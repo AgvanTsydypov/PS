@@ -137,25 +137,37 @@
             <div class="endpoint">
                 <h3>📊 Get Markets</h3>
                 <code>GET /api/markets</code>
-                <p>Fetch all available markets from Polymarket with pagination support.</p>
+                <p>Fetch all markets with filters: ?limit=10&closed=false&tag_id=100381</p>
             </div>
             
             <div class="endpoint">
-                <h3>🎯 Get Market by ID</h3>
-                <code>GET /api/markets/{id}</code>
-                <p>Retrieve detailed information about a specific market.</p>
+                <h3>🎯 Get Market by Slug</h3>
+                <code>GET /api/markets/slug/{slug}</code>
+                <p>Retrieve a specific market by its slug identifier.</p>
             </div>
             
             <div class="endpoint">
                 <h3>📅 Get Events</h3>
                 <code>GET /api/events</code>
-                <p>Fetch all events. Each event contains one or more related markets.</p>
+                <p>Fetch all events with filters: ?limit=10&closed=false&order=id</p>
             </div>
             
             <div class="endpoint">
-                <h3>🔍 Get Event by ID</h3>
-                <code>GET /api/events/{id}</code>
-                <p>Retrieve detailed information about a specific event.</p>
+                <h3>🔍 Get Event by Slug</h3>
+                <code>GET /api/events/slug/{slug}</code>
+                <p>Retrieve a specific event by its slug identifier.</p>
+            </div>
+            
+            <div class="endpoint">
+                <h3>🏷️ Get Tags</h3>
+                <code>GET /api/tags</code>
+                <p>Fetch all available category tags for filtering markets.</p>
+            </div>
+            
+            <div class="endpoint">
+                <h3>⚽ Get Sports</h3>
+                <code>GET /api/sports</code>
+                <p>Fetch sports tags and metadata with IDs and images.</p>
             </div>
         </div>
         
@@ -164,22 +176,34 @@
             
             <div style="margin-bottom: 30px;">
                 <h3 style="color: #333; margin-bottom: 15px;">📊 Markets</h3>
-                <button onclick="testEndpoint('/api/markets')">Get All Markets</button>
+                <div style="margin-bottom: 15px;">
+                    <button onclick="testEndpoint('/api/markets?limit=10&closed=false')">Get Active Markets</button>
+                    <button onclick="testEndpoint('/api/markets?limit=5')">Get All Markets (5)</button>
+                </div>
                 <div style="margin-top: 15px;">
-                    <input type="text" id="marketId" placeholder="Enter Market ID or Slug" 
-                           style="padding: 10px; border: 2px solid #667eea; border-radius: 5px; width: 300px; font-size: 1em;">
-                    <button onclick="getMarketById()">Get Market by ID</button>
+                    <input type="text" id="marketSlug" placeholder="Enter Market Slug (e.g., will-bitcoin-hit-100k)" 
+                           style="padding: 10px; border: 2px solid #667eea; border-radius: 5px; width: 400px; font-size: 1em;">
+                    <button onclick="getMarketBySlug()">Get Market by Slug</button>
+                </div>
+            </div>
+            
+            <div style="margin-bottom: 30px;">
+                <h3 style="color: #333; margin-bottom: 15px;">📅 Events</h3>
+                <div style="margin-bottom: 15px;">
+                    <button onclick="testEndpoint('/api/events?limit=10&closed=false&order=id&ascending=false')">Get Active Events</button>
+                    <button onclick="testEndpoint('/api/events?limit=5')">Get All Events (5)</button>
+                </div>
+                <div style="margin-top: 15px;">
+                    <input type="text" id="eventSlug" placeholder="Enter Event Slug (e.g., venezuela-leader-end-of-2026)" 
+                           style="padding: 10px; border: 2px solid #667eea; border-radius: 5px; width: 400px; font-size: 1em;">
+                    <button onclick="getEventBySlug()">Get Event by Slug</button>
                 </div>
             </div>
             
             <div style="margin-bottom: 20px;">
-                <h3 style="color: #333; margin-bottom: 15px;">📅 Events</h3>
-                <button onclick="testEndpoint('/api/events')">Get All Events</button>
-                <div style="margin-top: 15px;">
-                    <input type="text" id="eventId" placeholder="Enter Event ID or Slug" 
-                           style="padding: 10px; border: 2px solid #667eea; border-radius: 5px; width: 300px; font-size: 1em;">
-                    <button onclick="getEventById()">Get Event by ID</button>
-                </div>
+                <h3 style="color: #333; margin-bottom: 15px;">🏷️ Browse</h3>
+                <button onclick="testEndpoint('/api/tags')">Get All Tags</button>
+                <button onclick="testEndpoint('/api/sports')">Get Sports Tags</button>
             </div>
             
             <div class="loading" id="loading">Loading...</div>
@@ -212,39 +236,39 @@
             }
         }
         
-        async function getMarketById() {
-            const marketId = document.getElementById('marketId').value.trim();
+        async function getMarketBySlug() {
+            const slug = document.getElementById('marketSlug').value.trim();
             
-            if (!marketId) {
-                alert('Please enter a Market ID or Slug');
+            if (!slug) {
+                alert('Please enter a Market Slug');
                 return;
             }
             
-            await testEndpoint('/api/markets/' + encodeURIComponent(marketId));
+            await testEndpoint('/api/markets/slug/' + encodeURIComponent(slug));
         }
         
-        async function getEventById() {
-            const eventId = document.getElementById('eventId').value.trim();
+        async function getEventBySlug() {
+            const slug = document.getElementById('eventSlug').value.trim();
             
-            if (!eventId) {
-                alert('Please enter an Event ID or Slug');
+            if (!slug) {
+                alert('Please enter an Event Slug');
                 return;
             }
             
-            await testEndpoint('/api/events/' + encodeURIComponent(eventId));
+            await testEndpoint('/api/events/slug/' + encodeURIComponent(slug));
         }
         
         // Allow Enter key to submit
         document.addEventListener('DOMContentLoaded', function() {
-            document.getElementById('marketId').addEventListener('keypress', function(e) {
+            document.getElementById('marketSlug').addEventListener('keypress', function(e) {
                 if (e.key === 'Enter') {
-                    getMarketById();
+                    getMarketBySlug();
                 }
             });
             
-            document.getElementById('eventId').addEventListener('keypress', function(e) {
+            document.getElementById('eventSlug').addEventListener('keypress', function(e) {
                 if (e.key === 'Enter') {
-                    getEventById();
+                    getEventBySlug();
                 }
             });
         });
