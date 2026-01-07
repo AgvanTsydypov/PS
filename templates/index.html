@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PolyStars - Polymarket API Client</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 40px;
+            font-size: 1.2em;
+        }
+        
+        .endpoints {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 30px;
+        }
+        
+        .endpoint {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .endpoint:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+        }
+        
+        .endpoint h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        
+        .endpoint code {
+            background: #e9ecef;
+            padding: 5px 10px;
+            border-radius: 5px;
+            display: inline-block;
+            margin: 10px 0;
+            font-size: 0.9em;
+        }
+        
+        .endpoint p {
+            color: #666;
+            line-height: 1.6;
+        }
+        
+        .test-section {
+            margin-top: 40px;
+            padding: 30px;
+            background: #e9ecef;
+            border-radius: 10px;
+        }
+        
+        .test-section h2 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            margin-right: 10px;
+            margin-bottom: 10px;
+            transition: background 0.3s;
+        }
+        
+        button:hover {
+            background: #764ba2;
+        }
+        
+        #response {
+            margin-top: 20px;
+            background: white;
+            padding: 20px;
+            border-radius: 5px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        
+        .loading {
+            display: none;
+            color: #667eea;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌟 PolyStars</h1>
+        <p class="subtitle">Polymarket API Client - Flask Application</p>
+        
+        <div class="endpoints">
+            <div class="endpoint">
+                <h3>📊 Get Markets</h3>
+                <code>GET /api/markets</code>
+                <p>Fetch all available markets from Polymarket with pagination support.</p>
+            </div>
+            
+            <div class="endpoint">
+                <h3>🎯 Get Market by ID</h3>
+                <code>GET /api/markets/{id}</code>
+                <p>Retrieve detailed information about a specific market.</p>
+            </div>
+            
+            <div class="endpoint">
+                <h3>📅 Get Events</h3>
+                <code>GET /api/events</code>
+                <p>Fetch all events. Each event contains one or more related markets.</p>
+            </div>
+            
+            <div class="endpoint">
+                <h3>🔍 Get Event by ID</h3>
+                <code>GET /api/events/{id}</code>
+                <p>Retrieve detailed information about a specific event.</p>
+            </div>
+        </div>
+        
+        <div class="test-section">
+            <h2>🧪 Test API Endpoints</h2>
+            
+            <div style="margin-bottom: 30px;">
+                <h3 style="color: #333; margin-bottom: 15px;">📊 Markets</h3>
+                <button onclick="testEndpoint('/api/markets')">Get All Markets</button>
+                <div style="margin-top: 15px;">
+                    <input type="text" id="marketId" placeholder="Enter Market ID or Slug" 
+                           style="padding: 10px; border: 2px solid #667eea; border-radius: 5px; width: 300px; font-size: 1em;">
+                    <button onclick="getMarketById()">Get Market by ID</button>
+                </div>
+            </div>
+            
+            <div style="margin-bottom: 20px;">
+                <h3 style="color: #333; margin-bottom: 15px;">📅 Events</h3>
+                <button onclick="testEndpoint('/api/events')">Get All Events</button>
+                <div style="margin-top: 15px;">
+                    <input type="text" id="eventId" placeholder="Enter Event ID or Slug" 
+                           style="padding: 10px; border: 2px solid #667eea; border-radius: 5px; width: 300px; font-size: 1em;">
+                    <button onclick="getEventById()">Get Event by ID</button>
+                </div>
+            </div>
+            
+            <div class="loading" id="loading">Loading...</div>
+            <div id="response"></div>
+        </div>
+    </div>
+    
+    <script>
+        async function testEndpoint(endpoint) {
+            const responseDiv = document.getElementById('response');
+            const loadingDiv = document.getElementById('loading');
+            
+            loadingDiv.style.display = 'block';
+            responseDiv.innerHTML = '';
+            
+            try {
+                const response = await fetch(endpoint);
+                const data = await response.json();
+                
+                loadingDiv.style.display = 'none';
+                
+                if (response.ok) {
+                    responseDiv.innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                } else {
+                    responseDiv.innerHTML = '<p style="color: red;">Error: ' + (data.error || 'Unknown error') + '</p>';
+                }
+            } catch (error) {
+                loadingDiv.style.display = 'none';
+                responseDiv.innerHTML = '<p style="color: red;">Error: ' + error.message + '</p>';
+            }
+        }
+        
+        async function getMarketById() {
+            const marketId = document.getElementById('marketId').value.trim();
+            
+            if (!marketId) {
+                alert('Please enter a Market ID or Slug');
+                return;
+            }
+            
+            await testEndpoint('/api/markets/' + encodeURIComponent(marketId));
+        }
+        
+        async function getEventById() {
+            const eventId = document.getElementById('eventId').value.trim();
+            
+            if (!eventId) {
+                alert('Please enter an Event ID or Slug');
+                return;
+            }
+            
+            await testEndpoint('/api/events/' + encodeURIComponent(eventId));
+        }
+        
+        // Allow Enter key to submit
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('marketId').addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    getMarketById();
+                }
+            });
+            
+            document.getElementById('eventId').addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    getEventById();
+                }
+            });
+        });
+    </script>
+</body>
+</html>
+
