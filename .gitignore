@@ -42,3 +42,5 @@ instance/
 Thumbs.db
 
 *.md
+
+/json_output/*
