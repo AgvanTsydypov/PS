@@ -43,4 +43,5 @@ Thumbs.db
 
 *.md
 
-/json_output/*
+json_output/*
+sql_schemas/*
