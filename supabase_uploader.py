@@ -41,7 +41,28 @@ class SupabaseUploader:
         """Load data from JSON file"""
         print(f"[*] Loading data from {filepath}...")
         with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+            raw_data = json.load(f)
+        
+        # Handle different JSON structures
+        # If the data has 'events' key, use it directly
+        if 'events' in raw_data:
+            data = raw_data
+        # If the data is a list, wrap it in the expected structure
+        elif isinstance(raw_data, list):
+            data = {
+                'events': raw_data,
+                'metadata': {}
+            }
+        # If the data is a single event object (has 'id' and 'markets' keys)
+        elif isinstance(raw_data, dict) and 'id' in raw_data:
+            data = {
+                'events': [raw_data],
+                'metadata': {}
+            }
+        else:
+            # Unknown structure, try to use as-is
+            data = raw_data
+        
         print(f"[OK] Loaded {len(data.get('events', []))} events")
         return data
     
@@ -255,6 +276,11 @@ class SupabaseUploader:
         Stores fetch metadata for tracking
         """
         print(f"\n[*] Uploading metadata to Supabase...")
+        
+        # Skip if metadata is empty or missing required fields
+        if not metadata or not metadata.get('timestamp'):
+            print(f"  [SKIP] Metadata is empty or missing required fields (timestamp)")
+            return
         
         try:
             # Add timestamp as unique identifier
