@@ -34,8 +34,13 @@ class SupabaseUploader:
             'events_updated': 0,
             'markets_inserted': 0,
             'markets_updated': 0,
+            'redemptions_inserted': 0,
             'errors': []
         }
+    
+    def create_new_client(self) -> Client:
+        """Create a new Supabase client instance (thread-safe for parallel uploads)"""
+        return create_client(self.supabase_url, self.supabase_key)
     
     def load_json_data(self, filepath: str) -> Dict:
         """Load data from JSON file"""
@@ -118,6 +123,15 @@ class SupabaseUploader:
         for liq_field in ['liquidity', 'liquidityAmm', 'liquidityClob', 'openInterest']:
             if liq_field in event_data:
                 event_data[liq_field] = float(event_data[liq_field]) if event_data[liq_field] else 0.0
+        
+        # Convert integer fields
+        integer_fields = ['comment_count', 'competitive']
+        for field in integer_fields:
+            if field in event_data and event_data[field] is not None:
+                try:
+                    event_data[field] = int(float(event_data[field]))  # Convert to float first, then int
+                except (ValueError, TypeError):
+                    event_data[field] = 0
         
         return event_data
     
@@ -270,6 +284,149 @@ class SupabaseUploader:
                 print(f"  [ERROR] {error_msg}")
                 self.stats['errors'].append(error_msg)
     
+    def upload_redemptions_batch(self, redemptions: List[Dict], chunk_size: int = 100, use_new_client: bool = True) -> bool:
+        """
+        Upload a batch of redemptions to Supabase
+        Splits large batches into smaller chunks to avoid timeouts
+        
+        Args:
+            redemptions: List of redemption records to upload
+            chunk_size: Size of each upload chunk
+            use_new_client: If True, creates a new client instance (thread-safe for parallel uploads)
+        
+        Returns True if successful, False otherwise
+        """
+        if not redemptions:
+            return True
+        
+        # Create new client for thread-safe parallel uploads
+        client = self.create_new_client() if use_new_client else self.client
+        
+        try:
+            # Prepare redemptions data
+            prepared_batch = []
+            for redemption in redemptions:
+                redemption_data = {
+                    'transaction_hash': redemption.get('transaction_hash'),
+                    'condition_id': redemption.get('condition_id'),
+                    'event_id': redemption.get('event_id'),
+                    'market_id': redemption.get('market_id'),
+                    'market_question': redemption.get('market_question'),
+                    'event_title': redemption.get('event_title'),
+                    'redeemer_address': redemption.get('redeemer_address'),
+                    'payout_usdc': float(redemption.get('payout_usdc', 0)),
+                    'timestamp_unix': int(redemption.get('timestamp_unix', 0)),
+                }
+                
+                # Convert timestamp_human to ISO format
+                timestamp_human = redemption.get('timestamp_human')
+                if timestamp_human:
+                    try:
+                        dt = datetime.strptime(timestamp_human, '%Y-%m-%d %H:%M:%S')
+                        redemption_data['timestamp_human'] = dt.isoformat()
+                    except:
+                        redemption_data['timestamp_human'] = timestamp_human
+                
+                prepared_batch.append(redemption_data)
+            
+            # Split into chunks if batch is large
+            total_uploaded = 0
+            num_chunks = (len(prepared_batch) + chunk_size - 1) // chunk_size
+            show_progress = len(prepared_batch) > chunk_size
+            
+            for i in range(0, len(prepared_batch), chunk_size):
+                chunk = prepared_batch[i:i + chunk_size]
+                chunk_num = i // chunk_size + 1
+                
+                # Retry logic for statement timeout
+                max_retries = 2
+                retry_count = 0
+                chunk_uploaded = False
+                
+                while retry_count <= max_retries and not chunk_uploaded:
+                    try:
+                        # Show progress for large batches
+                        if show_progress:
+                            retry_suffix = f" (retry {retry_count})" if retry_count > 0 else ""
+                            print(f"\n      📦 Chunk {chunk_num}/{num_chunks} ({len(chunk)} records){retry_suffix}...", end=" ", flush=True)
+                        
+                        # Upsert to database using the appropriate client
+                        response = client.table('redemptions').upsert(
+                            chunk,
+                            on_conflict='transaction_hash,redeemer_address'
+                        ).execute()
+                        
+                        total_uploaded += len(chunk)
+                        self.stats['redemptions_inserted'] += len(chunk)
+                        chunk_uploaded = True
+                        
+                        if show_progress:
+                            success_msg = "✅"
+                            if retry_count > 0:
+                                success_msg = f"✅ (succeeded after {retry_count} retry)"
+                            print(success_msg, flush=True)
+                        
+                        # Small delay between chunks for large batches to avoid overwhelming DB
+                        if show_progress and chunk_num < num_chunks:
+                            import time
+                            time.sleep(0.05)  # 50ms delay between chunks
+                        
+                    except Exception as chunk_error:
+                        error_str = str(chunk_error)
+                        error_type = type(chunk_error).__name__
+                        
+                        # Check if it's a statement timeout
+                        if '57014' in error_str or 'statement timeout' in error_str.lower():
+                            retry_count += 1
+                            if retry_count <= max_retries:
+                                if show_progress:
+                                    print(f"⏳ timeout, retrying...", flush=True)
+                                print(f"         📊 Chunk info: {chunk_num}/{num_chunks}, {len(chunk)} records")
+                                print(f"         ⏰ Timeout after attempt {retry_count}, waiting 1s...")
+                                import time
+                                time.sleep(1)  # Wait 1 second before retry
+                                continue
+                            else:
+                                # Max retries reached for timeout
+                                error_msg = f"Statement timeout after {max_retries} retries on chunk {chunk_num}/{num_chunks}"
+                                print(f"\n      ❌ {error_msg}")
+                                print(f"         Chunk size: {len(chunk)} records")
+                                print(f"         Total batch: {len(prepared_batch)} records")
+                                self.stats['errors'].append(error_msg)
+                                return False
+                        
+                        # If not timeout or max retries reached for other errors
+                        error_msg = f"Error uploading chunk {chunk_num}/{num_chunks}: {error_str[:200]}"
+                        print(f"\n      ❌ DATABASE ERROR")
+                        print(f"         Type: {error_type}")
+                        print(f"         Chunk: {chunk_num}/{num_chunks} ({len(chunk)} records)")
+                        print(f"         Total batch: {len(prepared_batch)} records")
+                        print(f"         Error: {error_str[:250]}")
+                        self.stats['errors'].append(error_msg)
+                        return False
+            
+            return total_uploaded == len(prepared_batch)
+            
+        except Exception as e:
+            error_type = type(e).__name__
+            error_msg = str(e)
+            print(f"\n      ❌ ERROR PREPARING REDEMPTIONS")
+            print(f"         Type: {error_type}")
+            print(f"         Total records: {len(redemptions)}")
+            print(f"         Error: {error_msg[:250]}")
+            
+            # Try to identify problematic record
+            try:
+                if prepared_batch:
+                    print(f"         Last prepared: {len(prepared_batch)} records")
+                    print(f"         Failed on record: ~{len(prepared_batch) + 1}")
+            except:
+                pass
+            
+            full_error = f"Error preparing redemptions: {error_msg[:200]}"
+            self.stats['errors'].append(full_error)
+            return False
+    
     def upload_metadata(self, metadata: Dict) -> None:
         """
         Upload metadata to Supabase
@@ -333,9 +490,13 @@ class SupabaseUploader:
         print("\n" + "=" * 70)
         print("UPLOAD SUMMARY")
         print("=" * 70)
-        print(f"[OK] Events inserted/updated: {self.stats['events_inserted']}")
-        print(f"[OK] Markets inserted/updated: {self.stats['markets_inserted']}")
-        
+        if self.stats['events_inserted'] > 0:
+            print(f"[OK] Events inserted/updated: {self.stats['events_inserted']}")
+        if self.stats['markets_inserted'] > 0:
+            print(f"[OK] Markets inserted/updated: {self.stats['markets_inserted']}")
+        if self.stats['redemptions_inserted'] > 0:
+            print(f"[OK] Redemptions inserted/updated: {self.stats['redemptions_inserted']}")
+
         if self.stats['errors']:
             print(f"\n[WARN] Errors encountered: {len(self.stats['errors'])}")
             for error in self.stats['errors'][:5]:  # Show first 5 errors

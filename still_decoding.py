@@ -108,6 +108,8 @@ for event in raw_data:
     # Create clean record for JSON
     cleaned_data.append({
         "transaction_hash": tx_hash,
+        "condition_id": TARGET_MARKET['id'],
+        "market_question": TARGET_MARKET['name'],
         "redeemer_address": event['redeemer'],
         "payout_usdc": amount,
         "timestamp_unix": event['timestamp'],

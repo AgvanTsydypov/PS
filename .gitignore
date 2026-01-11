@@ -46,3 +46,11 @@ Thumbs.db
 json_output/*
 sql_schemas/*
 output/*
+
+# Redemptions data
+redemptions_*.json
+market_winners.json
+
+# Logs
+logs/
+*.log
