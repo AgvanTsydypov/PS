@@ -1,17 +1,38 @@
 """
 Fetch Redemptions for All Markets from Polymarket Events
 Automatically scans latest events file and fetches redemptions for each market
-WITH OPTIMIZED PARALLEL PROCESSING (High-speed with stability)
+
+БЫСТРЫЙ ЗАПУСК:
+===============
+1. Только fetch (без загрузки):
+   python fetch_redemptions.py
+
+2. Fetch + загрузка в Supabase:
+   python fetch_redemptions.py --upload
+
+3. Fetch + загрузка в локальную PostgreSQL (БЕЗ ЛИМИТОВ):
+   python fetch_redemptions.py --upload --local
+
+4. Справка:
+   python fetch_redemptions.py --help
+
+ТРЕБОВАНИЯ:
+===========
+- Python 3.8+
+- pip install -r requirements.txt
+- Файл .env с настройками (см. env.template)
+- Для --local: PostgreSQL установлен и настроен
+
+ЛОГИ:
+=====
+- Сохраняются в: logs/redemptions_fetch_YYYYMMDD_HHMMSS.log
+- Просмотр: python view_logs.py
 
 Features:
-- Processes markets in batches to avoid overwhelming the system
-- Parallel database uploads (new client per upload for thread-safety)
-- Large GraphQL batches (5000 records per request instead of 1000)
-- No artificial delays between requests (5x faster for large markets)
-- Retry mechanism for failed requests
-- Configurable concurrency limits (10 concurrent markets)
-- Progress tracking for large markets
-- Detailed error logging
+- Параллельная обработка маркетов (10 одновременно)
+- Автоматические retry при ошибках
+- Real-time логирование всех операций
+- Поддержка Supabase и локальной PostgreSQL
 """
 
 import requests
@@ -402,28 +423,17 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     # Initialize database uploader if auto_upload is enabled
     uploader = None
     if auto_upload:
-        if use_local_db:
-            print("🔄 Auto-upload to LOCAL PostgreSQL enabled")
-            try:
-                from local_db_uploader import LocalDatabaseUploader
-                uploader = LocalDatabaseUploader()
-                print("✅ Connected to local PostgreSQL")
-            except Exception as e:
-                print(f"❌ Failed to connect to local PostgreSQL: {e}")
-                print("   Continuing without upload...")
-                auto_upload = False
-                uploader = None
-        else:
-            print("🔄 Auto-upload to Supabase enabled")
-            try:
-                from supabase_uploader import SupabaseUploader
-                uploader = SupabaseUploader()
-                print("✅ Connected to Supabase")
-            except Exception as e:
-                print(f"❌ Failed to connect to Supabase: {e}")
-                print("   Continuing without upload...")
-                auto_upload = False
-                uploader = None
+        db_name = "LOCAL PostgreSQL" if use_local_db else "Supabase"
+        print(f"🔄 Auto-upload to {db_name} enabled")
+        try:
+            from supabase_uploader import SupabaseUploader
+            uploader = SupabaseUploader(use_local_db=use_local_db)
+            print(f"✅ Connected to {db_name}")
+        except Exception as e:
+            print(f"❌ Failed to connect to {db_name}: {e}")
+            print("   Continuing without upload...")
+            auto_upload = False
+            uploader = None
     
     # 1. Find and load latest events file
     events_file = find_latest_events_file()

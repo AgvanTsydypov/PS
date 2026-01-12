@@ -1,13 +1,68 @@
 """
-Supabase Data Uploader for Polymarket Events
-Uploads events and markets data from JSON to Supabase tables
+Database Uploader for Polymarket Events
+Uploads events and markets data to Supabase or local PostgreSQL
+
+ПРЯМОЙ ЗАПУСК (для загрузки events/markets из JSON):
+====================================================
+1. Загрузить последний JSON файл в Supabase:
+   python supabase_uploader.py
+
+2. Загрузить конкретный файл в Supabase:
+   python supabase_uploader.py путь/к/файлу.json
+
+3. Загрузить в локальную PostgreSQL:
+   python supabase_uploader.py --local
+   python supabase_uploader.py путь/к/файлу.json --local
+
+4. Загрузить redemptions (конкретный файл):
+   python supabase_uploader.py redemptions_data.json --redemptions
+   python supabase_uploader.py redemptions_data.json --redemptions --local
+
+ПРОГРАММНОЕ ИСПОЛЬЗОВАНИЕ (в Python коде):
+==========================================
+   # Supabase (по умолчанию)
+   from supabase_uploader import SupabaseUploader
+   uploader = SupabaseUploader()
+   uploader.upload_redemptions_batch(redemptions_list)
+   
+   # Локальная PostgreSQL (явно указать)
+   uploader = SupabaseUploader(use_local_db=True)
+   uploader.upload_redemptions_batch(redemptions_list)
+
+ДРУГИЕ СКРИПТЫ:
+===============
+- Тестирование подключения:
+  python test_db_connection.py
+
+- Основной скрипт (fetch redemptions):
+  python fetch_redemptions.py --upload          # → Supabase
+  python fetch_redemptions.py --upload --local  # → PostgreSQL
+
+ТРЕБОВАНИЯ:
+===========
+- Python 3.8+
+- pip install supabase psycopg2-binary python-dotenv
+- Файл .env с настройками:
+  * Для Supabase: SUPABASE_URL, SUPABASE_KEY
+  * Для PostgreSQL: LOCAL_DB_HOST, LOCAL_DB_PORT, LOCAL_DB_NAME, 
+                     LOCAL_DB_USER, LOCAL_DB_PASSWORD
+
+ВАЖНО:
+======
+- Выбор БД ТОЛЬКО через параметр use_local_db (True/False) или флаг --local
+- По умолчанию: Supabase (use_local_db=False)
+- Нет автоматического определения БД!
+
+CHUNK SIZE:
+===========
+- Supabase: 100 записей на chunk (избежать таймаутов)
+- PostgreSQL: 1000 записей на chunk (нет лимитов)
 """
 
 import json
 import os
 from datetime import datetime
 from typing import List, Dict, Optional
-from supabase import create_client, Client
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -15,20 +70,25 @@ load_dotenv()
 
 
 class SupabaseUploader:
-    """Handles uploading Polymarket data to Supabase"""
+    """Handles uploading Polymarket data to Supabase or local PostgreSQL"""
     
-    def __init__(self):
-        """Initialize Supabase client"""
-        self.supabase_url = os.getenv('SUPABASE_URL')
-        self.supabase_key = os.getenv('SUPABASE_KEY')
+    def __init__(self, use_local_db: bool = False):
+        """
+        Initialize database client
         
-        if not self.supabase_url or not self.supabase_key:
-            raise ValueError(
-                "Missing Supabase credentials. "
-                "Please set SUPABASE_URL and SUPABASE_KEY in .env file"
-            )
+        Args:
+            use_local_db: If True, use local PostgreSQL; if False (default), use Supabase
+                         MUST be explicitly set - no automatic detection!
         
-        self.client: Client = create_client(self.supabase_url, self.supabase_key)
+        Examples:
+            # Use Supabase (default)
+            uploader = SupabaseUploader()
+            uploader = SupabaseUploader(use_local_db=False)
+            
+            # Use local PostgreSQL (explicit)
+            uploader = SupabaseUploader(use_local_db=True)
+        """
+        self.use_local_db = use_local_db
         self.stats = {
             'events_inserted': 0,
             'events_updated': 0,
@@ -37,10 +97,65 @@ class SupabaseUploader:
             'redemptions_inserted': 0,
             'errors': []
         }
+        
+        if use_local_db:
+            # Initialize local PostgreSQL connection
+            try:
+                import psycopg2
+                self.psycopg2 = psycopg2
+            except ImportError:
+                raise ImportError(
+                    "psycopg2 is required for local PostgreSQL. "
+                    "Install it with: pip install psycopg2-binary"
+                )
+            
+            self.connection_params = {
+                'host': os.getenv('LOCAL_DB_HOST', 'localhost'),
+                'port': os.getenv('LOCAL_DB_PORT', '5432'),
+                'database': os.getenv('LOCAL_DB_NAME', 'polymarket'),
+                'user': os.getenv('LOCAL_DB_USER', 'postgres'),
+                'password': os.getenv('LOCAL_DB_PASSWORD', '')
+            }
+            
+            # Test connection
+            self._test_local_connection()
+            self.client = None
+        else:
+            # Initialize Supabase client
+            from supabase import create_client, Client
+            
+            self.supabase_url = os.getenv('SUPABASE_URL')
+            self.supabase_key = os.getenv('SUPABASE_KEY')
+            
+            if not self.supabase_url or not self.supabase_key:
+                raise ValueError(
+                    "Missing Supabase credentials. "
+                    "Please set SUPABASE_URL and SUPABASE_KEY in .env file"
+                )
+            
+            self.client: Client = create_client(self.supabase_url, self.supabase_key)
     
-    def create_new_client(self) -> Client:
-        """Create a new Supabase client instance (thread-safe for parallel uploads)"""
-        return create_client(self.supabase_url, self.supabase_key)
+    def _test_local_connection(self):
+        """Test local PostgreSQL connection"""
+        try:
+            conn = self.psycopg2.connect(**self.connection_params)
+            conn.close()
+        except Exception as e:
+            raise ConnectionError(
+                f"Failed to connect to local PostgreSQL: {str(e)}\n"
+                f"Host: {self.connection_params['host']}:{self.connection_params['port']}\n"
+                f"Database: {self.connection_params['database']}\n"
+                f"User: {self.connection_params['user']}"
+            )
+    
+    def create_new_client(self):
+        """Create a new database client instance (thread-safe for parallel uploads)"""
+        if self.use_local_db:
+            # For PostgreSQL, we'll create connection in each upload method
+            return None
+        else:
+            from supabase import create_client
+            return create_client(self.supabase_url, self.supabase_key)
     
     def load_json_data(self, filepath: str) -> Dict:
         """Load data from JSON file"""
@@ -227,11 +342,18 @@ class SupabaseUploader:
     
     def upload_events(self, events: List[Dict], batch_size: int = 100) -> None:
         """
-        Upload events to Supabase in batches
+        Upload events to database in batches
         Uses upsert to handle duplicates
         """
+        if self.use_local_db:
+            return self._upload_events_to_postgres(events, batch_size)
+        else:
+            return self._upload_events_to_supabase(events, batch_size)
+    
+    def _upload_events_to_supabase(self, events: List[Dict], batch_size: int = 100) -> None:
+        """Upload events to Supabase"""
         print(f"\n[*] Uploading {len(events)} events to Supabase...")
-        
+
         for i in range(0, len(events), batch_size):
             batch = events[i:i + batch_size]
             prepared_batch = [self.prepare_event_data(event) for event in batch]
@@ -251,11 +373,151 @@ class SupabaseUploader:
                 print(f"  [ERROR] {error_msg}")
                 self.stats['errors'].append(error_msg)
     
+    def _upload_events_to_postgres(self, events: List[Dict], batch_size: int = 500) -> None:
+        """Upload events to local PostgreSQL"""
+        from psycopg2.extras import execute_batch
+        
+        print(f"\n[*] Uploading {len(events)} events to PostgreSQL...")
+        
+        conn = None
+        cursor = None
+        
+        try:
+            conn = self.psycopg2.connect(**self.connection_params)
+            cursor = conn.cursor()
+            
+            # Prepare SQL for upsert
+            insert_sql = """
+                INSERT INTO events (
+                    id, ticker, slug, title, description,
+                    start_date, creation_date, end_date, closed_time, created_at, updated_at,
+                    image, icon,
+                    active, closed, archived, new, featured, restricted, neg_risk, enable_order_book,
+                    volume, volume24hr, volume1wk, volume1mo, volume1yr,
+                    liquidity, open_interest, liquidity_amm, liquidity_clob,
+                    competitive, comment_count
+                ) VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    ticker = EXCLUDED.ticker,
+                    slug = EXCLUDED.slug,
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    start_date = EXCLUDED.start_date,
+                    creation_date = EXCLUDED.creation_date,
+                    end_date = EXCLUDED.end_date,
+                    closed_time = EXCLUDED.closed_time,
+                    updated_at = EXCLUDED.updated_at,
+                    image = EXCLUDED.image,
+                    icon = EXCLUDED.icon,
+                    active = EXCLUDED.active,
+                    closed = EXCLUDED.closed,
+                    archived = EXCLUDED.archived,
+                    new = EXCLUDED.new,
+                    featured = EXCLUDED.featured,
+                    restricted = EXCLUDED.restricted,
+                    neg_risk = EXCLUDED.neg_risk,
+                    enable_order_book = EXCLUDED.enable_order_book,
+                    volume = EXCLUDED.volume,
+                    volume24hr = EXCLUDED.volume24hr,
+                    volume1wk = EXCLUDED.volume1wk,
+                    volume1mo = EXCLUDED.volume1mo,
+                    volume1yr = EXCLUDED.volume1yr,
+                    liquidity = EXCLUDED.liquidity,
+                    open_interest = EXCLUDED.open_interest,
+                    liquidity_amm = EXCLUDED.liquidity_amm,
+                    liquidity_clob = EXCLUDED.liquidity_clob,
+                    competitive = EXCLUDED.competitive,
+                    comment_count = EXCLUDED.comment_count
+            """
+            
+            for i in range(0, len(events), batch_size):
+                batch = events[i:i + batch_size]
+                prepared_batch = []
+                
+                for event in batch:
+                    event_data = self.prepare_event_data(event)
+                    # Convert to tuple in correct order
+                    prepared_batch.append((
+                        event_data.get('id'),
+                        event_data.get('ticker'),
+                        event_data.get('slug'),
+                        event_data.get('title'),
+                        event_data.get('description'),
+                        event_data.get('start_date'),
+                        event_data.get('creation_date'),
+                        event_data.get('end_date'),
+                        event_data.get('closed_time'),
+                        event_data.get('created_at'),
+                        event_data.get('updated_at'),
+                        event_data.get('image'),
+                        event_data.get('icon'),
+                        event_data.get('active', False),
+                        event_data.get('closed', False),
+                        event_data.get('archived', False),
+                        event_data.get('new', False),
+                        event_data.get('featured', False),
+                        event_data.get('restricted', False),
+                        event_data.get('neg_risk', False),
+                        event_data.get('enable_order_book', False),
+                        event_data.get('volume'),
+                        event_data.get('volume24hr'),
+                        event_data.get('volume1wk'),
+                        event_data.get('volume1mo'),
+                        event_data.get('volume1yr'),
+                        event_data.get('liquidity'),
+                        event_data.get('open_interest'),
+                        event_data.get('liquidity_amm'),
+                        event_data.get('liquidity_clob'),
+                        event_data.get('competitive'),
+                        event_data.get('comment_count')
+                    ))
+                
+                try:
+                    execute_batch(cursor, insert_sql, prepared_batch, page_size=100)
+                    conn.commit()
+                    
+                    self.stats['events_inserted'] += len(prepared_batch)
+                    print(f"  [OK] Batch {i//batch_size + 1}: {len(prepared_batch)} events")
+                    
+                except Exception as e:
+                    conn.rollback()
+                    error_msg = f"Error uploading events batch {i//batch_size + 1}: {e}"
+                    print(f"  [ERROR] {error_msg}")
+                    self.stats['errors'].append(error_msg)
+            
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            error_msg = f"Failed to upload events to PostgreSQL: {e}"
+            print(f"  [ERROR] {error_msg}")
+            self.stats['errors'].append(error_msg)
+            
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+    
     def upload_markets(self, events: List[Dict], batch_size: int = 100) -> None:
         """
-        Upload markets to Supabase in batches
+        Upload markets to database in batches
         Extracts markets from events and links them via event_id
         """
+        if self.use_local_db:
+            return self._upload_markets_to_postgres(events, batch_size)
+        else:
+            return self._upload_markets_to_supabase(events, batch_size)
+    
+    def _upload_markets_to_supabase(self, events: List[Dict], batch_size: int = 100) -> None:
+        """Upload markets to Supabase"""
         all_markets = []
         for event in events:
             event_id = event.get('id')
@@ -284,14 +546,136 @@ class SupabaseUploader:
                 print(f"  [ERROR] {error_msg}")
                 self.stats['errors'].append(error_msg)
     
-    def upload_redemptions_batch(self, redemptions: List[Dict], chunk_size: int = 100, use_new_client: bool = True) -> bool:
+    def _upload_markets_to_postgres(self, events: List[Dict], batch_size: int = 500) -> None:
+        """Upload markets to local PostgreSQL"""
+        from psycopg2.extras import execute_batch
+        import json
+        
+        # Extract all markets from events
+        all_markets = []
+        for event in events:
+            event_id = event.get('id')
+            markets = event.get('markets', [])
+            for market in markets:
+                market_data = self.prepare_market_data(market, event_id)
+                all_markets.append(market_data)
+        
+        print(f"\n[*] Uploading {len(all_markets)} markets to PostgreSQL...")
+        
+        conn = None
+        cursor = None
+        
+        try:
+            conn = self.psycopg2.connect(**self.connection_params)
+            cursor = conn.cursor()
+            
+            # Prepare SQL for upsert (simplified - key fields only)
+            insert_sql = """
+                INSERT INTO markets (
+                    id, event_id, question, condition_id, slug, question_id,
+                    end_date, start_date, created_at, updated_at, closed_time,
+                    image, icon, description, outcomes, outcome_prices,
+                    volume, volume_num, volume24hr, liquidity, liquidity_num,
+                    active, closed, new, featured, archived, restricted, enable_order_book,
+                    neg_risk, ready, funded
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    question = EXCLUDED.question,
+                    condition_id = EXCLUDED.condition_id,
+                    updated_at = EXCLUDED.updated_at,
+                    closed_time = EXCLUDED.closed_time,
+                    outcome_prices = EXCLUDED.outcome_prices,
+                    volume_num = EXCLUDED.volume_num,
+                    volume24hr = EXCLUDED.volume24hr,
+                    liquidity_num = EXCLUDED.liquidity_num,
+                    active = EXCLUDED.active,
+                    closed = EXCLUDED.closed
+            """
+            
+            for i in range(0, len(all_markets), batch_size):
+                batch = all_markets[i:i + batch_size]
+                prepared_batch = []
+                
+                for market in batch:
+                    # Convert arrays/objects to JSON strings
+                    outcomes_str = json.dumps(market.get('outcomes')) if market.get('outcomes') else None
+                    outcome_prices_str = json.dumps(market.get('outcome_prices')) if market.get('outcome_prices') else None
+                    
+                    prepared_batch.append((
+                        market.get('id'),
+                        market.get('event_id'),
+                        market.get('question'),
+                        market.get('condition_id'),
+                        market.get('slug'),
+                        market.get('question_id'),
+                        market.get('end_date'),
+                        market.get('start_date'),
+                        market.get('created_at'),
+                        market.get('updated_at'),
+                        market.get('closed_time'),
+                        market.get('image'),
+                        market.get('icon'),
+                        market.get('description'),
+                        outcomes_str,
+                        outcome_prices_str,
+                        market.get('volume'),
+                        market.get('volume_num'),
+                        market.get('volume24hr'),
+                        market.get('liquidity'),
+                        market.get('liquidity_num'),
+                        market.get('active', False),
+                        market.get('closed', False),
+                        market.get('new', False),
+                        market.get('featured', False),
+                        market.get('archived', False),
+                        market.get('restricted', False),
+                        market.get('enable_order_book', False),
+                        market.get('neg_risk', False),
+                        market.get('ready', False),
+                        market.get('funded', False)
+                    ))
+                
+                try:
+                    execute_batch(cursor, insert_sql, prepared_batch, page_size=100)
+                    conn.commit()
+                    
+                    self.stats['markets_inserted'] += len(prepared_batch)
+                    print(f"  [OK] Batch {i//batch_size + 1}: {len(prepared_batch)} markets")
+                    
+                except Exception as e:
+                    conn.rollback()
+                    error_msg = f"Error uploading markets batch {i//batch_size + 1}: {e}"
+                    print(f"  [ERROR] {error_msg}")
+                    self.stats['errors'].append(error_msg)
+            
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            error_msg = f"Failed to upload markets to PostgreSQL: {e}"
+            print(f"  [ERROR] {error_msg}")
+            self.stats['errors'].append(error_msg)
+            
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+    
+    def upload_redemptions_batch(self, redemptions: List[Dict], chunk_size: int = None, use_new_client: bool = True) -> bool:
         """
-        Upload a batch of redemptions to Supabase
+        Upload a batch of redemptions to database (Supabase or local PostgreSQL)
         Splits large batches into smaller chunks to avoid timeouts
         
         Args:
             redemptions: List of redemption records to upload
-            chunk_size: Size of each upload chunk
+            chunk_size: Size of each upload chunk (default: 100 for Supabase, 1000 for local PostgreSQL)
             use_new_client: If True, creates a new client instance (thread-safe for parallel uploads)
         
         Returns True if successful, False otherwise
@@ -299,6 +683,18 @@ class SupabaseUploader:
         if not redemptions:
             return True
         
+        # Set default chunk_size based on database type
+        if chunk_size is None:
+            chunk_size = 1000 if self.use_local_db else 100
+        
+        # Route to appropriate upload method
+        if self.use_local_db:
+            return self._upload_to_local_postgres(redemptions, chunk_size)
+        else:
+            return self._upload_to_supabase(redemptions, chunk_size, use_new_client)
+    
+    def _upload_to_supabase(self, redemptions: List[Dict], chunk_size: int, use_new_client: bool) -> bool:
+        """Upload redemptions to Supabase"""
         # Create new client for thread-safe parallel uploads
         client = self.create_new_client() if use_new_client else self.client
         
@@ -427,13 +823,172 @@ class SupabaseUploader:
             self.stats['errors'].append(full_error)
             return False
     
+    def _upload_to_local_postgres(self, redemptions: List[Dict], chunk_size: int = 1000) -> bool:
+        """
+        Upload redemptions to local PostgreSQL database
+        
+        Args:
+            redemptions: List of redemption records
+            chunk_size: Size of each batch (can be larger for local DB: 1000)
+            
+        Returns True if successful, False otherwise
+        """
+        from psycopg2.extras import execute_batch
+        
+        conn = None
+        cursor = None
+        
+        try:
+            # Connect to database
+            conn = self.psycopg2.connect(**self.connection_params)
+            cursor = conn.cursor()
+            
+            # Prepare data as tuples for PostgreSQL
+            prepared_batch = []
+            for r in redemptions:
+                try:
+                    prepared_batch.append((
+                        r['transaction_hash'],
+                        r['condition_id'],
+                        r['event_id'],
+                        r['market_id'],
+                        r['market_question'],
+                        r.get('event_title', ''),
+                        r['redeemer_address'],
+                        float(r['payout_usdc']),
+                        int(r['timestamp_unix']),
+                        r['timestamp_human']
+                    ))
+                except Exception as prep_error:
+                    print(f"\n      ⚠️  Skipping invalid record: {str(prep_error)}")
+                    continue
+            
+            if not prepared_batch:
+                print(f"      ⚠️  No valid records to upload")
+                return False
+            
+            # Split into chunks
+            total_uploaded = 0
+            num_chunks = (len(prepared_batch) + chunk_size - 1) // chunk_size
+            show_progress = len(prepared_batch) > chunk_size
+            
+            # SQL with ON CONFLICT (upsert)
+            insert_sql = """
+                INSERT INTO redemptions (
+                    transaction_hash,
+                    condition_id,
+                    event_id,
+                    market_id,
+                    market_question,
+                    event_title,
+                    redeemer_address,
+                    payout_usdc,
+                    timestamp_unix,
+                    timestamp_human
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (transaction_hash, redeemer_address) 
+                DO UPDATE SET
+                    payout_usdc = EXCLUDED.payout_usdc,
+                    timestamp_unix = EXCLUDED.timestamp_unix,
+                    timestamp_human = EXCLUDED.timestamp_human
+            """
+            
+            for i in range(0, len(prepared_batch), chunk_size):
+                chunk = prepared_batch[i:i + chunk_size]
+                chunk_num = i // chunk_size + 1
+                
+                # Retry logic for statement timeout
+                max_retries = 2
+                retry_count = 0
+                chunk_uploaded = False
+                
+                while retry_count <= max_retries and not chunk_uploaded:
+                    try:
+                        if show_progress:
+                            retry_suffix = f" (retry {retry_count})" if retry_count > 0 else ""
+                            print(f"\n      📦 Chunk {chunk_num}/{num_chunks} ({len(chunk)} records){retry_suffix}...", end=" ", flush=True)
+                        
+                        # Execute batch insert
+                        execute_batch(cursor, insert_sql, chunk, page_size=500)
+                        conn.commit()
+                        
+                        total_uploaded += len(chunk)
+                        self.stats['redemptions_inserted'] += len(chunk)
+                        chunk_uploaded = True
+                        
+                        if show_progress:
+                            success_msg = "✅"
+                            if retry_count > 0:
+                                success_msg = f"✅ (succeeded after {retry_count} retry)"
+                            print(success_msg, flush=True)
+                        
+                    except Exception as chunk_error:
+                        conn.rollback()
+                        error_str = str(chunk_error)
+                        error_type = type(chunk_error).__name__
+                        
+                        # Check if it's a statement timeout
+                        if '57014' in error_str or 'statement timeout' in error_str.lower():
+                            retry_count += 1
+                            if retry_count <= max_retries:
+                                if show_progress:
+                                    print(f"⏳ timeout, retrying...", flush=True)
+                                print(f"         📊 Chunk info: {chunk_num}/{num_chunks}, {len(chunk)} records")
+                                print(f"         ⏰ Timeout after attempt {retry_count}, waiting 1s...")
+                                import time
+                                time.sleep(1)
+                                continue
+                            else:
+                                error_msg = f"Statement timeout after {max_retries} retries on chunk {chunk_num}/{num_chunks}"
+                                print(f"\n      ❌ {error_msg}")
+                                print(f"         Chunk size: {len(chunk)} records")
+                                self.stats['errors'].append(error_msg)
+                                return False
+                        
+                        # Other errors
+                        print(f"\n      ❌ DATABASE ERROR")
+                        print(f"         Type: {error_type}")
+                        print(f"         Chunk: {chunk_num}/{num_chunks} ({len(chunk)} records)")
+                        print(f"         Error: {error_str[:200]}")
+                        self.stats['errors'].append(error_str[:200])
+                        return False
+            
+            return total_uploaded == len(prepared_batch)
+            
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            
+            error_type = type(e).__name__
+            error_msg = str(e)
+            print(f"\n      ❌ UPLOAD FAILED")
+            print(f"         Type: {error_type}")
+            print(f"         Error: {error_msg[:200]}")
+            self.stats['errors'].append(error_msg[:200])
+            return False
+            
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+    
     def upload_metadata(self, metadata: Dict) -> None:
         """
         Upload metadata to Supabase
         Stores fetch metadata for tracking
-        """
-        print(f"\n[*] Uploading metadata to Supabase...")
         
+        NOTE: Only works with Supabase, not local PostgreSQL
+        """
+        if self.use_local_db:
+            print(f"\n⚠️  WARNING: upload_metadata() only works with Supabase")
+            print(f"   Skipping metadata upload for local PostgreSQL")
+            return
+        
+        print(f"\n[*] Uploading metadata to Supabase...")
+
         # Skip if metadata is empty or missing required fields
         if not metadata or not metadata.get('timestamp'):
             print(f"  [SKIP] Metadata is empty or missing required fields (timestamp)")
@@ -458,13 +1013,14 @@ class SupabaseUploader:
     
     def upload_json_file(self, filepath: str, include_metadata: bool = True) -> None:
         """
-        Main method to upload entire JSON file to Supabase
+        Main method to upload entire JSON file to database
         
         Args:
             filepath: Path to JSON file
-            include_metadata: Whether to upload metadata table
+            include_metadata: Whether to upload metadata table (Supabase only)
         """
-        print("[*] Starting Supabase upload...")
+        db_name = "PostgreSQL" if self.use_local_db else "Supabase"
+        print(f"[*] Starting {db_name} upload...")
         print("=" * 70)
         
         # Load data
@@ -510,13 +1066,53 @@ class SupabaseUploader:
 
 
 def main():
-    """Main execution function"""
+    """
+    Main execution function for direct script usage
+    
+    Usage:
+        python supabase_uploader.py [filepath] [--local] [--redemptions]
+    
+    Examples:
+        python supabase_uploader.py                           # Latest JSON → Supabase
+        python supabase_uploader.py --local                   # Latest JSON → PostgreSQL
+        python supabase_uploader.py data.json                 # data.json → Supabase
+        python supabase_uploader.py data.json --local         # data.json → PostgreSQL
+        python supabase_uploader.py redeem.json --redemptions # Upload redemptions
+    """
     import sys
     
-    # Get filepath from command line argument or use default
-    if len(sys.argv) > 1:
-        filepath = sys.argv[1]
-    else:
+    # Parse command line arguments
+    args = sys.argv[1:]
+    use_local_db = '--local' in args or '-l' in args
+    is_redemptions = '--redemptions' in args or '-r' in args
+    show_help = '--help' in args or '-h' in args
+    
+    # Remove flags from args to get filepath
+    filepath = None
+    for arg in args:
+        if not arg.startswith('-'):
+            filepath = arg
+            break
+    
+    # Show help
+    if show_help:
+        print("Usage: python supabase_uploader.py [filepath] [OPTIONS]")
+        print()
+        print("Options:")
+        print("  --local, -l         Upload to local PostgreSQL instead of Supabase")
+        print("  --redemptions, -r   Upload as redemptions data (not events/markets)")
+        print("  --help, -h          Show this help message")
+        print()
+        print("Examples:")
+        print("  python supabase_uploader.py")
+        print("  python supabase_uploader.py --local")
+        print("  python supabase_uploader.py data.json")
+        print("  python supabase_uploader.py data.json --local")
+        print("  python supabase_uploader.py redeem.json --redemptions")
+        return
+    
+    # Get filepath
+    if not filepath:
         # Use latest JSON file in json_output directory
         json_dir = 'json_output'
         if os.path.exists(json_dir):
@@ -525,6 +1121,7 @@ def main():
                 # Sort by modification time, get latest
                 json_files.sort(key=lambda x: os.path.getmtime(os.path.join(json_dir, x)), reverse=True)
                 filepath = os.path.join(json_dir, json_files[0])
+                print(f"[*] Using latest file: {filepath}")
             else:
                 print("[ERROR] No JSON files found in json_output directory")
                 return
@@ -536,17 +1133,56 @@ def main():
         print(f"[ERROR] File not found: {filepath}")
         return
     
-    # Create uploader and upload
+    # Create uploader
+    db_type = "local PostgreSQL" if use_local_db else "Supabase"
+    print(f"[*] Target database: {db_type}")
+    
     try:
-        uploader = SupabaseUploader()
-        uploader.upload_json_file(filepath)
+        uploader = SupabaseUploader(use_local_db=use_local_db)
+        
+        if is_redemptions:
+            # Upload redemptions data
+            print(f"[*] Loading redemptions from: {filepath}")
+            with open(filepath, 'r', encoding='utf-8') as f:
+                redemptions = json.load(f)
+            
+            if not isinstance(redemptions, list):
+                print(f"[ERROR] Expected list of redemptions, got {type(redemptions)}")
+                return
+            
+            print(f"[*] Uploading {len(redemptions)} redemptions to {db_type}...")
+            success = uploader.upload_redemptions_batch(redemptions)
+            
+            if success:
+                print(f"[OK] Successfully uploaded {uploader.stats['redemptions_inserted']} redemptions")
+            else:
+                print(f"[ERROR] Failed to upload redemptions")
+                if uploader.stats['errors']:
+                    print(f"[ERRORS] {len(uploader.stats['errors'])} errors:")
+                    for error in uploader.stats['errors'][:3]:
+                        print(f"   - {error}")
+        else:
+            # Upload events/markets data
+            uploader.upload_json_file(filepath)
+            uploader.print_summary()
+            
     except ValueError as e:
         print(f"[ERROR] Configuration error: {e}")
-        print("\nPlease create a .env file with:")
-        print("  SUPABASE_URL=your_supabase_url")
-        print("  SUPABASE_KEY=your_supabase_service_role_key")
+        if use_local_db:
+            print("\nPlease create a .env file with:")
+            print("  LOCAL_DB_HOST=localhost")
+            print("  LOCAL_DB_PORT=5432")
+            print("  LOCAL_DB_NAME=polymarket")
+            print("  LOCAL_DB_USER=postgres")
+            print("  LOCAL_DB_PASSWORD=your_password")
+        else:
+            print("\nPlease create a .env file with:")
+            print("  SUPABASE_URL=your_supabase_url")
+            print("  SUPABASE_KEY=your_supabase_service_role_key")
     except Exception as e:
         print(f"[ERROR] Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 

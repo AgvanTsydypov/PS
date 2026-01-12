@@ -1,6 +1,32 @@
 """
 View and analyze redemption fetch logs
 Quick script to view the latest log file
+
+ИСПОЛЬЗОВАНИЕ:
+==============
+1. Последние 50 строк (по умолчанию):
+   python view_logs.py
+
+2. Последние N строк:
+   python view_logs.py 100      # последние 100 строк
+   python view_logs.py 500      # последние 500 строк
+
+3. Весь лог:
+   python view_logs.py all
+
+4. Только ошибки:
+   python view_logs.py errors
+
+5. Поиск текста:
+   python view_logs.py search "timeout"
+   python view_logs.py search "Market 42"
+
+6. Статистика:
+   python view_logs.py analyze
+
+РАСПОЛОЖЕНИЕ ЛОГОВ:
+===================
+logs/redemptions_fetch_YYYYMMDD_HHMMSS.log
 """
 
 import os
