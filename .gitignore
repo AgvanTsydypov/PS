@@ -54,3 +54,5 @@ market_winners.json
 # Logs
 logs/
 *.log
+
+/sql_q
