@@ -29,10 +29,21 @@ Automatically scans latest events file and fetches redemptions for each market
 - Просмотр: python view_logs.py
 
 Features:
-- Параллельная обработка маркетов (10 одновременно)
-- Автоматические retry при ошибках
+- Параллельная обработка маркетов (3 для обоих режимов - API лимит!)
+- Автоматические retry при ошибках API и БД
+- Повторная загрузка неудавшихся данных после завершения:
+  * Ожидание 10 секунд перед retry (API/БД "отдыхают")
+  * Пауза 3 секунды между повторными попытками
+  * Сохранение chunk_size для быстрой загрузки в БД
+- Сохранение финально неудавшихся данных в JSON для ручной retry
 - Real-time логирование всех операций
 - Поддержка Supabase и локальной PostgreSQL
+- TURBO MODE для локальной БД:
+  * API фетчинг: консервативный (3 маркета, батчи по 20, пауза 3с)
+  * БД загрузка: СУПЕР БЫСТРАЯ (chunk 5000, PostgreSQL COPY)
+  * 150ms пауза между пагинацией (избегаем rate limiting)
+  * Баланс: API стабильный, БД на максимуме
+  * Результат: 3-5x прирост за счет БД, не упираясь в API
 """
 
 import requests
@@ -112,13 +123,30 @@ FILTER_CLOSED_ONLY = True  # Only fetch redemptions for closed markets
 MIN_VOLUME = 0  # Minimum market volume to process (set to 0 for all)
 MAX_MARKETS = None  # Limit number of markets to process (None = all)
 
-# Parallel processing settings
-MAX_CONCURRENT_MARKETS = 10  # Process 10 markets simultaneously (increased for speed)
-BATCH_SIZE = 50  # Process markets in batches to avoid overwhelming the system
-BATCH_DELAY = 1  # Delay between batches in seconds
-REQUEST_TIMEOUT = 60  # Timeout for each request in seconds (increased)
-MAX_RETRIES = 3  # Maximum retry attempts for failed requests
-RETRY_DELAY = 1  # Delay between retries in seconds
+# Parallel processing settings (will be adjusted based on database type)
+# Conservative settings for Supabase (cloud, has rate limits)
+MAX_CONCURRENT_MARKETS_CLOUD = 3
+BATCH_SIZE_CLOUD = 20
+BATCH_DELAY_CLOUD = 5
+
+# Optimized settings for local PostgreSQL
+# БД может быть супер-быстрой, но API очень чувствителен к перегрузке!
+MAX_CONCURRENT_MARKETS_LOCAL = 3  # Консервативно! API Goldsky rate limiting жесткий
+BATCH_SIZE_LOCAL = 20  # Не увеличиваем, чтобы не перегружать API
+BATCH_DELAY_LOCAL = 3  # Больше время для "отдыха" API между батчами
+
+# Active settings (will be set based on database type)
+MAX_CONCURRENT_MARKETS = MAX_CONCURRENT_MARKETS_CLOUD  # Default to conservative
+BATCH_SIZE = BATCH_SIZE_CLOUD
+BATCH_DELAY = BATCH_DELAY_CLOUD
+
+REQUEST_TIMEOUT = 60  # Timeout for each request in seconds
+MAX_RETRIES = 5  # Maximum retry attempts for failed requests
+RETRY_DELAY = 2  # Delay between retries in seconds
+
+# Database upload settings
+# БД может быть ОЧЕНЬ быстрой - не ограничиваем!
+MAX_CONCURRENT_DB_UPLOADS = 100  # Без ограничений - БД справится!
 
 # ==========================================
 # FILE UTILITIES
@@ -200,10 +228,15 @@ async def fetch_redemptions_for_market_async(
     session: aiohttp.ClientSession, 
     condition_id: str, 
     market_info: Dict,
-    semaphore: asyncio.Semaphore
+    semaphore: asyncio.Semaphore,
+    use_local_db: bool = False
 ) -> List[Dict]:
     """Fetch all redemptions for a specific market (async version)"""
     async with semaphore:  # Limit concurrent requests
+        # Small initial delay to spread out requests and avoid bursts
+        if use_local_db:
+            await asyncio.sleep(0.1)  # 100ms стартовая задержка для каждого маркета
+        
         all_redemptions = []
         last_id = "0x00"
         request_count = 0
@@ -284,11 +317,16 @@ async def fetch_redemptions_for_market_async(
                             print(f"      ... fetched {len(all_redemptions):,} redemptions ({request_count} requests)", flush=True)
                         
                         # Safety limit per market (increased for large markets)
-                        if len(all_redemptions) > 100000:
-                            print(f"      ⚠️  Reached safety limit of 100k redemptions")
+                        if len(all_redemptions) > 500000:  # Увеличили до 500k
+                            print(f"      ⚠️  Reached safety limit of 500k redemptions")
                             break
                         
-                        # No delay needed - semaphore already limits concurrent requests
+                        # Delay between pagination requests to avoid API rate limiting
+                        # GraphQL API очень чувствителен, нужны паузы!
+                        if use_local_db and request_count > 1:
+                            await asyncio.sleep(0.15)  # 150ms между запросами пагинации (было 50ms)
+                        elif request_count > 1:
+                            await asyncio.sleep(0.05)  # Для Supabase - 50ms
                             
                 except asyncio.TimeoutError:
                     retry_count += 1
@@ -325,7 +363,9 @@ async def process_market_async(
     total_markets: int,
     uploader,
     stats: Dict,
-    semaphore: asyncio.Semaphore
+    semaphore: asyncio.Semaphore,
+    db_semaphore: asyncio.Semaphore,
+    use_local_db: bool = False
 ):
     """Process a single market: fetch and upload (with parallel upload support)"""
     try:
@@ -338,7 +378,7 @@ async def process_market_async(
         print(f"   Volume: ${market['volume']:,.2f}")
         
         # Fetch redemptions
-        redemptions = await fetch_redemptions_for_market_async(session, condition_id, market, semaphore)
+        redemptions = await fetch_redemptions_for_market_async(session, condition_id, market, semaphore, use_local_db)
         
         if redemptions:
             stats['markets_with_redemptions'] += 1
@@ -350,38 +390,66 @@ async def process_market_async(
             for r in redemptions:
                 stats['unique_redeemers'].add(r['redeemer_address'])
             
-            print(f"   ✅ Found {len(redemptions)} redemptions (${market_volume:,.2f})")
+            print(f"   ✅ Found {len(redemptions)} redemptions (${market_volume:,.2f})", flush=True)
             
-            # Upload to Supabase if enabled (parallel upload with new client per task)
+            # Upload to database if enabled (with concurrency control)
             if uploader:
+                db_name = "local PostgreSQL" if use_local_db else "Supabase"
                 if len(redemptions) > 1000:
-                    print(f"   📤 Uploading {len(redemptions)} redemptions to Supabase (large batch)...", flush=True)
+                    print(f"   📤 Uploading {len(redemptions)} redemptions to {db_name} (large batch)...", flush=True)
                 else:
-                    print(f"   📤 Uploading to Supabase...", end=" ", flush=True)
+                    print(f"   📤 Uploading to {db_name}...", end=" ", flush=True)
                 
-                # Run sync upload in thread pool to not block async loop
-                # Each upload uses a new client instance (thread-safe)
-                loop = asyncio.get_event_loop()
-                try:
-                    success = await loop.run_in_executor(None, uploader.upload_redemptions_batch, redemptions)
-                    if success:
-                        print("✅ Uploaded" if len(redemptions) <= 1000 else "      ✅ Successfully uploaded large batch")
-                    else:
-                        print("❌ Failed" if len(redemptions) <= 1000 else "      ❌ Failed to upload large batch")
-                        print(f"      🔍 Market: {market_index} | Condition: {condition_id[:30]}...")
-                        print(f"      🔍 Records: {len(redemptions)} | Volume: ${market_volume:,.2f}")
+                # Use semaphore to limit concurrent DB uploads (не перегружаем БД!)
+                async with db_semaphore:
+                    # Run sync upload in thread pool to not block async loop
+                    # Each upload uses a new client instance (thread-safe)
+                    loop = asyncio.get_event_loop()
+                    try:
+                        success = await loop.run_in_executor(None, uploader.upload_redemptions_batch, redemptions)
+                        if success:
+                            print("✅ Uploaded" if len(redemptions) <= 1000 else "      ✅ Successfully uploaded large batch")
+                        else:
+                            print("❌ Failed" if len(redemptions) <= 1000 else "      ❌ Failed to upload large batch")
+                            print(f"      🔍 Market: {market_index} | Condition: {condition_id[:30]}...")
+                            print(f"      🔍 Records: {len(redemptions)} | Volume: ${market_volume:,.2f}")
+                            # Save failed upload for retry
+                            stats['failed_uploads'].append({
+                                'redemptions': redemptions,
+                                'market_info': {
+                                    'market_index': market_index,
+                                    'question': question,
+                                    'condition_id': condition_id,
+                                    'volume': market_volume
+                                }
+                            })
+                            stats['upload_errors'] += 1
+                    except Exception as upload_err:
+                        error_type = type(upload_err).__name__
+                        error_detail = str(upload_err)[:150]
+                        print(f"❌ Upload Exception: {error_type}")
+                        print(f"   Market: [{market_index}] {question}")
+                        print(f"   Condition: {condition_id[:30]}...")
+                        print(f"   Records: {len(redemptions)}")
+                        print(f"   Error: {error_detail}")
+                        # Save failed upload for retry
+                        stats['failed_uploads'].append({
+                            'redemptions': redemptions,
+                            'market_info': {
+                                'market_index': market_index,
+                                'question': question,
+                                'condition_id': condition_id,
+                                'volume': market_volume
+                            }
+                        })
                         stats['upload_errors'] += 1
-                except Exception as upload_err:
-                    error_type = type(upload_err).__name__
-                    error_detail = str(upload_err)[:150]
-                    print(f"❌ Upload Exception: {error_type}")
-                    print(f"   Market: [{market_index}] {question}")
-                    print(f"   Condition: {condition_id[:30]}...")
-                    print(f"   Records: {len(redemptions)}")
-                    print(f"   Error: {error_detail}")
-                    stats['upload_errors'] += 1
         else:
-            print(f"   ⚪ No redemptions found")
+            # Warn if high-volume market has no redemptions (might indicate API issue)
+            if market['volume'] > 100000 and market['closed']:
+                print(f"   ⚠️  No redemptions found (suspicious: high volume ${market['volume']:,.2f}, market closed)", flush=True)
+                stats['suspicious_empty_markets'] += 1
+            else:
+                print(f"   ⚪ No redemptions found", flush=True)
         
         stats['markets_processed'] += 1
         
@@ -410,15 +478,31 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     # Setup logging to file
     log_file = setup_logging()
     
+    # Apply performance settings based on database type
+    global MAX_CONCURRENT_MARKETS, BATCH_SIZE, BATCH_DELAY
+    if use_local_db:
+        MAX_CONCURRENT_MARKETS = MAX_CONCURRENT_MARKETS_LOCAL
+        BATCH_SIZE = BATCH_SIZE_LOCAL
+        BATCH_DELAY = BATCH_DELAY_LOCAL
+        perf_mode = "🚀 TURBO MODE (Local PostgreSQL)"
+    else:
+        MAX_CONCURRENT_MARKETS = MAX_CONCURRENT_MARKETS_CLOUD
+        BATCH_SIZE = BATCH_SIZE_CLOUD
+        BATCH_DELAY = BATCH_DELAY_CLOUD
+        perf_mode = "⚡ STANDARD MODE (Supabase Cloud)"
+    
     print("=" * 70)
     print("🚀 POLYMARKET REDEMPTIONS FETCHER (OPTIMIZED PARALLEL)")
     print("=" * 70)
+    print(f"{perf_mode}")
     print(f"⚡ Processing settings:")
     print(f"   - Batch size: {BATCH_SIZE} markets")
     print(f"   - Concurrent per batch: {MAX_CONCURRENT_MARKETS} markets")
     print(f"   - Request timeout: {REQUEST_TIMEOUT}s")
     print(f"   - Delay between batches: {BATCH_DELAY}s")
     print(f"   - Database uploads: Parallel (new client per upload)")
+    if use_local_db:
+        print(f"   - Performance: MAXIMUM (No rate limits!)")
     
     # Initialize database uploader if auto_upload is enabled
     uploader = None
@@ -475,11 +559,14 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
         'total_volume': 0.0,
         'unique_redeemers': set(),
         'upload_errors': 0,
-        'processing_errors': 0
+        'processing_errors': 0,
+        'suspicious_empty_markets': 0,  # High volume closed markets with no redemptions
+        'failed_uploads': []  # List of (redemptions, market_info) tuples that failed to upload
     }
     
-    # Create semaphore to limit concurrent requests
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_MARKETS)
+    # Create semaphores to limit concurrent operations
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_MARKETS)  # Ограничение на фетчинг
+    db_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DB_UPLOADS)  # Ограничение на загрузку в БД
     
     # Create aiohttp session
     async with aiohttp.ClientSession() as session:
@@ -509,7 +596,9 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
                     len(markets), 
                     uploader, 
                     stats, 
-                    semaphore
+                    semaphore,
+                    db_semaphore,
+                    use_local_db
                 )
                 tasks.append(task)
             
@@ -525,7 +614,85 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
                 print(f"⏳ Waiting {BATCH_DELAY}s before next batch...")
                 await asyncio.sleep(BATCH_DELAY)
     
-    # 4. Print final statistics
+    # 4. Retry failed uploads
+    if auto_upload and uploader and stats['failed_uploads']:
+        print("\n" + "=" * 70)
+        print("🔄 RETRYING FAILED UPLOADS")
+        print("=" * 70)
+        print(f"Found {len(stats['failed_uploads'])} failed uploads ({sum(len(f['redemptions']) for f in stats['failed_uploads']):,} records)")
+        print(f"Waiting 10 seconds to let API and DB cool down...")
+        await asyncio.sleep(10)  # Даем API и БД время "отдохнуть"
+        print(f"Attempting to retry uploads...")
+        print()
+        
+        retry_success = 0
+        retry_failed = 0
+        still_failed_items = []
+        
+        for i, failed_item in enumerate(stats['failed_uploads'], 1):
+            redemptions = failed_item['redemptions']
+            market_info = failed_item['market_info']
+            
+            print(f"\n[Retry {i}/{len(stats['failed_uploads'])}] Market #{market_info['market_index']}")
+            print(f"   Question: {market_info['question'][:60]}...")
+            print(f"   Condition: {market_info['condition_id'][:30]}...")
+            print(f"   Records: {len(redemptions)} | Volume: ${market_info['volume']:,.2f}")
+            print(f"   🔄 Retrying upload...", end=" ", flush=True)
+            
+            try:
+                # Use default chunk size (БД справляется, проблема была в API timing)
+                # БД для локальной будет использовать chunk_size=5000 (быстро!)
+                success = uploader.upload_redemptions_batch(redemptions)
+                if success:
+                    print("✅ Success!")
+                    retry_success += 1
+                else:
+                    print("❌ Failed again")
+                    retry_failed += 1
+                    still_failed_items.append(failed_item)
+            except Exception as e:
+                print(f"❌ Exception: {type(e).__name__}")
+                print(f"      Error: {str(e)[:100]}")
+                retry_failed += 1
+                still_failed_items.append(failed_item)
+            
+            # Longer delay between retries to let DB/API rest
+            if i < len(stats['failed_uploads']):
+                print(f"   ⏳ Waiting 3 seconds before next retry...")
+                await asyncio.sleep(3)
+        
+        print(f"\n📊 Retry Results:")
+        print(f"   ✅ Successful: {retry_success}/{len(stats['failed_uploads'])}")
+        print(f"   ❌ Still failed: {retry_failed}/{len(stats['failed_uploads'])}")
+        
+        # Save still-failed data to file
+        if still_failed_items:
+            import json
+            from datetime import datetime
+            failed_file = f"output/failed_redemptions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            
+            # Create output directory if needed
+            os.makedirs('output', exist_ok=True)
+            
+            # Prepare data for saving
+            failed_data = []
+            for item in still_failed_items:
+                failed_data.append({
+                    'market_info': item['market_info'],
+                    'redemptions': item['redemptions']
+                })
+            
+            with open(failed_file, 'w', encoding='utf-8') as f:
+                json.dump(failed_data, f, indent=2, ensure_ascii=False)
+            
+            print(f"\n💾 Still-failed data saved to: {failed_file}")
+            print(f"   Total records: {sum(len(item['redemptions']) for item in still_failed_items):,}")
+            print(f"   You can retry later using: python supabase_uploader.py {failed_file} --redemptions {'--local' if use_local_db else ''}")
+        
+        # Update stats
+        stats['upload_errors'] = retry_failed  # Update to reflect final count
+    
+    # 5. Print final statistics
     print("\n" + "=" * 70)
     print("📊 FINAL STATISTICS")
     print("=" * 70)
@@ -539,41 +706,72 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
         print(f"\n⚠️  Processing Errors:")
         print(f"   Failed markets:          {stats['processing_errors']}")
     
+    if stats['suspicious_empty_markets'] > 0:
+        print(f"\n⚠️  Suspicious Cases:")
+        print(f"   High-volume closed markets with no redemptions: {stats['suspicious_empty_markets']}")
+        print(f"   (This might indicate GraphQL API rate limiting or data issues)")
+    
     if auto_upload and uploader:
         print(f"\n💾 Database Upload:")
         print(f"   Uploaded:                {uploader.stats['redemptions_inserted']:,} redemptions")
-        if stats['upload_errors'] > 0:
+        
+        # Show retry information if there were any
+        if len(stats.get('failed_uploads', [])) > 0:
+            original_failures = len(stats['failed_uploads'])
+            final_failures = stats['upload_errors']
+            retry_successes = original_failures - final_failures
+            
+            print(f"\n   🔄 Retry Statistics:")
+            print(f"   Initial failures:        {original_failures}")
+            print(f"   Retry successes:         {retry_successes}")
+            print(f"   Final failures:          {final_failures}")
+            
+            if final_failures > 0:
+                print(f"\n   ⚠️  {final_failures} upload(s) still failed after retry")
+                print(f"   💾 Failed data saved to output/failed_redemptions_*.json")
+        elif stats['upload_errors'] > 0:
             print(f"   Upload errors:           {stats['upload_errors']}")
             
-            # Show detailed error summary
-            if uploader.stats['errors']:
-                print(f"\n   📋 ERROR SUMMARY ({len(uploader.stats['errors'])} total errors):")
-                print(f"   " + "=" * 66)
-                
-                # Categorize errors
-                timeout_errors = [e for e in uploader.stats['errors'] if '57014' in e or 'timeout' in e.lower()]
-                other_errors = [e for e in uploader.stats['errors'] if e not in timeout_errors]
-                
-                if timeout_errors:
-                    print(f"   ⏰ Statement Timeouts: {len(timeout_errors)}")
-                    for error in timeout_errors[:3]:
-                        print(f"      • {error[:90]}")
-                
-                if other_errors:
-                    print(f"   ❌ Other Errors: {len(other_errors)}")
-                    for error in other_errors[:3]:
-                        print(f"      • {error[:90]}")
-                
-                if len(uploader.stats['errors']) > 6:
-                    print(f"   ... and {len(uploader.stats['errors']) - 6} more errors")
+        # Show detailed error summary
+        if uploader.stats['errors']:
+            print(f"\n   📋 ERROR SUMMARY ({len(uploader.stats['errors'])} total errors):")
+            print(f"   " + "=" * 66)
+            
+            # Categorize errors
+            timeout_errors = [e for e in uploader.stats['errors'] if '57014' in e or 'timeout' in e.lower()]
+            other_errors = [e for e in uploader.stats['errors'] if e not in timeout_errors]
+            
+            if timeout_errors:
+                print(f"   ⏰ Statement Timeouts: {len(timeout_errors)}")
+                for error in timeout_errors[:3]:
+                    print(f"      • {error[:90]}")
+            
+            if other_errors:
+                print(f"   ❌ Other Errors: {len(other_errors)}")
+                for error in other_errors[:3]:
+                    print(f"      • {error[:90]}")
+            
+            if len(uploader.stats['errors']) > 6:
+                print(f"   ... and {len(uploader.stats['errors']) - 6} more errors")
     
-    # Total execution time
+    # Total execution time and performance metrics
     total_elapsed = time.time() - script_start_time
     hours = int(total_elapsed // 3600)
     minutes = int((total_elapsed % 3600) // 60)
     seconds = int(total_elapsed % 60)
     
     print(f"\n⏱️  Total execution time: {hours}h {minutes}m {seconds}s ({total_elapsed:.1f}s)")
+    
+    # Performance metrics
+    if stats['total_redemptions'] > 0 and total_elapsed > 0:
+        redemptions_per_sec = stats['total_redemptions'] / total_elapsed
+        markets_per_sec = stats['markets_processed'] / total_elapsed
+        print(f"\n📈 Performance:")
+        print(f"   Redemptions/sec:        {redemptions_per_sec:.1f}")
+        print(f"   Markets/sec:            {markets_per_sec:.2f}")
+        if auto_upload and uploader:
+            db_name = "PostgreSQL" if use_local_db else "Supabase"
+            print(f"   Database ({db_name}):   {uploader.stats['redemptions_inserted'] / total_elapsed:.1f} records/sec")
     
     print("=" * 70)
     

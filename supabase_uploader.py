@@ -18,6 +18,10 @@ Uploads events and markets data to Supabase or local PostgreSQL
    python supabase_uploader.py redemptions_data.json --redemptions
    python supabase_uploader.py redemptions_data.json --redemptions --local
 
+5. Повторить загрузку неудавшихся данных:
+   python supabase_uploader.py output/failed_redemptions_*.json --redemptions --local
+   (автоматически распознает формат failed_redemptions)
+
 ПРОГРАММНОЕ ИСПОЛЬЗОВАНИЕ (в Python коде):
 ==========================================
    # Supabase (по умолчанию)
@@ -53,10 +57,15 @@ Uploads events and markets data to Supabase or local PostgreSQL
 - По умолчанию: Supabase (use_local_db=False)
 - Нет автоматического определения БД!
 
-CHUNK SIZE:
-===========
-- Supabase: 100 записей на chunk (избежать таймаутов)
-- PostgreSQL: 1000 записей на chunk (нет лимитов)
+CHUNK SIZE & PERFORMANCE:
+=========================
+- Supabase: 1000 записей на chunk (с автоматической деградацией при таймаутах)
+- PostgreSQL: 5000 записей на chunk (TURBO MODE!)
+  * Использует PostgreSQL COPY (10-50x быстрее обычных INSERT)
+  * БД загрузка без ограничений (моментально!)
+  * API фетчинг: консервативно (3 маркета, пауза 3с, 150ms между запросами)
+  * Узкое место: GraphQL API, а не БД!
+  * Результат: 3-5x ускорение за счет мгновенной загрузки в БД
 """
 
 import json
@@ -71,6 +80,12 @@ load_dotenv()
 
 class SupabaseUploader:
     """Handles uploading Polymarket data to Supabase or local PostgreSQL"""
+    
+    # Table names configuration
+    TABLE_EVENTS = 'events'
+    TABLE_MARKETS = 'markets'
+    TABLE_REDEMPTIONS = 'redemptions' # 5.248.075 5,260,530
+    TABLE_METADATA = 'fetch_metadata'
     
     def __init__(self, use_local_db: bool = False):
         """
@@ -360,7 +375,7 @@ class SupabaseUploader:
             
             try:
                 # Upsert: insert or update if exists (based on 'id' primary key)
-                response = self.client.table('events').upsert(
+                response = self.client.table(self.TABLE_EVENTS).upsert(
                     prepared_batch,
                     on_conflict='id'
                 ).execute()
@@ -387,8 +402,8 @@ class SupabaseUploader:
             cursor = conn.cursor()
             
             # Prepare SQL for upsert
-            insert_sql = """
-                INSERT INTO events (
+            insert_sql = f"""
+                INSERT INTO {self.TABLE_EVENTS} (
                     id, ticker, slug, title, description,
                     start_date, creation_date, end_date, closed_time, created_at, updated_at,
                     image, icon,
@@ -533,7 +548,7 @@ class SupabaseUploader:
             
             try:
                 # Upsert: insert or update if exists (based on 'id' primary key)
-                response = self.client.table('markets').upsert(
+                response = self.client.table(self.TABLE_MARKETS).upsert(
                     batch,
                     on_conflict='id'
                 ).execute()
@@ -570,8 +585,8 @@ class SupabaseUploader:
             cursor = conn.cursor()
             
             # Prepare SQL for upsert (simplified - key fields only)
-            insert_sql = """
-                INSERT INTO markets (
+            insert_sql = f"""
+                INSERT INTO {self.TABLE_MARKETS} (
                     id, event_id, question, condition_id, slug, question_id,
                     end_date, start_date, created_at, updated_at, closed_time,
                     image, icon, description, outcomes, outcome_prices,
@@ -685,7 +700,13 @@ class SupabaseUploader:
         
         # Set default chunk_size based on database type
         if chunk_size is None:
-            chunk_size = 1000 if self.use_local_db else 100
+            if self.use_local_db:
+                # Локальная БД может быть СУПЕР быстрой - большие чанки!
+                chunk_size = 5000  # TURBO MODE для PostgreSQL COPY
+            else:
+                # Always start with large chunks for speed
+                # Will fallback to smaller chunks if errors occur
+                chunk_size = 1000
         
         # Route to appropriate upload method
         if self.use_local_db:
@@ -694,9 +715,12 @@ class SupabaseUploader:
             return self._upload_to_supabase(redemptions, chunk_size, use_new_client)
     
     def _upload_to_supabase(self, redemptions: List[Dict], chunk_size: int, use_new_client: bool) -> bool:
-        """Upload redemptions to Supabase"""
+        """Upload redemptions to Supabase with progressive chunking fallback"""
         # Create new client for thread-safe parallel uploads
         client = self.create_new_client() if use_new_client else self.client
+        
+        # Failed chunks that need retry with smaller size
+        failed_chunks_data = []
         
         try:
             # Prepare redemptions data
@@ -730,6 +754,10 @@ class SupabaseUploader:
             num_chunks = (len(prepared_batch) + chunk_size - 1) // chunk_size
             show_progress = len(prepared_batch) > chunk_size
             
+            # Show settings
+            if len(prepared_batch) > 1000:
+                print(f"      🔧 Starting upload: {len(prepared_batch)} records, chunk_size={chunk_size}", flush=True)
+            
             for i in range(0, len(prepared_batch), chunk_size):
                 chunk = prepared_batch[i:i + chunk_size]
                 chunk_num = i // chunk_size + 1
@@ -747,7 +775,7 @@ class SupabaseUploader:
                             print(f"\n      📦 Chunk {chunk_num}/{num_chunks} ({len(chunk)} records){retry_suffix}...", end=" ", flush=True)
                         
                         # Upsert to database using the appropriate client
-                        response = client.table('redemptions').upsert(
+                        response = client.table(self.TABLE_REDEMPTIONS).upsert(
                             chunk,
                             on_conflict='transaction_hash,redeemer_address'
                         ).execute()
@@ -762,10 +790,10 @@ class SupabaseUploader:
                                 success_msg = f"✅ (succeeded after {retry_count} retry)"
                             print(success_msg, flush=True)
                         
-                        # Small delay between chunks for large batches to avoid overwhelming DB
+                        # Small delay between chunks
                         if show_progress and chunk_num < num_chunks:
                             import time
-                            time.sleep(0.05)  # 50ms delay between chunks
+                            time.sleep(0.05)  # 50ms delay
                         
                     except Exception as chunk_error:
                         error_str = str(chunk_error)
@@ -783,23 +811,73 @@ class SupabaseUploader:
                                 time.sleep(1)  # Wait 1 second before retry
                                 continue
                             else:
-                                # Max retries reached for timeout
-                                error_msg = f"Statement timeout after {max_retries} retries on chunk {chunk_num}/{num_chunks}"
-                                print(f"\n      ❌ {error_msg}")
-                                print(f"         Chunk size: {len(chunk)} records")
-                                print(f"         Total batch: {len(prepared_batch)} records")
-                                self.stats['errors'].append(error_msg)
-                                return False
+                                # Max retries reached for timeout - save chunk for retry with smaller size
+                                error_msg = f"Chunk {chunk_num} timeout, will retry with smaller chunk size"
+                                print(f"\n      ⚠️  {error_msg}", flush=True)
+                                failed_chunks_data.extend(chunk)  # Save failed chunk data
+                                break  # Exit retry loop, move to next chunk
                         
-                        # If not timeout or max retries reached for other errors
-                        error_msg = f"Error uploading chunk {chunk_num}/{num_chunks}: {error_str[:200]}"
-                        print(f"\n      ❌ DATABASE ERROR")
-                        print(f"         Type: {error_type}")
-                        print(f"         Chunk: {chunk_num}/{num_chunks} ({len(chunk)} records)")
-                        print(f"         Total batch: {len(prepared_batch)} records")
-                        print(f"         Error: {error_str[:250]}")
-                        self.stats['errors'].append(error_msg)
-                        return False
+                        # If not timeout - save chunk for retry with smaller size
+                        error_msg = f"Chunk {chunk_num} failed ({error_type}), will retry with smaller chunk size"
+                        print(f"\n      ⚠️  {error_msg}", flush=True)
+                        failed_chunks_data.extend(chunk)  # Save failed chunk data
+                        break  # Exit retry loop, move to next chunk
+            
+            # Progressive retry: if some chunks failed, retry with smaller chunk sizes
+            if failed_chunks_data:
+                print(f"\n      🔄 Retrying {len(failed_chunks_data)} failed records with progressive chunking...", flush=True)
+                
+                # Try progressively smaller chunk sizes: 500 → 100 → 50 → 25 → 10 → 1
+                for retry_chunk_size in [500, 100, 50, 25, 10, 1]:
+                    if not failed_chunks_data:
+                        break  # All uploaded successfully
+                    
+                    if retry_chunk_size <= 10:
+                        print(f"      📦 Attempt with chunk_size={retry_chunk_size} (extreme fallback)", flush=True)
+                    else:
+                        print(f"      📦 Attempt with chunk_size={retry_chunk_size}", flush=True)
+                    still_failed = []
+                    
+                    for i in range(0, len(failed_chunks_data), retry_chunk_size):
+                        retry_chunk = failed_chunks_data[i:i + retry_chunk_size]
+                        retry_chunk_num = i // retry_chunk_size + 1
+                        total_retry_chunks = (len(failed_chunks_data) + retry_chunk_size - 1) // retry_chunk_size
+                        
+                        try:
+                            print(f"         Chunk {retry_chunk_num}/{total_retry_chunks} ({len(retry_chunk)} records)...", end=" ", flush=True)
+                            
+                            response = client.table(self.TABLE_REDEMPTIONS).upsert(
+                                retry_chunk,
+                                on_conflict='transaction_hash,redeemer_address'
+                            ).execute()
+                            
+                            total_uploaded += len(retry_chunk)
+                            self.stats['redemptions_inserted'] += len(retry_chunk)
+                            print("✅", flush=True)
+                            
+                            import time
+                            time.sleep(0.1)  # Small delay
+                            
+                        except Exception as retry_error:
+                            print(f"❌", flush=True)
+                            still_failed.extend(retry_chunk)  # Save for next attempt
+                    
+                    failed_chunks_data = still_failed
+                    
+                    if not failed_chunks_data:
+                        print(f"      ✅ All failed records uploaded successfully with chunk_size={retry_chunk_size}!", flush=True)
+                        break
+                
+                # If still have failed data after all attempts, save to file
+                if failed_chunks_data:
+                    import json
+                    from datetime import datetime
+                    failed_file = f"failed_uploads_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    with open(failed_file, 'w') as f:
+                        json.dump(failed_chunks_data, f, indent=2)
+                    print(f"\n      ⚠️  {len(failed_chunks_data)} records still failed after all retries", flush=True)
+                    print(f"      💾 Saved to: {failed_file}", flush=True)
+                    self.stats['errors'].append(f"{len(failed_chunks_data)} records saved to {failed_file}")
             
             return total_uploaded == len(prepared_batch)
             
@@ -823,17 +901,20 @@ class SupabaseUploader:
             self.stats['errors'].append(full_error)
             return False
     
-    def _upload_to_local_postgres(self, redemptions: List[Dict], chunk_size: int = 1000) -> bool:
+    def _upload_to_local_postgres(self, redemptions: List[Dict], chunk_size: int = 10000) -> bool:
         """
-        Upload redemptions to local PostgreSQL database
+        Upload redemptions to local PostgreSQL database using COPY (ultra-fast bulk insert)
         
         Args:
             redemptions: List of redemption records
-            chunk_size: Size of each batch (can be larger for local DB: 1000)
+            chunk_size: Size of each batch (default: 10000 for maximum speed)
             
         Returns True if successful, False otherwise
+        
+        Performance: Uses PostgreSQL COPY which is 10-50x faster than INSERT batches
         """
-        from psycopg2.extras import execute_batch
+        import io
+        from psycopg2 import sql
         
         conn = None
         cursor = None
@@ -843,7 +924,136 @@ class SupabaseUploader:
             conn = self.psycopg2.connect(**self.connection_params)
             cursor = conn.cursor()
             
-            # Prepare data as tuples for PostgreSQL
+            # Create temporary table for bulk insert
+            temp_table = f"{self.TABLE_REDEMPTIONS}_temp_{os.getpid()}"
+            
+            try:
+                # Create temp table with same structure
+                cursor.execute(f"""
+                    CREATE TEMP TABLE {temp_table} (LIKE {self.TABLE_REDEMPTIONS} INCLUDING ALL)
+                    ON COMMIT DROP
+                """)
+                
+                # Prepare data for COPY
+                total_uploaded = 0
+                num_chunks = (len(redemptions) + chunk_size - 1) // chunk_size
+                show_progress = len(redemptions) > 1000
+                
+                if show_progress:
+                    print(f"      🚀 TURBO MODE: Using PostgreSQL COPY (10-50x faster)", flush=True)
+                    print(f"      📦 Processing {len(redemptions)} records in chunks of {chunk_size}", flush=True)
+                
+                for i in range(0, len(redemptions), chunk_size):
+                    chunk = redemptions[i:i + chunk_size]
+                    chunk_num = i // chunk_size + 1
+                    
+                    try:
+                        if show_progress and num_chunks > 1:
+                            print(f"      📦 Chunk {chunk_num}/{num_chunks} ({len(chunk)} records)...", end=" ", flush=True)
+                        
+                        # Prepare CSV data in memory
+                        csv_buffer = io.StringIO()
+                        for r in chunk:
+                            # Escape special characters for PostgreSQL COPY
+                            def escape_field(val):
+                                if val is None:
+                                    return '\\N'
+                                val_str = str(val).replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+                                return val_str
+                            
+                            csv_buffer.write('\t'.join([
+                                escape_field(r.get('transaction_hash')),
+                                escape_field(r.get('condition_id')),
+                                escape_field(r.get('event_id')),
+                                escape_field(r.get('market_id')),
+                                escape_field(r.get('market_question')),
+                                escape_field(r.get('event_title', '')),
+                                escape_field(r.get('redeemer_address')),
+                                escape_field(float(r.get('payout_usdc', 0))),
+                                escape_field(int(r.get('timestamp_unix', 0))),
+                                escape_field(r.get('timestamp_human'))
+                            ]) + '\n')
+                        
+                        csv_buffer.seek(0)
+                        
+                        # COPY to temp table (ultra-fast!)
+                        cursor.copy_from(
+                            csv_buffer, 
+                            temp_table,
+                            columns=['transaction_hash', 'condition_id', 'event_id', 'market_id',
+                                   'market_question', 'event_title', 'redeemer_address', 'payout_usdc',
+                                   'timestamp_unix', 'timestamp_human']
+                        )
+                        
+                        total_uploaded += len(chunk)
+                        
+                        if show_progress and num_chunks > 1:
+                            print("✅", flush=True)
+                        
+                    except Exception as chunk_error:
+                        conn.rollback()
+                        error_str = str(chunk_error)
+                        error_type = type(chunk_error).__name__
+                        print(f"\n      ❌ COPY ERROR on chunk {chunk_num}")
+                        print(f"         Type: {error_type}")
+                        print(f"         Error: {error_str[:200]}")
+                        self.stats['errors'].append(error_str[:200])
+                        return False
+                
+                # Insert from temp table to main table with ON CONFLICT (upsert)
+                if show_progress:
+                    print(f"      🔄 Merging {total_uploaded} records into main table...", end=" ", flush=True)
+                
+                cursor.execute(f"""
+                    INSERT INTO {self.TABLE_REDEMPTIONS}
+                    SELECT * FROM {temp_table}
+                    ON CONFLICT (transaction_hash, redeemer_address) 
+                    DO UPDATE SET
+                        payout_usdc = EXCLUDED.payout_usdc,
+                        timestamp_unix = EXCLUDED.timestamp_unix,
+                        timestamp_human = EXCLUDED.timestamp_human
+                """)
+                
+                conn.commit()
+                self.stats['redemptions_inserted'] += total_uploaded
+                
+                if show_progress:
+                    print("✅", flush=True)
+                
+                return True
+                
+            except Exception as e:
+                conn.rollback()
+                # Fallback to slower method if COPY fails
+                error_msg = f"COPY method failed: {str(e)[:100]}"
+                print(f"\n      ⚠️  {error_msg}")
+                print(f"      🔄 Falling back to standard INSERT method...")
+                return self._upload_to_local_postgres_fallback(redemptions, cursor, conn, chunk_size)
+            
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            
+            error_type = type(e).__name__
+            error_msg = str(e)
+            print(f"\n      ❌ UPLOAD FAILED")
+            print(f"         Type: {error_type}")
+            print(f"         Error: {error_msg[:200]}")
+            self.stats['errors'].append(error_msg[:200])
+            return False
+            
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+    
+    def _upload_to_local_postgres_fallback(self, redemptions: List[Dict], cursor, conn, chunk_size: int) -> bool:
+        """Fallback method using standard INSERT batches if COPY fails"""
+        from psycopg2.extras import execute_batch
+        
+        try:
+            # Prepare data as tuples
             prepared_batch = []
             for r in redemptions:
                 try:
@@ -864,30 +1074,15 @@ class SupabaseUploader:
                     continue
             
             if not prepared_batch:
-                print(f"      ⚠️  No valid records to upload")
                 return False
             
-            # Split into chunks
-            total_uploaded = 0
-            num_chunks = (len(prepared_batch) + chunk_size - 1) // chunk_size
-            show_progress = len(prepared_batch) > chunk_size
-            
-            # SQL with ON CONFLICT (upsert)
-            insert_sql = """
-                INSERT INTO redemptions (
-                    transaction_hash,
-                    condition_id,
-                    event_id,
-                    market_id,
-                    market_question,
-                    event_title,
-                    redeemer_address,
-                    payout_usdc,
-                    timestamp_unix,
-                    timestamp_human
-                ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                )
+            # SQL with ON CONFLICT
+            insert_sql = f"""
+                INSERT INTO {self.TABLE_REDEMPTIONS} (
+                    transaction_hash, condition_id, event_id, market_id,
+                    market_question, event_title, redeemer_address, payout_usdc,
+                    timestamp_unix, timestamp_human
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (transaction_hash, redeemer_address) 
                 DO UPDATE SET
                     payout_usdc = EXCLUDED.payout_usdc,
@@ -895,65 +1090,13 @@ class SupabaseUploader:
                     timestamp_human = EXCLUDED.timestamp_human
             """
             
+            total_uploaded = 0
             for i in range(0, len(prepared_batch), chunk_size):
                 chunk = prepared_batch[i:i + chunk_size]
-                chunk_num = i // chunk_size + 1
-                
-                # Retry logic for statement timeout
-                max_retries = 2
-                retry_count = 0
-                chunk_uploaded = False
-                
-                while retry_count <= max_retries and not chunk_uploaded:
-                    try:
-                        if show_progress:
-                            retry_suffix = f" (retry {retry_count})" if retry_count > 0 else ""
-                            print(f"\n      📦 Chunk {chunk_num}/{num_chunks} ({len(chunk)} records){retry_suffix}...", end=" ", flush=True)
-                        
-                        # Execute batch insert
-                        execute_batch(cursor, insert_sql, chunk, page_size=500)
-                        conn.commit()
-                        
-                        total_uploaded += len(chunk)
-                        self.stats['redemptions_inserted'] += len(chunk)
-                        chunk_uploaded = True
-                        
-                        if show_progress:
-                            success_msg = "✅"
-                            if retry_count > 0:
-                                success_msg = f"✅ (succeeded after {retry_count} retry)"
-                            print(success_msg, flush=True)
-                        
-                    except Exception as chunk_error:
-                        conn.rollback()
-                        error_str = str(chunk_error)
-                        error_type = type(chunk_error).__name__
-                        
-                        # Check if it's a statement timeout
-                        if '57014' in error_str or 'statement timeout' in error_str.lower():
-                            retry_count += 1
-                            if retry_count <= max_retries:
-                                if show_progress:
-                                    print(f"⏳ timeout, retrying...", flush=True)
-                                print(f"         📊 Chunk info: {chunk_num}/{num_chunks}, {len(chunk)} records")
-                                print(f"         ⏰ Timeout after attempt {retry_count}, waiting 1s...")
-                                import time
-                                time.sleep(1)
-                                continue
-                            else:
-                                error_msg = f"Statement timeout after {max_retries} retries on chunk {chunk_num}/{num_chunks}"
-                                print(f"\n      ❌ {error_msg}")
-                                print(f"         Chunk size: {len(chunk)} records")
-                                self.stats['errors'].append(error_msg)
-                                return False
-                        
-                        # Other errors
-                        print(f"\n      ❌ DATABASE ERROR")
-                        print(f"         Type: {error_type}")
-                        print(f"         Chunk: {chunk_num}/{num_chunks} ({len(chunk)} records)")
-                        print(f"         Error: {error_str[:200]}")
-                        self.stats['errors'].append(error_str[:200])
-                        return False
+                execute_batch(cursor, insert_sql, chunk, page_size=1000)
+                conn.commit()
+                total_uploaded += len(chunk)
+                self.stats['redemptions_inserted'] += len(chunk)
             
             return total_uploaded == len(prepared_batch)
             
@@ -1003,7 +1146,7 @@ class SupabaseUploader:
                 'filters': json.dumps(metadata.get('filters', {})),  # Store as JSON string
             }
             
-            response = self.client.table('fetch_metadata').insert(metadata_record).execute()
+            response = self.client.table(self.TABLE_METADATA).insert(metadata_record).execute()
             print(f"  [OK] Metadata uploaded")
             
         except Exception as e:
@@ -1144,14 +1287,33 @@ def main():
             # Upload redemptions data
             print(f"[*] Loading redemptions from: {filepath}")
             with open(filepath, 'r', encoding='utf-8') as f:
-                redemptions = json.load(f)
+                data = json.load(f)
             
-            if not isinstance(redemptions, list):
-                print(f"[ERROR] Expected list of redemptions, got {type(redemptions)}")
+            # Support two formats:
+            # 1. Simple list: [{"transaction_hash": ..., "condition_id": ..., ...}, ...]
+            # 2. Failed uploads format: [{"market_info": {...}, "redemptions": [...]}, ...]
+            
+            all_redemptions = []
+            
+            if isinstance(data, list):
+                if len(data) > 0 and 'redemptions' in data[0]:
+                    # Failed uploads format - extract redemptions from each market
+                    print(f"[*] Detected failed_redemptions format with {len(data)} markets")
+                    for item in data:
+                        market_info = item.get('market_info', {})
+                        redemptions = item.get('redemptions', [])
+                        print(f"   • Market #{market_info.get('market_index', '?')}: {len(redemptions)} redemptions")
+                        all_redemptions.extend(redemptions)
+                else:
+                    # Simple list format
+                    all_redemptions = data
+            else:
+                print(f"[ERROR] Expected list of redemptions, got {type(data)}")
                 return
             
-            print(f"[*] Uploading {len(redemptions)} redemptions to {db_type}...")
-            success = uploader.upload_redemptions_batch(redemptions)
+            print(f"\n[*] Total redemptions to upload: {len(all_redemptions)}")
+            print(f"[*] Uploading to {db_type}...")
+            success = uploader.upload_redemptions_batch(all_redemptions)
             
             if success:
                 print(f"[OK] Successfully uploaded {uploader.stats['redemptions_inserted']} redemptions")

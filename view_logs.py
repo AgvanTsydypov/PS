@@ -100,7 +100,7 @@ def analyze_log(filepath):
         print(f"❌ File not found: {filepath}")
         return
     
-    print(f"📊 Analyzing: {filepath}\n")
+    print(f"[*] Analyzing: {filepath}\n")
     
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
@@ -118,28 +118,91 @@ def analyze_log(filepath):
             'uploads': len([l for l in lines if 'Uploading to Supabase' in l or 'Uploading' in l and 'redemptions' in l]),
         }
         
+        # Detailed retry statistics
+        retry_stats = {
+            'retry_1': len([l for l in lines if '(retry 1)' in l.lower()]),
+            'retry_2': len([l for l in lines if '(retry 2)' in l.lower()]),
+            'timeout_retry': len([l for l in lines if '⏳ timeout, retrying' in l]),
+            'succeeded_after_retry': len([l for l in lines if 'succeeded after' in l.lower()]),
+            'timeout_attempts': len([l for l in lines if '⏰ Timeout after attempt' in l]),
+            'chunk_info': len([l for l in lines if '📊 Chunk info:' in l]),
+        }
+        
+        # Progressive retry statistics
+        progressive_stats = {
+            'progressive_retry': len([l for l in lines if '🔄 Retrying' in l and 'failed records with progressive chunking' in l]),
+            'chunk_500': len([l for l in lines if 'chunk_size=500' in l.lower()]),
+            'chunk_100': len([l for l in lines if 'chunk_size=100' in l.lower()]),
+            'chunk_50': len([l for l in lines if 'chunk_size=50' in l.lower()]),
+            'all_uploaded_progressive': len([l for l in lines if 'All failed records uploaded successfully' in l]),
+        }
+        
+        # Suspicious cases
+        suspicious_stats = {
+            'suspicious_empty': len([l for l in lines if '⚠️  No redemptions found (suspicious' in l]),
+            'large_batch': len([l for l in lines if '🔧' in l and 'Large batch' in l or 'Starting upload' in l]),
+        }
+        
         print("=" * 70)
         print("STATISTICS")
         print("=" * 70)
         print(f"Total lines:          {stats['total_lines']:,}")
         print(f"Markets processed:    {stats['markets_processed']:,}")
         print(f"Upload attempts:      {stats['uploads']:,}")
-        print(f"Successes (✅):       {stats['successes']:,}")
-        print(f"Errors (❌):          {stats['errors']:,}")
-        print(f"Warnings (⚠️):        {stats['warnings']:,}")
+        print(f"Successes:            {stats['successes']:,}")
+        print(f"Errors:               {stats['errors']:,}")
+        print(f"Warnings:             {stats['warnings']:,}")
         print(f"Timeouts:             {stats['timeouts']:,}")
         print(f"Retries:              {stats['retries']:,}")
         print("=" * 70)
         
-        # Show recent errors
-        error_lines = [l.strip() for l in lines if '❌' in l or 'ERROR' in l.upper()]
+        # Retry details
+        if any(retry_stats.values()):
+            print("\nRETRY STATISTICS")
+            print("=" * 70)
+            print(f"Retry attempts (1st): {retry_stats['retry_1']:,}")
+            print(f"Retry attempts (2nd): {retry_stats['retry_2']:,}")
+            print(f"Timeout retries:      {retry_stats['timeout_retry']:,}")
+            print(f"Succeeded after retry:{retry_stats['succeeded_after_retry']:,}")
+            print(f"Timeout events:       {retry_stats['timeout_attempts']:,}")
+            print(f"Chunk info logs:      {retry_stats['chunk_info']:,}")
+            
+            # Calculate retry success rate
+            if retry_stats['timeout_retry'] > 0:
+                retry_success_rate = (retry_stats['succeeded_after_retry'] / retry_stats['timeout_retry']) * 100
+                print(f"Retry success rate:   {retry_success_rate:.1f}%")
+            print("=" * 70)
+        
+        # Progressive retry details
+        if any(progressive_stats.values()):
+            print("\nPROGRESSIVE RETRY STATISTICS")
+            print("=" * 70)
+            print(f"Progressive retries:  {progressive_stats['progressive_retry']:,}")
+            print(f"  -> chunk_size=500:  {progressive_stats['chunk_500']:,}")
+            print(f"  -> chunk_size=100:  {progressive_stats['chunk_100']:,}")
+            print(f"  -> chunk_size=50:   {progressive_stats['chunk_50']:,}")
+            print(f"All uploaded (prog):  {progressive_stats['all_uploaded_progressive']:,}")
+            print("=" * 70)
+        
+        # Suspicious cases
+        if any(suspicious_stats.values()):
+            print("\nSUSPICIOUS CASES")
+            print("=" * 70)
+            print(f"High-vol empty mkts:  {suspicious_stats['suspicious_empty']:,}")
+            print(f"Large batches:        {suspicious_stats['large_batch']:,}")
+            print("=" * 70)
+        
+        # Show recent errors (filter out emojis for Windows console)
+        error_lines = [l.strip() for l in lines if 'ERROR' in l.upper()]
         if error_lines:
-            print(f"\n🚨 Recent errors (last 5):")
+            print(f"\nRecent errors (last 5):")
             for line in error_lines[-5:]:
-                print(f"   • {line[:100]}")
+                # Remove emojis and special characters for Windows console
+                clean_line = line.encode('ascii', 'ignore').decode('ascii')
+                print(f"   - {clean_line[:100]}")
         
     except Exception as e:
-        print(f"❌ Error analyzing file: {e}")
+        print(f"[ERROR] Error analyzing file: {e}")
 
 if __name__ == '__main__':
     import sys

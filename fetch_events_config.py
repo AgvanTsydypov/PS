@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 # Filtering Criteria
 # MIN_VOLUME = 500000  # Minimum volume in USD (e.g., 500000 = $500,000)
-MIN_VOLUME = 5000000
+MIN_VOLUME = 10000000
 CLOSED_ONLY = True   # Only fetch closed events
 RESOLUTION_STATUS = 'resolved'  # Filter by umaResolutionStatus
 
