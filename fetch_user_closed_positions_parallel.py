@@ -251,6 +251,8 @@ def transform_closed_position(position: Dict) -> Dict:
     
     return {
         'proxy_wallet': position.get('proxyWallet', ''),
+        'event_id': None,  # Will be populated later via JOIN with events table
+        'market_id': None,  # Will be populated later via JOIN with markets table
         'condition_id': position.get('conditionId'),
         'asset': position.get('asset'),
         'avg_price': float(position.get('avgPrice', 0)),
@@ -351,14 +353,14 @@ def upload_closed_positions_batch(uploader: SupabaseUploader, positions: List[Di
                 # Prepare bulk insert
                 insert_query = """
                     INSERT INTO public.user_closed_positions (
-                        proxy_wallet, condition_id, asset,
+                        proxy_wallet, event_id, market_id, condition_id, asset,
                         avg_price, total_bought, realized_pnl, cur_price,
                         timestamp_unix, timestamp_human,
                         title, slug, icon, event_slug,
                         outcome, outcome_index, opposite_outcome, opposite_asset,
                         end_date, end_date_parsed
                     ) VALUES (
-                        %(proxy_wallet)s, %(condition_id)s, %(asset)s,
+                        %(proxy_wallet)s, %(event_id)s, %(market_id)s, %(condition_id)s, %(asset)s,
                         %(avg_price)s, %(total_bought)s, %(realized_pnl)s, %(cur_price)s,
                         %(timestamp_unix)s, %(timestamp_human)s,
                         %(title)s, %(slug)s, %(icon)s, %(event_slug)s,
@@ -367,6 +369,8 @@ def upload_closed_positions_batch(uploader: SupabaseUploader, positions: List[Di
                     )
                     ON CONFLICT (proxy_wallet, condition_id, asset, timestamp_unix) 
                     DO UPDATE SET
+                        event_id = EXCLUDED.event_id,
+                        market_id = EXCLUDED.market_id,
                         avg_price = EXCLUDED.avg_price,
                         total_bought = EXCLUDED.total_bought,
                         realized_pnl = EXCLUDED.realized_pnl,
