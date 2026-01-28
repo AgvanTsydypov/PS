@@ -19,6 +19,15 @@ Uses parallel processing with rate limiting and connection pooling
 5. Больше позиций на пользователя:
    python fetch_user_closed_positions_parallel.py --upload --local --positions 1000
 
+6. Фильтрация по конкретным рынкам (conditionIds):
+   python fetch_user_closed_positions_parallel.py --local --market 0xabc123... 0xdef456...
+
+7. Фильтрация по событиям (event IDs):
+   python fetch_user_closed_positions_parallel.py --local --event-id 12345 67890
+
+8. Фильтрация по названию рынка:
+   python fetch_user_closed_positions_parallel.py --local --title "Trump"
+
 ТРЕБОВАНИЯ:
 ===========
 - Python 3.8+
@@ -29,12 +38,19 @@ Uses parallel processing with rate limiting and connection pooling
 API LIMITS:
 ===========
 - Closed Positions API: 150 requests / 10 seconds
-- Safe limit: 135 requests / 10 seconds (90% of max)
+- Optimized limit: 145 requests / 10 seconds (~97% of max)
 - Automatic rate limiting and retry on failures
 
+КЛЮЧЕВАЯ ОСОБЕННОСТЬ:
+=====================
+Скрипт использует SQL запрос из lowest_100m_event_redeemers.sql, который возвращает
+пары (пользователь, рынок). API вызовы автоматически фильтруются по конкретному
+рынку для каждого пользователя, делая запросы более точными и эффективными.
+
 Features:
-- ⚡ Параллельная обработка пользователей (5 workers по умолчанию)
-- 🔄 Автоматический rate limiting (135 req/10s safe limit)
+- ⚡ Параллельная обработка user-market пар (5 workers по умолчанию)
+- 🎯 Автоматическая фильтрация по рынкам из SQL запроса
+- 🔄 Автоматический rate limiting (145 req/10s optimized limit)
 - 🔁 Connection pooling для эффективного использования соединений
 - 🔄 Автоматический retry при ошибках API
 - 📦 Batch загрузка в БД (каждые 100 записей)
@@ -72,10 +88,10 @@ DEFAULT_WORKERS = 5  # Conservative default (API limit: 150/10s)
 DEFAULT_POSITIONS_PER_USER = 50
 BATCH_SIZE = 100  # How many records to upload to DB at once
 
-# Rate limiting: 150 req/10s, use 90% = 135 req/10s
+# Rate limiting: 150 req/10s, use 145 req/10s for higher speed
 RATE_LIMIT_MAX = 150
 RATE_LIMIT_WINDOW = 10
-RATE_LIMIT_SAFE = int(RATE_LIMIT_MAX * 0.9)  # 135
+RATE_LIMIT_SAFE = 145  # ~97% of max, optimized for speed
 
 
 # ==========================================
@@ -88,12 +104,12 @@ class RateLimiter:
     Ensures we don't exceed API rate limits
     """
     
-    def __init__(self, max_requests: int = RATE_LIMIT_MAX, window_seconds: int = RATE_LIMIT_WINDOW):
+    def __init__(self, max_requests: int = RATE_LIMIT_SAFE, window_seconds: int = RATE_LIMIT_WINDOW):
         """
         Initialize rate limiter
         
         Args:
-            max_requests: Maximum requests allowed per window
+            max_requests: Maximum requests allowed per window (defaults to RATE_LIMIT_SAFE)
             window_seconds: Time window in seconds
         """
         self.max_requests = max_requests
@@ -101,8 +117,8 @@ class RateLimiter:
         self.requests = deque()  # Store timestamps of requests
         self.lock = Lock()
         
-        # Use 90% of limit to be safe
-        self.safe_limit = int(max_requests * 0.9)
+        # Use the provided limit (already optimized)
+        self.safe_limit = max_requests
         
     def wait_if_needed(self):
         """
@@ -177,10 +193,23 @@ class SharedAPIClient:
         limit: int = 50,
         offset: int = 0,
         sort_by: str = "REALIZEDPNL",
-        sort_direction: str = "DESC"
+        sort_direction: str = "DESC",
+        market: Optional[List[str]] = None,
+        title: Optional[str] = None,
+        event_id: Optional[List[int]] = None
     ) -> tuple[Optional[List[Dict]], Optional[str]]:
         """
         Fetch closed positions for a user (thread-safe with rate limiting)
+        
+        Args:
+            user_address: The address of the user (required)
+            limit: The max number of positions to return (max 50)
+            offset: The starting index for pagination
+            sort_by: The sort criteria (REALIZEDPNL, TITLE, PRICE, AVGPRICE, TIMESTAMP)
+            sort_direction: The sort direction (ASC, DESC)
+            market: List of conditionIds to filter by (cannot be used with event_id)
+            title: Filter by market title
+            event_id: List of event IDs to filter by (cannot be used with market)
         
         Returns:
             tuple: (positions_list, error_message)
@@ -200,6 +229,22 @@ class SharedAPIClient:
                 'sortBy': sort_by,
                 'sortDirection': sort_direction
             }
+            
+            # Add optional filter parameters
+            if market and event_id:
+                # Cannot use both market and event_id according to API docs
+                return (None, "Cannot use both 'market' and 'event_id' parameters together")
+            
+            if market:
+                # Convert list to comma-separated string
+                params['market'] = ','.join(market)
+            
+            if title:
+                params['title'] = title[:100]  # API max length is 100
+            
+            if event_id:
+                # Convert list to comma-separated string
+                params['eventId'] = ','.join(map(str, event_id))
             
             url = f"{API_BASE_URL}/closed-positions"
             response = self.session.get(url, params=params, timeout=30)
@@ -281,14 +326,14 @@ def transform_closed_position(position: Dict) -> Dict:
 def get_redeemers_from_db(use_local_db: bool = False, limit: Optional[int] = None) -> List[Dict]:
     """
     Query database using the SQL from lowest_100m_event_redeemers.sql
-    Returns list of dicts with event_id, event_title, redeemer_address
+    Returns list of dicts with event_id, condition_id, event_title, redeemer_address
     """
     print("=" * 70)
     print("📊 QUERYING DATABASE FOR REDEEMERS")
     print("=" * 70)
     
     # Read SQL query from file
-    sql_file = "sql_q/lowest_100m_event_redeemers.sql"
+    sql_file = "sql_q/all_100m_event_redeemers.sql"
     if not os.path.exists(sql_file):
         raise FileNotFoundError(f"SQL file not found: {sql_file}")
     
@@ -319,11 +364,17 @@ def get_redeemers_from_db(use_local_db: bool = False, limit: Optional[int] = Non
             # Convert to list of dicts
             redeemers = [dict(row) for row in results]
             
-            print(f"✅ Found {len(redeemers)} redeemer records")
+            print(f"✅ Found {len(redeemers)} redeemer records (user-market pairs)")
+            
+            # Show statistics
+            unique_users = len(set(r['redeemer_address'] for r in redeemers))
+            unique_markets = len(set(r['condition_id'] for r in redeemers))
+            print(f"   • Unique users: {unique_users}")
+            print(f"   • Unique markets: {unique_markets}")
             
             if limit:
                 redeemers = redeemers[:limit]
-                print(f"⚠️  Limited to first {limit} redeemers")
+                print(f"⚠️  Limited to first {limit} redeemer records")
             
             return redeemers
             
@@ -422,7 +473,10 @@ class ParallelPositionsFetcher:
                  positions_per_user: int = DEFAULT_POSITIONS_PER_USER,
                  upload: bool = False,
                  use_local_db: bool = False,
-                 verbose: bool = False):
+                 verbose: bool = False,
+                 market_filter: Optional[List[str]] = None,
+                 title_filter: Optional[str] = None,
+                 event_id_filter: Optional[List[int]] = None):
         """
         Initialize parallel fetcher
         
@@ -432,15 +486,21 @@ class ParallelPositionsFetcher:
             upload: Whether to upload to database
             use_local_db: Use local PostgreSQL instead of Supabase
             verbose: Show detailed output
+            market_filter: List of conditionIds to filter by (optional)
+            title_filter: Filter by market title (optional)
+            event_id_filter: List of event IDs to filter by (optional)
         """
         self.max_workers = max_workers
         self.positions_per_user = positions_per_user
         self.upload = upload
         self.use_local_db = use_local_db
         self.verbose = verbose
+        self.market_filter = market_filter
+        self.title_filter = title_filter
+        self.event_id_filter = event_id_filter
         
-        # Create rate limiter (150 req/10s, using 90% = 135 req/10s to be safe)
-        self.rate_limiter = RateLimiter(max_requests=RATE_LIMIT_MAX, window_seconds=RATE_LIMIT_WINDOW)
+        # Create rate limiter (145 req/10s optimized for speed)
+        self.rate_limiter = RateLimiter(max_requests=RATE_LIMIT_SAFE, window_seconds=RATE_LIMIT_WINDOW)
         
         # Shared client with connection pool and rate limiter
         self.client = SharedAPIClient(
@@ -471,9 +531,21 @@ class ParallelPositionsFetcher:
             'end_time': None
         }
     
-    def fetch_all_for_user(self, user_address: str) -> tuple[List[Dict], Optional[str]]:
+    def fetch_all_for_user(
+        self, 
+        user_address: str,
+        market: Optional[List[str]] = None,
+        title: Optional[str] = None,
+        event_id: Optional[List[int]] = None
+    ) -> tuple[List[Dict], Optional[str]]:
         """
         Fetch all closed positions for a single user with pagination
+        
+        Args:
+            user_address: The address of the user (required)
+            market: List of conditionIds to filter by (optional)
+            title: Filter by market title (optional)
+            event_id: List of event IDs to filter by (optional)
         
         Returns:
             tuple: (positions_list, error_message)
@@ -486,7 +558,10 @@ class ParallelPositionsFetcher:
             positions, error = self.client.fetch_closed_positions(
                 user_address,
                 limit=batch_size,
-                offset=offset
+                offset=offset,
+                market=market,
+                title=title,
+                event_id=event_id
             )
             
             if error:
@@ -506,22 +581,38 @@ class ParallelPositionsFetcher:
         
         return (all_positions[:self.positions_per_user], None)
     
-    def process_single_user(self, user_address: str, user_index: int, total_users: int) -> tuple[int, bool]:
+    def process_single_user(self, user_address: str, user_index: int, total_users: int, market_override: Optional[str] = None) -> tuple[int, bool]:
         """
         Process a single user (fetch and optionally upload)
+        
+        Args:
+            user_address: User's wallet address
+            user_index: Index for tracking
+            total_users: Total number to process
+            market_override: Specific market conditionId for this user (overrides global filter)
         
         Returns:
             tuple: (positions_count, is_error)
         """
         try:
-            # Fetch positions
-            positions, error = self.fetch_all_for_user(user_address)
+            # Determine which market filter to use
+            # If market_override is provided, use it (from SQL query)
+            # Otherwise, use the global market_filter
+            market_filter = [market_override] if market_override else self.market_filter
+            
+            # Fetch positions with filters
+            positions, error = self.fetch_all_for_user(
+                user_address,
+                market=market_filter,
+                title=self.title_filter,
+                event_id=self.event_id_filter
+            )
             
             if error:
                 # Failed request
                 with self.lock:
                     self.stats['errors'] += 1
-                    self.failed_users.append(user_address)
+                    self.failed_users.append((user_address, market_override))
                 return (0, True)
             
             if not positions or len(positions) == 0:
@@ -553,22 +644,38 @@ class ParallelPositionsFetcher:
         except Exception as e:
             with self.lock:
                 self.stats['errors'] += 1
-                self.failed_users.append(user_address)
+                self.failed_users.append((user_address, market_override))
             return (0, True)
     
-    def process_all_users(self, user_addresses: List[str]):
+    def process_all_users(self, user_records: List[Dict]):
         """
-        Process all users in parallel
+        Process all user-market pairs in parallel
+        
+        Args:
+            user_records: List of dicts with 'redeemer_address' and optionally 'condition_id'
         """
         self.stats['start_time'] = datetime.now()
-        self.stats['total_users'] = len(user_addresses)
+        self.stats['total_users'] = len(user_records)
         
         print("\n" + "=" * 70)
         print("🚀 PARALLEL FETCHING CLOSED POSITIONS")
         print("=" * 70)
         print(f"📋 Configuration:")
-        print(f"   • Total users to process: {len(user_addresses)}")
-        print(f"   • Positions per user: {self.positions_per_user}")
+        print(f"   • Total records to process: {len(user_records)}")
+        
+        # Check if we have market filtering from SQL query
+        has_market_from_sql = any('condition_id' in r and r.get('condition_id') for r in user_records)
+        if has_market_from_sql:
+            unique_users = len(set(r['redeemer_address'] for r in user_records))
+            unique_markets = len(set(r.get('condition_id') for r in user_records if r.get('condition_id')))
+            print(f"   • User-Market pairs (from SQL query)")
+            print(f"   • Unique users: {unique_users}")
+            print(f"   • Unique markets: {unique_markets}")
+        else:
+            unique_users = len(set(r['redeemer_address'] for r in user_records))
+            print(f"   • Unique users: {unique_users}")
+        
+        print(f"   • Positions per query: {self.positions_per_user}")
         print(f"   • Parallel workers: {self.max_workers}")
         print(f"   • Upload to DB: {'YES' if self.upload else 'NO (preview only)'}")
         if self.upload:
@@ -576,17 +683,29 @@ class ParallelPositionsFetcher:
         print(f"   • Connection Pooling: ENABLED ✅")
         print(f"   • Rate Limiting: ENABLED ✅ ({RATE_LIMIT_SAFE}/{RATE_LIMIT_WINDOW}s safe limit)")
         
+        # Show active filters
+        if self.market_filter or self.title_filter or self.event_id_filter or has_market_from_sql:
+            print(f"\n🔍 Active Filters:")
+            if has_market_from_sql:
+                print(f"   • Markets: From SQL query (user-specific)")
+            elif self.market_filter:
+                print(f"   • Markets: {', '.join(self.market_filter[:3])}{'...' if len(self.market_filter) > 3 else ''}")
+            if self.title_filter:
+                print(f"   • Title: '{self.title_filter}'")
+            if self.event_id_filter:
+                print(f"   • Event IDs: {', '.join(map(str, self.event_id_filter))}")
+        
         # Estimate time
         if self.positions_per_user > 100:
             requests_per_user = (self.positions_per_user // 50) + 1
-            # Assuming rate limiter allows ~13.5 req/s (135/10s)
+            # Rate limiter allows ~14.5 req/s (145/10s)
             req_per_second = RATE_LIMIT_SAFE / RATE_LIMIT_WINDOW
             seconds_per_user = requests_per_user / req_per_second
-            total_seconds = (len(user_addresses) * seconds_per_user) / self.max_workers
+            total_seconds = (len(user_records) * seconds_per_user) / self.max_workers
             total_minutes = total_seconds / 60
             
             print(f"\n⏱️  ESTIMATED TIME:")
-            print(f"   Requests per user: ~{requests_per_user}")
+            print(f"   Requests per query: ~{requests_per_user}")
             if total_minutes >= 60:
                 print(f"   Estimated time: ~{total_minutes/60:.1f} hours")
             elif total_minutes >= 1:
@@ -602,14 +721,23 @@ class ParallelPositionsFetcher:
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             # Submit all tasks
-            future_to_user = {
-                executor.submit(self.process_single_user, addr, i, len(user_addresses)): addr
-                for i, addr in enumerate(user_addresses, 1)
-            }
+            future_to_user = {}
+            for i, record in enumerate(user_records, 1):
+                user_address = record['redeemer_address']
+                market_id = record.get('condition_id')  # May be None
+                
+                future = executor.submit(
+                    self.process_single_user, 
+                    user_address, 
+                    i, 
+                    len(user_records),
+                    market_id
+                )
+                future_to_user[future] = (user_address, market_id)
             
             # Process results as they complete
             for future in as_completed(future_to_user):
-                user_address = future_to_user[future]
+                user_address, market_id = future_to_user[future]
                 
                 try:
                     positions_count, is_error = future.result()
@@ -621,7 +749,7 @@ class ParallelPositionsFetcher:
                     with self.lock:
                         self.stats['users_processed'] += 1
                         self.stats['errors'] += 1
-                        self.failed_users.append(user_address)
+                        self.failed_users.append((user_address, market_id))
                 
                 # Progress update
                 current_time = time.time()
@@ -635,9 +763,9 @@ class ParallelPositionsFetcher:
                         rate_info = f"API: {current_rate}/{RATE_LIMIT_SAFE}"
                         
                         print(
-                            f"📥 Progress: {self.stats['users_processed']}/{self.stats['total_users']} users | "
+                            f"📥 Progress: {self.stats['users_processed']}/{self.stats['total_users']} records | "
                             f"{self.stats['total_positions']:,} positions | "
-                            f"{rate:.1f} users/s | "
+                            f"{rate:.1f} queries/s | "
                             f"{rate_info} | "
                             f"{self.stats['errors']} failed",
                             end="\r",
@@ -669,14 +797,14 @@ class ParallelPositionsFetcher:
     
     def _retry_failed_users(self, max_retries: int = 2):
         """
-        Retry failed users with exponential backoff
+        Retry failed user-market pairs with exponential backoff
         """
         retry_attempt = 1
         
         while self.failed_users and retry_attempt <= max_retries:
             print()
             print(f"🔄 Retry attempt {retry_attempt}/{max_retries}")
-            print(f"   Retrying {len(self.failed_users)} failed users...")
+            print(f"   Retrying {len(self.failed_users)} failed records...")
             
             # Get failed users and clear the list
             with self.lock:
@@ -694,13 +822,19 @@ class ParallelPositionsFetcher:
             retry_successes = 0
             
             with ThreadPoolExecutor(max_workers=retry_workers) as executor:
-                future_to_user = {
-                    executor.submit(self.process_single_user, addr, i, len(users_to_retry)): addr
-                    for i, addr in enumerate(users_to_retry, 1)
-                }
+                future_to_user = {}
+                for i, (user_addr, market_id) in enumerate(users_to_retry, 1):
+                    future = executor.submit(
+                        self.process_single_user, 
+                        user_addr, 
+                        i, 
+                        len(users_to_retry),
+                        market_id
+                    )
+                    future_to_user[future] = (user_addr, market_id)
                 
                 for future in as_completed(future_to_user):
-                    user_address = future_to_user[future]
+                    user_address, market_id = future_to_user[future]
                     
                     try:
                         positions_count, is_error = future.result()
@@ -716,7 +850,7 @@ class ParallelPositionsFetcher:
                     except Exception as e:
                         with self.lock:
                             self.stats['retried_users'] += 1
-                            self.failed_users.append(user_address)
+                            self.failed_users.append((user_address, market_id))
             
             print(f"   ✓ Retry {retry_attempt} completed: {retry_successes} recovered")
             retry_attempt += 1
@@ -725,9 +859,9 @@ class ParallelPositionsFetcher:
         with self.lock:
             final_failures = len(self.failed_users)
             if final_failures > 0:
-                print(f"   ⚠️  {final_failures} users still failed after {max_retries} retries")
+                print(f"   ⚠️  {final_failures} records still failed after {max_retries} retries")
             else:
-                print(f"   ✅ All failed users recovered!")
+                print(f"   ✅ All failed records recovered!")
         
         print("-" * 70)
     
@@ -739,9 +873,9 @@ class ParallelPositionsFetcher:
         print("📊 PROCESSING SUMMARY")
         print("=" * 70)
         print(f"⏱️  Duration: {duration:.2f} seconds ({duration/60:.1f} minutes)")
-        print(f"👥 Total users: {self.stats['total_users']}")
-        print(f"✅ Users processed: {self.stats['users_processed']}")
-        print(f"📊 Users with positions: {self.stats['users_with_positions']}")
+        print(f"📝 Total records processed: {self.stats['total_users']}")
+        print(f"✅ Successfully processed: {self.stats['users_processed']}")
+        print(f"📊 Records with positions: {self.stats['users_with_positions']}")
         print(f"💼 Total positions fetched: {self.stats['total_positions']:,}")
         print(f"❌ Errors: {self.stats['errors']}")
         
@@ -759,7 +893,7 @@ class ParallelPositionsFetcher:
         
         if duration > 0:
             print(f"\n⚡ Speed:")
-            print(f"   • {self.stats['users_processed']/duration:.2f} users/second")
+            print(f"   • {self.stats['users_processed']/duration:.2f} queries/second")
             print(f"   • {self.stats['total_positions']/duration:.1f} positions/second")
         
         if self.all_positions and not self.upload:
@@ -796,6 +930,15 @@ Examples:
   
   # Fetch many positions per user
   python fetch_user_closed_positions_parallel.py --upload --local --positions 1000 --workers 8
+  
+  # Filter by specific markets (conditionIds)
+  python fetch_user_closed_positions_parallel.py --local --market 0xabc123... 0xdef456...
+  
+  # Filter by event IDs
+  python fetch_user_closed_positions_parallel.py --local --event-id 12345 67890
+  
+  # Filter by market title
+  python fetch_user_closed_positions_parallel.py --local --title "Trump"
         """
     )
     
@@ -838,7 +981,36 @@ Examples:
         help='Show detailed output'
     )
     
+    parser.add_argument(
+        '--market',
+        type=str,
+        nargs='+',
+        default=None,
+        help='Filter by market conditionIds (space-separated list). Cannot be used with --event-id'
+    )
+    
+    parser.add_argument(
+        '--title',
+        type=str,
+        default=None,
+        help='Filter by market title (partial match)'
+    )
+    
+    parser.add_argument(
+        '--event-id',
+        type=int,
+        nargs='+',
+        default=None,
+        help='Filter by event IDs (space-separated list). Cannot be used with --market'
+    )
+    
     args = parser.parse_args()
+    
+    # Validate that market and event-id are not used together
+    if args.market and args.event_id:
+        print("❌ ERROR: Cannot use both --market and --event-id parameters together")
+        print("   Please choose one or the other.")
+        sys.exit(1)
     
     # Validate workers
     if args.workers > 15:
@@ -857,6 +1029,17 @@ Examples:
         print(f"User limit: {args.limit}")
     print(f"Positions per user: {args.positions}")
     print(f"Parallel workers: {args.workers}")
+    
+    # Show active filters
+    if args.market or args.title or args.event_id:
+        print(f"\n🔍 API Filters:")
+        if args.market:
+            print(f"   Market(s): {', '.join(args.market[:3])}{'...' if len(args.market) > 3 else ''}")
+        if args.title:
+            print(f"   Title: '{args.title}'")
+        if args.event_id:
+            print(f"   Event ID(s): {', '.join(map(str, args.event_id))}")
+    
     print("=" * 70)
     
     try:
@@ -874,21 +1057,21 @@ Examples:
             print("   3. There are events with volume > 100,000,000")
             return
         
-        # Get unique addresses
-        unique_addresses = list(set([r['redeemer_address'] for r in redeemers]))
-        print(f"\n📋 Unique redeemer addresses: {len(unique_addresses)}")
-        
         # Step 2: Create parallel fetcher
         fetcher = ParallelPositionsFetcher(
             max_workers=args.workers,
             positions_per_user=args.positions,
             upload=args.upload,
             use_local_db=args.local,
-            verbose=args.verbose
+            verbose=args.verbose,
+            market_filter=args.market,
+            title_filter=args.title,
+            event_id_filter=args.event_id
         )
         
-        # Step 3: Process all users
-        fetcher.process_all_users(unique_addresses)
+        # Step 3: Process all user-market pairs
+        # The redeemers list contains dicts with 'redeemer_address' and 'condition_id'
+        fetcher.process_all_users(redeemers)
         
         # Step 4: Print summary
         fetcher.print_summary()
