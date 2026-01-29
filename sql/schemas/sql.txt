@@ -1,0 +1,7 @@
+psql "postgresql://postgres.xwebfmuzqamjucmgwevg:F8KZnmDvXijhggQ2@aws-1-eu-west-1.pooler.supabase.com:5432/postgres"
+
+$env:PGPASSWORD='F8KZnmDvXijhggQ2'
+pg_restore -h aws-1-eu-west-1.pooler.supabase.com -p 5432 -U postgres.xwebfmuzqamjucmgwevg -d postgres --data-only -t events C:\Users\AgvanD\events.dump 
+
+$env:PGPASSWORD='1234'
+pg_dump -h localhost -p 5432 -U postgres -d polymarket -t public.markets -Fc -f C:\Users\AgvanD\markets.dump

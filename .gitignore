@@ -7,52 +7,54 @@ __pycache__/
 env/
 venv/
 ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
+dist/
+build/
 *.egg
 
-# Flask
-instance/
-.webassets-cache
+# Node.js / Next.js
+/node_modules
+/.pnp
+.pnp.js
+/.next/
+/out/
+/build
+
+# Testing
+/coverage
+
+# Production
+/dist
 
 # Environment variables
 .env
+.env*.local
 
-# IDE
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# OS
+.DS_Store
+*.pem
+Thumbs.db
+
+# IDEs
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
 
-# OS
-.DS_Store
-Thumbs.db
+# Vercel
+.vercel
 
-*.md
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
 
-json_output/*
-sql_schemas/*
-output/*
-
-# Redemptions data
-redemptions_*.json
-market_winners.json
-
-# Logs
-logs/
-*.log
-
-/sql_q
+# Data (optional - uncomment if you don't want to track data files)
+# data/output/
+# data/json_output/
+# data/logs/
