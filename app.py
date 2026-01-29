@@ -1,5 +1,5 @@
 from flask import Flask, jsonify, render_template, request
-from polymarket_client import PolymarketClient
+from scripts.db.polymarket_client import PolymarketClient
 
 app = Flask(__name__)
 polymarket = PolymarketClient()

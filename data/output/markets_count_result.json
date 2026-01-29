@@ -1,0 +1,18 @@
+{
+  "file": "json_output\\polymarket_events_optimized_20260111_155551.json",
+  "total_events": 644,
+  "total_markets": 10633,
+  "events_with_markets": 644,
+  "events_without_markets": 0,
+  "average_markets_per_event": 16.51,
+  "max_markets_in_event": {
+    "count": 110,
+    "event_id": "89365",
+    "event_title": "Cowboys vs. Lions"
+  },
+  "min_markets_in_event": {
+    "count": 1,
+    "event_id": "903743",
+    "event_title": "Will Bitcoin hit $250k in 2024?"
+  }
+}
