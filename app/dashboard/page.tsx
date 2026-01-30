@@ -1,6 +1,7 @@
 'use client';
 
 import { ProtectedContent } from '@/components/protected-content';
+import { SolanaClaimForm } from '@/components/solana-claim-form';
 import { useAccount } from 'wagmi';
 import { useEffect, useState } from 'react';
 import { formatAddress } from '@/lib/utils';
@@ -71,7 +72,7 @@ export default function DashboardPage() {
                   <p className="text-sm text-gray-600 mb-1">
                     Ваш кошелек (EOA)
                   </p>
-                  <p className="font-mono text-sm break-all">
+                  <p className="font-mono text-sm break-all text-gray-900">
                     {address || 'Не подключен'}
                   </p>
                   {address && (
@@ -86,7 +87,7 @@ export default function DashboardPage() {
                     <p className="text-sm text-gray-600 mb-1">
                       Proxy Wallet (Polymarket)
                     </p>
-                    <p className="font-mono text-sm break-all">
+                    <p className="font-mono text-sm break-all text-gray-900">
                       {session.proxyWallet}
                     </p>
                     <p className="text-xs text-gray-500 mt-1">
@@ -104,47 +105,8 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* Защищенный контент */}
-            <div className="bg-white rounded-2xl shadow-xl p-8">
-              <h2 className="text-2xl font-bold text-gray-800 mb-4">
-                Защищенный контент
-              </h2>
-              
-              <div className="prose max-w-none">
-                <p className="text-gray-700 mb-4">
-                  Это пример защищенного контента, доступного только верифицированным пользователям.
-                </p>
-                
-                <div className="bg-blue-50 border-l-4 border-blue-500 p-4 mb-4">
-                  <p className="text-blue-800 font-medium">
-                    Доступ получен!
-                  </p>
-                  <p className="text-blue-700 text-sm mt-1">
-                    Ваш прокси-кошелек найден в списке разрешенных адресов.
-                  </p>
-                </div>
-
-                <div className="grid md:grid-cols-2 gap-4 mt-6">
-                  <div className="bg-gray-50 p-4 rounded-lg">
-                    <h3 className="font-semibold text-gray-800 mb-2">
-                      Функция 1
-                    </h3>
-                    <p className="text-gray-600 text-sm">
-                      Здесь может быть функционал, доступный только верифицированным пользователям.
-                    </p>
-                  </div>
-                  
-                  <div className="bg-gray-50 p-4 rounded-lg">
-                    <h3 className="font-semibold text-gray-800 mb-2">
-                      Функция 2
-                    </h3>
-                    <p className="text-gray-600 text-sm">
-                      Например, доступ к премиум-аналитике или эксклюзивным данным.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
+            {/* NFT Claim Form */}
+            <SolanaClaimForm isVerified={session?.isVerified || false} />
 
             {/* Действия */}
             <div className="bg-white rounded-2xl shadow-xl p-8">
