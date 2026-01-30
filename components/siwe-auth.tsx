@@ -189,15 +189,23 @@ export function SiweAuth() {
               description={
                 <>
                   <p className="mb-2">Ваш прокси-кошелек найден в списке разрешенных</p>
-                  <p className="text-xs break-all">
+                  <p className="text-xs break-all mb-4">
                     <strong>Proxy:</strong> {verificationResult.proxy}
                   </p>
-                  <button
-                    onClick={handleLogout}
-                    className="mt-4 w-full bg-gray-200 hover:bg-gray-300 text-gray-800 font-medium py-2 px-4 rounded-lg transition"
-                  >
-                    Выйти
-                  </button>
+                  <div className="space-y-2">
+                    <a
+                      href="/dashboard"
+                      className="block w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition text-center"
+                    >
+                      🎨 Перейти на Dashboard
+                    </a>
+                    <button
+                      onClick={handleLogout}
+                      className="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 font-medium py-2 px-4 rounded-lg transition"
+                    >
+                      Выйти
+                    </button>
+                  </div>
                 </>
               }
             />
@@ -277,8 +285,21 @@ export function SiweAuth() {
               <li>Подключите ваш кошелек</li>
               <li>Подпишите SIWE сообщение</li>
               <li>Система проверит ваш прокси-кошелек в Polymarket</li>
-              <li>Получите доступ, если адрес в списке разрешенных</li>
+              <li>Получите доступ к Dashboard для запроса NFT</li>
             </ol>
+          </div>
+        )}
+
+        {/* Что делать после верификации */}
+        {status === 'verified' && (
+          <div className="mt-6 p-4 bg-purple-50 rounded-lg border border-purple-200">
+            <h3 className="font-semibold text-purple-900 mb-2">
+              🎯 Что дальше?
+            </h3>
+            <p className="text-sm text-purple-800">
+              Перейдите на Dashboard чтобы указать ваш Solana адрес для получения NFT. 
+              Заявки обрабатываются партиями по 100 штук ежедневно.
+            </p>
           </div>
         )}
       </div>

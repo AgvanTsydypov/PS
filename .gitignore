@@ -54,6 +54,10 @@ Thumbs.db
 *.tsbuildinfo
 next-env.d.ts
 
+# Old structure (to be deleted)
+polymarket-siwe-auth/
+polymarket-siwe-auth.OLD/
+
 # Data (optional - uncomment if you don't want to track data files)
 # data/output/
 # data/json_output/
