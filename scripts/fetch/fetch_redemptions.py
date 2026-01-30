@@ -13,7 +13,10 @@ Automatically scans latest events file and fetches redemptions for each market
 3. Fetch + загрузка в локальную PostgreSQL (БЕЗ ЛИМИТОВ):
    python fetch_redemptions.py --upload --local
 
-4. Справка:
+4. Использовать конкретный файл событий:
+   python fetch_redemptions.py --file data/json_output/polymarket_events_optimized_20260113_020726.json
+
+5. Справка:
    python fetch_redemptions.py --help
 
 ТРЕБОВАНИЯ:
@@ -125,9 +128,10 @@ MAX_MARKETS = None  # Limit number of markets to process (None = all)
 
 # Parallel processing settings (will be adjusted based on database type)
 # Conservative settings for Supabase (cloud, has rate limits)
-MAX_CONCURRENT_MARKETS_CLOUD = 3
-BATCH_SIZE_CLOUD = 20
-BATCH_DELAY_CLOUD = 5
+# ULTRA CONSERVATIVE - zero rate limiting errors
+MAX_CONCURRENT_MARKETS_CLOUD = 1  # ТОЛЬКО 1 рынок одновременно (последовательно)
+BATCH_SIZE_CLOUD = 5  # Маленькие батчи по 5 рынков
+BATCH_DELAY_CLOUD = 10  # 10 секунд отдыха между батчами
 
 # Optimized settings for local PostgreSQL
 # БД может быть супер-быстрой, но API очень чувствителен к перегрузке!
@@ -153,7 +157,7 @@ MAX_CONCURRENT_DB_UPLOADS = 100  # Без ограничений - БД спра
 # ==========================================
 def find_latest_events_file() -> Optional[str]:
     """Find the latest polymarket_events_optimized_*.json file"""
-    json_dir = 'json_output'
+    json_dir = 'data/json_output'
     pattern = os.path.join(json_dir, 'polymarket_events_optimized_*.json')
     files = glob.glob(pattern)
     
@@ -236,6 +240,8 @@ async def fetch_redemptions_for_market_async(
         # Small initial delay to spread out requests and avoid bursts
         if use_local_db:
             await asyncio.sleep(0.1)  # 100ms стартовая задержка для каждого маркета
+        else:
+            await asyncio.sleep(0.5)  # ULTRA CONSERVATIVE: 500ms стартовая задержка для каждого маркета
         
         all_redemptions = []
         last_id = "0x00"
@@ -324,9 +330,9 @@ async def fetch_redemptions_for_market_async(
                         # Delay between pagination requests to avoid API rate limiting
                         # GraphQL API очень чувствителен, нужны паузы!
                         if use_local_db and request_count > 1:
-                            await asyncio.sleep(0.15)  # 150ms между запросами пагинации (было 50ms)
+                            await asyncio.sleep(0.15)  # 150ms между запросами пагинации
                         elif request_count > 1:
-                            await asyncio.sleep(0.05)  # Для Supabase - 50ms
+                            await asyncio.sleep(0.5)  # ULTRA CONSERVATIVE: 500ms между каждым pagination запросом
                             
                 except asyncio.TimeoutError:
                     retry_count += 1
@@ -519,10 +525,25 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             auto_upload = False
             uploader = None
     
-    # 1. Find and load latest events file
-    events_file = find_latest_events_file()
-    if not events_file:
-        return
+    # 1. Find and load events file (either specified or latest)
+    # Check if custom file was specified in command line
+    import sys
+    custom_file = None
+    for i, arg in enumerate(sys.argv):
+        if arg in ['--file', '-f'] and i + 1 < len(sys.argv):
+            custom_file = sys.argv[i + 1]
+            break
+    
+    if custom_file:
+        if not os.path.exists(custom_file):
+            print(f"❌ Specified file not found: {custom_file}")
+            return
+        events_file = custom_file
+        print(f"📌 Using specified file: {events_file}")
+    else:
+        events_file = find_latest_events_file()
+        if not events_file:
+            return
     
     events = load_events_file(events_file)
     
@@ -824,14 +845,26 @@ if __name__ == '__main__':
         print("Usage: python fetch_redemptions.py [OPTIONS]")
         print()
         print("Options:")
-        print("  --upload, -u    Upload redemptions to database")
-        print("  --local, -l     Use local PostgreSQL instead of Supabase (requires --upload)")
-        print("  --help, -h      Show this help message")
+        print("  --upload, -u       Upload redemptions to database")
+        print("  --local, -l        Use local PostgreSQL instead of Supabase (requires --upload)")
+        print("  --file FILE, -f    Use specific events file instead of latest")
+        print("  --help, -h         Show this help message")
         print()
         print("Examples:")
-        print("  python fetch_redemptions.py                  # Fetch only, no upload")
-        print("  python fetch_redemptions.py --upload         # Fetch and upload to Supabase")
-        print("  python fetch_redemptions.py --upload --local # Fetch and upload to local PostgreSQL")
+        print("  python fetch_redemptions.py")
+        print("      Fetch only (latest file), no upload")
+        print()
+        print("  python fetch_redemptions.py --upload")
+        print("      Fetch and upload to Supabase (latest file)")
+        print()
+        print("  python fetch_redemptions.py --upload --local")
+        print("      Fetch and upload to local PostgreSQL (latest file)")
+        print()
+        print("  python fetch_redemptions.py --file data/json_output/polymarket_events_optimized_20260113_020726.json")
+        print("      Use specific events file")
+        print()
+        print("  python fetch_redemptions.py --file data/json_output/polymarket_events_optimized_20260113_020726.json --upload")
+        print("      Use specific events file and upload to Supabase")
         sys.exit(0)
 
     if use_local_db and not auto_upload:
