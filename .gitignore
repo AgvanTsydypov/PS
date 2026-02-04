@@ -59,6 +59,6 @@ polymarket-siwe-auth/
 polymarket-siwe-auth.OLD/
 
 # Data (optional - uncomment if you don't want to track data files)
-# data/output/
-# data/json_output/
-# data/logs/
+data/output/
+data/json_output/
+data/logs/
