@@ -32,21 +32,30 @@ Automatically scans latest events file and fetches redemptions for each market
 - Просмотр: python view_logs.py
 
 Features:
-- Параллельная обработка маркетов (3 для обоих режимов - API лимит!)
-- Автоматические retry при ошибках API и БД
-- Повторная загрузка неудавшихся данных после завершения:
-  * Ожидание 10 секунд перед retry (API/БД "отдыхают")
-  * Пауза 3 секунды между повторными попытками
-  * Сохранение chunk_size для быстрой загрузки в БД
-- Сохранение финально неудавшихся данных в JSON для ручной retry
-- Real-time логирование всех операций
+- Умный Rate Limiter для Goldsky API:
+  * Token Bucket алгоритм - точно 9 RPS
+  * Lock не держится во время sleep - полная параллельность
+  * Автоматическое распределение временных слотов
+- Intelligent Immediate Retry System:
+  * 5 попыток с экспоненциальной задержкой (3s → 6s → 12s → 24s → 48s)
+  * Retry СРАЗУ при ошибке, не откладывая на потом
+  * Отдельная обработка GraphQL timeouts и network errors
+  * Goldsky API "отдыхает" между попытками
+- 🎯 SMART ADAPTIVE PAGINATION (Умная адаптивная пагинация):
+  * Начинает с 1000 redemptions за запрос (максимум)
+  * Sliding window tracking: отслеживает последние 10 запросов
+  * Pattern detection: если 60%+ timeout'ов → автоуменьшение batch size
+  * Critical mode: если 80%+ timeout'ов → увеличивает retry delay (до 3x)
+  * Прогрессивное уменьшение: 1000 → 500 → 250 → 125 → 62 → 50
+  * Динамическое восстановление: постепенно снижает delay при успехе
+  * Результат: быстрые маркеты на максимуме | проблемные находят оптимум
+- Параллельная обработка маркетов (20-30 concurrent)
+- Отслеживание неудачных/неполных маркетов
+- Повторная обработка упорных случаев в конце (если immediate retry не помог)
+- Сохранение финально неудавшихся данных в JSON для ручного анализа
+- Real-time логирование всех операций с временными метками
 - Поддержка Supabase и локальной PostgreSQL
-- TURBO MODE для локальной БД:
-  * API фетчинг: консервативный (3 маркета, батчи по 20, пауза 3с)
-  * БД загрузка: СУПЕР БЫСТРАЯ (chunk 5000, PostgreSQL COPY)
-  * 150ms пауза между пагинацией (избегаем rate limiting)
-  * Баланс: API стабильный, БД на максимуме
-  * Результат: 3-5x прирост за счет БД, не упираясь в API
+- Параллельная загрузка в БД (до 100 concurrent uploads)
 """
 
 import requests
@@ -60,6 +69,7 @@ import sys
 from datetime import datetime
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 
 # ==========================================
 # LOGGING SETUP
@@ -117,36 +127,118 @@ def cleanup_logging():
         _logger = None
 
 # ==========================================
+# RATE LIMITER FOR GOLDSKY API
+# ==========================================
+class GoldskyRateLimiter:
+    """
+    Smart rate limiter for Goldsky API using Token Bucket algorithm
+    Allows up to MAX_RPS requests per second
+    CRITICAL: Does NOT hold lock during sleep to allow parallel processing
+    """
+    def __init__(self, max_rps: float = 9.0):
+        self.max_rps = max_rps
+        # Add 1% safety margin to ensure we never exceed rate limit
+        self.min_interval = (1.0 / max_rps) * 1.01
+        self.last_request_time = 0.0  # Start time, first request goes immediately
+        self.lock = asyncio.Lock()
+        self.total_requests = 0
+        self.total_wait_time = 0.0
+        
+    async def acquire(self):
+        """
+        Wait if necessary to respect rate limit, then allow request
+        Uses simple interval-based approach to ensure min_interval between requests
+        Lock is released BEFORE sleeping to enable parallel processing
+        """
+        # Acquire lock to get our time slot
+        async with self.lock:
+            now = time.time()
+            
+            # Calculate next available slot
+            # If last_request_time is in the future, we need to wait
+            # If it's in the past, we can go now
+            next_available = max(self.last_request_time, now)
+            wait_time = next_available - now
+            
+            # Reserve the next slot for future requests
+            # Each request reserves a slot min_interval after the previous
+            self.last_request_time = next_available + self.min_interval
+            self.total_requests += 1
+        
+        # CRITICAL: Lock is released here!
+        # Now sleep OUTSIDE the lock so other coroutines can reserve their slots
+        if wait_time > 0.001:  # Only sleep if wait time is significant
+            self.total_wait_time += wait_time
+            await asyncio.sleep(wait_time)
+    
+    def get_stats(self):
+        """Get rate limiter statistics"""
+        return {
+            'total_requests': self.total_requests,
+            'total_wait_time': self.total_wait_time
+        }
+
+# ==========================================
 # CONFIGURATION
 # ==========================================
 GRAPH_URL = "https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/activity-subgraph/0.0.4/gn"
 
 # Filter settings
 FILTER_CLOSED_ONLY = True  # Only fetch redemptions for closed markets
-MIN_VOLUME = 0  # Minimum market volume to process (set to 0 for all)
+MIN_VOLUME = 0  # Minimum market volume to process ($100k+, значительно уменьшит количество)
 MAX_MARKETS = None  # Limit number of markets to process (None = all)
 
-# Parallel processing settings (will be adjusted based on database type)
-# Conservative settings for Supabase (cloud, has rate limits)
-# ULTRA CONSERVATIVE - zero rate limiting errors
-MAX_CONCURRENT_MARKETS_CLOUD = 1  # ТОЛЬКО 1 рынок одновременно (последовательно)
-BATCH_SIZE_CLOUD = 5  # Маленькие батчи по 5 рынков
-BATCH_DELAY_CLOUD = 10  # 10 секунд отдыха между батчами
+# ==========================================
+# GOLDSKY API RATE LIMITING
+# ==========================================
+# Goldsky allows 10 RPS max, we use 9.0 for safety margin
+GOLDSKY_MAX_RPS = 9.0  # Safe rate: 9 requests per second
 
-# Optimized settings for local PostgreSQL
-# БД может быть супер-быстрой, но API очень чувствителен к перегрузке!
-MAX_CONCURRENT_MARKETS_LOCAL = 3  # Консервативно! API Goldsky rate limiting жесткий
-BATCH_SIZE_LOCAL = 20  # Не увеличиваем, чтобы не перегружать API
-BATCH_DELAY_LOCAL = 3  # Больше время для "отдыха" API между батчами
+# ==========================================
+# PARALLEL PROCESSING SETTINGS
+# ==========================================
+# Balance between parallelism and rate limiting
+# Rate limiter serializes API calls (9 RPS max)
+# But we want some parallelism for markets with multiple pagination requests
+
+# Settings for Supabase (cloud)
+# Moderate parallelism - rate limiter handles API throttling
+MAX_CONCURRENT_MARKETS_CLOUD = 20  # Reasonable parallelism
+BATCH_SIZE_CLOUD = 100  # Large batches for efficiency
+BATCH_DELAY_CLOUD = 0  # NO delay between batches (rate limiter handles it)
+
+# Settings for local PostgreSQL
+# Can be more aggressive with local DB (faster uploads)
+MAX_CONCURRENT_MARKETS_LOCAL = 30  # Higher parallelism
+BATCH_SIZE_LOCAL = 150  # Larger batches
+BATCH_DELAY_LOCAL = 0  # NO delay between batches
 
 # Active settings (will be set based on database type)
-MAX_CONCURRENT_MARKETS = MAX_CONCURRENT_MARKETS_CLOUD  # Default to conservative
+MAX_CONCURRENT_MARKETS = MAX_CONCURRENT_MARKETS_CLOUD  # Default
 BATCH_SIZE = BATCH_SIZE_CLOUD
 BATCH_DELAY = BATCH_DELAY_CLOUD
 
-REQUEST_TIMEOUT = 60  # Timeout for each request in seconds
-MAX_RETRIES = 5  # Maximum retry attempts for failed requests
-RETRY_DELAY = 2  # Delay between retries in seconds
+REQUEST_TIMEOUT = 180  # Timeout for each request in seconds (increased for large markets like Trump)
+
+# Immediate retry settings (при сбое на месте)
+IMMEDIATE_RETRIES = 5  # Количество немедленных retry при ошибке
+INITIAL_RETRY_DELAY = 3  # Начальная задержка (секунды)
+MAX_RETRY_DELAY = 60  # Максимальная задержка (секунды)
+# Exponential backoff: 3s, 6s, 12s, 24s, 48s, 60s (cap)
+
+# Adaptive pagination settings (адаптивная пагинация для проблемных маркетов)
+INITIAL_BATCH_SIZE = 1000  # Начальный размер батча
+MIN_BATCH_SIZE = 100  # Минимальный размер батча (агрессивное уменьшение для проблемных маркетов)
+BATCH_SIZE_REDUCTION_FACTOR = 2  # Делитель при уменьшении (1000 → 500 → 250 → 125 → 100)
+
+# Smart pattern detection (умное отслеживание паттернов)
+TIMEOUT_WINDOW_SIZE = 10  # Отслеживаем последние 10 запросов
+TIMEOUT_THRESHOLD_FOR_REDUCTION = 0.7  # 70%+ timeout'ов → уменьшить batch (менее агрессивно)
+TIMEOUT_THRESHOLD_CRITICAL = 0.9  # 90%+ timeout'ов → увеличить retry delay (очень редко)
+
+# Legacy retry settings (для совместимости с другими местами в коде)
+MAX_RETRIES = IMMEDIATE_RETRIES
+RETRY_DELAY = INITIAL_RETRY_DELAY
 
 # Database upload settings
 # БД может быть ОЧЕНЬ быстрой - не ограничиваем!
@@ -233,36 +325,76 @@ async def fetch_redemptions_for_market_async(
     condition_id: str, 
     market_info: Dict,
     semaphore: asyncio.Semaphore,
+    rate_limiter: GoldskyRateLimiter,
     use_local_db: bool = False
-) -> List[Dict]:
-    """Fetch all redemptions for a specific market (async version)"""
-    async with semaphore:  # Limit concurrent requests
-        # Small initial delay to spread out requests and avoid bursts
-        if use_local_db:
-            await asyncio.sleep(0.1)  # 100ms стартовая задержка для каждого маркета
-        else:
-            await asyncio.sleep(0.5)  # ULTRA CONSERVATIVE: 500ms стартовая задержка для каждого маркета
+) -> tuple[List[Dict], Dict]:
+    """
+    Fetch all redemptions for a specific market (async version)
+    
+    Returns:
+        tuple: (redemptions_list, status_dict)
+        status_dict = {
+            'success': bool,
+            'complete': bool,  # False if stopped due to error/timeout
+            'error': str or None,
+            'requests_made': int
+        }
+    """
+    async with semaphore:  # Limit concurrent market processing (memory/resource control)
+        # NO initial delay - rate limiter will handle API throttling automatically!
         
         all_redemptions = []
         last_id = "0x00"
         request_count = 0
+        current_batch_size = INITIAL_BATCH_SIZE  # Start with 1000, adaptively reduce on errors
+        batch_size_reduced = False  # Track if we've reduced batch size
+        
+        # Pattern tracking for smart adaptation
+        timeout_history = deque(maxlen=TIMEOUT_WINDOW_SIZE)  # Track last N requests: True=timeout, False=success
+        retry_delay_multiplier = 1.0  # Start normal, can increase in critical situations
+        last_request_duration = 0.0  # Track duration of last successful request for adaptive delay
+        
+        status = {
+            'success': True,
+            'complete': True,
+            'error': None,
+            'requests_made': 0,
+            'adaptive_pagination_used': False
+        }
+        
+        def analyze_timeout_pattern():
+            """Analyze recent timeout pattern and return adaptation decisions"""
+            if len(timeout_history) < 5:  # Need at least 5 samples
+                return {'should_reduce': False, 'is_critical': False, 'timeout_rate': 0.0}
+            
+            timeout_count = sum(timeout_history)
+            timeout_rate = timeout_count / len(timeout_history)
+            
+            return {
+                'should_reduce': timeout_rate >= TIMEOUT_THRESHOLD_FOR_REDUCTION and current_batch_size > MIN_BATCH_SIZE,
+                'is_critical': timeout_rate >= TIMEOUT_THRESHOLD_CRITICAL,
+                'timeout_rate': timeout_rate,
+                'recent_timeouts': timeout_count
+            }
         
         while True:
             request_count += 1
-            query = """
-            query ($condId: Bytes!, $lastId: ID!) {
+            
+            # Build query with current batch size
+            query = f"""
+            query ($condId: Bytes!, $lastId: ID!) {{
               redemptions(
-                where: { condition: $condId, id_gt: $lastId }
-                first: 1000
+                where: {{ condition: $condId, id_gt: $lastId }}
+                first: {current_batch_size}
                 orderBy: id
                 orderDirection: asc
-              ) {
+              ) {{
                 id
                 redeemer
                 payout
                 timestamp
-              }
-            }
+              }}
+            }}
             """
             
             variables = {
@@ -270,12 +402,21 @@ async def fetch_redemptions_for_market_async(
                 "lastId": last_id
             }
             
-            # Retry logic for each request
+            # Retry logic for each request with exponential backoff
             retry_count = 0
             request_success = False
+            graphql_error_retries = 0  # Track GraphQL-specific retries separately
+            total_attempts = 0  # Total attempts including all error types
             
-            while retry_count <= MAX_RETRIES and not request_success:
+            while total_attempts <= IMMEDIATE_RETRIES and not request_success:
+                total_attempts += 1
                 try:
+                    # Use rate limiter BEFORE each API request
+                    await rate_limiter.acquire()
+                    
+                    # Track request duration for adaptive delay
+                    request_start_time = time.time()
+                    
                     async with session.post(
                         GRAPH_URL,
                         json={'query': query, 'variables': variables},
@@ -283,16 +424,137 @@ async def fetch_redemptions_for_market_async(
                     ) as response:
                         data = await response.json()
                         
+                        # Calculate request duration
+                        request_duration = time.time() - request_start_time
+                        
                         if data.get('errors'):
                             # Log GraphQL errors in real-time
                             error_details = data.get('errors')
-                            print(f"\n      ❌ GraphQL Error for {condition_id[:20]}...")
-                            print(f"         Error: {str(error_details)[:200]}")
-                            break
+                            error_msg = str(error_details)
+                            
+                            # Check if this is a retryable error (timeout, etc.)
+                            is_timeout = 'timeout' in error_msg.lower() or 'canceling statement' in error_msg.lower()
+                            
+                            if is_timeout and total_attempts <= IMMEDIATE_RETRIES:
+                                graphql_error_retries += 1
+                                timeout_history.append(True)  # Record timeout
+                                
+                                # SMART PATTERN ANALYSIS
+                                pattern = analyze_timeout_pattern()
+                                
+                                # ADAPTIVE PAGINATION with pattern detection
+                                should_reduce_batch = False
+                                
+                                # Strategy 1: Immediate reduction after 2 consecutive failures
+                                # (This is the proven strategy from old algorithm)
+                                if current_batch_size > MIN_BATCH_SIZE and graphql_error_retries >= 2:
+                                    should_reduce_batch = True
+                                    reduction_reason = f"2 consecutive timeouts"
+                                
+                                # Strategy 2: Pattern-based reduction (only if 70%+ timeout rate AND min 5 samples)
+                                # More conservative - only kicks in for persistent problems
+                                elif pattern['should_reduce'] and len(timeout_history) >= 5 and current_batch_size > MIN_BATCH_SIZE:
+                                    should_reduce_batch = True
+                                    reduction_reason = f"high timeout rate ({pattern['timeout_rate']*100:.0f}%)"
+                                
+                                # Strategy 3: Critical situation - increase retry delay (CONSERVATIVE)
+                                # Only activate in extreme cases (90%+ failure rate) with enough samples
+                                if pattern['is_critical'] and len(timeout_history) >= 7:
+                                    new_multiplier = min(retry_delay_multiplier * 1.2, 2.0)  # Max 2x (less aggressive)
+                                    if new_multiplier > retry_delay_multiplier:
+                                        retry_delay_multiplier = new_multiplier
+                                        print(f"\n      🚨 CRITICAL: {pattern['recent_timeouts']}/{len(timeout_history)} recent timeouts!")
+                                        print(f"         Increasing retry delay multiplier: {retry_delay_multiplier:.1f}x")
+                                
+                                if should_reduce_batch:
+                                    # Reduce batch size
+                                    new_batch_size = max(current_batch_size // BATCH_SIZE_REDUCTION_FACTOR, MIN_BATCH_SIZE)
+                                    
+                                    print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                                    print(f"         Error: {error_msg[:150]}")
+                                    print(f"         📉 ADAPTIVE: Reducing batch size {current_batch_size} → {new_batch_size} ({reduction_reason})")
+                                    if pattern['timeout_rate'] > 0:
+                                        print(f"         📊 Pattern: {pattern['recent_timeouts']}/{len(timeout_history)} recent requests had timeouts")
+                                    print(f"         🔄 Retrying with smaller batch...", flush=True)
+                                    
+                                    current_batch_size = new_batch_size
+                                    batch_size_reduced = True
+                                    status['adaptive_pagination_used'] = True
+                                    
+                                    # Reset retry counter for new batch size attempt
+                                    graphql_error_retries = 0
+                                    # DON'T clear timeout_history - we need it for pattern detection!
+                                    # timeout_history keeps accumulating to detect persistent problems
+                                    # Only reset multiplier if we're not in critical mode
+                                    if not pattern['is_critical']:
+                                        retry_delay_multiplier = 1.0  # Reset multiplier only if not critical
+                                    
+                                    await asyncio.sleep(2)  # Short pause before retry
+                                    continue  # Retry with new batch size
+                                else:
+                                    # Normal exponential backoff retry with dynamic multiplier
+                                    base_delay = INITIAL_RETRY_DELAY * (2 ** (graphql_error_retries - 1))
+                                    retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
+                                    
+                                    print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                                    print(f"         Error: {error_msg[:150]}")
+                                    if batch_size_reduced:
+                                        print(f"         Current batch size: {current_batch_size}")
+                                    if pattern['timeout_rate'] > 0.3:
+                                        print(f"         📊 Pattern: {pattern['recent_timeouts']}/{len(timeout_history)} recent timeouts ({pattern['timeout_rate']*100:.0f}%)")
+                                    if retry_delay_multiplier > 1.0:
+                                        print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
+                                    else:
+                                        print(f"         🔄 Retrying in {retry_delay:.0f}s (exponential backoff)...", flush=True)
+                                    
+                                    await asyncio.sleep(retry_delay)
+                                    continue  # Retry the request
+                            else:
+                                # Non-retryable error or exhausted retries
+                                if is_timeout:
+                                    print(f"\n      ❌ GraphQL Timeout for {condition_id[:20]}... (failed after {graphql_error_retries} retries)")
+                                    if batch_size_reduced:
+                                        print(f"         Final batch size: {current_batch_size}")
+                                else:
+                                    print(f"\n      ❌ GraphQL Error for {condition_id[:20]}... (non-retryable)")
+                                print(f"         Error: {error_msg[:200]}")
+                                
+                                # Mark as incomplete
+                                status['complete'] = False
+                                status['error'] = f"GraphQL Error after {graphql_error_retries} retries: {error_msg[:300]}"
+                                status['requests_made'] = request_count
+                                break
                         
                         batch = data.get('data', {}).get('redemptions', [])
                         
+                        # Record success in timeout history
+                        if graphql_error_retries > 0:
+                            # This was a successful retry after timeout(s)
+                            timeout_history.append(False)  # Record as success
+                        else:
+                            # First-time success, no timeout
+                            timeout_history.append(False)
+                        
+                        # Show success message if we recovered from GraphQL errors
+                        if graphql_error_retries > 0:
+                            if batch_size_reduced:
+                                pattern = analyze_timeout_pattern()
+                                if pattern['timeout_rate'] > 0.3:
+                                    print(f"      ✅ Recovered! (batch: {current_batch_size}, pattern: {pattern['recent_timeouts']}/{len(timeout_history)} timeouts)", flush=True)
+                                else:
+                                    print(f"      ✅ Recovered after {graphql_error_retries} GraphQL retries with batch size {current_batch_size}!", flush=True)
+                            else:
+                                print(f"      ✅ Recovered after {graphql_error_retries} GraphQL retries!", flush=True)
+                            graphql_error_retries = 0  # Reset counter
+                            
+                            # Gradually reduce retry delay multiplier on success
+                            if retry_delay_multiplier > 1.0:
+                                retry_delay_multiplier = max(retry_delay_multiplier * 0.8, 1.0)
+                        
                         if not batch:
+                            # Show final stats if batch size was reduced
+                            if batch_size_reduced and len(all_redemptions) > 0:
+                                print(f"      ℹ️  Completed with adaptive batch size: {current_batch_size} (started with {INITIAL_BATCH_SIZE})", flush=True)
                             break
                         
                         # Process batch
@@ -317,49 +579,106 @@ async def fetch_redemptions_for_market_async(
                         
                         last_id = batch[-1]['id']
                         request_success = True
+                        last_request_duration = request_duration  # Save for adaptive delay
                         
-                        # Show progress for large markets (every 3 batches = 15k records)
+                        # Show success message if we recovered from network errors
+                        if retry_count > 0:
+                            print(f"      ✅ Recovered after {retry_count} network retries!", flush=True)
+                        
+                        # Show progress for large markets (every 3 batches)
                         if request_count > 1 and request_count % 3 == 0:
-                            print(f"      ... fetched {len(all_redemptions):,} redemptions ({request_count} requests)", flush=True)
+                            progress_msg = f"      ... fetched {len(all_redemptions):,} redemptions ({request_count} requests)"
+                            if batch_size_reduced:
+                                progress_msg += f" [batch: {current_batch_size}]"
+                            print(progress_msg, flush=True)
                         
                         # Safety limit per market (increased for large markets)
                         if len(all_redemptions) > 500000:  # Увеличили до 500k
                             print(f"      ⚠️  Reached safety limit of 500k redemptions")
                             break
                         
-                        # Delay between pagination requests to avoid API rate limiting
-                        # GraphQL API очень чувствителен, нужны паузы!
-                        if use_local_db and request_count > 1:
-                            await asyncio.sleep(0.15)  # 150ms между запросами пагинации
-                        elif request_count > 1:
-                            await asyncio.sleep(0.5)  # ULTRA CONSERVATIVE: 500ms между каждым pagination запросом
+                        # Smart adaptive delay between pagination requests for problematic markets
+                        # Wait for server to finish processing before sending next request
+                        if batch_size_reduced and current_batch_size <= 250:
+                            # Adaptive delay based on server response time
+                            # If server took long → give it more rest time
+                            # If server was fast → shorter rest time
+                            if last_request_duration > 30:
+                                # Very slow response (>30s) → long rest
+                                adaptive_delay = 2.5
+                            elif last_request_duration > 15:
+                                # Slow response (15-30s) → medium rest
+                                adaptive_delay = 2.0
+                            elif last_request_duration > 5:
+                                # Moderate response (5-15s) → normal rest
+                                adaptive_delay = 1.5
+                            else:
+                                # Fast response (<5s) → short rest
+                                adaptive_delay = 1.0
+                            
+                            await asyncio.sleep(adaptive_delay)
                             
                 except asyncio.TimeoutError:
                     retry_count += 1
-                    print(f"\n      ⚠️  Request timeout (attempt {retry_count}/{MAX_RETRIES + 1})")
+                    timeout_history.append(True)  # Record timeout
+                    
+                    # Apply dynamic retry delay multiplier
+                    base_delay = INITIAL_RETRY_DELAY * (2 ** (retry_count - 1))
+                    retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
+                    
+                    print(f"\n      ⚠️  Request timeout (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
                     print(f"         Condition: {condition_id[:30]}...")
                     print(f"         Request: {request_count}, Last ID: {last_id[:20]}...")
-                    if retry_count > MAX_RETRIES:
-                        print(f"      ❌ Failed after {MAX_RETRIES} retries - giving up")
+                    
+                    if total_attempts > IMMEDIATE_RETRIES:
+                        print(f"      ❌ Failed after {total_attempts - 1} total attempts - giving up")
+                        status['success'] = False
+                        status['complete'] = False
+                        status['error'] = f"Timeout after {total_attempts - 1} attempts at request {request_count}"
+                        status['requests_made'] = request_count
                         break
-                    await asyncio.sleep(RETRY_DELAY)
+                    
+                    if retry_delay_multiplier > 1.0:
+                        print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
+                    else:
+                        print(f"         🔄 Retrying in {retry_delay:.0f}s (exponential backoff)...", flush=True)
+                    await asyncio.sleep(retry_delay)
                 except Exception as e:
                     retry_count += 1
+                    timeout_history.append(True)  # Record error as timeout-equivalent
+                    
+                    # Apply dynamic retry delay multiplier
+                    base_delay = INITIAL_RETRY_DELAY * (2 ** (retry_count - 1))
+                    retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
                     error_type = type(e).__name__
                     error_msg = str(e)
-                    print(f"\n      ⚠️  {error_type} (attempt {retry_count}/{MAX_RETRIES + 1})")
+                    
+                    print(f"\n      ⚠️  {error_type} (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
                     print(f"         Condition: {condition_id[:30]}...")
                     print(f"         Error: {error_msg[:150]}")
-                    if retry_count > MAX_RETRIES:
-                        print(f"      ❌ Failed after {MAX_RETRIES} retries - giving up")
+                    
+                    if total_attempts > IMMEDIATE_RETRIES:
+                        print(f"      ❌ Failed after {total_attempts - 1} total attempts - giving up")
+                        status['success'] = False
+                        status['complete'] = False
+                        status['error'] = f"{error_type}: {error_msg[:200]}"
+                        status['requests_made'] = request_count
                         break
-                    await asyncio.sleep(RETRY_DELAY)
+                    
+                    if retry_delay_multiplier > 1.0:
+                        print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
+                    else:
+                        print(f"         🔄 Retrying in {retry_delay:.0f}s (exponential backoff)...", flush=True)
+                    await asyncio.sleep(retry_delay)
             
             # If all retries failed, break the pagination loop
             if not request_success:
                 break
         
-        return all_redemptions
+        # Set final request count
+        status['requests_made'] = request_count
+        
+        return all_redemptions, status
 
 
 async def process_market_async(
@@ -371,20 +690,33 @@ async def process_market_async(
     stats: Dict,
     semaphore: asyncio.Semaphore,
     db_semaphore: asyncio.Semaphore,
+    rate_limiter: GoldskyRateLimiter,
     use_local_db: bool = False
 ):
     """Process a single market: fetch and upload (with parallel upload support)"""
+    import time
+    market_start_time = time.time()
+    
     try:
         condition_id = market['condition_id']
         question = market['question'][:60] + "..." if len(market['question']) > 60 else market['question']
         
+        # Timestamp for market start
+        start_timestamp = time.strftime('%H:%M:%S')
         print(f"\n[{market_index}/{total_markets}] {question}")
+        print(f"   🕐 Started: {start_timestamp}")
         print(f"   Condition ID: {condition_id[:20]}...")
         print(f"   Event ID: {market['event_id']}")
         print(f"   Volume: ${market['volume']:,.2f}")
         
-        # Fetch redemptions
-        redemptions = await fetch_redemptions_for_market_async(session, condition_id, market, semaphore, use_local_db)
+        # Fetch redemptions (track time)
+        fetch_start = time.time()
+        redemptions, fetch_status = await fetch_redemptions_for_market_async(session, condition_id, market, semaphore, rate_limiter, use_local_db)
+        fetch_elapsed = time.time() - fetch_start
+        
+        # Track if adaptive pagination was used
+        if fetch_status.get('adaptive_pagination_used', False):
+            stats['adaptive_pagination_used'] += 1
         
         if redemptions:
             stats['markets_with_redemptions'] += 1
@@ -396,7 +728,20 @@ async def process_market_async(
             for r in redemptions:
                 stats['unique_redeemers'].add(r['redeemer_address'])
             
-            print(f"   ✅ Found {len(redemptions)} redemptions (${market_volume:,.2f})", flush=True)
+            # Check if data is complete
+            if not fetch_status['complete']:
+                print(f"   ⚠️  INCOMPLETE: Found {len(redemptions)} redemptions (${market_volume:,.2f}) - data may be partial!", flush=True)
+                print(f"   ⚠️  Reason: {fetch_status['error']}", flush=True)
+                stats['incomplete_markets'] += 1
+                stats['failed_fetches'].append({
+                    'market': market,
+                    'redemptions_fetched': len(redemptions),
+                    'error': fetch_status['error'],
+                    'requests_made': fetch_status['requests_made']
+                })
+            else:
+                print(f"   ✅ Found {len(redemptions)} redemptions (${market_volume:,.2f})", flush=True)
+            print(f"   ⏱️  Fetch time: {fetch_elapsed:.2f}s", flush=True)
             
             # Upload to database if enabled (with concurrency control)
             if uploader:
@@ -406,6 +751,9 @@ async def process_market_async(
                 else:
                     print(f"   📤 Uploading to {db_name}...", end=" ", flush=True)
                 
+                # Track upload time
+                upload_start = time.time()
+                
                 # Use semaphore to limit concurrent DB uploads (не перегружаем БД!)
                 async with db_semaphore:
                     # Run sync upload in thread pool to not block async loop
@@ -413,10 +761,18 @@ async def process_market_async(
                     loop = asyncio.get_event_loop()
                     try:
                         success = await loop.run_in_executor(None, uploader.upload_redemptions_batch, redemptions)
+                        upload_elapsed = time.time() - upload_start
+                        
                         if success:
-                            print("✅ Uploaded" if len(redemptions) <= 1000 else "      ✅ Successfully uploaded large batch")
+                            if len(redemptions) <= 1000:
+                                print(f"✅ Uploaded (⏱️ {upload_elapsed:.2f}s)")
+                            else:
+                                print(f"      ✅ Successfully uploaded large batch (⏱️ {upload_elapsed:.2f}s)")
                         else:
-                            print("❌ Failed" if len(redemptions) <= 1000 else "      ❌ Failed to upload large batch")
+                            if len(redemptions) <= 1000:
+                                print(f"❌ Failed (⏱️ {upload_elapsed:.2f}s)")
+                            else:
+                                print(f"      ❌ Failed to upload large batch (⏱️ {upload_elapsed:.2f}s)")
                             print(f"      🔍 Market: {market_index} | Condition: {condition_id[:30]}...")
                             print(f"      🔍 Records: {len(redemptions)} | Volume: ${market_volume:,.2f}")
                             # Save failed upload for retry
@@ -431,6 +787,7 @@ async def process_market_async(
                             })
                             stats['upload_errors'] += 1
                     except Exception as upload_err:
+                        upload_elapsed = time.time() - upload_start
                         error_type = type(upload_err).__name__
                         error_detail = str(upload_err)[:150]
                         print(f"❌ Upload Exception: {error_type}")
@@ -438,6 +795,7 @@ async def process_market_async(
                         print(f"   Condition: {condition_id[:30]}...")
                         print(f"   Records: {len(redemptions)}")
                         print(f"   Error: {error_detail}")
+                        print(f"   ⏱️  Upload time before error: {upload_elapsed:.2f}s")
                         # Save failed upload for retry
                         stats['failed_uploads'].append({
                             'redemptions': redemptions,
@@ -450,12 +808,29 @@ async def process_market_async(
                         })
                         stats['upload_errors'] += 1
         else:
+            # Check if fetch failed
+            if not fetch_status['success'] or not fetch_status['complete']:
+                print(f"   ❌ FETCH FAILED: No redemptions retrieved", flush=True)
+                print(f"   ❌ Reason: {fetch_status['error']}", flush=True)
+                stats['incomplete_markets'] += 1
+                stats['failed_fetches'].append({
+                    'market': market,
+                    'redemptions_fetched': 0,
+                    'error': fetch_status['error'],
+                    'requests_made': fetch_status['requests_made']
+                })
             # Warn if high-volume market has no redemptions (might indicate API issue)
-            if market['volume'] > 100000 and market['closed']:
+            elif market['volume'] > 100000 and market['closed']:
                 print(f"   ⚠️  No redemptions found (suspicious: high volume ${market['volume']:,.2f}, market closed)", flush=True)
                 stats['suspicious_empty_markets'] += 1
             else:
                 print(f"   ⚪ No redemptions found", flush=True)
+            print(f"   ⏱️  Fetch time: {fetch_elapsed:.2f}s", flush=True)
+        
+        # Total market processing time
+        market_elapsed = time.time() - market_start_time
+        end_timestamp = time.strftime('%H:%M:%S')
+        print(f"   🏁 Completed: {end_timestamp} (Total: {market_elapsed:.2f}s)", flush=True)
         
         stats['markets_processed'] += 1
         
@@ -497,18 +872,35 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
         BATCH_DELAY = BATCH_DELAY_CLOUD
         perf_mode = "⚡ STANDARD MODE (Supabase Cloud)"
     
+    # Start timestamp
+    start_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
     print("=" * 70)
     print("🚀 POLYMARKET REDEMPTIONS FETCHER (OPTIMIZED PARALLEL)")
     print("=" * 70)
+    print(f"🕐 Script started: {start_timestamp}")
     print(f"{perf_mode}")
+    print(f"🎯 SMART RATE LIMITING:")
+    print(f"   - Goldsky API limit: {GOLDSKY_MAX_RPS} requests/second")
+    print(f"   - Interval between requests: {(1.0/GOLDSKY_MAX_RPS)*1.01:.3f}s (with 1% safety margin)")
+    print(f"   - Strategy: Token bucket - parallel requests queue for time slots")
+    print(f"🔄 INTELLIGENT RETRY SYSTEM:")
+    print(f"   - Immediate retries on error: {IMMEDIATE_RETRIES} attempts")
+    print(f"   - Exponential backoff: {INITIAL_RETRY_DELAY}s → {INITIAL_RETRY_DELAY*2}s → {INITIAL_RETRY_DELAY*4}s → {INITIAL_RETRY_DELAY*8}s → {INITIAL_RETRY_DELAY*16}s (max {MAX_RETRY_DELAY}s)")
+    print(f"   - Strategy: Retry immediately on failure, give API time to recover")
+    print(f"🎯 SMART ADAPTIVE PAGINATION:")
+    print(f"   - Initial batch size: {INITIAL_BATCH_SIZE} redemptions/request")
+    print(f"   - Pattern tracking: Last {TIMEOUT_WINDOW_SIZE} requests (sliding window)")
+    print(f"   - Auto-reduce threshold: {TIMEOUT_THRESHOLD_FOR_REDUCTION*100:.0f}% timeout rate")
+    print(f"   - Critical threshold: {TIMEOUT_THRESHOLD_CRITICAL*100:.0f}% timeout rate (×1.5-3.0 retry delay)")
+    print(f"   - Progressive reduction: {INITIAL_BATCH_SIZE} → {INITIAL_BATCH_SIZE//2} → {INITIAL_BATCH_SIZE//4} → ... (min: {MIN_BATCH_SIZE})")
+    print(f"   - Strategy: Pattern-based adaptation + dynamic retry delays")
     print(f"⚡ Processing settings:")
     print(f"   - Batch size: {BATCH_SIZE} markets")
-    print(f"   - Concurrent per batch: {MAX_CONCURRENT_MARKETS} markets")
+    print(f"   - Concurrent markets: {MAX_CONCURRENT_MARKETS}")
     print(f"   - Request timeout: {REQUEST_TIMEOUT}s")
     print(f"   - Delay between batches: {BATCH_DELAY}s")
-    print(f"   - Database uploads: Parallel (new client per upload)")
-    if use_local_db:
-        print(f"   - Performance: MAXIMUM (No rate limits!)")
+    print(f"   - Database uploads: Parallel (max {MAX_CONCURRENT_DB_UPLOADS} concurrent)")
     
     # Initialize database uploader if auto_upload is enabled
     uploader = None
@@ -582,12 +974,19 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
         'upload_errors': 0,
         'processing_errors': 0,
         'suspicious_empty_markets': 0,  # High volume closed markets with no redemptions
-        'failed_uploads': []  # List of (redemptions, market_info) tuples that failed to upload
+        'failed_uploads': [],  # List of (redemptions, market_info) tuples that failed to upload
+        'incomplete_markets': 0,  # Markets with partial data due to errors
+        'failed_fetches': [],  # Markets that failed to fetch completely
+        'adaptive_pagination_used': 0  # Markets that used adaptive pagination
     }
     
     # Create semaphores to limit concurrent operations
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_MARKETS)  # Ограничение на фетчинг
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_MARKETS)  # Ограничение на параллельную обработку маркетов
     db_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DB_UPLOADS)  # Ограничение на загрузку в БД
+    
+    # Create rate limiter for Goldsky API (THIS IS THE KEY!)
+    rate_limiter = GoldskyRateLimiter(max_rps=GOLDSKY_MAX_RPS)
+    print(f"\n✅ Rate limiter initialized: {GOLDSKY_MAX_RPS} RPS max")
     
     # Create aiohttp session
     async with aiohttp.ClientSession() as session:
@@ -598,7 +997,11 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             batch_markets = markets[batch_num:batch_num + BATCH_SIZE]
             batch_index = batch_num // BATCH_SIZE + 1
             
+            # Batch start time
+            batch_start_timestamp = time.strftime('%H:%M:%S')
+            
             print(f"\n📦 Processing batch {batch_index}/{total_batches} ({len(batch_markets)} markets)")
+            print(f"   🕐 Batch started: {batch_start_timestamp}")
             print(f"   Markets {batch_num + 1} to {batch_num + len(batch_markets)}")
             print("-" * 70)
             
@@ -619,6 +1022,7 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
                     stats, 
                     semaphore,
                     db_semaphore,
+                    rate_limiter,
                     use_local_db
                 )
                 tasks.append(task)
@@ -628,18 +1032,192 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             
             # Show batch completion time
             batch_elapsed = time.time() - batch_start
-            print(f"\n✅ Batch {batch_index} completed in {batch_elapsed:.1f}s")
+            batch_end_timestamp = time.strftime('%H:%M:%S')
+            markets_in_batch = len(batch_markets)
+            avg_time_per_market = batch_elapsed / markets_in_batch if markets_in_batch > 0 else 0
             
-            # Delay between batches (except for last batch)
-            if batch_num + BATCH_SIZE < len(markets):
-                print(f"⏳ Waiting {BATCH_DELAY}s before next batch...")
-                await asyncio.sleep(BATCH_DELAY)
+            # Get rate limiter stats (total since start)
+            rl_stats = rate_limiter.get_stats()
+            total_script_elapsed = time.time() - script_start_time
+            overall_rps = rl_stats['total_requests'] / total_script_elapsed if total_script_elapsed > 0 else 0
+            
+            print(f"\n✅ Batch {batch_index}/{total_batches} completed")
+            print(f"   🏁 Finished: {batch_end_timestamp}")
+            print(f"   ⏱️  Batch time: {batch_elapsed:.1f}s")
+            print(f"   📊 Avg per market: {avg_time_per_market:.2f}s")
+            print(f"   🎯 Total API requests: {rl_stats['total_requests']:,} (Overall RPS: {overall_rps:.2f})")
+            
+            # NO delay between batches! Rate limiter handles everything
+            # Immediately proceed to next batch
     
-    # 4. Retry failed uploads
+    # 4. Retry failed/incomplete market fetches
+    if stats['failed_fetches']:
+        print("\n" + "=" * 70)
+        print("🔄 RETRYING FAILED/INCOMPLETE MARKET FETCHES")
+        print("=" * 70)
+        retry_fetch_start_time = time.time()
+        retry_fetch_timestamp = time.strftime('%H:%M:%S')
+        print(f"🕐 Retry fetch started: {retry_fetch_timestamp}")
+        print(f"Found {len(stats['failed_fetches'])} failed/incomplete markets")
+        print(f"Strategy: One market at a time with longer timeout")
+        print(f"Waiting 5 seconds to let API cool down...")
+        await asyncio.sleep(5)
+        print()
+        
+        retry_fetch_success = 0
+        retry_fetch_failed = 0
+        retry_fetch_improved = 0  # Got more data but still incomplete
+        still_failed_fetches = []
+        
+        # Create new stricter semaphore (only 1 at a time for retries)
+        retry_semaphore = asyncio.Semaphore(1)
+        
+        for i, failed_item in enumerate(stats['failed_fetches'], 1):
+            market = failed_item['market']
+            previous_count = failed_item['redemptions_fetched']
+            condition_id = market['condition_id']
+            question = market['question'][:60] + "..." if len(market['question']) > 60 else market['question']
+            
+            retry_item_start = time.time()
+            retry_timestamp = time.strftime('%H:%M:%S')
+            
+            print(f"\n[Retry Fetch {i}/{len(stats['failed_fetches'])}] {question}")
+            print(f"   🕐 Retry time: {retry_timestamp}")
+            print(f"   Condition: {condition_id[:30]}...")
+            print(f"   Previous: {previous_count} redemptions")
+            print(f"   Error was: {failed_item['error'][:100]}")
+            print(f"   🔄 Retrying fetch...", flush=True)
+            
+            try:
+                # Retry with same function but one at a time
+                redemptions_retry, fetch_status_retry = await fetch_redemptions_for_market_async(
+                    session, condition_id, market, retry_semaphore, rate_limiter, use_local_db
+                )
+                retry_item_elapsed = time.time() - retry_item_start
+                
+                if fetch_status_retry['complete'] and fetch_status_retry['success']:
+                    print(f"   ✅ Success! Got {len(redemptions_retry)} redemptions (⏱️ {retry_item_elapsed:.2f}s)")
+                    retry_fetch_success += 1
+                    
+                    # Upload if enabled and we got data
+                    if uploader and redemptions_retry:
+                        market_volume = sum(r['payout_usdc'] for r in redemptions_retry)
+                        print(f"   📤 Uploading {len(redemptions_retry)} redemptions...", end=" ", flush=True)
+                        try:
+                            success = await asyncio.get_event_loop().run_in_executor(
+                                None, uploader.upload_redemptions_batch, redemptions_retry
+                            )
+                            if success:
+                                print("✅ Uploaded")
+                                # Update stats
+                                if previous_count == 0:
+                                    stats['markets_with_redemptions'] += 1
+                                stats['total_redemptions'] += len(redemptions_retry) - previous_count
+                                stats['total_volume'] += market_volume
+                                for r in redemptions_retry:
+                                    stats['unique_redeemers'].add(r['redeemer_address'])
+                            else:
+                                print("❌ Upload failed")
+                        except Exception as e:
+                            print(f"❌ Upload error: {type(e).__name__}")
+                    
+                elif len(redemptions_retry) > previous_count:
+                    # Got more data but still incomplete
+                    print(f"   ⚠️  Improved but incomplete: {len(redemptions_retry)} redemptions (was {previous_count}) (⏱️ {retry_item_elapsed:.2f}s)")
+                    print(f"   ⚠️  Still failing: {fetch_status_retry['error'][:100]}")
+                    retry_fetch_improved += 1
+                    still_failed_fetches.append({
+                        'market': market,
+                        'redemptions_fetched': len(redemptions_retry),
+                        'error': fetch_status_retry['error'],
+                        'requests_made': fetch_status_retry['requests_made']
+                    })
+                    
+                    # Upload improved data if enabled
+                    if uploader and redemptions_retry and len(redemptions_retry) > previous_count:
+                        market_volume = sum(r['payout_usdc'] for r in redemptions_retry)
+                        print(f"   📤 Uploading improved data ({len(redemptions_retry)} redemptions)...", end=" ", flush=True)
+                        try:
+                            success = await asyncio.get_event_loop().run_in_executor(
+                                None, uploader.upload_redemptions_batch, redemptions_retry
+                            )
+                            if success:
+                                print("✅ Uploaded")
+                                # Update stats with delta
+                                if previous_count == 0:
+                                    stats['markets_with_redemptions'] += 1
+                                stats['total_redemptions'] += len(redemptions_retry) - previous_count
+                                stats['total_volume'] += market_volume
+                                for r in redemptions_retry:
+                                    stats['unique_redeemers'].add(r['redeemer_address'])
+                            else:
+                                print("❌ Upload failed")
+                        except Exception as e:
+                            print(f"❌ Upload error: {type(e).__name__}")
+                else:
+                    print(f"   ❌ Still failed: {len(redemptions_retry)} redemptions (⏱️ {retry_item_elapsed:.2f}s)")
+                    print(f"   ❌ Reason: {fetch_status_retry['error'][:100]}")
+                    retry_fetch_failed += 1
+                    still_failed_fetches.append(failed_item)
+                    
+            except Exception as e:
+                retry_item_elapsed = time.time() - retry_item_start
+                print(f"   ❌ Retry Exception: {type(e).__name__} (⏱️ {retry_item_elapsed:.2f}s)")
+                print(f"      Error: {str(e)[:100]}")
+                retry_fetch_failed += 1
+                still_failed_fetches.append(failed_item)
+            
+            # Short delay between retries
+            if i < len(stats['failed_fetches']):
+                print(f"   ⏳ Waiting 2 seconds before next retry...")
+                await asyncio.sleep(2)
+        
+        retry_fetch_elapsed = time.time() - retry_fetch_start_time
+        retry_fetch_end_timestamp = time.strftime('%H:%M:%S')
+        
+        print(f"\n📊 Retry Fetch Results:")
+        print(f"   🏁 Finished: {retry_fetch_end_timestamp}")
+        print(f"   ⏱️  Total retry time: {retry_fetch_elapsed:.1f}s")
+        print(f"   ✅ Fully successful: {retry_fetch_success}/{len(stats['failed_fetches'])}")
+        print(f"   📈 Improved (partial): {retry_fetch_improved}/{len(stats['failed_fetches'])}")
+        print(f"   ❌ Still failed: {retry_fetch_failed}/{len(stats['failed_fetches'])}")
+        
+        # Update stats
+        stats['incomplete_markets'] = len(still_failed_fetches)
+        stats['failed_fetches'] = still_failed_fetches
+        
+        # Save still-failed markets to file
+        if still_failed_fetches:
+            failed_markets_file = f"output/failed_markets_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            os.makedirs('output', exist_ok=True)
+            
+            failed_markets_data = []
+            for item in still_failed_fetches:
+                failed_markets_data.append({
+                    'condition_id': item['market']['condition_id'],
+                    'question': item['market']['question'],
+                    'event_id': item['market']['event_id'],
+                    'volume': item['market']['volume'],
+                    'redemptions_fetched': item['redemptions_fetched'],
+                    'error': item['error'],
+                    'requests_made': item['requests_made']
+                })
+            
+            with open(failed_markets_file, 'w', encoding='utf-8') as f:
+                json.dump(failed_markets_data, f, indent=2, ensure_ascii=False)
+            
+            print(f"\n💾 Still-failed markets saved to: {failed_markets_file}")
+            print(f"   Total markets: {len(still_failed_fetches)}")
+            print(f"   You can review these markets later")
+    
+    # 5. Retry failed uploads
     if auto_upload and uploader and stats['failed_uploads']:
         print("\n" + "=" * 70)
         print("🔄 RETRYING FAILED UPLOADS")
         print("=" * 70)
+        retry_start_time = time.time()
+        retry_start_timestamp = time.strftime('%H:%M:%S')
+        print(f"🕐 Retry started: {retry_start_timestamp}")
         print(f"Found {len(stats['failed_uploads'])} failed uploads ({sum(len(f['redemptions']) for f in stats['failed_uploads']):,} records)")
         print(f"Waiting 10 seconds to let API and DB cool down...")
         await asyncio.sleep(10)  # Даем API и БД время "отдохнуть"
@@ -654,7 +1232,11 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             redemptions = failed_item['redemptions']
             market_info = failed_item['market_info']
             
+            retry_item_start = time.time()
+            retry_timestamp = time.strftime('%H:%M:%S')
+            
             print(f"\n[Retry {i}/{len(stats['failed_uploads'])}] Market #{market_info['market_index']}")
+            print(f"   🕐 Retry time: {retry_timestamp}")
             print(f"   Question: {market_info['question'][:60]}...")
             print(f"   Condition: {market_info['condition_id'][:30]}...")
             print(f"   Records: {len(redemptions)} | Volume: ${market_info['volume']:,.2f}")
@@ -664,15 +1246,18 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
                 # Use default chunk size (БД справляется, проблема была в API timing)
                 # БД для локальной будет использовать chunk_size=5000 (быстро!)
                 success = uploader.upload_redemptions_batch(redemptions)
+                retry_item_elapsed = time.time() - retry_item_start
+                
                 if success:
-                    print("✅ Success!")
+                    print(f"✅ Success! (⏱️ {retry_item_elapsed:.2f}s)")
                     retry_success += 1
                 else:
-                    print("❌ Failed again")
+                    print(f"❌ Failed again (⏱️ {retry_item_elapsed:.2f}s)")
                     retry_failed += 1
                     still_failed_items.append(failed_item)
             except Exception as e:
-                print(f"❌ Exception: {type(e).__name__}")
+                retry_item_elapsed = time.time() - retry_item_start
+                print(f"❌ Exception: {type(e).__name__} (⏱️ {retry_item_elapsed:.2f}s)")
                 print(f"      Error: {str(e)[:100]}")
                 retry_failed += 1
                 still_failed_items.append(failed_item)
@@ -682,14 +1267,17 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
                 print(f"   ⏳ Waiting 3 seconds before next retry...")
                 await asyncio.sleep(3)
         
+        retry_elapsed = time.time() - retry_start_time
+        retry_end_timestamp = time.strftime('%H:%M:%S')
+        
         print(f"\n📊 Retry Results:")
+        print(f"   🏁 Finished: {retry_end_timestamp}")
+        print(f"   ⏱️  Total retry time: {retry_elapsed:.1f}s")
         print(f"   ✅ Successful: {retry_success}/{len(stats['failed_uploads'])}")
         print(f"   ❌ Still failed: {retry_failed}/{len(stats['failed_uploads'])}")
         
         # Save still-failed data to file
         if still_failed_items:
-            import json
-            from datetime import datetime
             failed_file = f"output/failed_redemptions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             
             # Create output directory if needed
@@ -713,7 +1301,7 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
         # Update stats
         stats['upload_errors'] = retry_failed  # Update to reflect final count
     
-    # 5. Print final statistics
+    # 6. Print final statistics
     print("\n" + "=" * 70)
     print("📊 FINAL STATISTICS")
     print("=" * 70)
@@ -731,6 +1319,18 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
         print(f"\n⚠️  Suspicious Cases:")
         print(f"   High-volume closed markets with no redemptions: {stats['suspicious_empty_markets']}")
         print(f"   (This might indicate GraphQL API rate limiting or data issues)")
+    
+    if stats['incomplete_markets'] > 0:
+        print(f"\n⚠️  Incomplete/Failed Markets:")
+        print(f"   Markets with errors/timeouts: {stats['incomplete_markets']}")
+        print(f"   (Data for these markets may be partial or missing)")
+        if stats['failed_fetches']:
+            print(f"   💾 Failed markets saved to output/failed_markets_*.json")
+    
+    if stats['adaptive_pagination_used'] > 0:
+        print(f"\n🎯 Adaptive Pagination:")
+        print(f"   Markets using adaptive pagination: {stats['adaptive_pagination_used']}")
+        print(f"   (Automatically reduced batch size for problematic markets)")
     
     if auto_upload and uploader:
         print(f"\n💾 Database Upload:")
@@ -777,22 +1377,42 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     
     # Total execution time and performance metrics
     total_elapsed = time.time() - script_start_time
+    end_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     hours = int(total_elapsed // 3600)
     minutes = int((total_elapsed % 3600) // 60)
     seconds = int(total_elapsed % 60)
     
-    print(f"\n⏱️  Total execution time: {hours}h {minutes}m {seconds}s ({total_elapsed:.1f}s)")
+    print(f"\n🕐 Script finished: {end_timestamp}")
+    print(f"⏱️  Total execution time: {hours}h {minutes}m {seconds}s ({total_elapsed:.1f}s)")
     
     # Performance metrics
     if stats['total_redemptions'] > 0 and total_elapsed > 0:
         redemptions_per_sec = stats['total_redemptions'] / total_elapsed
         markets_per_sec = stats['markets_processed'] / total_elapsed
+        
+        # Rate limiter statistics
+        rl_stats = rate_limiter.get_stats()
+        actual_rps = rl_stats['total_requests'] / total_elapsed if total_elapsed > 0 else 0
+        efficiency = (actual_rps / GOLDSKY_MAX_RPS * 100) if GOLDSKY_MAX_RPS > 0 else 0
+        
         print(f"\n📈 Performance:")
         print(f"   Redemptions/sec:        {redemptions_per_sec:.1f}")
         print(f"   Markets/sec:            {markets_per_sec:.2f}")
         if auto_upload and uploader:
             db_name = "PostgreSQL" if use_local_db else "Supabase"
             print(f"   Database ({db_name}):   {uploader.stats['redemptions_inserted'] / total_elapsed:.1f} records/sec")
+        
+        print(f"\n🎯 API Rate Limiting Stats:")
+        print(f"   Total API requests:     {rl_stats['total_requests']:,}")
+        print(f"   Actual RPS:             {actual_rps:.2f} / {GOLDSKY_MAX_RPS} max")
+        print(f"   API efficiency:         {efficiency:.1f}%")
+        print(f"   Total throttle time:    {rl_stats['total_wait_time']:.1f}s ({rl_stats['total_wait_time']/total_elapsed*100:.1f}% of runtime)")
+        if efficiency > 85:
+            print(f"   ✅ Excellent API utilization!")
+        elif efficiency > 70:
+            print(f"   ✅ Good API utilization")
+        else:
+            print(f"   ⚠️  Low API utilization - consider increasing parallelism")
     
     print("=" * 70)
     
