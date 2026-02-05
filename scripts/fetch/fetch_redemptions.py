@@ -46,9 +46,12 @@ Features:
 - 🔒 EXCLUSIVE MODE для тяжелых маркетов (>$300M):
   * Останавливает ВСЕ другие маркеты
   * ПОСЛЕДОВАТЕЛЬНАЯ обработка: ждет ответа от предыдущего запроса
-  * Адаптивные задержки между запросами: 2-10 секунд (зависит от скорости ответа сервера)
-  * НЕ перегружает API множеством параллельных запросов
-  * Результат: стабильная обработка самых крупных маркетов
+  * 🎯 УМНАЯ АДАПТАЦИЯ ЗАДЕРЖКИ (приоритет над уменьшением batch size):
+    - 7 уровней задержки: 2s → 4s → 6s → 8s → 10s → 15s → 20s
+    - При timeout: СНАЧАЛА увеличивает задержку (до 10 попыток)
+    - Только после 10 неудач: уменьшает batch size
+    - При 5+ успехах подряд: уменьшает задержку обратно (восстановление)
+  * Результат: стабильная обработка крупных маркетов БЕЗ потери производительности
 - Intelligent Immediate Retry System:
   * 5 попыток с экспоненциальной задержкой (3s → 6s → 12s → 24s → 48s)
   * Retry СРАЗУ при ошибке, не откладывая на потом
@@ -412,6 +415,16 @@ async def fetch_redemptions_for_market_async(
         retry_delay_multiplier = 1.0  # Start normal, can increase in critical situations
         last_request_duration = 0.0  # Track duration of last successful request for adaptive delay
         
+        # 🎯 NEW: Smart delay adaptation for very large markets
+        # Strategy: First increase delay (10 attempts), THEN reduce batch size
+        if is_very_large_market:
+            # Delay levels: 2s → 4s → 6s → 8s → 10s → 15s → 20s
+            delay_levels = [2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0]
+            current_delay_level = 0  # Start at level 0 (2s)
+            delay_increase_attempts = 0  # Track how many times we increased delay
+            consecutive_successes = 0  # Track successful requests in a row
+            print(f"      🎯 Smart delay adaptation enabled (start: {delay_levels[current_delay_level]:.0f}s)", flush=True)
+        
         status = {
             'success': True,
             'complete': True,
@@ -444,27 +457,12 @@ async def fetch_redemptions_for_market_async(
                 # First request for very large market - no delay but log it
                 print(f"      📡 Sending initial request (batch size: {current_batch_size})...", flush=True)
             elif is_very_large_market and request_count > 1:  # Apply delay before 2nd, 3rd, etc requests
-                # SEQUENTIAL PROCESSING: Always wait between requests
-                # Adaptive delay based on PREVIOUS server response time
-                # Longer delays for slower responses = server is struggling
-                if last_request_duration > 60:
-                    # Extremely slow response (>60s) → very long rest
-                    adaptive_delay = 10.0
-                    print(f"      ⏳ Server was slow ({last_request_duration:.0f}s) - waiting {adaptive_delay:.0f}s before next request...", flush=True)
-                elif last_request_duration > 30:
-                    # Very slow response (>30s) → long rest
-                    adaptive_delay = 6.0
-                    print(f"      ⏳ Server processing ({last_request_duration:.0f}s) - waiting {adaptive_delay:.0f}s...", flush=True)
-                elif last_request_duration > 15:
-                    # Slow response (15-30s) → medium rest
-                    adaptive_delay = 4.0
-                    print(f"      ⏳ Waiting {adaptive_delay:.0f}s before next request...", flush=True)
-                elif last_request_duration > 5:
-                    # Moderate response (5-15s) → normal rest
-                    adaptive_delay = 2.5
-                else:
-                    # Fast response (<5s) or first request → minimum rest
-                    adaptive_delay = 2.0
+                # 🎯 SMART DELAY ADAPTATION: Use current delay level
+                adaptive_delay = delay_levels[current_delay_level]
+                
+                # Show delay info based on level
+                if current_delay_level > 0:
+                    print(f"      ⏳ Waiting {adaptive_delay:.0f}s (delay level {current_delay_level+1}/{len(delay_levels)})...", flush=True)
                 
                 await asyncio.sleep(adaptive_delay)
             elif batch_size_reduced and current_batch_size <= 250 and request_count > 1:
@@ -539,76 +537,131 @@ async def fetch_redemptions_for_market_async(
                                 graphql_error_retries += 1
                                 timeout_history.append(True)  # Record timeout
                                 
-                                # SMART PATTERN ANALYSIS
-                                pattern = analyze_timeout_pattern()
-                                
-                                # ADAPTIVE PAGINATION with pattern detection
-                                should_reduce_batch = False
-                                
-                                # Strategy 1: Immediate reduction after 2 consecutive failures
-                                # (This is the proven strategy from old algorithm)
-                                if current_batch_size > MIN_BATCH_SIZE and graphql_error_retries >= 2:
-                                    should_reduce_batch = True
-                                    reduction_reason = f"2 consecutive timeouts"
-                                
-                                # Strategy 2: Pattern-based reduction (only if 70%+ timeout rate AND min 5 samples)
-                                # More conservative - only kicks in for persistent problems
-                                elif pattern['should_reduce'] and len(timeout_history) >= 5 and current_batch_size > MIN_BATCH_SIZE:
-                                    should_reduce_batch = True
-                                    reduction_reason = f"high timeout rate ({pattern['timeout_rate']*100:.0f}%)"
-                                
-                                # Strategy 3: Critical situation - increase retry delay (CONSERVATIVE)
-                                # Only activate in extreme cases (90%+ failure rate) with enough samples
-                                if pattern['is_critical'] and len(timeout_history) >= 7:
-                                    new_multiplier = min(retry_delay_multiplier * 1.2, 2.0)  # Max 2x (less aggressive)
-                                    if new_multiplier > retry_delay_multiplier:
-                                        retry_delay_multiplier = new_multiplier
-                                        print(f"\n      🚨 CRITICAL: {pattern['recent_timeouts']}/{len(timeout_history)} recent timeouts!")
-                                        print(f"         Increasing retry delay multiplier: {retry_delay_multiplier:.1f}x")
-                                
-                                if should_reduce_batch:
-                                    # Reduce batch size
-                                    new_batch_size = max(current_batch_size // BATCH_SIZE_REDUCTION_FACTOR, MIN_BATCH_SIZE)
+                                # 🎯 NEW: Different strategy for very large markets (>$300M)
+                                if is_very_large_market:
+                                    # STRATEGY: First increase delay (up to 10 attempts), THEN reduce batch size
                                     
-                                    print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
-                                    print(f"         Error: {error_msg[:150]}")
-                                    print(f"         📉 ADAPTIVE: Reducing batch size {current_batch_size} → {new_batch_size} ({reduction_reason})")
-                                    if pattern['timeout_rate'] > 0:
-                                        print(f"         📊 Pattern: {pattern['recent_timeouts']}/{len(timeout_history)} recent requests had timeouts")
-                                    print(f"         🔄 Retrying with smaller batch...", flush=True)
+                                    # Reset consecutive successes (we had a failure)
+                                    consecutive_successes = 0
                                     
-                                    current_batch_size = new_batch_size
-                                    batch_size_reduced = True
-                                    status['adaptive_pagination_used'] = True
+                                    # Check if we can increase delay level
+                                    can_increase_delay = (current_delay_level < len(delay_levels) - 1 and 
+                                                         delay_increase_attempts < 10)
                                     
-                                    # Reset retry counter for new batch size attempt
-                                    graphql_error_retries = 0
-                                    # DON'T clear timeout_history - we need it for pattern detection!
-                                    # timeout_history keeps accumulating to detect persistent problems
-                                    # Only reset multiplier if we're not in critical mode
-                                    if not pattern['is_critical']:
-                                        retry_delay_multiplier = 1.0  # Reset multiplier only if not critical
-                                    
-                                    await asyncio.sleep(2)  # Short pause before retry
-                                    continue  # Retry with new batch size
-                                else:
-                                    # Normal exponential backoff retry with dynamic multiplier
-                                    base_delay = INITIAL_RETRY_DELAY * (2 ** (graphql_error_retries - 1))
-                                    retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
-                                    
-                                    print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
-                                    print(f"         Error: {error_msg[:150]}")
-                                    if batch_size_reduced:
-                                        print(f"         Current batch size: {current_batch_size}")
-                                    if pattern['timeout_rate'] > 0.3:
-                                        print(f"         📊 Pattern: {pattern['recent_timeouts']}/{len(timeout_history)} recent timeouts ({pattern['timeout_rate']*100:.0f}%)")
-                                    if retry_delay_multiplier > 1.0:
-                                        print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
+                                    if can_increase_delay:
+                                        # Increase delay level instead of reducing batch size
+                                        old_level = current_delay_level
+                                        current_delay_level += 1
+                                        delay_increase_attempts += 1
+                                        
+                                        print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                                        print(f"         Error: {error_msg[:150]}")
+                                        print(f"         📈 SMART DELAY: Increasing delay level {old_level+1} → {current_delay_level+1} ({delay_levels[old_level]:.0f}s → {delay_levels[current_delay_level]:.0f}s)")
+                                        print(f"         📊 Delay increase attempts: {delay_increase_attempts}/10 (batch size unchanged: {current_batch_size})")
+                                        print(f"         🔄 Retrying with longer delay...", flush=True)
+                                        
+                                        # Short pause before retry
+                                        await asyncio.sleep(2)
+                                        continue  # Retry with increased delay
                                     else:
-                                        print(f"         🔄 Retrying in {retry_delay:.0f}s (exponential backoff)...", flush=True)
+                                        # Exhausted delay increases (10 attempts) - now reduce batch size
+                                        if current_batch_size > MIN_BATCH_SIZE:
+                                            new_batch_size = max(current_batch_size // BATCH_SIZE_REDUCTION_FACTOR, MIN_BATCH_SIZE)
+                                            
+                                            print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                                            print(f"         Error: {error_msg[:150]}")
+                                            print(f"         📉 BATCH REDUCTION: Max delay reached, reducing batch size {current_batch_size} → {new_batch_size}")
+                                            print(f"         📊 Delay increases exhausted (10/10), max delay level: {current_delay_level+1}/{len(delay_levels)}")
+                                            print(f"         🔄 Retrying with smaller batch...", flush=True)
+                                            
+                                            current_batch_size = new_batch_size
+                                            batch_size_reduced = True
+                                            status['adaptive_pagination_used'] = True
+                                            
+                                            # Reset delay adaptation counters for new batch size
+                                            delay_increase_attempts = 0
+                                            current_delay_level = 0  # Start from minimum delay with new batch size
+                                            
+                                            await asyncio.sleep(2)
+                                            continue  # Retry with new batch size
+                                        else:
+                                            # Can't reduce batch size further - normal retry
+                                            base_delay = INITIAL_RETRY_DELAY * (2 ** (graphql_error_retries - 1))
+                                            retry_delay = min(base_delay, MAX_RETRY_DELAY)
+                                            
+                                            print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                                            print(f"         Error: {error_msg[:150]}")
+                                            print(f"         Current batch size: {current_batch_size} (minimum)")
+                                            print(f"         🔄 Retrying in {retry_delay:.0f}s...", flush=True)
+                                            
+                                            await asyncio.sleep(retry_delay)
+                                            continue
+                                else:
+                                    # OLD STRATEGY: For smaller markets, use original logic
+                                    # SMART PATTERN ANALYSIS
+                                    pattern = analyze_timeout_pattern()
                                     
-                                    await asyncio.sleep(retry_delay)
-                                    continue  # Retry the request
+                                    # ADAPTIVE PAGINATION with pattern detection
+                                    should_reduce_batch = False
+                                    
+                                    # Strategy 1: Immediate reduction after 2 consecutive failures
+                                    if current_batch_size > MIN_BATCH_SIZE and graphql_error_retries >= 2:
+                                        should_reduce_batch = True
+                                        reduction_reason = f"2 consecutive timeouts"
+                                    
+                                    # Strategy 2: Pattern-based reduction (only if 70%+ timeout rate AND min 5 samples)
+                                    elif pattern['should_reduce'] and len(timeout_history) >= 5 and current_batch_size > MIN_BATCH_SIZE:
+                                        should_reduce_batch = True
+                                        reduction_reason = f"high timeout rate ({pattern['timeout_rate']*100:.0f}%)"
+                                    
+                                    # Strategy 3: Critical situation - increase retry delay
+                                    if pattern['is_critical'] and len(timeout_history) >= 7:
+                                        new_multiplier = min(retry_delay_multiplier * 1.2, 2.0)
+                                        if new_multiplier > retry_delay_multiplier:
+                                            retry_delay_multiplier = new_multiplier
+                                            print(f"\n      🚨 CRITICAL: {pattern['recent_timeouts']}/{len(timeout_history)} recent timeouts!")
+                                            print(f"         Increasing retry delay multiplier: {retry_delay_multiplier:.1f}x")
+                                    
+                                    if should_reduce_batch:
+                                        # Reduce batch size
+                                        new_batch_size = max(current_batch_size // BATCH_SIZE_REDUCTION_FACTOR, MIN_BATCH_SIZE)
+                                        
+                                        print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                                        print(f"         Error: {error_msg[:150]}")
+                                        print(f"         📉 ADAPTIVE: Reducing batch size {current_batch_size} → {new_batch_size} ({reduction_reason})")
+                                        if pattern['timeout_rate'] > 0:
+                                            print(f"         📊 Pattern: {pattern['recent_timeouts']}/{len(timeout_history)} recent requests had timeouts")
+                                        print(f"         🔄 Retrying with smaller batch...", flush=True)
+                                        
+                                        current_batch_size = new_batch_size
+                                        batch_size_reduced = True
+                                        status['adaptive_pagination_used'] = True
+                                        
+                                        # Reset retry counter for new batch size attempt
+                                        graphql_error_retries = 0
+                                        if not pattern['is_critical']:
+                                            retry_delay_multiplier = 1.0
+                                        
+                                        await asyncio.sleep(2)
+                                        continue
+                                    else:
+                                        # Normal exponential backoff retry
+                                        base_delay = INITIAL_RETRY_DELAY * (2 ** (graphql_error_retries - 1))
+                                        retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
+                                        
+                                        print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                                        print(f"         Error: {error_msg[:150]}")
+                                        if batch_size_reduced:
+                                            print(f"         Current batch size: {current_batch_size}")
+                                        if pattern['timeout_rate'] > 0.3:
+                                            print(f"         📊 Pattern: {pattern['recent_timeouts']}/{len(timeout_history)} recent timeouts ({pattern['timeout_rate']*100:.0f}%)")
+                                        if retry_delay_multiplier > 1.0:
+                                            print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
+                                        else:
+                                            print(f"         🔄 Retrying in {retry_delay:.0f}s (exponential backoff)...", flush=True)
+                                        
+                                        await asyncio.sleep(retry_delay)
+                                        continue
                             else:
                                 # Non-retryable error or exhausted retries
                                 if is_timeout:
@@ -634,6 +687,18 @@ async def fetch_redemptions_for_market_async(
                         else:
                             # First-time success, no timeout
                             timeout_history.append(False)
+                        
+                        # 🎯 NEW: Track consecutive successes for very large markets
+                        if is_very_large_market:
+                            consecutive_successes += 1
+                            
+                            # After 5+ consecutive successes, decrease delay level (if possible)
+                            if consecutive_successes >= 5 and current_delay_level > 0:
+                                old_level = current_delay_level
+                                current_delay_level -= 1
+                                consecutive_successes = 0  # Reset counter
+                                
+                                print(f"      ✅ 5+ successes! Decreasing delay level {old_level+1} → {current_delay_level+1} ({delay_levels[old_level]:.0f}s → {delay_levels[current_delay_level]:.0f}s)", flush=True)
                         
                         # Show success message if we recovered from GraphQL errors
                         if graphql_error_retries > 0:
