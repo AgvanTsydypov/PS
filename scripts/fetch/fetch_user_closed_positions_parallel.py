@@ -28,6 +28,9 @@ Uses parallel processing with rate limiting and connection pooling
 8. Фильтрация по названию рынка:
    python fetch_user_closed_positions_parallel.py --local --title "Trump"
 
+9. Низкое потребление памяти (для слабых компьютеров, батчи по 5000 записей):
+   python fetch_user_closed_positions_parallel.py --upload --local --db-batch 5000
+
 ТРЕБОВАНИЯ:
 ===========
 - Python 3.8+
@@ -49,6 +52,7 @@ API LIMITS:
 
 Features:
 - ⚡ Параллельная обработка user-market пар (5 workers по умолчанию)
+- 🧠 Memory-efficient batch processing (server-side cursor для больших датасетов)
 - 🎯 Автоматическая фильтрация по рынкам из SQL запроса
 - 🔄 Автоматический rate limiting (145 req/10s optimized limit)
 - 🔁 Connection pooling для эффективного использования соединений
@@ -56,6 +60,7 @@ Features:
 - 📦 Batch загрузка в БД (каждые 100 записей)
 - 📊 Real-time прогресс и статистика
 - 💾 Поддержка Supabase и локальной PostgreSQL
+- 💻 Работает на слабых компьютерах (низкое потребление RAM)
 """
 
 import requests
@@ -92,6 +97,7 @@ API_BASE_URL = "https://data-api.polymarket.com/v1"
 DEFAULT_WORKERS = 5  # Conservative default (API limit: 150/10s)
 DEFAULT_POSITIONS_PER_USER = 50
 BATCH_SIZE = 100  # How many records to upload to DB at once
+DB_FETCH_BATCH_SIZE = 10000  # How many redeemer records to fetch from DB at once (memory optimization)
 
 # Rate limiting: 150 req/10s, use 145 req/10s for higher speed
 RATE_LIMIT_MAX = 150
@@ -328,13 +334,21 @@ def transform_closed_position(position: Dict) -> Dict:
 # DATABASE FUNCTIONS
 # ==========================================
 
-def get_redeemers_from_db(use_local_db: bool = False, limit: Optional[int] = None) -> List[Dict]:
+def get_redeemers_from_db_generator(use_local_db: bool = False, limit: Optional[int] = None, batch_size: int = DB_FETCH_BATCH_SIZE):
     """
-    Query database using the SQL from lowest_XXXm_event_redeemers.sql
-    Returns list of dicts with event_id, condition_id, event_title, redeemer_address
+    Generator that yields batches of redeemer records from database
+    Memory-efficient: uses server-side cursor to avoid loading all data at once
+    
+    Args:
+        use_local_db: Use local PostgreSQL instead of Supabase
+        limit: Optional limit on total records
+        batch_size: Number of records to fetch per batch
+    
+    Yields:
+        Batches of redeemer dicts (each batch is a list)
     """
     print("=" * 70)
-    print("📊 QUERYING DATABASE FOR REDEEMERS")
+    print("📊 QUERYING DATABASE FOR REDEEMERS (BATCH MODE)")
     print("=" * 70)
     
     # Read SQL query from file
@@ -346,12 +360,13 @@ def get_redeemers_from_db(use_local_db: bool = False, limit: Optional[int] = Non
         sql_query = f.read()
     
     print(f"📄 Using SQL query from: {sql_file}")
+    print(f"🧠 Memory optimization: Fetching in batches of {batch_size:,} records")
     
     # Get database connection parameters
     uploader = SupabaseUploader(use_local_db=use_local_db)
     
     if use_local_db:
-        # Use local PostgreSQL
+        # Use local PostgreSQL with server-side cursor
         import psycopg2
         import psycopg2.extras
         
@@ -360,28 +375,46 @@ def get_redeemers_from_db(use_local_db: bool = False, limit: Optional[int] = Non
         print(f"   Host: {uploader.connection_params['host']}:{uploader.connection_params['port']}")
         
         conn = psycopg2.connect(**uploader.connection_params)
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Use named cursor for server-side cursor (doesn't load all data into memory)
+        cursor_name = f"redeemers_cursor_{int(time.time())}"
+        cursor = conn.cursor(cursor_name, cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Set fetch size for efficient batch reading
+        cursor.itersize = batch_size
         
         try:
+            print(f"🔍 Executing query (server-side cursor)...")
             cursor.execute(sql_query)
-            results = cursor.fetchall()
             
-            # Convert to list of dicts
-            redeemers = [dict(row) for row in results]
+            total_fetched = 0
+            batch_num = 0
             
-            print(f"✅ Found {len(redeemers)} redeemer records (user-market pairs)")
+            while True:
+                # Fetch a batch
+                batch = cursor.fetchmany(batch_size)
+                
+                if not batch:
+                    break
+                
+                batch_num += 1
+                total_fetched += len(batch)
+                
+                # Convert to list of dicts
+                batch_records = [dict(row) for row in batch]
+                
+                # Apply limit if specified
+                if limit and total_fetched > limit:
+                    overflow = total_fetched - limit
+                    batch_records = batch_records[:-overflow]
+                    print(f"✅ Batch {batch_num}: Fetched {len(batch_records):,} records (limit reached: {limit:,} total)")
+                    yield batch_records
+                    break
+                
+                print(f"✅ Batch {batch_num}: Fetched {len(batch_records):,} records (total so far: {total_fetched:,})")
+                yield batch_records
             
-            # Show statistics
-            unique_users = len(set(r['redeemer_address'] for r in redeemers))
-            unique_markets = len(set(r['condition_id'] for r in redeemers))
-            print(f"   • Unique users: {unique_users}")
-            print(f"   • Unique markets: {unique_markets}")
-            
-            if limit:
-                redeemers = redeemers[:limit]
-                print(f"⚠️  Limited to first {limit} redeemer records")
-            
-            return redeemers
+            print(f"🏁 Total records fetched: {total_fetched:,}")
             
         finally:
             cursor.close()
@@ -390,7 +423,7 @@ def get_redeemers_from_db(use_local_db: bool = False, limit: Optional[int] = Non
     else:
         print("⚠️  WARNING: Supabase mode requires local PostgreSQL for complex queries")
         print("   Please use --local flag")
-        return []
+        return
 
 
 def upload_closed_positions_batch(uploader: SupabaseUploader, positions: List[Dict]) -> bool:
@@ -652,73 +685,80 @@ class ParallelPositionsFetcher:
                 self.failed_users.append((user_address, market_override))
             return (0, True)
     
-    def process_all_users(self, user_records: List[Dict]):
+    def process_all_users(self, user_records: List[Dict], show_header: bool = True):
         """
         Process all user-market pairs in parallel
         
         Args:
             user_records: List of dicts with 'redeemer_address' and optionally 'condition_id'
+            show_header: Whether to show the configuration header (use False for batch processing)
         """
-        self.stats['start_time'] = datetime.now()
-        self.stats['total_users'] = len(user_records)
+        # Initialize start time only if not already set
+        if self.stats['start_time'] is None:
+            self.stats['start_time'] = datetime.now()
         
-        print("\n" + "=" * 70)
-        print("🚀 PARALLEL FETCHING CLOSED POSITIONS")
-        print("=" * 70)
-        print(f"📋 Configuration:")
-        print(f"   • Total records to process: {len(user_records)}")
+        # Add to total users count (for batch processing)
+        self.stats['total_users'] += len(user_records)
+        
+        if show_header:
+            print("\n" + "=" * 70)
+            print("🚀 PARALLEL FETCHING CLOSED POSITIONS")
+            print("=" * 70)
+        
+        print(f"📋 Processing {len(user_records):,} records in this batch")
         
         # Check if we have market filtering from SQL query
         has_market_from_sql = any('condition_id' in r and r.get('condition_id') for r in user_records)
         if has_market_from_sql:
             unique_users = len(set(r['redeemer_address'] for r in user_records))
             unique_markets = len(set(r.get('condition_id') for r in user_records if r.get('condition_id')))
-            print(f"   • User-Market pairs (from SQL query)")
-            print(f"   • Unique users: {unique_users}")
-            print(f"   • Unique markets: {unique_markets}")
+            print(f"   • User-Market pairs: {len(user_records):,}")
+            print(f"   • Unique users: {unique_users:,}")
+            print(f"   • Unique markets: {unique_markets:,}")
         else:
             unique_users = len(set(r['redeemer_address'] for r in user_records))
-            print(f"   • Unique users: {unique_users}")
+            print(f"   • Unique users: {unique_users:,}")
         
-        print(f"   • Positions per query: {self.positions_per_user}")
-        print(f"   • Parallel workers: {self.max_workers}")
-        print(f"   • Upload to DB: {'YES' if self.upload else 'NO (preview only)'}")
-        if self.upload:
-            print(f"   • Database: {'Local PostgreSQL' if self.use_local_db else 'Supabase'}")
-        print(f"   • Connection Pooling: ENABLED ✅")
-        print(f"   • Rate Limiting: ENABLED ✅ ({RATE_LIMIT_SAFE}/{RATE_LIMIT_WINDOW}s safe limit)")
-        
-        # Show active filters
-        if self.market_filter or self.title_filter or self.event_id_filter or has_market_from_sql:
-            print(f"\n🔍 Active Filters:")
-            if has_market_from_sql:
-                print(f"   • Markets: From SQL query (user-specific)")
-            elif self.market_filter:
-                print(f"   • Markets: {', '.join(self.market_filter[:3])}{'...' if len(self.market_filter) > 3 else ''}")
-            if self.title_filter:
-                print(f"   • Title: '{self.title_filter}'")
-            if self.event_id_filter:
-                print(f"   • Event IDs: {', '.join(map(str, self.event_id_filter))}")
-        
-        # Estimate time
-        if self.positions_per_user > 100:
-            requests_per_user = (self.positions_per_user // 50) + 1
-            # Rate limiter allows ~14.5 req/s (145/10s)
-            req_per_second = RATE_LIMIT_SAFE / RATE_LIMIT_WINDOW
-            seconds_per_user = requests_per_user / req_per_second
-            total_seconds = (len(user_records) * seconds_per_user) / self.max_workers
-            total_minutes = total_seconds / 60
+        if show_header:
+            print(f"   • Positions per query: {self.positions_per_user}")
+            print(f"   • Parallel workers: {self.max_workers}")
+            print(f"   • Upload to DB: {'YES' if self.upload else 'NO (preview only)'}")
+            if self.upload:
+                print(f"   • Database: {'Local PostgreSQL' if self.use_local_db else 'Supabase'}")
+            print(f"   • Connection Pooling: ENABLED ✅")
+            print(f"   • Rate Limiting: ENABLED ✅ ({RATE_LIMIT_SAFE}/{RATE_LIMIT_WINDOW}s safe limit)")
             
-            print(f"\n⏱️  ESTIMATED TIME:")
-            print(f"   Requests per query: ~{requests_per_user}")
-            if total_minutes >= 60:
-                print(f"   Estimated time: ~{total_minutes/60:.1f} hours")
-            elif total_minutes >= 1:
-                print(f"   Estimated time: ~{total_minutes:.1f} minutes")
-            else:
-                print(f"   Estimated time: ~{total_seconds:.0f} seconds")
-        
-        print("=" * 70)
+            # Show active filters
+            if self.market_filter or self.title_filter or self.event_id_filter or has_market_from_sql:
+                print(f"\n🔍 Active Filters:")
+                if has_market_from_sql:
+                    print(f"   • Markets: From SQL query (user-specific)")
+                elif self.market_filter:
+                    print(f"   • Markets: {', '.join(self.market_filter[:3])}{'...' if len(self.market_filter) > 3 else ''}")
+                if self.title_filter:
+                    print(f"   • Title: '{self.title_filter}'")
+                if self.event_id_filter:
+                    print(f"   • Event IDs: {', '.join(map(str, self.event_id_filter))}")
+            
+            # Estimate time
+            if self.positions_per_user > 100:
+                requests_per_user = (self.positions_per_user // 50) + 1
+                # Rate limiter allows ~14.5 req/s (145/10s)
+                req_per_second = RATE_LIMIT_SAFE / RATE_LIMIT_WINDOW
+                seconds_per_user = requests_per_user / req_per_second
+                total_seconds = (len(user_records) * seconds_per_user) / self.max_workers
+                total_minutes = total_seconds / 60
+                
+                print(f"\n⏱️  ESTIMATED TIME:")
+                print(f"   Requests per query: ~{requests_per_user}")
+                if total_minutes >= 60:
+                    print(f"   Estimated time: ~{total_minutes/60:.1f} hours")
+                elif total_minutes >= 1:
+                    print(f"   Estimated time: ~{total_minutes:.1f} minutes")
+                else:
+                    print(f"   Estimated time: ~{total_seconds:.0f} seconds")
+            
+            print("=" * 70)
         print()
         
         # Process users in parallel
@@ -944,6 +984,9 @@ Examples:
   
   # Filter by market title
   python fetch_user_closed_positions_parallel.py --local --title "Trump"
+  
+  # Low memory mode for weak computers (smaller batches)
+  python fetch_user_closed_positions_parallel.py --upload --local --db-batch 5000
         """
     )
     
@@ -1009,6 +1052,13 @@ Examples:
         help='Filter by event IDs (space-separated list). Cannot be used with --market'
     )
     
+    parser.add_argument(
+        '--db-batch',
+        type=int,
+        default=DB_FETCH_BATCH_SIZE,
+        help=f'Batch size for fetching redeemers from DB (default: {DB_FETCH_BATCH_SIZE:,}). Lower value = less memory usage'
+    )
+    
     args = parser.parse_args()
     
     # Validate that market and event-id are not used together
@@ -1034,6 +1084,7 @@ Examples:
         print(f"User limit: {args.limit}")
     print(f"Positions per user: {args.positions}")
     print(f"Parallel workers: {args.workers}")
+    print(f"DB batch size: {args.db_batch:,} records (memory optimization)")
     
     # Show active filters
     if args.market or args.title or args.event_id:
@@ -1048,21 +1099,7 @@ Examples:
     print("=" * 70)
     
     try:
-        # Step 1: Get redeemers from database
-        redeemers = get_redeemers_from_db(
-            use_local_db=args.local,
-            limit=args.limit
-        )
-        
-        if not redeemers:
-            print("\n❌ No redeemers found in database")
-            print("💡 Make sure:")
-            print("   1. Your database is properly configured in .env")
-            print("   2. The redemptions and events tables have data")
-            print("   3. There are events with volume > 100,000,000")
-            return
-        
-        # Step 2: Create parallel fetcher
+        # Step 1: Create parallel fetcher
         fetcher = ParallelPositionsFetcher(
             max_workers=args.workers,
             positions_per_user=args.positions,
@@ -1074,14 +1111,53 @@ Examples:
             event_id_filter=args.event_id
         )
         
-        # Step 3: Process all user-market pairs
-        # The redeemers list contains dicts with 'redeemer_address' and 'condition_id'
-        fetcher.process_all_users(redeemers)
+        # Step 2: Process redeemers in batches (memory-efficient)
+        batch_generator = get_redeemers_from_db_generator(
+            use_local_db=args.local,
+            limit=args.limit,
+            batch_size=args.db_batch
+        )
         
-        # Step 4: Print summary
+        total_processed = 0
+        batch_count = 0
+        has_data = False
+        
+        print("\n" + "=" * 70)
+        print("🚀 STARTING BATCH PROCESSING")
+        print("=" * 70)
+        
+        for batch in batch_generator:
+            has_data = True
+            batch_count += 1
+            
+            if not batch:
+                continue
+            
+            print(f"\n{'='*70}")
+            print(f"📦 Processing Batch {batch_count} ({len(batch):,} records)")
+            print(f"{'='*70}")
+            
+            # Process this batch (show header only for first batch)
+            fetcher.process_all_users(batch, show_header=(batch_count == 1))
+            
+            total_processed += len(batch)
+            print(f"\n✅ Batch {batch_count} completed. Total processed so far: {total_processed:,}")
+        
+        if not has_data:
+            print("\n❌ No redeemers found in database")
+            print("💡 Make sure:")
+            print("   1. Your database is properly configured in .env")
+            print("   2. The redemptions and events tables have data")
+            print("   3. There are events with volume > 100,000,000")
+            return
+        
+        # Step 3: Print summary
+        print("\n" + "=" * 70)
+        print("🏁 ALL BATCHES COMPLETED")
+        print("=" * 70)
         fetcher.print_summary()
         
-        # Step 5: Cleanup
+        # Step 4: Cleanup
         fetcher.close()
         
         print("\n✅ Process completed successfully!")
