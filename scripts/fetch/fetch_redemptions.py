@@ -43,6 +43,12 @@ Features:
   * Token Bucket алгоритм - точно 9 RPS
   * Lock не держится во время sleep - полная параллельность
   * Автоматическое распределение временных слотов
+- 🔒 EXCLUSIVE MODE для тяжелых маркетов (>$300M):
+  * Останавливает ВСЕ другие маркеты
+  * ПОСЛЕДОВАТЕЛЬНАЯ обработка: ждет ответа от предыдущего запроса
+  * Адаптивные задержки между запросами: 2-10 секунд (зависит от скорости ответа сервера)
+  * НЕ перегружает API множеством параллельных запросов
+  * Результат: стабильная обработка самых крупных маркетов
 - Intelligent Immediate Retry System:
   * 5 попыток с экспоненциальной задержкой (3s → 6s → 12s → 24s → 48s)
   * Retry СРАЗУ при ошибке, не откладывая на потом
@@ -51,9 +57,9 @@ Features:
 - 🎯 SMART ADAPTIVE PAGINATION (Умная адаптивная пагинация):
   * Начинает с 1000 redemptions за запрос (максимум)
   * Sliding window tracking: отслеживает последние 10 запросов
-  * Pattern detection: если 60%+ timeout'ов → автоуменьшение batch size
-  * Critical mode: если 80%+ timeout'ов → увеличивает retry delay (до 3x)
-  * Прогрессивное уменьшение: 1000 → 500 → 250 → 125 → 62 → 50
+  * Pattern detection: если 70%+ timeout'ов → автоуменьшение batch size
+  * Critical mode: если 90%+ timeout'ов → увеличивает retry delay (до 2x)
+  * Прогрессивное уменьшение: 1000 → 500 → 250 → 125 → 100
   * Динамическое восстановление: постепенно снижает delay при успехе
   * Результат: быстрые маркеты на максимуме | проблемные находят оптимум
 - Параллельная обработка маркетов (20-30 concurrent)
@@ -396,9 +402,10 @@ async def fetch_redemptions_for_market_async(
         current_batch_size = INITIAL_BATCH_SIZE  # Start with 1000, adaptively reduce on errors
         batch_size_reduced = False  # Track if we've reduced batch size
         
-        # Check if this is a very large market (>$1B) - needs special handling
+        # Check if this is a very large market (>$300M) - needs special handling
+        # These markets get EXCLUSIVE ACCESS and SEQUENTIAL request processing
         market_volume = float(market_info.get('volume', 0) or 0)
-        is_very_large_market = market_volume > 100_000_000  # $1B+ volume
+        is_very_large_market = market_volume > 300_000_000  # $300M+ volume (matches exclusive mode threshold)
         
         # Pattern tracking for smart adaptation
         timeout_history = deque(maxlen=TIMEOUT_WINDOW_SIZE)  # Track last N requests: True=timeout, False=success
@@ -430,6 +437,48 @@ async def fetch_redemptions_for_market_async(
         
         while True:
             request_count += 1
+            
+            # 🎯 IMPORTANT: Apply delay BEFORE making request (not after)
+            # This ensures EVERY request (except first) has proper spacing
+            if is_very_large_market and request_count == 1:
+                # First request for very large market - no delay but log it
+                print(f"      📡 Sending initial request (batch size: {current_batch_size})...", flush=True)
+            elif is_very_large_market and request_count > 1:  # Apply delay before 2nd, 3rd, etc requests
+                # SEQUENTIAL PROCESSING: Always wait between requests
+                # Adaptive delay based on PREVIOUS server response time
+                # Longer delays for slower responses = server is struggling
+                if last_request_duration > 60:
+                    # Extremely slow response (>60s) → very long rest
+                    adaptive_delay = 10.0
+                    print(f"      ⏳ Server was slow ({last_request_duration:.0f}s) - waiting {adaptive_delay:.0f}s before next request...", flush=True)
+                elif last_request_duration > 30:
+                    # Very slow response (>30s) → long rest
+                    adaptive_delay = 6.0
+                    print(f"      ⏳ Server processing ({last_request_duration:.0f}s) - waiting {adaptive_delay:.0f}s...", flush=True)
+                elif last_request_duration > 15:
+                    # Slow response (15-30s) → medium rest
+                    adaptive_delay = 4.0
+                    print(f"      ⏳ Waiting {adaptive_delay:.0f}s before next request...", flush=True)
+                elif last_request_duration > 5:
+                    # Moderate response (5-15s) → normal rest
+                    adaptive_delay = 2.5
+                else:
+                    # Fast response (<5s) or first request → minimum rest
+                    adaptive_delay = 2.0
+                
+                await asyncio.sleep(adaptive_delay)
+            elif batch_size_reduced and current_batch_size <= 250 and request_count > 1:
+                # Smart adaptive delay for problematic markets (batch size reduced)
+                if last_request_duration > 30:
+                    adaptive_delay = 2.5
+                elif last_request_duration > 15:
+                    adaptive_delay = 2.0
+                elif last_request_duration > 5:
+                    adaptive_delay = 1.5
+                else:
+                    adaptive_delay = 1.0
+                
+                await asyncio.sleep(adaptive_delay)
             
             # Build query with current batch size
             query = f"""
@@ -648,29 +697,8 @@ async def fetch_redemptions_for_market_async(
                             print(f"      ⚠️  Reached safety limit of 500k redemptions")
                             break
                         
-                        # Smart adaptive delay between pagination requests for problematic markets
-                        # Wait for server to finish processing before sending next request
-                        # Apply delay if:
-                        # 1. Batch size was reduced (problematic market detected) OR
-                        # 2. Very large market (>$1B) from the start (preventive)
-                        if (batch_size_reduced and current_batch_size <= 250) or is_very_large_market:
-                            # Adaptive delay based on server response time
-                            # If server took long → give it more rest time
-                            # If server was fast → shorter rest time
-                            if last_request_duration > 30:
-                                # Very slow response (>30s) → long rest
-                                adaptive_delay = 2.5
-                            elif last_request_duration > 15:
-                                # Slow response (15-30s) → medium rest
-                                adaptive_delay = 2.0
-                            elif last_request_duration > 5:
-                                # Moderate response (5-15s) → normal rest
-                                adaptive_delay = 1.5
-                            else:
-                                # Fast response (<5s) → short rest
-                                adaptive_delay = 1.0
-                            
-                            await asyncio.sleep(adaptive_delay)
+                        # Delay is now applied at the START of next iteration (before request)
+                        # See delay logic at the beginning of while loop
                             
                 except asyncio.TimeoutError:
                     retry_count += 1
@@ -795,8 +823,10 @@ async def process_market_async(
                 print(f"      Market: {question}")
                 print(f"      Volume: ${market_volume:,.0f}")
                 print(f"      All other markets are paused")
+                print(f"      ⏳ SEQUENTIAL PROCESSING: Each request waits for previous to complete")
                 
                 # Fetch redemptions with exclusive API access
+                # Requests are made SEQUENTIALLY with adaptive delays (see fetch function)
                 fetch_start = time.time()
                 redemptions, fetch_status = await fetch_redemptions_for_market_async(session, condition_id, market, semaphore, rate_limiter, use_local_db)
                 
