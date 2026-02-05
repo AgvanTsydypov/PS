@@ -349,6 +349,10 @@ async def fetch_redemptions_for_market_async(
         current_batch_size = INITIAL_BATCH_SIZE  # Start with 1000, adaptively reduce on errors
         batch_size_reduced = False  # Track if we've reduced batch size
         
+        # Check if this is a very large market (>$1B) - needs special handling
+        market_volume = float(market_info.get('volume', 0) or 0)
+        is_very_large_market = market_volume > 100_000_000  # $1B+ volume
+        
         # Pattern tracking for smart adaptation
         timeout_history = deque(maxlen=TIMEOUT_WINDOW_SIZE)  # Track last N requests: True=timeout, False=success
         retry_delay_multiplier = 1.0  # Start normal, can increase in critical situations
@@ -599,7 +603,10 @@ async def fetch_redemptions_for_market_async(
                         
                         # Smart adaptive delay between pagination requests for problematic markets
                         # Wait for server to finish processing before sending next request
-                        if batch_size_reduced and current_batch_size <= 250:
+                        # Apply delay if:
+                        # 1. Batch size was reduced (problematic market detected) OR
+                        # 2. Very large market (>$1B) from the start (preventive)
+                        if (batch_size_reduced and current_batch_size <= 250) or is_very_large_market:
                             # Adaptive delay based on server response time
                             # If server took long → give it more rest time
                             # If server was fast → shorter rest time
@@ -691,6 +698,10 @@ async def process_market_async(
     semaphore: asyncio.Semaphore,
     db_semaphore: asyncio.Semaphore,
     rate_limiter: GoldskyRateLimiter,
+    exclusive_market_lock: asyncio.Lock,
+    exclusive_market_active: Dict,
+    active_markets_count: Dict,
+    active_markets_condition: asyncio.Condition,
     use_local_db: bool = False
 ):
     """Process a single market: fetch and upload (with parallel upload support)"""
@@ -709,9 +720,67 @@ async def process_market_async(
         print(f"   Event ID: {market['event_id']}")
         print(f"   Volume: ${market['volume']:,.2f}")
         
-        # Fetch redemptions (track time)
-        fetch_start = time.time()
-        redemptions, fetch_status = await fetch_redemptions_for_market_async(session, condition_id, market, semaphore, rate_limiter, use_local_db)
+        # Check if this is a very large market that needs exclusive API access
+        market_volume = float(market.get('volume', 0) or 0)
+        needs_exclusive_access = market_volume > 300_000_000  # $300M+
+        
+        if needs_exclusive_access:
+            # LARGE MARKET: Wait for all active markets to finish, then get exclusive access
+            
+            # First, wait if another large market is already processing
+            if exclusive_market_active['active']:
+                print(f"   ⏸️  Waiting for exclusive access (currently: {exclusive_market_active['market_name']})...")
+                async with exclusive_market_lock:
+                    pass  # Wait for exclusive lock
+            
+            # Now wait for all currently active regular markets to finish
+            print(f"   ⏳ Large market detected (${market_volume:,.0f}) - waiting for active markets to finish...")
+            async with active_markets_condition:
+                while active_markets_count['count'] > 0:
+                    print(f"      ... waiting for {active_markets_count['count']} active market(s) to complete")
+                    await active_markets_condition.wait()
+            
+            # Now we have exclusive access - no other markets are running
+            async with exclusive_market_lock:
+                exclusive_market_active['active'] = True
+                exclusive_market_active['market_name'] = question[:40]
+                print(f"   🔒 EXCLUSIVE MODE ACTIVATED")
+                print(f"      Market: {question}")
+                print(f"      Volume: ${market_volume:,.0f}")
+                print(f"      All other markets are paused")
+                
+                # Fetch redemptions with exclusive API access
+                fetch_start = time.time()
+                redemptions, fetch_status = await fetch_redemptions_for_market_async(session, condition_id, market, semaphore, rate_limiter, use_local_db)
+                
+                exclusive_market_active['active'] = False
+                exclusive_market_active['market_name'] = None
+                print(f"   🔓 EXCLUSIVE MODE RELEASED - other markets can continue")
+        else:
+            # REGULAR MARKET: Check if we should wait for exclusive mode
+            
+            # Wait if a large market is processing (respect exclusive mode)
+            if exclusive_market_active['active']:
+                print(f"   ⏸️  Paused: Large market in progress ({exclusive_market_active['market_name']})...")
+                async with exclusive_market_lock:
+                    pass  # Wait for exclusive lock to be released
+                print(f"   ▶️  Resumed: Large market finished")
+            
+            # Register this market as active
+            async with active_markets_condition:
+                active_markets_count['count'] += 1
+            
+            try:
+                # Normal fetch without exclusive access
+                fetch_start = time.time()
+                redemptions, fetch_status = await fetch_redemptions_for_market_async(session, condition_id, market, semaphore, rate_limiter, use_local_db)
+            finally:
+                # Always decrement counter and notify waiting large markets
+                async with active_markets_condition:
+                    active_markets_count['count'] -= 1
+                    if active_markets_count['count'] == 0:
+                        # Notify any waiting large markets that all regular markets finished
+                        active_markets_condition.notify_all()
         fetch_elapsed = time.time() - fetch_start
         
         # Track if adaptive pagination was used
@@ -859,17 +928,16 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     # Setup logging to file
     log_file = setup_logging()
     
-    # Apply performance settings based on database type
+    # Use same performance settings regardless of database type
+    # Database type should NOT affect API request parameters
     global MAX_CONCURRENT_MARKETS, BATCH_SIZE, BATCH_DELAY
+    MAX_CONCURRENT_MARKETS = MAX_CONCURRENT_MARKETS_CLOUD  # Always use cloud settings
+    BATCH_SIZE = BATCH_SIZE_CLOUD
+    BATCH_DELAY = BATCH_DELAY_CLOUD
+    
     if use_local_db:
-        MAX_CONCURRENT_MARKETS = MAX_CONCURRENT_MARKETS_LOCAL
-        BATCH_SIZE = BATCH_SIZE_LOCAL
-        BATCH_DELAY = BATCH_DELAY_LOCAL
-        perf_mode = "🚀 TURBO MODE (Local PostgreSQL)"
+        perf_mode = "⚡ STANDARD MODE (Local PostgreSQL)"
     else:
-        MAX_CONCURRENT_MARKETS = MAX_CONCURRENT_MARKETS_CLOUD
-        BATCH_SIZE = BATCH_SIZE_CLOUD
-        BATCH_DELAY = BATCH_DELAY_CLOUD
         perf_mode = "⚡ STANDARD MODE (Supabase Cloud)"
     
     # Start timestamp
@@ -908,7 +976,13 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
         db_name = "LOCAL PostgreSQL" if use_local_db else "Supabase"
         print(f"🔄 Auto-upload to {db_name} enabled")
         try:
-            from supabase_uploader import SupabaseUploader
+            # Add parent directory to path for imports
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            parent_dir = os.path.dirname(script_dir)
+            if parent_dir not in sys.path:
+                sys.path.insert(0, parent_dir)
+            
+            from db.supabase_uploader import SupabaseUploader
             uploader = SupabaseUploader(use_local_db=use_local_db)
             print(f"✅ Connected to {db_name}")
         except Exception as e:
@@ -919,7 +993,6 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     
     # 1. Find and load events file (either specified or latest)
     # Check if custom file was specified in command line
-    import sys
     custom_file = None
     for i, arg in enumerate(sys.argv):
         if arg in ['--file', '-f'] and i + 1 < len(sys.argv):
@@ -988,6 +1061,13 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     rate_limiter = GoldskyRateLimiter(max_rps=GOLDSKY_MAX_RPS)
     print(f"\n✅ Rate limiter initialized: {GOLDSKY_MAX_RPS} RPS max")
     
+    # Create exclusive lock for very large/problematic markets
+    # When a market needs exclusive access, it locks this and blocks all other markets
+    exclusive_market_lock = asyncio.Lock()
+    exclusive_market_active = {'active': False, 'market_name': None}  # Shared state
+    active_markets_count = {'count': 0}  # Track how many markets are currently processing
+    active_markets_condition = asyncio.Condition()  # To wait for all markets to finish
+    
     # Create aiohttp session
     async with aiohttp.ClientSession() as session:
         # Process markets in batches
@@ -1023,6 +1103,10 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
                     semaphore,
                     db_semaphore,
                     rate_limiter,
+                    exclusive_market_lock,
+                    exclusive_market_active,
+                    active_markets_count,
+                    active_markets_condition,
                     use_local_db
                 )
                 tasks.append(task)
@@ -1296,7 +1380,7 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             
             print(f"\n💾 Still-failed data saved to: {failed_file}")
             print(f"   Total records: {sum(len(item['redemptions']) for item in still_failed_items):,}")
-            print(f"   You can retry later using: python supabase_uploader.py {failed_file} --redemptions {'--local' if use_local_db else ''}")
+            print(f"   You can retry later using: python scripts/db/supabase_uploader.py {failed_file} --redemptions {'--local' if use_local_db else ''}")
         
         # Update stats
         stats['upload_errors'] = retry_failed  # Update to reflect final count

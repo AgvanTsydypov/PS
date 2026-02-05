@@ -43,7 +43,7 @@ API LIMITS:
 
 КЛЮЧЕВАЯ ОСОБЕННОСТЬ:
 =====================
-Скрипт использует SQL запрос из lowest_100m_event_redeemers.sql, который возвращает
+Скрипт использует SQL запрос из lowest_XXXm_event_redeemers.sql, который возвращает
 пары (пользователь, рынок). API вызовы автоматически фильтруются по конкретному
 рынку для каждого пользователя, делая запросы более точными и эффективными.
 
@@ -75,8 +75,13 @@ from collections import deque
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
+# Add project root to Python path for imports
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 # Import the existing database uploader
-from supabase_uploader import SupabaseUploader
+from scripts.db.supabase_uploader import SupabaseUploader
 
 
 # ==========================================
@@ -325,7 +330,7 @@ def transform_closed_position(position: Dict) -> Dict:
 
 def get_redeemers_from_db(use_local_db: bool = False, limit: Optional[int] = None) -> List[Dict]:
     """
-    Query database using the SQL from lowest_100m_event_redeemers.sql
+    Query database using the SQL from lowest_XXXm_event_redeemers.sql
     Returns list of dicts with event_id, condition_id, event_title, redeemer_address
     """
     print("=" * 70)
@@ -333,7 +338,7 @@ def get_redeemers_from_db(use_local_db: bool = False, limit: Optional[int] = Non
     print("=" * 70)
     
     # Read SQL query from file
-    sql_file = "sql_q/all_100m_event_redeemers.sql"
+    sql_file = "sql/queries/all_XXXm_event_redeemers.sql"
     if not os.path.exists(sql_file):
         raise FileNotFoundError(f"SQL file not found: {sql_file}")
     

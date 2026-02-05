@@ -5,7 +5,7 @@ WITH event_stats AS (
     FROM public.redemptions r
     JOIN public.events e ON r.event_id = e.id
     WHERE r.event_id IS NOT NULL
-      AND e.volume > 100000000
+      AND e.volume >= 5000000
     GROUP BY r.event_id
 ),
 min_event AS (
