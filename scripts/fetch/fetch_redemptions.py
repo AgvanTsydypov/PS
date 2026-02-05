@@ -975,6 +975,9 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     # Setup logging to file
     log_file = setup_logging()
     
+    # Resolve retry-failed mode before any use
+    retry_failed_mode = '--retry-failed' in sys.argv or '--failed' in sys.argv
+    
     # Use same performance settings regardless of database type
     # Database type should NOT affect API request parameters
     global MAX_CONCURRENT_MARKETS, BATCH_SIZE, BATCH_DELAY, INITIAL_BATCH_SIZE
@@ -1056,9 +1059,6 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             uploader = None
     
     # 1. Find and load events file (either specified or latest) or failed markets file
-    # Check if retry-failed mode is enabled
-    retry_failed_mode = '--retry-failed' in sys.argv or '--failed' in sys.argv
-    
     # Check if custom file was specified in command line
     custom_file = None
     for i, arg in enumerate(sys.argv):
