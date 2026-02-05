@@ -63,4 +63,4 @@ data/output/
 data/json_output/
 data/logs/
 /logs/
-/output/
+#/output/
