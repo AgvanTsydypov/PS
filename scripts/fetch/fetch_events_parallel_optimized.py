@@ -176,6 +176,8 @@ class OptimizedParallelEventFetcher:
             'total_filtered_by_date': 0,
             'total_filtered_by_volume': 0,
             'total_filtered_by_status': 0,
+            'total_markets_original': 0,
+            'total_markets_filtered': 0,
             'pages_processed': 0,
             'start_time': None,
             'end_time': None,
@@ -194,7 +196,8 @@ class OptimizedParallelEventFetcher:
         print("🚀 PolyStars - OPTIMIZED Parallel Events Fetcher")
         print("=" * 70)
         print(f"📋 Configuration:")
-        print(f"   • Minimum Volume: ${config.MIN_VOLUME:,.0f}")
+        print(f"   • Minimum Event Volume: ${config.MIN_VOLUME:,.0f}")
+        print(f"   • Minimum Market Volume: ${config.MIN_MARKET_VOLUME:,.0f}")
         print(f"   • Closed Only: {config.CLOSED_ONLY}")
         print(f"   • Resolution Status: {config.RESOLUTION_STATUS}")
         print(f"   • Batch Size: {config.BATCH_SIZE}")
@@ -478,7 +481,7 @@ class OptimizedParallelEventFetcher:
         return (len(filtered), False)
     
     def _filter_events(self, events: List[Dict]) -> List[Dict]:
-        """Filter events by configured criteria"""
+        """Filter events by configured criteria and filter markets by volume"""
         filtered = []
         
         for event in events:
@@ -497,6 +500,9 @@ class OptimizedParallelEventFetcher:
                 with self.lock:
                     self.stats['total_filtered_by_status'] += 1
                 continue
+            
+            # Filter markets by volume if MIN_MARKET_VOLUME is set
+            event = self._filter_markets_by_volume(event)
             
             filtered.append(event)
         
@@ -563,6 +569,35 @@ class OptimizedParallelEventFetcher:
         
         return False
     
+    def _filter_markets_by_volume(self, event: Dict) -> Dict:
+        """
+        Filter markets within an event by minimum volume
+        Returns a copy of the event with filtered markets
+        """
+        if 'markets' not in event or not event['markets']:
+            return event
+        
+        original_markets = event['markets']
+        original_count = len(original_markets)
+        
+        # Filter markets by volume
+        filtered_markets = []
+        for market in original_markets:
+            market_volume = self._get_volume(market)
+            if market_volume >= config.MIN_MARKET_VOLUME:
+                filtered_markets.append(market)
+        
+        # Update stats
+        with self.lock:
+            self.stats['total_markets_original'] += original_count
+            self.stats['total_markets_filtered'] += len(filtered_markets)
+        
+        # Create a copy of the event with filtered markets
+        event_copy = event.copy()
+        event_copy['markets'] = filtered_markets
+        
+        return event_copy
+    
     def print_summary(self):
         """Print summary statistics"""
         duration = (self.stats['end_time'] - self.stats['start_time']).total_seconds()
@@ -590,6 +625,14 @@ class OptimizedParallelEventFetcher:
         print(f"   • Excluded by date range: {self.stats['total_filtered_by_date']:,}")
         print(f"   • Excluded by volume: {self.stats['total_filtered_by_volume']:,}")
         print(f"   • Excluded by resolution status: {self.stats['total_filtered_by_status']:,}")
+        
+        if self.stats['total_markets_original'] > 0:
+            markets_removed = self.stats['total_markets_original'] - self.stats['total_markets_filtered']
+            markets_kept_pct = (self.stats['total_markets_filtered'] / self.stats['total_markets_original']) * 100
+            print(f"\n📊 Markets filtering:")
+            print(f"   • Original markets: {self.stats['total_markets_original']:,}")
+            print(f"   • Markets kept (≥${config.MIN_MARKET_VOLUME}): {self.stats['total_markets_filtered']:,} ({markets_kept_pct:.1f}%)")
+            print(f"   • Markets removed (<${config.MIN_MARKET_VOLUME}): {markets_removed:,}")
         
         if self.all_events:
             volumes = [self._get_volume(e) for e in self.all_events]
@@ -629,7 +672,8 @@ def save_events_to_json(events: List[Dict], filename: str = None) -> str:
             'fetch_method': 'parallel_optimized',
             'filters': {
                 'closed': config.CLOSED_ONLY,
-                'min_volume': config.MIN_VOLUME,
+                'min_event_volume': config.MIN_VOLUME,
+                'min_market_volume': config.MIN_MARKET_VOLUME,
                 'resolution_status': config.RESOLUTION_STATUS,
                 'date_range': {
                     'start': config.START_DATE.isoformat() if config.START_DATE else None,
