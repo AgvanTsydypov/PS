@@ -16,7 +16,14 @@ Automatically scans latest events file and fetches redemptions for each market
 4. Использовать конкретный файл событий:
    python fetch_redemptions.py --file data/json_output/polymarket_events_optimized_20260113_020726.json
 
-5. Справка:
+5. НОВОЕ! Повторная обработка упорных маркетов (retry failed markets):
+   python fetch_redemptions.py --retry-failed --upload
+   (использует последний файл failed_markets_*.json из output/)
+
+6. Повторная обработка конкретного файла failed markets:
+   python fetch_redemptions.py --retry-failed --file output/failed_markets_20260205_204749.json --upload
+
+7. Справка:
    python fetch_redemptions.py --help
 
 ТРЕБОВАНИЯ:
@@ -260,6 +267,46 @@ def find_latest_events_file() -> Optional[str]:
     # Sort by modification time, get latest
     latest_file = max(files, key=os.path.getmtime)
     return latest_file
+
+
+def find_latest_failed_markets_file() -> Optional[str]:
+    """Find the latest failed_markets_*.json file"""
+    output_dir = 'output'
+    pattern = os.path.join(output_dir, 'failed_markets_*.json')
+    files = glob.glob(pattern)
+    
+    if not files:
+        print(f"❌ No failed markets files found in {output_dir}/")
+        return None
+    
+    # Sort by modification time, get latest
+    latest_file = max(files, key=os.path.getmtime)
+    return latest_file
+
+
+def load_failed_markets_file(filepath: str) -> List[Dict]:
+    """Load failed markets data from JSON file and convert to market format"""
+    print(f"📂 Loading failed markets from: {filepath}")
+    with open(filepath, 'r', encoding='utf-8') as f:
+        failed_markets = json.load(f)
+    
+    print(f"✅ Loaded {len(failed_markets)} failed markets")
+    
+    # Convert to market format
+    markets = []
+    for fm in failed_markets:
+        market_info = {
+            'market_id': None,  # Not available in failed markets file
+            'condition_id': fm['condition_id'],
+            'question': fm['question'],
+            'event_id': fm['event_id'],
+            'event_title': 'Unknown Event',  # Not available in failed markets file
+            'closed': True,  # Assume closed since they were being processed
+            'volume': float(fm.get('volume', 0) or 0),
+        }
+        markets.append(market_info)
+    
+    return markets
 
 
 def load_events_file(filepath: str) -> Dict:
@@ -930,24 +977,41 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     
     # Use same performance settings regardless of database type
     # Database type should NOT affect API request parameters
-    global MAX_CONCURRENT_MARKETS, BATCH_SIZE, BATCH_DELAY
-    MAX_CONCURRENT_MARKETS = MAX_CONCURRENT_MARKETS_CLOUD  # Always use cloud settings
-    BATCH_SIZE = BATCH_SIZE_CLOUD
-    BATCH_DELAY = BATCH_DELAY_CLOUD
+    global MAX_CONCURRENT_MARKETS, BATCH_SIZE, BATCH_DELAY, INITIAL_BATCH_SIZE
     
-    if use_local_db:
-        perf_mode = "⚡ STANDARD MODE (Local PostgreSQL)"
+    # In retry-failed mode, use more conservative settings
+    if retry_failed_mode:
+        MAX_CONCURRENT_MARKETS = 5  # Much lower concurrency for problematic markets
+        BATCH_SIZE = 10  # Smaller batches
+        BATCH_DELAY = 2  # Add delay between batches
+        # Keep INITIAL_BATCH_SIZE as is - adaptive pagination will reduce if needed
+        perf_mode = "🔄 RETRY MODE (Conservative settings for problematic markets)"
     else:
-        perf_mode = "⚡ STANDARD MODE (Supabase Cloud)"
+        MAX_CONCURRENT_MARKETS = MAX_CONCURRENT_MARKETS_CLOUD  # Always use cloud settings
+        BATCH_SIZE = BATCH_SIZE_CLOUD
+        BATCH_DELAY = BATCH_DELAY_CLOUD
+        
+        if use_local_db:
+            perf_mode = "⚡ STANDARD MODE (Local PostgreSQL)"
+        else:
+            perf_mode = "⚡ STANDARD MODE (Supabase Cloud)"
     
     # Start timestamp
     start_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     print("=" * 70)
-    print("🚀 POLYMARKET REDEMPTIONS FETCHER (OPTIMIZED PARALLEL)")
+    if retry_failed_mode:
+        print("🔄 POLYMARKET REDEMPTIONS FETCHER - RETRY FAILED MARKETS MODE")
+    else:
+        print("🚀 POLYMARKET REDEMPTIONS FETCHER (OPTIMIZED PARALLEL)")
     print("=" * 70)
     print(f"🕐 Script started: {start_timestamp}")
     print(f"{perf_mode}")
+    if retry_failed_mode:
+        print(f"⚠️  RETRY MODE:")
+        print(f"   - Lower concurrency (safer for problematic markets)")
+        print(f"   - Adaptive pagination will find optimal batch size")
+        print(f"   - All retry mechanisms are active")
     print(f"🎯 SMART RATE LIMITING:")
     print(f"   - Goldsky API limit: {GOLDSKY_MAX_RPS} requests/second")
     print(f"   - Interval between requests: {(1.0/GOLDSKY_MAX_RPS)*1.01:.3f}s (with 1% safety margin)")
@@ -991,7 +1055,10 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             auto_upload = False
             uploader = None
     
-    # 1. Find and load events file (either specified or latest)
+    # 1. Find and load events file (either specified or latest) or failed markets file
+    # Check if retry-failed mode is enabled
+    retry_failed_mode = '--retry-failed' in sys.argv or '--failed' in sys.argv
+    
     # Check if custom file was specified in command line
     custom_file = None
     for i, arg in enumerate(sys.argv):
@@ -999,27 +1066,45 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             custom_file = sys.argv[i + 1]
             break
     
-    if custom_file:
-        if not os.path.exists(custom_file):
-            print(f"❌ Specified file not found: {custom_file}")
-            return
-        events_file = custom_file
-        print(f"📌 Using specified file: {events_file}")
+    if retry_failed_mode:
+        # Load failed markets file
+        if custom_file:
+            if not os.path.exists(custom_file):
+                print(f"❌ Specified failed markets file not found: {custom_file}")
+                return
+            failed_file = custom_file
+            print(f"📌 Using specified failed markets file: {failed_file}")
+        else:
+            failed_file = find_latest_failed_markets_file()
+            if not failed_file:
+                return
+        
+        markets = load_failed_markets_file(failed_file)
+        print(f"\n🔄 RETRY MODE: Processing {len(markets)} previously failed markets")
     else:
-        events_file = find_latest_events_file()
-        if not events_file:
-            return
+        # Normal mode: load events file
+        if custom_file:
+            if not os.path.exists(custom_file):
+                print(f"❌ Specified file not found: {custom_file}")
+                return
+            events_file = custom_file
+            print(f"📌 Using specified file: {events_file}")
+        else:
+            events_file = find_latest_events_file()
+            if not events_file:
+                return
+        
+        events = load_events_file(events_file)
+        
+        # 2. Extract markets
+        print(f"\n📊 Extracting markets from events...")
+        markets = extract_markets(events)
     
-    events = load_events_file(events_file)
-    
-    # 2. Extract markets
-    print(f"\n📊 Extracting markets from events...")
-    markets = extract_markets(events)
-    
-    if FILTER_CLOSED_ONLY:
-        print(f"   Filter: Closed markets only")
-    if MIN_VOLUME > 0:
-        print(f"   Filter: Min volume ${MIN_VOLUME:,.2f}")
+    if not retry_failed_mode:
+        if FILTER_CLOSED_ONLY:
+            print(f"   Filter: Closed markets only")
+        if MIN_VOLUME > 0:
+            print(f"   Filter: Min volume ${MIN_VOLUME:,.2f}")
     
     print(f"✅ Found {len(markets)} markets to process")
     
@@ -1552,6 +1637,7 @@ if __name__ == '__main__':
         print("  --upload, -u       Upload redemptions to database")
         print("  --local, -l        Use local PostgreSQL instead of Supabase (requires --upload)")
         print("  --file FILE, -f    Use specific events file instead of latest")
+        print("  --retry-failed     Retry processing failed markets from latest failed_markets_*.json")
         print("  --help, -h         Show this help message")
         print()
         print("Examples:")
@@ -1569,6 +1655,12 @@ if __name__ == '__main__':
         print()
         print("  python fetch_redemptions.py --file data/json_output/polymarket_events_optimized_20260113_020726.json --upload")
         print("      Use specific events file and upload to Supabase")
+        print()
+        print("  python fetch_redemptions.py --retry-failed --upload")
+        print("      Retry failed markets (latest failed_markets_*.json) and upload to Supabase")
+        print()
+        print("  python fetch_redemptions.py --retry-failed --file output/failed_markets_20260205_204749.json --upload")
+        print("      Retry specific failed markets file and upload to Supabase")
         sys.exit(0)
 
     if use_local_db and not auto_upload:
