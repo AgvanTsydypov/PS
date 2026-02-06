@@ -604,16 +604,7 @@ async def fetch_redemptions_for_market_async(
         retry_delay_multiplier = 1.0  # Start normal, can increase in critical situations
         last_request_duration = 0.0  # Track duration of last successful request for adaptive delay
         
-        # 🎯 NEW: Smart delay adaptation for very large markets
-        # Strategy: First increase delay (10 attempts), THEN reduce batch size
-        if is_very_large_market:
-            # Delay levels: 2s → 4s → 6s → 8s → 10s → 15s → 20s
-            delay_levels = [2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0]
-            current_delay_level = 0  # Start at level 0 (2s)
-            delay_increase_attempts = 0  # Track how many times we increased delay
-            consecutive_successes = 0  # Track successful requests in a row
-            print(f"      🎯 Smart delay adaptation enabled (start: {delay_levels[current_delay_level]:.0f}s)", flush=True)
-        
+        # Initialize status dict FIRST (before using it!)
         status = {
             'success': True,
             'complete': True,
@@ -621,6 +612,26 @@ async def fetch_redemptions_for_market_async(
             'requests_made': 0,
             'adaptive_pagination_used': False
         }
+        
+        # 🎯 NEW: Smart delay + PROGRESSIVE BATCH SIZE for very large markets
+        # Strategy: Start SMALL (50), increase on success, decrease on failure
+        if is_very_large_market:
+            # Delay levels: 2s → 4s → 6s → 8s → 10s → 15s → 20s
+            delay_levels = [2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0]
+            current_delay_level = 0  # Start at level 0 (2s)
+            delay_increase_attempts = 0  # Track how many times we increased delay
+            consecutive_successes = 0  # Track successful requests in a row
+            consecutive_timeouts = 0  # Track consecutive timeouts for cooldown
+            
+            # 🔄 PROGRESSIVE BATCH SIZE: Start small, grow on success
+            batch_size_levels = [50, 100, 250, 500, 1000]
+            current_batch_size = batch_size_levels[0]  # Start with 50
+            current_batch_level = 0  # Level 0 = 50, Level 4 = 1000
+            batch_size_reduced = True  # Mark as "reduced" to trigger adaptive logic
+            status['adaptive_pagination_used'] = True
+            
+            print(f"      🎯 Smart delay adaptation enabled (start: {delay_levels[current_delay_level]:.0f}s)", flush=True)
+            print(f"      🔄 PROGRESSIVE BATCH SIZE: Starting with {current_batch_size} (will increase on success)", flush=True)
         
         def analyze_timeout_pattern():
             """Analyze recent timeout pattern and return adaptation decisions"""
@@ -732,6 +743,14 @@ async def fetch_redemptions_for_market_async(
                                     
                                     # Reset consecutive successes (we had a failure)
                                     consecutive_successes = 0
+                                    consecutive_timeouts += 1
+                                    
+                                    # Check for cooldown after 3+ consecutive timeouts
+                                    if consecutive_timeouts >= 3:
+                                        cooldown_time = min(10.0 + (consecutive_timeouts - 3) * 2.0, 20.0)  # 10s base, +2s per extra timeout, max 20s
+                                        print(f"\n      🚨 COOLDOWN: {consecutive_timeouts} consecutive timeouts detected!")
+                                        print(f"         💤 Giving PostgreSQL {cooldown_time:.0f}s to recover...", flush=True)
+                                        await asyncio.sleep(cooldown_time)
                                     
                                     # Check if we can increase delay level
                                     can_increase_delay = (current_delay_level < len(delay_levels) - 1 and 
@@ -749,39 +768,57 @@ async def fetch_redemptions_for_market_async(
                                         print(f"         📊 Delay increase attempts: {delay_increase_attempts}/10 (batch size unchanged: {current_batch_size})")
                                         print(f"         🔄 Retrying with longer delay...", flush=True)
                                         
-                                        # Short pause before retry
-                                        await asyncio.sleep(2)
+                                        # Use current delay level for retry pause (not fixed 2s!)
+                                        retry_pause = delay_levels[current_delay_level]
+                                        await asyncio.sleep(retry_pause)
                                         continue  # Retry with increased delay
                                     else:
                                         # Exhausted delay increases (10 attempts) - now reduce batch size
-                                        if current_batch_size > MIN_BATCH_SIZE:
-                                            new_batch_size = max(current_batch_size // BATCH_SIZE_REDUCTION_FACTOR, MIN_BATCH_SIZE)
+                                        if current_batch_level > 0:  # Can decrease batch level
+                                            old_batch_level = current_batch_level
+                                            old_batch_size = current_batch_size
+                                            current_batch_level -= 1  # Decrease by 1 level
+                                            current_batch_size = batch_size_levels[current_batch_level]
+                                            
+                                            # Partially reduce delay level (not reset to 0!)
+                                            # Keep some delay advantage we earned
+                                            old_delay_level = current_delay_level
+                                            current_delay_level = max(current_delay_level - 2, 0)  # Drop by 2 levels, minimum 0
                                             
                                             print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
                                             print(f"         Error: {error_msg[:150]}")
-                                            print(f"         📉 BATCH REDUCTION: Max delay reached, reducing batch size {current_batch_size} → {new_batch_size}")
-                                            print(f"         📊 Delay increases exhausted (10/10), max delay level: {current_delay_level+1}/{len(delay_levels)}")
+                                            print(f"         📉 BATCH REDUCTION: Max delay reached, reducing batch level {old_batch_level+1} → {current_batch_level+1} ({old_batch_size} → {current_batch_size})")
+                                            print(f"         📊 Delay increases exhausted (10/10), max delay level: {old_delay_level+1}/{len(delay_levels)}")
+                                            print(f"         📊 PARTIAL DELAY REDUCTION: level {old_delay_level+1} → {current_delay_level+1} ({delay_levels[old_delay_level]:.0f}s → {delay_levels[current_delay_level]:.0f}s)")
                                             print(f"         🔄 Retrying with smaller batch...", flush=True)
                                             
-                                            current_batch_size = new_batch_size
                                             batch_size_reduced = True
                                             status['adaptive_pagination_used'] = True
                                             
                                             # Reset delay adaptation counters for new batch size
                                             delay_increase_attempts = 0
-                                            current_delay_level = 0  # Start from minimum delay with new batch size
+                                            consecutive_successes = 0  # Reset success counter
+                                            # NOTE: current_delay_level is NOT reset - we keep some delay!
                                             
-                                            await asyncio.sleep(2)
+                                            # Use current delay level for retry pause
+                                            retry_pause = delay_levels[current_delay_level]
+                                            await asyncio.sleep(retry_pause)
                                             continue  # Retry with new batch size
                                         else:
-                                            # Can't reduce batch size further - normal retry
+                                            # Can't reduce batch level further (at level 0 = 50) - use exponential backoff with current delay level
                                             base_delay = INITIAL_RETRY_DELAY * (2 ** (graphql_error_retries - 1))
-                                            retry_delay = min(base_delay, MAX_RETRY_DELAY)
+                                            exponential_delay = min(base_delay, MAX_RETRY_DELAY)
+                                            
+                                            # Combine exponential backoff with current delay level
+                                            # Use the MAXIMUM of the two to ensure sufficient pause
+                                            current_level_delay = delay_levels[current_delay_level]
+                                            retry_delay = max(exponential_delay, current_level_delay)
                                             
                                             print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
                                             print(f"         Error: {error_msg[:150]}")
-                                            print(f"         Current batch size: {current_batch_size} (minimum)")
-                                            print(f"         🔄 Retrying in {retry_delay:.0f}s...", flush=True)
+                                            print(f"         Current batch level: {current_batch_level+1}/{len(batch_size_levels)} ({current_batch_size} - minimum)")
+                                            print(f"         Current delay level: {current_delay_level+1}/{len(delay_levels)} ({current_level_delay:.0f}s)")
+                                            print(f"         🔄 Retrying in {retry_delay:.0f}s (max of exponential {exponential_delay:.0f}s and level {current_level_delay:.0f}s)...", flush=True)
                                             
                                             await asyncio.sleep(retry_delay)
                                             continue
@@ -880,9 +917,20 @@ async def fetch_redemptions_for_market_async(
                         # 🎯 NEW: Track consecutive successes for very large markets
                         if is_very_large_market:
                             consecutive_successes += 1
+                            consecutive_timeouts = 0  # Reset consecutive timeouts on success
+                            
+                            # 🔄 PROGRESSIVE BATCH SIZE: Increase batch size after 3+ successes
+                            if consecutive_successes >= 3 and current_batch_level < len(batch_size_levels) - 1:
+                                old_batch_level = current_batch_level
+                                old_batch_size = current_batch_size
+                                current_batch_level += 1
+                                current_batch_size = batch_size_levels[current_batch_level]
+                                consecutive_successes = 0  # Reset counter
+                                
+                                print(f"      📈 3+ successes! Increasing batch size level {old_batch_level+1} → {current_batch_level+1} ({old_batch_size} → {current_batch_size})", flush=True)
                             
                             # After 5+ consecutive successes, decrease delay level (if possible)
-                            if consecutive_successes >= 5 and current_delay_level > 0:
+                            elif consecutive_successes >= 5 and current_delay_level > 0:
                                 old_level = current_delay_level
                                 current_delay_level -= 1
                                 consecutive_successes = 0  # Reset counter
@@ -906,8 +954,13 @@ async def fetch_redemptions_for_market_async(
                                 retry_delay_multiplier = max(retry_delay_multiplier * 0.8, 1.0)
                         
                         if not batch:
-                            # Show final stats if batch size was reduced
-                            if batch_size_reduced and len(all_redemptions) > 0:
+                            # Show final stats for very large markets with progressive batch size
+                            if is_very_large_market and len(all_redemptions) > 0:
+                                print(f"      ℹ️  Completed! Final batch level: {current_batch_level+1}/{len(batch_size_levels)} (size: {current_batch_size})", flush=True)
+                                if current_batch_level > 0:
+                                    print(f"      📈 Successfully scaled up from {batch_size_levels[0]} to {current_batch_size}!", flush=True)
+                            # Show final stats if batch size was reduced for regular markets
+                            elif batch_size_reduced and len(all_redemptions) > 0:
                                 print(f"      ℹ️  Completed with adaptive batch size: {current_batch_size} (started with {INITIAL_BATCH_SIZE})", flush=True)
                             break
                         
@@ -958,9 +1011,26 @@ async def fetch_redemptions_for_market_async(
                     retry_count += 1
                     timeout_history.append(True)  # Record timeout
                     
+                    # Track consecutive timeouts for very large markets
+                    if is_very_large_market:
+                        consecutive_timeouts += 1
+                        consecutive_successes = 0
+                        
+                        # Cooldown after 3+ consecutive timeouts
+                        if consecutive_timeouts >= 3:
+                            cooldown_time = min(10.0 + (consecutive_timeouts - 3) * 2.0, 20.0)
+                            print(f"\n      🚨 COOLDOWN: {consecutive_timeouts} consecutive timeouts detected!")
+                            print(f"         💤 Giving PostgreSQL {cooldown_time:.0f}s to recover...", flush=True)
+                            await asyncio.sleep(cooldown_time)
+                    
                     # Apply dynamic retry delay multiplier
                     base_delay = INITIAL_RETRY_DELAY * (2 ** (retry_count - 1))
                     retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
+                    
+                    # For very large markets, use at least current delay level
+                    if is_very_large_market:
+                        current_level_delay = delay_levels[current_delay_level]
+                        retry_delay = max(retry_delay, current_level_delay)
                     
                     print(f"\n      ⚠️  Request timeout (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
                     print(f"         Condition: {condition_id[:30]}...")
@@ -974,6 +1044,9 @@ async def fetch_redemptions_for_market_async(
                         status['requests_made'] = request_count
                         break
                     
+                    if is_very_large_market:
+                        print(f"         Current delay level: {current_delay_level+1}/{len(delay_levels)} ({delay_levels[current_delay_level]:.0f}s)")
+                    
                     if retry_delay_multiplier > 1.0:
                         print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
                     else:
@@ -983,9 +1056,27 @@ async def fetch_redemptions_for_market_async(
                     retry_count += 1
                     timeout_history.append(True)  # Record error as timeout-equivalent
                     
+                    # Track consecutive timeouts for very large markets
+                    if is_very_large_market:
+                        consecutive_timeouts += 1
+                        consecutive_successes = 0
+                        
+                        # Cooldown after 3+ consecutive timeouts
+                        if consecutive_timeouts >= 3:
+                            cooldown_time = min(10.0 + (consecutive_timeouts - 3) * 2.0, 20.0)
+                            print(f"\n      🚨 COOLDOWN: {consecutive_timeouts} consecutive errors detected!")
+                            print(f"         💤 Giving PostgreSQL {cooldown_time:.0f}s to recover...", flush=True)
+                            await asyncio.sleep(cooldown_time)
+                    
                     # Apply dynamic retry delay multiplier
                     base_delay = INITIAL_RETRY_DELAY * (2 ** (retry_count - 1))
                     retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
+                    
+                    # For very large markets, use at least current delay level
+                    if is_very_large_market:
+                        current_level_delay = delay_levels[current_delay_level]
+                        retry_delay = max(retry_delay, current_level_delay)
+                    
                     error_type = type(e).__name__
                     error_msg = str(e)
                     
@@ -1000,6 +1091,9 @@ async def fetch_redemptions_for_market_async(
                         status['error'] = f"{error_type}: {error_msg[:200]}"
                         status['requests_made'] = request_count
                         break
+                    
+                    if is_very_large_market:
+                        print(f"         Current delay level: {current_delay_level+1}/{len(delay_levels)} ({delay_levels[current_delay_level]:.0f}s)")
                     
                     if retry_delay_multiplier > 1.0:
                         print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
