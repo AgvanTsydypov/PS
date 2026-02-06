@@ -318,8 +318,197 @@ def load_failed_markets_file(filepath: str) -> List[Dict]:
     return markets
 
 
+def get_markets_from_db(use_local_db: bool = False, limit: Optional[int] = None) -> List[Dict]:
+    """
+    Load markets data from database
+    
+    Args:
+        use_local_db: Use local PostgreSQL instead of Supabase
+        limit: Optional limit on number of markets
+    
+    Returns:
+        List of market dicts with condition_id, question, event info, volume, etc.
+    """
+    print("=" * 70)
+    print("📊 QUERYING DATABASE FOR MARKETS")
+    print("=" * 70)
+    
+    # Initialize database connection
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(script_dir)
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+    
+    from db.supabase_uploader import SupabaseUploader
+    uploader = SupabaseUploader(use_local_db=use_local_db)
+    
+    if use_local_db:
+        # Use local PostgreSQL
+        import psycopg2
+        import psycopg2.extras
+        
+        print(f"🟢 Connecting to local PostgreSQL...")
+        print(f"   Database: {uploader.connection_params['database']}")
+        print(f"   Host: {uploader.connection_params['host']}:{uploader.connection_params['port']}")
+        print()
+        
+        conn = psycopg2.connect(**uploader.connection_params)
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        try:
+            # Load SQL query from file
+            sql_file = "sql/queries/get_markets_for_redemptions.sql"
+            if not os.path.exists(sql_file):
+                raise FileNotFoundError(f"SQL file not found: {sql_file}")
+            
+            print(f"📄 Using SQL query from: {sql_file}")
+            
+            with open(sql_file, 'r', encoding='utf-8') as f:
+                sql_query = f.read()
+            
+            # Apply additional filters dynamically
+            filters = []
+            params = []
+            
+            if FILTER_CLOSED_ONLY:
+                filters.append("m.closed = TRUE")
+                print(f"🔍 Filter: Closed markets only")
+            
+            if MIN_VOLUME > 0:
+                filters.append("""
+                    COALESCE(
+                        CASE 
+                            WHEN m.volume IS NOT NULL AND m.volume <> '' 
+                            THEN m.volume::numeric 
+                            ELSE NULL 
+                        END,
+                        m.volume_num,
+                        0
+                    ) >= %s
+                """)
+                params.append(MIN_VOLUME)
+                print(f"🔍 Filter: Min volume ${MIN_VOLUME:,.0f}")
+            
+            if filters:
+                sql_query += " AND " + " AND ".join(filters)
+            
+            # Order by volume descending (cast to numeric for proper sorting)
+            sql_query += """
+                ORDER BY COALESCE(
+                    CASE 
+                        WHEN m.volume IS NOT NULL AND m.volume <> '' 
+                        THEN m.volume::numeric 
+                        ELSE NULL 
+                    END,
+                    m.volume_num,
+                    0
+                ) DESC
+            """
+            
+            if limit:
+                sql_query += f" LIMIT {limit}"
+                print(f"🔍 Limit: {limit:,} markets")
+            
+            print()
+            print(f"🔍 Executing query...")
+            cursor.execute(sql_query, params)
+            
+            # Fetch all results
+            rows = cursor.fetchall()
+            
+            print(f"✅ Found {len(rows):,} markets in database")
+            print()
+            
+            # Convert to list of dicts
+            markets = []
+            for row in rows:
+                market_info = {
+                    'market_id': row['market_id'],
+                    'condition_id': row['condition_id'],
+                    'question': row['question'] or 'Unknown Question',
+                    'event_id': row['event_id'],
+                    'event_title': row['event_title'] or 'Unknown Event',
+                    'closed': row['closed'],
+                    'volume': float(row['volume'] or 0),
+                }
+                markets.append(market_info)
+            
+            return markets
+            
+        finally:
+            cursor.close()
+            conn.close()
+    
+    else:
+        # Supabase mode
+        print(f"🔵 Connecting to Supabase...")
+        print()
+        
+        try:
+            # Build query
+            query = uploader.client.table('markets').select(
+                'id, condition_id, question, event_id, events(title), closed, volume, volume_num'
+            )
+            
+            # Apply filters
+            if FILTER_CLOSED_ONLY:
+                query = query.eq('closed', True)
+                print(f"🔍 Filter: Closed markets only")
+            
+            # Filter out NULL condition_ids
+            query = query.not_.is_('condition_id', 'null')
+            
+            # Order by volume
+            query = query.order('volume', desc=True)
+            
+            if limit:
+                query = query.limit(limit)
+                print(f"🔍 Limit: {limit:,} markets")
+            
+            print()
+            print(f"🔍 Executing query...")
+            response = query.execute()
+            
+            rows = response.data
+            print(f"✅ Found {len(rows):,} markets in database")
+            print()
+            
+            # Convert to market format
+            markets = []
+            for row in rows:
+                # Get volume (handle different field names)
+                volume = float(row.get('volume') or row.get('volume_num') or 0)
+                
+                # Skip if below minimum volume
+                if MIN_VOLUME > 0 and volume < MIN_VOLUME:
+                    continue
+                
+                # Get event title from joined data
+                event_title = 'Unknown Event'
+                if row.get('events') and isinstance(row['events'], dict):
+                    event_title = row['events'].get('title', 'Unknown Event')
+                
+                market_info = {
+                    'market_id': row['id'],
+                    'condition_id': row['condition_id'],
+                    'question': row.get('question') or 'Unknown Question',
+                    'event_id': row['event_id'],
+                    'event_title': event_title,
+                    'closed': row.get('closed', False),
+                    'volume': volume,
+                }
+                markets.append(market_info)
+            
+            return markets
+            
+        except Exception as e:
+            print(f"❌ Error querying Supabase: {type(e).__name__}")
+            print(f"   {str(e)}")
+            raise
+
+
 def load_events_file(filepath: str) -> Dict:
-    """Load events data from JSON file"""
+    """Load events data from JSON file (LEGACY - prefer get_markets_from_db)"""
     print(f"📂 Loading events from: {filepath}")
     with open(filepath, 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -1153,12 +1342,14 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             auto_upload = False
             uploader = None
     
-    # 1. Find and load events file (either specified or latest) or failed markets file
-    # Check if custom file was specified in command line
+    # 1. Load markets from DB or file
+    # Check for source flags
+    use_json_file = '--from-json' in sys.argv or '--file' in sys.argv or '-f' in sys.argv
     custom_file = None
     for i, arg in enumerate(sys.argv):
         if arg in ['--file', '-f'] and i + 1 < len(sys.argv):
             custom_file = sys.argv[i + 1]
+            use_json_file = True
             break
     
     if retry_failed_mode:
@@ -1176,8 +1367,13 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
         
         markets = load_failed_markets_file(failed_file)
         print(f"\n🔄 RETRY MODE: Processing {len(markets)} previously failed markets")
-    else:
-        # Normal mode: load events file
+    
+    elif use_json_file:
+        # Legacy mode: load from JSON file
+        print(f"📄 DATA SOURCE: JSON file (legacy mode)")
+        print(f"   💡 Tip: Use database mode (no --file flag) for better performance")
+        print()
+        
         if custom_file:
             if not os.path.exists(custom_file):
                 print(f"❌ Specified file not found: {custom_file}")
@@ -1191,19 +1387,40 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
         
         events = load_events_file(events_file)
         
-        # 2. Extract markets
+        # Extract markets from events
         print(f"\n📊 Extracting markets from events...")
         markets = extract_markets(events)
-    
-    if not retry_failed_mode:
+        
         if FILTER_CLOSED_ONLY:
             print(f"   Filter: Closed markets only")
         if MIN_VOLUME > 0:
             print(f"   Filter: Min volume ${MIN_VOLUME:,.2f}")
     
+    else:
+        # New mode: load from database (DEFAULT)
+        print(f"📊 DATA SOURCE: Database (recommended)")
+        print(f"   Database: {'Local PostgreSQL' if use_local_db else 'Supabase'}")
+        print()
+        
+        # Get markets from database
+        markets = get_markets_from_db(
+            use_local_db=use_local_db,
+            limit=MAX_MARKETS
+        )
+        
+        if not markets:
+            print("❌ No markets found in database")
+            print("   Make sure you ran: python fetch_events_parallel_optimized.py --upload --local")
+            return
+    
+    print()
     print(f"✅ Found {len(markets)} markets to process")
     
-    if MAX_MARKETS:
+    # Apply MAX_MARKETS limit (only if not already applied by DB query)
+    if MAX_MARKETS and not use_json_file and len(markets) > MAX_MARKETS:
+        markets = markets[:MAX_MARKETS]
+        print(f"⚠️  Limited to {MAX_MARKETS} markets")
+    elif MAX_MARKETS and use_json_file:
         markets = markets[:MAX_MARKETS]
         print(f"⚠️  Limited to {MAX_MARKETS} markets")
     
@@ -1731,31 +1948,33 @@ if __name__ == '__main__':
         print("Options:")
         print("  --upload, -u       Upload redemptions to database")
         print("  --local, -l        Use local PostgreSQL instead of Supabase (requires --upload)")
-        print("  --file FILE, -f    Use specific events file instead of latest")
+        print("  --file FILE, -f    Use specific JSON events file (legacy mode)")
+        print("  --from-json        Load markets from JSON file instead of database (legacy)")
         print("  --retry-failed     Retry processing failed markets from latest failed_markets_*.json")
         print("  --help, -h         Show this help message")
         print()
+        print("Data Sources:")
+        print("  DEFAULT: Database (recommended)")
+        print("    - Reads markets from database (events + markets tables)")
+        print("    - Faster, more reliable, always up-to-date")
+        print("    - Requires: fetch_events_parallel_optimized.py --upload --local")
+        print()
+        print("  LEGACY: JSON file (--file or --from-json)")
+        print("    - Reads from JSON file (data/json_output/)")
+        print("    - Useful for specific snapshots or offline work")
+        print()
         print("Examples:")
-        print("  python fetch_redemptions.py")
-        print("      Fetch only (latest file), no upload")
+        print("  python fetch_redemptions.py --upload --local")
+        print("      Fetch from DATABASE and upload to PostgreSQL (RECOMMENDED)")
         print()
         print("  python fetch_redemptions.py --upload")
-        print("      Fetch and upload to Supabase (latest file)")
+        print("      Fetch from DATABASE and upload to Supabase")
         print()
-        print("  python fetch_redemptions.py --upload --local")
-        print("      Fetch and upload to local PostgreSQL (latest file)")
+        print("  python fetch_redemptions.py --file data/json_output/events.json --upload --local")
+        print("      Fetch from JSON FILE (legacy) and upload to PostgreSQL")
         print()
-        print("  python fetch_redemptions.py --file data/json_output/polymarket_events_optimized_20260113_020726.json")
-        print("      Use specific events file")
-        print()
-        print("  python fetch_redemptions.py --file data/json_output/polymarket_events_optimized_20260113_020726.json --upload")
-        print("      Use specific events file and upload to Supabase")
-        print()
-        print("  python fetch_redemptions.py --retry-failed --upload")
-        print("      Retry failed markets (latest failed_markets_*.json) and upload to Supabase")
-        print()
-        print("  python fetch_redemptions.py --retry-failed --file output/failed_markets_20260205_204749.json --upload")
-        print("      Retry specific failed markets file and upload to Supabase")
+        print("  python fetch_redemptions.py --retry-failed --upload --local")
+        print("      Retry failed markets and upload to PostgreSQL")
         sys.exit(0)
 
     if use_local_db and not auto_upload:
