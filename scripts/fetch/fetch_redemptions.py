@@ -392,19 +392,6 @@ def get_markets_from_db(use_local_db: bool = False, limit: Optional[int] = None)
             if filters:
                 sql_query += " AND " + " AND ".join(filters)
             
-            # Order by volume descending (cast to numeric for proper sorting)
-            sql_query += """
-                ORDER BY COALESCE(
-                    CASE 
-                        WHEN m.volume IS NOT NULL AND m.volume <> '' 
-                        THEN m.volume::numeric 
-                        ELSE NULL 
-                    END,
-                    m.volume_num,
-                    0
-                ) DESC
-            """
-            
             if limit:
                 sql_query += f" LIMIT {limit}"
                 print(f"🔍 Limit: {limit:,} markets")
