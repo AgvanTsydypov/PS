@@ -28,12 +28,12 @@ SELECT
 FROM markets m
 LEFT JOIN events e ON m.event_id = e.id
 WHERE m.condition_id IS NOT NULL
-ORDER BY COALESCE(
-    CASE 
-        WHEN m.volume IS NOT NULL AND m.volume <> '' 
-        THEN m.volume::numeric 
-        ELSE NULL 
-    END,
-    m.volume_num,
-    0
-) DESC
+-- ORDER BY COALESCE(
+--     CASE 
+--         WHEN m.volume IS NOT NULL AND m.volume <> '' 
+--         THEN m.volume::numeric 
+--         ELSE NULL 
+--     END,
+--     m.volume_num,
+--     0
+-- ) DESC
