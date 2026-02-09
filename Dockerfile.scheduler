@@ -1,0 +1,48 @@
+# ============================================================================
+# Dockerfile for PolyStars Scheduler Service
+# ============================================================================
+# This image runs the daily data scheduler with cron
+# ============================================================================
+
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    cron \
+    curl \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY scripts/ /app/scripts/
+COPY sql/ /app/sql/
+COPY .env /app/.env
+
+# Create logs directory
+RUN mkdir -p /app/logs
+
+# Copy cron setup script
+COPY scripts/cron/setup_cron.sh /app/scripts/cron/setup_cron.sh
+RUN chmod +x /app/scripts/cron/setup_cron.sh
+
+# Setup cron job
+RUN /app/scripts/cron/setup_cron.sh
+
+# Copy entrypoint script
+COPY scripts/cron/docker-entrypoint-scheduler.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+# Healthcheck
+HEALTHCHECK --interval=1h --timeout=10s --start-period=30s --retries=3 \
+    CMD pgrep cron || exit 1
+
+# Start cron in foreground
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["cron", "-f"]

@@ -1,40 +1,85 @@
 """
-Configuration file for historical events fetcher
-Modify these settings to customize your data collection
+Configuration for parallel events fetcher
+Adjust these parameters to filter events
+
+AUTO-SEASON SUPPORT:
+====================
+Genesis Period: 2024-07-06 to 2026-01-05 (исторические данные)
+Season 1+:      2026-01-06 onwards (по 10 дней каждый сезон)
+
+To enable automatic date filtering based on current season:
+1. Set AUTO_SEASON = True
+2. Script will automatically load dates from season_manager
+3. Or use daily_scheduler.py which handles this automatically
 """
 
 from datetime import datetime, timedelta
 
-# Filtering Criteria
-# MIN_VOLUME = 500000  # Minimum volume in USD (e.g., 500000 = $500,000)
-MIN_VOLUME = 5000000
-MIN_MARKET_VOLUME = 100  # Minimum volume for individual markets in USD
-CLOSED_ONLY = True   # Only fetch closed events
-RESOLUTION_STATUS = 'resolved'  # Filter by umaResolutionStatus
+# ============================================================================
+# AUTO-SEASON MODE
+# ============================================================================
 
-# Pagination Settings
-BATCH_SIZE = 100  # Number of events per API request (max: 100)
-MAX_EVENTS = None  # Maximum total events to fetch (None = no limit)
+# Enable automatic season-based date filtering
+AUTO_SEASON = False  # Set to True to use season dates automatically
 
-# Output Settings
-OUTPUT_FILENAME = None  # Custom filename (None = auto-generate with timestamp)
-OUTPUT_DIR = 'data/json_output'  # Output directory for JSON files (relative path, no leading slash)
+# ============================================================================
+# FILTERING CRITERIA
+# ============================================================================
 
-# API Settings
-REQUEST_DELAY = 0.2  # Delay between requests in seconds (avoid rate limiting - increased for stability)
+# Minimum event volume (in USD)
+# NOTE: If AUTO_SEASON = True, this will be overridden:
+#   - Genesis: 100M (only major historical events)
+#   - Seasons: 5M (more detailed current data)
+MIN_VOLUME = 100_000_000  # Default: 100M USD
 
-# Date Range - DEFAULT: Last 1 year from now
-# Set to None to disable date filtering
+# Minimum market volume (in USD) - markets below this will be filtered out
+MIN_MARKET_VOLUME = 100  # Minimum volume for individual markets
+
+# Fetch only closed events
+CLOSED_ONLY = True
+
+# Resolution status filter
+RESOLUTION_STATUS = 'Resolved'  # Only resolved events
+
+# ============================================================================
+# DATE RANGE FILTERING
+# ============================================================================
+
+# Date range filtering (None = no filter)
+# If AUTO_SEASON = True, these will be overridden by season dates
+
+# Genesis period (historical data)
+# START_DATE = datetime(2024, 7, 6)   # Genesis start
+# END_DATE = datetime(2026, 1, 5)     # Genesis end
+
+# Or use current date for testing
 END_DATE = datetime.now()  # End date (now)
-# END_DATE = datetime(2026, 1, 3)
-# START_DATE = END_DATE - timedelta(days=365)  # Start date (1 year ago)
-# START_DATE = END_DATE - timedelta(days=1)
-
-# Alternative: Custom date range
-START_DATE = datetime(2024, 7, 6)  # January 1, 2023
-# END_DATE = datetime(2024, 1, 1)    # January 1, 2024
+START_DATE = datetime(2024, 7, 6)  # Start from Genesis
 
 # Or set to None to fetch all events regardless of date
 # START_DATE = None
 # END_DATE = None
+
+# ============================================================================
+# FETCH PARAMETERS
+# ============================================================================
+
+# Batch size for pagination
+BATCH_SIZE = 100
+
+# Maximum number of events to fetch (None = unlimited)
+MAX_EVENTS = None  # Set to a number like 1000 for testing
+
+# API Settings
+REQUEST_DELAY = 0.2  # Delay between requests in seconds
+
+# ============================================================================
+# OUTPUT
+# ============================================================================
+
+# Output directory
+OUTPUT_DIR = "output"
+
+# Output filename (None = auto-generate with timestamp)
+OUTPUT_FILENAME = None  # e.g., "events_20240706.json"
 
