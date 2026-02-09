@@ -1,0 +1,41 @@
+# Dockerfile для Python скриптов PolyStars
+FROM python:3.12-slim
+
+# Установка системных зависимостей
+RUN apt-get update && apt-get install -y \
+    gcc \
+    postgresql-client \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Установка рабочей директории
+WORKDIR /app
+
+# Копирование requirements.txt
+COPY requirements.txt .
+
+# Установка Python зависимостей
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копирование всех скриптов
+COPY scripts/ ./scripts/
+COPY sql/ ./sql/
+
+# Создание директорий для output
+RUN mkdir -p /app/output /app/data /app/logs
+
+# Установка переменных окружения
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# Healthcheck (проверка что Python работает)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD python -c "import sys; sys.exit(0)"
+
+# По умолчанию держим контейнер запущенным для выполнения команд
+CMD ["tail", "-f", "/dev/null"]
+
+# Примеры запуска конкретных скриптов:
+# CMD ["python", "scripts/fetch/fetch_events_parallel_optimized.py"]
+# CMD ["python", "scripts/fetch/fetch_redemptions.py", "--upload", "--local"]
+# CMD ["python", "scripts/analytics/count_markets.py"]
