@@ -29,6 +29,10 @@ build/
 # Environment variables
 .env
 .env*.local
+.env.docker
+
+# Docker
+docker-compose.override.yml
 
 # Logs
 npm-debug.log*

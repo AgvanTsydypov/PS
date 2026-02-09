@@ -1,0 +1,466 @@
+-- ============================================================================
+-- POLYMARKET DATABASE INITIALIZATION SCRIPT
+-- ============================================================================
+-- This script creates all tables for PolyStars project
+-- Auto-executed by Docker PostgreSQL on first container startup
+-- ============================================================================
+
+\echo '🚀 Starting PolyStars database initialization...'
+
+-- ============================================================================
+-- 1. EVENTS TABLE - Main events data
+-- ============================================================================
+\echo '📊 Creating events table...'
+
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    ticker TEXT,
+    slug TEXT,
+    title TEXT NOT NULL,
+    description TEXT,
+    
+    -- Date fields
+    start_date TIMESTAMPTZ,
+    creation_date TIMESTAMPTZ,
+    end_date TIMESTAMPTZ,
+    closed_time TIMESTAMPTZ,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ,
+    
+    -- URLs
+    image TEXT,
+    icon TEXT,
+    
+    -- Boolean flags
+    active BOOLEAN DEFAULT false,
+    closed BOOLEAN DEFAULT false,
+    archived BOOLEAN DEFAULT false,
+    new BOOLEAN DEFAULT false,
+    featured BOOLEAN DEFAULT false,
+    restricted BOOLEAN DEFAULT false,
+    neg_risk BOOLEAN DEFAULT false,
+    enable_order_book BOOLEAN DEFAULT false,
+    
+    -- Volume metrics
+    volume NUMERIC(20, 6) DEFAULT 0,
+    volume24hr NUMERIC(20, 6) DEFAULT 0,
+    volume1wk NUMERIC(20, 6) DEFAULT 0,
+    volume1mo NUMERIC(20, 6) DEFAULT 0,
+    volume1yr NUMERIC(20, 6) DEFAULT 0,
+    
+    -- Liquidity metrics
+    liquidity NUMERIC(20, 6) DEFAULT 0,
+    open_interest NUMERIC(20, 6) DEFAULT 0,
+    liquidity_amm NUMERIC(20, 6) DEFAULT 0,
+    liquidity_clob NUMERIC(20, 6) DEFAULT 0,
+    
+    -- Other fields
+    competitive INTEGER DEFAULT 0,
+    comment_count INTEGER DEFAULT 0
+);
+
+-- Events indexes
+CREATE INDEX IF NOT EXISTS idx_events_closed ON events(closed);
+CREATE INDEX IF NOT EXISTS idx_events_closed_time ON events(closed_time);
+CREATE INDEX IF NOT EXISTS idx_events_end_date ON events(end_date);
+CREATE INDEX IF NOT EXISTS idx_events_volume ON events(volume DESC);
+CREATE INDEX IF NOT EXISTS idx_events_active ON events(active);
+CREATE INDEX IF NOT EXISTS idx_events_ticker ON events(ticker);
+
+\echo '✅ Events table created'
+
+-- ============================================================================
+-- 2. MARKETS TABLE - Individual markets within events
+-- ============================================================================
+\echo '📈 Creating markets table...'
+
+CREATE TABLE IF NOT EXISTS markets (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL,
+    
+    -- Basic info
+    question TEXT NOT NULL,
+    condition_id TEXT,
+    slug TEXT,
+    question_id TEXT,
+    
+    -- Dates
+    end_date TIMESTAMPTZ,
+    start_date TIMESTAMPTZ,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ,
+    closed_time TIMESTAMPTZ,
+    uma_end_date TIMESTAMPTZ,
+    accepting_orders_timestamp TIMESTAMPTZ,
+    deploying_timestamp TIMESTAMPTZ,
+    
+    -- URLs
+    image TEXT,
+    icon TEXT,
+    
+    -- Description and outcomes
+    description TEXT,
+    outcomes TEXT,
+    outcome_prices TEXT,
+    
+    -- Volume metrics
+    volume TEXT,
+    volume_num NUMERIC(20, 6) DEFAULT 0,
+    volume24hr NUMERIC(20, 6) DEFAULT 0,
+    volume1wk NUMERIC(20, 6) DEFAULT 0,
+    volume1mo NUMERIC(20, 6) DEFAULT 0,
+    volume1yr NUMERIC(20, 6) DEFAULT 0,
+    volume_clob NUMERIC(20, 6) DEFAULT 0,
+    volume24hr_clob NUMERIC(20, 6) DEFAULT 0,
+    volume1wk_clob NUMERIC(20, 6) DEFAULT 0,
+    volume1mo_clob NUMERIC(20, 6) DEFAULT 0,
+    volume1yr_clob NUMERIC(20, 6) DEFAULT 0,
+    
+    -- Liquidity
+    liquidity TEXT,
+    liquidity_num NUMERIC(20, 6) DEFAULT 0,
+    liquidity_amm NUMERIC(20, 6) DEFAULT 0,
+    liquidity_clob NUMERIC(20, 6) DEFAULT 0,
+    
+    -- Boolean flags
+    active BOOLEAN DEFAULT false,
+    closed BOOLEAN DEFAULT false,
+    new BOOLEAN DEFAULT false,
+    featured BOOLEAN DEFAULT false,
+    archived BOOLEAN DEFAULT false,
+    restricted BOOLEAN DEFAULT false,
+    enable_order_book BOOLEAN DEFAULT false,
+    neg_risk BOOLEAN DEFAULT false,
+    ready BOOLEAN DEFAULT false,
+    funded BOOLEAN DEFAULT false,
+    cyom BOOLEAN DEFAULT false,
+    pager_duty_notification_enabled BOOLEAN DEFAULT false,
+    approved BOOLEAN DEFAULT false,
+    automatically_resolved BOOLEAN DEFAULT false,
+    automatically_active BOOLEAN DEFAULT false,
+    clear_book_on_start BOOLEAN DEFAULT false,
+    manual_activation BOOLEAN DEFAULT false,
+    neg_risk_other BOOLEAN DEFAULT false,
+    pending_deployment BOOLEAN DEFAULT false,
+    deploying BOOLEAN DEFAULT false,
+    rfq_enabled BOOLEAN DEFAULT false,
+    holding_rewards_enabled BOOLEAN DEFAULT false,
+    fees_enabled BOOLEAN DEFAULT false,
+    requires_translation BOOLEAN DEFAULT false,
+    accepting_orders BOOLEAN DEFAULT false,
+    has_reviewed_dates BOOLEAN DEFAULT false,
+    
+    -- Resolution
+    resolved_by TEXT,
+    uma_resolution_status TEXT,
+    uma_resolution_statuses TEXT,
+    uma_bond TEXT,
+    uma_reward TEXT,
+    
+    -- Market details
+    market_maker_address TEXT,
+    submitted_by TEXT,
+    group_item_title TEXT,
+    group_item_threshold TEXT,
+    clob_token_ids TEXT,
+    neg_risk_request_id TEXT,
+    
+    -- Date fields (ISO format)
+    end_date_iso TEXT,
+    start_date_iso TEXT,
+    
+    -- Trading parameters
+    order_price_min_tick_size NUMERIC(10, 6),
+    order_min_size NUMERIC(20, 6),
+    rewards_min_size NUMERIC(20, 6),
+    rewards_max_spread NUMERIC(10, 6),
+    spread NUMERIC(10, 6),
+    
+    -- Price changes
+    one_day_price_change NUMERIC(10, 6),
+    one_week_price_change NUMERIC(10, 6),
+    last_trade_price NUMERIC(10, 6),
+    best_bid NUMERIC(10, 6),
+    best_ask NUMERIC(10, 6),
+    
+    -- Other
+    competitive INTEGER DEFAULT 0,
+    custom_liveness INTEGER DEFAULT 0,
+    
+    -- Foreign key to events
+    CONSTRAINT fk_event FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+);
+
+-- Markets indexes
+CREATE INDEX IF NOT EXISTS idx_markets_event_id ON markets(event_id);
+CREATE INDEX IF NOT EXISTS idx_markets_closed ON markets(closed);
+CREATE INDEX IF NOT EXISTS idx_markets_volume ON markets(volume_num DESC);
+CREATE INDEX IF NOT EXISTS idx_markets_status ON markets(uma_resolution_status);
+CREATE INDEX IF NOT EXISTS idx_markets_end_date ON markets(end_date);
+
+\echo '✅ Markets table created'
+
+-- ============================================================================
+-- 3. FETCH METADATA TABLE - Track data fetches
+-- ============================================================================
+\echo '📝 Creating fetch_metadata table...'
+
+CREATE TABLE IF NOT EXISTS fetch_metadata (
+    id BIGSERIAL PRIMARY KEY,
+    timestamp TIMESTAMPTZ NOT NULL,
+    total_events INTEGER,
+    fetch_method TEXT,
+    filters JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_fetch_metadata_timestamp ON fetch_metadata(timestamp DESC);
+
+\echo '✅ Fetch_metadata table created'
+
+-- ============================================================================
+-- 4. REDEMPTIONS TABLE - When users claim their winnings
+-- ============================================================================
+\echo '💰 Creating redemptions table...'
+
+CREATE TABLE IF NOT EXISTS redemptions (
+    id BIGSERIAL PRIMARY KEY,
+    transaction_hash TEXT NOT NULL,
+    condition_id TEXT,
+    event_id TEXT,
+    market_id TEXT,
+    redeemer_address TEXT NOT NULL,
+    payout_usdc NUMERIC(20, 6) NOT NULL DEFAULT 0,
+    timestamp_unix BIGINT NOT NULL,
+    timestamp_human TIMESTAMPTZ,
+    market_question TEXT,
+    event_title TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT unique_redemption UNIQUE(transaction_hash, redeemer_address)
+);
+
+-- Redemptions indexes
+CREATE INDEX IF NOT EXISTS idx_redemptions_condition_id ON redemptions(condition_id);
+CREATE INDEX IF NOT EXISTS idx_redemptions_event_id ON redemptions(event_id);
+CREATE INDEX IF NOT EXISTS idx_redemptions_market_id ON redemptions(market_id);
+CREATE INDEX IF NOT EXISTS idx_redemptions_redeemer ON redemptions(redeemer_address);
+CREATE INDEX IF NOT EXISTS idx_redemptions_timestamp ON redemptions(timestamp_unix DESC);
+CREATE INDEX IF NOT EXISTS idx_redemptions_payout ON redemptions(payout_usdc DESC);
+
+\echo '✅ Redemptions table created'
+
+-- ============================================================================
+-- 5. USER CLOSED POSITIONS TABLE - Closed trading positions
+-- ============================================================================
+\echo '📊 Creating user_closed_positions table...'
+
+CREATE TABLE IF NOT EXISTS user_closed_positions (
+    id BIGSERIAL PRIMARY KEY,
+    
+    -- User and market identification
+    proxy_wallet TEXT NOT NULL,
+    event_id TEXT,
+    market_id TEXT,
+    condition_id TEXT,
+    asset TEXT,
+    
+    -- Position metrics
+    avg_price NUMERIC(20, 6) DEFAULT 0,
+    total_bought NUMERIC(20, 6) DEFAULT 0,
+    realized_pnl NUMERIC(20, 6) DEFAULT 0,
+    cur_price NUMERIC(20, 6) DEFAULT 0,
+    
+    -- Timestamp
+    timestamp_unix BIGINT NOT NULL,
+    timestamp_human TIMESTAMPTZ,
+    
+    -- Market/Event information
+    title TEXT,
+    slug TEXT,
+    icon TEXT,
+    event_slug TEXT,
+    
+    -- Outcome information
+    outcome TEXT,
+    outcome_index INTEGER,
+    opposite_outcome TEXT,
+    opposite_asset TEXT,
+    
+    -- End date
+    end_date TEXT,
+    end_date_parsed TIMESTAMPTZ,
+    
+    -- Metadata
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    -- Ensure unique positions per user/condition
+    CONSTRAINT unique_user_position UNIQUE(proxy_wallet, condition_id, asset, timestamp_unix)
+);
+
+-- User closed positions indexes
+CREATE INDEX IF NOT EXISTS idx_user_closed_positions_wallet ON user_closed_positions(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_user_closed_positions_event_id ON user_closed_positions(event_id);
+CREATE INDEX IF NOT EXISTS idx_user_closed_positions_market_id ON user_closed_positions(market_id);
+CREATE INDEX IF NOT EXISTS idx_user_closed_positions_condition ON user_closed_positions(condition_id);
+CREATE INDEX IF NOT EXISTS idx_user_closed_positions_timestamp ON user_closed_positions(timestamp_unix DESC);
+CREATE INDEX IF NOT EXISTS idx_user_closed_positions_realized_pnl ON user_closed_positions(realized_pnl DESC);
+CREATE INDEX IF NOT EXISTS idx_user_closed_positions_event_slug ON user_closed_positions(event_slug);
+CREATE INDEX IF NOT EXISTS idx_user_closed_positions_outcome ON user_closed_positions(outcome_index);
+
+\echo '✅ User_closed_positions table created'
+
+-- ============================================================================
+-- 6. TRADER LEADERBOARD TABLE - Trader rankings
+-- ============================================================================
+\echo '🏆 Creating trader_leaderboard table...'
+
+CREATE TABLE IF NOT EXISTS trader_leaderboard (
+    -- Primary identifiers
+    id BIGSERIAL PRIMARY KEY,
+    
+    -- Leaderboard data
+    rank INTEGER,
+    proxy_wallet VARCHAR(42) NOT NULL,
+    user_name VARCHAR(255),
+    vol NUMERIC(24, 6) NOT NULL DEFAULT 0,
+    pnl NUMERIC(24, 6) NOT NULL DEFAULT 0,
+    
+    -- Profile information
+    profile_image TEXT,
+    x_username VARCHAR(255),
+    verified_badge BOOLEAN DEFAULT FALSE,
+    
+    -- Query parameters
+    category VARCHAR(20) NOT NULL,
+    time_period VARCHAR(10) NOT NULL,
+    order_by VARCHAR(10) NOT NULL,
+    
+    -- Metadata
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    fetched_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    
+    -- Constraints
+    CONSTRAINT trader_leaderboard_proxy_wallet_check CHECK (proxy_wallet ~* '^0x[a-f0-9]{40}$'),
+    CONSTRAINT trader_leaderboard_category_check CHECK (category IN ('OVERALL', 'POLITICS', 'SPORTS', 'CRYPTO', 'CULTURE', 'MENTIONS', 'WEATHER', 'ECONOMICS', 'TECH', 'FINANCE')),
+    CONSTRAINT trader_leaderboard_time_period_check CHECK (time_period IN ('DAY', 'WEEK', 'MONTH', 'ALL')),
+    CONSTRAINT trader_leaderboard_order_by_check CHECK (order_by IN ('PNL', 'VOL'))
+);
+
+-- Trader leaderboard indexes
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trader_leaderboard_unique_entry
+    ON trader_leaderboard(proxy_wallet, category, time_period, order_by, fetched_date);
+CREATE INDEX IF NOT EXISTS idx_trader_leaderboard_proxy_wallet ON trader_leaderboard(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_trader_leaderboard_rank ON trader_leaderboard(rank) WHERE rank IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_trader_leaderboard_category_period ON trader_leaderboard(category, time_period, order_by);
+CREATE INDEX IF NOT EXISTS idx_trader_leaderboard_user_name ON trader_leaderboard(user_name) WHERE user_name IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_trader_leaderboard_fetched_at ON trader_leaderboard(fetched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trader_leaderboard_category_period_rank ON trader_leaderboard(category, time_period, rank) WHERE rank IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_trader_leaderboard_vol ON trader_leaderboard(vol DESC);
+CREATE INDEX IF NOT EXISTS idx_trader_leaderboard_pnl ON trader_leaderboard(pnl DESC);
+
+\echo '✅ Trader_leaderboard table created'
+
+-- ============================================================================
+-- 7. NFT CLAIM TABLES (для Next.js приложения)
+-- ============================================================================
+\echo '🎨 Creating NFT claim tables...'
+
+-- NftClaim table
+CREATE TABLE IF NOT EXISTS nft_claims (
+    id SERIAL PRIMARY KEY,
+    eth_address VARCHAR(42) UNIQUE NOT NULL,
+    proxy_wallet VARCHAR(42) NOT NULL,
+    solana_address VARCHAR(44) NOT NULL,
+    status VARCHAR(20) DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    processed_at TIMESTAMPTZ,
+    mint_tx_hash VARCHAR(200),
+    error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_nft_claims_status_created ON nft_claims(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_nft_claims_eth_address ON nft_claims(eth_address);
+
+-- RateLimit table
+CREATE TABLE IF NOT EXISTS rate_limits (
+    id SERIAL PRIMARY KEY,
+    identifier VARCHAR(100) UNIQUE NOT NULL,
+    count INTEGER DEFAULT 0,
+    window_start TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_rate_limits_identifier ON rate_limits(identifier);
+
+\echo '✅ NFT claim tables created'
+
+-- ============================================================================
+-- 8. USEFUL VIEWS FOR ANALYTICS
+-- ============================================================================
+\echo '📊 Creating analytics views...'
+
+-- Events with market count and total volume
+CREATE OR REPLACE VIEW events_summary AS
+SELECT 
+    e.*,
+    COUNT(m.id) as market_count,
+    SUM(m.volume_num) as total_market_volume,
+    AVG(m.volume_num) as avg_market_volume
+FROM events e
+LEFT JOIN markets m ON e.id = m.event_id
+GROUP BY e.id;
+
+-- Top volume events
+CREATE OR REPLACE VIEW top_volume_events AS
+SELECT 
+    id,
+    title,
+    volume,
+    end_date,
+    closed
+FROM events
+ORDER BY volume DESC
+LIMIT 100;
+
+-- User PnL Summary
+CREATE OR REPLACE VIEW user_pnl_summary AS
+SELECT 
+    proxy_wallet,
+    COUNT(*) as total_positions,
+    SUM(realized_pnl) as total_realized_pnl,
+    AVG(realized_pnl) as avg_pnl_per_position,
+    SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as winning_positions,
+    SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) as losing_positions,
+    MAX(realized_pnl) as best_trade,
+    MIN(realized_pnl) as worst_trade
+FROM user_closed_positions
+GROUP BY proxy_wallet;
+
+\echo '✅ Analytics views created'
+
+-- ============================================================================
+-- COMPLETION
+-- ============================================================================
+\echo ''
+\echo '✅ PolyStars database initialization complete!'
+\echo ''
+\echo '📊 Created tables:'
+\echo '   - events'
+\echo '   - markets'
+\echo '   - fetch_metadata'
+\echo '   - redemptions'
+\echo '   - user_closed_positions'
+\echo '   - trader_leaderboard'
+\echo '   - nft_claims'
+\echo '   - rate_limits'
+\echo ''
+\echo '📈 Created views:'
+\echo '   - events_summary'
+\echo '   - top_volume_events'
+\echo '   - user_pnl_summary'
+\echo ''
+\echo '🚀 Database is ready for data ingestion!'
+\echo ''

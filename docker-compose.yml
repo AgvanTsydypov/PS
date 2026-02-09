@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: polystars_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${LOCAL_DB_NAME:-polymarket}
+      POSTGRES_USER: ${LOCAL_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${LOCAL_DB_PASSWORD:-1234}
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "${LOCAL_DB_PORT:-5432}:5432"
+    volumes:
+      # Persistent data storage
+      - postgres_data:/var/lib/postgresql/data
+      # SQL schema for initialization (runs on first startup only)
+      - ./sql/schemas/init-db.sql:/docker-entrypoint-initdb.d/01-init-db.sql:ro
+    networks:
+      - polystars_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LOCAL_DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Python Scripts Service
+  python_scripts:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    container_name: polystars_python
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database connection (внутри Docker сети)
+      LOCAL_DB_HOST: postgres
+      LOCAL_DB_PORT: 5432
+      LOCAL_DB_NAME: ${LOCAL_DB_NAME:-polymarket}
+      LOCAL_DB_USER: ${LOCAL_DB_USER:-postgres}
+      LOCAL_DB_PASSWORD: ${LOCAL_DB_PASSWORD:-1234}
+      DATABASE_URL: postgresql://${LOCAL_DB_USER:-postgres}:${LOCAL_DB_PASSWORD:-1234}@postgres:5432/${LOCAL_DB_NAME:-polymarket}
+      
+      # Supabase (опционально)
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_KEY: ${SUPABASE_KEY}
+      
+      # Alchemy API
+      ALCHEMY_API_KEY: ${ALCHEMY_API_KEY}
+      
+      # Python settings
+      PYTHONUNBUFFERED: 1
+    volumes:
+      # Mount scripts directory
+      - ./scripts:/app/scripts:ro
+      # Mount output directories (read-write)
+      - ./output:/app/output
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - polystars_network
+    # Keep container running (for on-demand script execution)
+    command: tail -f /dev/null
+    # Альтернатива: запускать конкретный скрипт
+    # command: python scripts/fetch/fetch_events_parallel_optimized.py
+
+  # PgAdmin (опционально, для удобного управления БД)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: polystars_pgadmin
+    restart: unless-stopped
+    profiles:
+      - tools  # Запускается только с флагом: docker-compose --profile tools up
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@polystars.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    networks:
+      - polystars_network
+
+volumes:
+  postgres_data:
+    name: polystars_postgres_data
+  pgadmin_data:
+    name: polystars_pgadmin_data
+
+networks:
+  polystars_network:
+    name: polystars_network
+    driver: bridge

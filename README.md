@@ -2,6 +2,12 @@
 
 Полнофункциональное приложение для анализа данных Polymarket с защищенной аутентификацией через SIWE (Sign-In With Ethereum).
 
+## 📚 Документация
+
+- **[START.md](START.md)** - быстрый старт (2 минуты) 🚀
+- **[DOCKER.md](DOCKER.md)** - Docker документация
+- **[README.md](README.md)** - полная документация (этот файл)
+
 ## 🏗 Структура проекта
 
 ```
@@ -45,6 +51,23 @@ PolyStars/
 ```
 
 ## 🚀 Быстрый старт
+
+### Docker (рекомендуется) 🐳
+
+```bash
+# 1. Запустить контейнеры
+docker-compose up -d
+
+# 2. Проверить подключение
+docker exec polystars_python python scripts/db/test_db_connection.py
+
+# 3. Загрузить данные
+docker exec polystars_python python scripts/fetch/fetch_events_parallel_optimized.py
+```
+
+📖 **Подробнее:** [DOCKER.md](DOCKER.md)
+
+### Локальная установка
 
 ### 1. Установка зависимостей
 
