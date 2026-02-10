@@ -35,7 +35,7 @@ AUTO_CONFIG = True  # Set to True if using daily_scheduler_simple.py
 if os.getenv('POLYSTARS_MIN_VOLUME'):
     MIN_VOLUME = int(os.getenv('POLYSTARS_MIN_VOLUME'))
 else:
-    MIN_VOLUME = 100_000  # Default: 100M USD
+    MIN_VOLUME = 5_000_000  # Default: 100M USD
 
 # Minimum market volume (in USD) - markets below this will be filtered out
 MIN_MARKET_VOLUME = 100  # Minimum volume for individual markets
@@ -44,7 +44,7 @@ MIN_MARKET_VOLUME = 100  # Minimum volume for individual markets
 CLOSED_ONLY = True
 
 # Resolution status filter
-RESOLUTION_STATUS = 'Resolved'  # Only resolved events
+RESOLUTION_STATUS = 'resolved'  # Only resolved events (lowercase!)
 
 # ============================================================================
 # DATE RANGE FILTERING
@@ -64,7 +64,7 @@ if os.getenv('POLYSTARS_START_DATE'):
     END_DATE = dt.strptime(os.getenv('POLYSTARS_END_DATE'), '%Y-%m-%d').replace(hour=23, minute=59, second=59)
 else:
     # Fallback to defaults
-    START_DATE = datetime(2024, 10, 1)  # Genesis start or specific date
+    START_DATE = datetime(2026, 2, 1)  # Genesis start or specific date
     END_DATE = datetime(2026, 2, 6)  # Current or specific date
 
 # Or set to None for no date filtering
