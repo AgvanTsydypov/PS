@@ -108,10 +108,21 @@ class SharedPolymarketClient:
                    limit: int = 10, 
                    offset: int = 0,
                    closed: Optional[bool] = None,
+                   end_date_min: Optional[str] = None,
+                   end_date_max: Optional[str] = None,
                    order: str = 'id',
                    ascending: bool = False) -> tuple[Optional[List[Dict]], Optional[str]]:
         """
         Fetch events (thread-safe with rate limiting)
+        
+        Args:
+            limit: Number of events per page
+            offset: Pagination offset
+            closed: Filter by closed status
+            end_date_min: Minimum end date (ISO format, server-side filter)
+            end_date_max: Maximum end date (ISO format, server-side filter)
+            order: Sort field
+            ascending: Sort direction
         
         Returns:
             tuple: (events_list, error_message)
@@ -132,6 +143,12 @@ class SharedPolymarketClient:
             }
             if closed is not None:
                 params['closed'] = str(closed).lower()
+            
+            # Add server-side date filtering (major performance improvement!)
+            if end_date_min:
+                params['end_date_min'] = end_date_min
+            if end_date_max:
+                params['end_date_max'] = end_date_max
             
             url = f"{self.BASE_URL}/events"
             response = self.session.get(url, params=params, timeout=30)
@@ -211,7 +228,7 @@ class OptimizedParallelEventFetcher:
             print(f"   • Rate Limiting: DISABLED ⚠️")
         
         if config.START_DATE or config.END_DATE:
-            print(f"   • Date Range:")
+            print(f"   • Date Range (SERVER-SIDE FILTERING 🚀):")
             if config.START_DATE:
                 print(f"      From: {config.START_DATE.strftime('%Y-%m-%d')}")
             if config.END_DATE:
@@ -224,101 +241,134 @@ class OptimizedParallelEventFetcher:
         
         # Step 1: Fetch initial batch
         print("🔍 Determining data size...", end=" ", flush=True)
-        initial_batch = self._fetch_single_page(0)
-        if not initial_batch:
-            print("❌ Failed to fetch initial batch")
+        initial_batch, initial_error = self._fetch_single_page(0)
+        
+        if initial_error:
+            print(f"❌ Failed to fetch initial batch")
+            print(f"   API Error: {initial_batch}")
+            self.stats['end_time'] = datetime.now()
             return []
         
-        print(f"✓ Got {len(initial_batch)} events")
+        if initial_batch is None:
+            print("✓ No events found matching filters")
+            self.stats['end_time'] = datetime.now()
+            return []
+        
+        if not isinstance(initial_batch, list) or len(initial_batch) == 0:
+            print("✓ No events found matching filters")
+            self.stats['end_time'] = datetime.now()
+            return []
+        
+        print(f"✓ Got {len(initial_batch)} events from API")
         
         # Process initial batch
-        initial_events, initial_error = initial_batch
-        if initial_error or not initial_events:
-            print("❌ Failed to fetch initial batch")
-            return []
-        
-        filtered_initial = self._filter_events(initial_events)
+        filtered_initial = self._filter_events(initial_batch)
         with self.lock:
             self.all_events.extend(filtered_initial)
-            self.stats['total_fetched'] += len(initial_events)
+            self.stats['total_fetched'] += len(initial_batch)
             self.stats['total_filtered'] += len(filtered_initial)
             self.stats['pages_processed'] += 1
         
-        # Step 2: Create list of page offsets
-        max_pages_estimate = 2000
-        offsets = [
-            offset for offset in range(config.BATCH_SIZE, max_pages_estimate * config.BATCH_SIZE, config.BATCH_SIZE)
-        ]
+        print(f"   After client-side filtering: {len(filtered_initial)} events matched all criteria")
         
-        print(f"📊 Starting parallel fetch of up to {len(offsets)} pages...")
-        print(f"⚡ Using {self.max_workers} parallel workers with shared connection pool")
+        # Step 2: Parallel pagination with smart batching and early stopping
+        # Submit batches and stop when we hit empty results
+        print(f"📊 Starting parallel fetch with smart early stopping...")
+        print(f"⚡ Using {self.max_workers} parallel workers")
         print("-" * 70)
         
-        # Step 3: Fetch pages in parallel
+        # Step 3: Fetch pages in parallel batches
         last_update = time.time()
         empty_results = 0
         error_results = 0
-        total_futures = len(offsets)
+        successful_results = 0
+        current_offset = config.BATCH_SIZE
+        BATCH_SIZE_PAGES = 50  # Process 50 pages per batch
+        EMPTY_THRESHOLD = 3  # Stop after 3 consecutive empty batches
+        consecutive_empty_batches = 0
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all tasks
-            future_to_offset = {
-                executor.submit(self._fetch_and_filter_page, offset): offset 
-                for offset in offsets
-            }
-            
-            # Process results as they complete
-            for future in as_completed(future_to_offset):
-                offset = future_to_offset[future]
+            while True:
+                # Submit a batch of pages
+                offsets = [current_offset + (i * config.BATCH_SIZE) for i in range(BATCH_SIZE_PAGES)]
+                future_to_offset = {
+                    executor.submit(self._fetch_and_filter_page, offset): offset 
+                    for offset in offsets
+                }
                 
-                try:
-                    result, is_error = future.result()
+                batch_had_data = False
+                
+                # Process this batch
+                for future in as_completed(future_to_offset):
+                    offset = future_to_offset[future]
                     
-                    if is_error:
-                        error_results += 1
+                    try:
+                        result, is_error = future.result()
+                        
+                        if is_error:
+                            error_results += 1
+                            with self.lock:
+                                self.stats['failed_requests'] += 1
+                                self.failed_offsets.append(offset)
+                        elif result is None:
+                            empty_results += 1
+                        else:
+                            successful_results += 1
+                            batch_had_data = True
+                        
+                    except Exception as e:
                         with self.lock:
                             self.stats['failed_requests'] += 1
-                            self.failed_offsets.append(offset)  # Track for retry
-                    elif result is None:
-                        empty_results += 1
+                            self.failed_offsets.append(offset)
+                        error_results += 1
                     
-                except Exception as e:
-                    with self.lock:
-                        self.stats['failed_requests'] += 1
-                        self.failed_offsets.append(offset)  # Track for retry
-                    error_results += 1
+                    # Progress update
+                    current_time = time.time()
+                    if current_time - last_update >= 0.5:
+                        with self.lock:
+                            elapsed = (datetime.now() - self.stats['start_time']).total_seconds()
+                            rate = self.stats['pages_processed'] / elapsed if elapsed > 0 else 0
+                            
+                            rate_info = ""
+                            if self.rate_limiter:
+                                current_rate = self.rate_limiter.get_current_rate()
+                                rate_info = f" | API: {current_rate}/450"
+                            
+                            print(
+                                f"📥 Progress: {self.stats['pages_processed']:,} pages | "
+                                f"{self.stats['total_filtered']:,} matched | "
+                                f"{rate:.1f} pages/s{rate_info} | "
+                                f"{self.stats['failed_requests']} failed",
+                                end="\r",
+                                flush=True
+                            )
+                        last_update = current_time
+                    
+                    # Check max events limit
+                    if config.MAX_EVENTS:
+                        with self.lock:
+                            if len(self.all_events) >= config.MAX_EVENTS:
+                                print(f"\n✅ Reached maximum events limit: {config.MAX_EVENTS}")
+                                break
                 
-                # Progress update
-                current_time = time.time()
-                if current_time - last_update >= 0.5:
-                    with self.lock:
-                        elapsed = (datetime.now() - self.stats['start_time']).total_seconds()
-                        rate = self.stats['pages_processed'] / elapsed if elapsed > 0 else 0
-                        
-                        # Show rate limiter status if enabled
-                        rate_info = ""
-                        if self.rate_limiter:
-                            current_rate = self.rate_limiter.get_current_rate()
-                            rate_info = f" | API: {current_rate}/450"
-                        
-                        print(
-                            f"📥 Progress: {self.stats['pages_processed']:,} pages | "
-                            f"{self.stats['total_filtered']:,} matched | "
-                            f"{rate:.1f} pages/s{rate_info} | "
-                            f"{self.stats['failed_requests']} failed",
-                            end="\r",
-                            flush=True
-                        )
-                    last_update = current_time
+                # Check if batch was empty
+                if not batch_had_data:
+                    consecutive_empty_batches += 1
+                    if consecutive_empty_batches >= EMPTY_THRESHOLD:
+                        print(f"\n✅ Stopping: {EMPTY_THRESHOLD} consecutive empty batches")
+                        break
+                else:
+                    consecutive_empty_batches = 0
                 
-                # Check max events limit
-                if config.MAX_EVENTS:
-                    with self.lock:
-                        if len(self.all_events) >= config.MAX_EVENTS:
-                            print(f"\n✅ Reached maximum events limit: {config.MAX_EVENTS}")
-                            for f in future_to_offset:
-                                f.cancel()
-                            break
+                # Move to next batch
+                current_offset += BATCH_SIZE_PAGES * config.BATCH_SIZE
+                
+                # Safety limit
+                if current_offset > 500000:
+                    print(f"\n⚠️ Reached safety limit (offset > 500k)")
+                    break
+        
+        total_futures = successful_results + empty_results + error_results
         
         print()
         print("-" * 70)
@@ -426,27 +476,40 @@ class OptimizedParallelEventFetcher:
         
         print("-" * 70)
     
-    def _fetch_single_page(self, offset: int) -> tuple[Optional[List[Dict]], bool]:
+    def _fetch_single_page(self, offset: int) -> tuple[Optional[List[Dict]] | str, bool]:
         """
         Fetch a single page using shared client
         
         Returns:
-            tuple: (events_list, is_error)
+            tuple: (events_list_or_error, is_error)
                 - ([], False) = Empty result (no more data)
                 - ([...], False) = Success with data
-                - (None, True) = Failed request (should retry)
+                - (error_string, True) = Failed request (should retry)
         """
+        # Prepare date parameters for server-side filtering
+        end_date_min = None
+        end_date_max = None
+        
+        if config.START_DATE:
+            # Try ISO format with 'Z' timezone indicator
+            end_date_min = config.START_DATE.strftime('%Y-%m-%dT%H:%M:%SZ')
+        if config.END_DATE:
+            # Try ISO format with 'Z' timezone indicator
+            end_date_max = config.END_DATE.strftime('%Y-%m-%dT%H:%M:%SZ')
+        
         events, error = self.client.get_events(
             limit=config.BATCH_SIZE,
             offset=offset,
             closed=config.CLOSED_ONLY,
+            end_date_min=end_date_min,
+            end_date_max=end_date_max,
             order='id',
             ascending=False
         )
         
         if error:
-            # Failed request
-            return (None, True)
+            # Failed request - return error message
+            return (error, True)
         
         if not events or len(events) == 0:
             # Empty result (no more data)
@@ -461,21 +524,23 @@ class OptimizedParallelEventFetcher:
         Returns:
             tuple: (filtered_count, is_error)
         """
-        events, is_error = self._fetch_single_page(offset)
+        result, is_error = self._fetch_single_page(offset)
         
         if is_error:
             # Failed request - don't count as processed
+            # result is error message (string)
             return (None, True)
         
-        if events is None:
+        if result is None:
             # Empty result (end of data)
             return (None, False)
         
-        filtered = self._filter_events(events)
+        # result is events list
+        filtered = self._filter_events(result)
         
         with self.lock:
             self.all_events.extend(filtered)
-            self.stats['total_fetched'] += len(events)
+            self.stats['total_fetched'] += len(result)
             self.stats['total_filtered'] += len(filtered)
             self.stats['pages_processed'] += 1
         
@@ -510,7 +575,12 @@ class OptimizedParallelEventFetcher:
         return filtered
     
     def _check_date_range(self, event: Dict) -> bool:
-        """Check if event is within configured date range"""
+        """
+        Check if event is within configured date range (FALLBACK)
+        
+        NOTE: With server-side filtering enabled, this should rarely filter anything.
+        It serves as a safety net in case API returns unexpected data.
+        """
         if config.START_DATE is None and config.END_DATE is None:
             return True
         
@@ -601,6 +671,9 @@ class OptimizedParallelEventFetcher:
     
     def print_summary(self):
         """Print summary statistics"""
+        if self.stats['end_time'] is None:
+            self.stats['end_time'] = datetime.now()
+        
         duration = (self.stats['end_time'] - self.stats['start_time']).total_seconds()
         
         print("\n" + "=" * 70)
