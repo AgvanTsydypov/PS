@@ -35,7 +35,15 @@ AUTO_CONFIG = True  # Set to True if using daily_scheduler_simple.py
 if os.getenv('POLYSTARS_MIN_VOLUME'):
     MIN_VOLUME = int(os.getenv('POLYSTARS_MIN_VOLUME'))
 else:
-    MIN_VOLUME = 5_000_000  # Default: 100M USD
+    MIN_VOLUME = 1_000_000  # Default: 10M USD
+
+# Maximum event volume (in USD) - for testing, to exclude very large events
+# Set to None for no maximum limit (production)
+# Example: 150_000_000 to exclude events over 150M USD
+if os.getenv('POLYSTARS_MAX_VOLUME'):
+    MAX_VOLUME = int(os.getenv('POLYSTARS_MAX_VOLUME'))
+else:
+    MAX_VOLUME = 5_000_000  # Default: No maximum limit
 
 # Minimum market volume (in USD) - markets below this will be filtered out
 MIN_MARKET_VOLUME = 100  # Minimum volume for individual markets
@@ -64,8 +72,8 @@ if os.getenv('POLYSTARS_START_DATE'):
     END_DATE = dt.strptime(os.getenv('POLYSTARS_END_DATE'), '%Y-%m-%d').replace(hour=23, minute=59, second=59)
 else:
     # Fallback to defaults
-    START_DATE = datetime(2026, 2, 1)  # Genesis start or specific date
-    END_DATE = datetime(2026, 2, 6)  # Current or specific date
+    START_DATE = datetime(2026, 2, 6)  # Genesis start or specific date
+    END_DATE = datetime(2026, 2, 10)  # Current or specific date
 
 # Or set to None for no date filtering
 # START_DATE = None
@@ -79,7 +87,11 @@ else:
 BATCH_SIZE = 100
 
 # Maximum number of events to fetch (None = unlimited)
-MAX_EVENTS = None  # Set to a number like 1000 for testing
+# Check environment variable first (set by scheduler for testing)
+if os.getenv('POLYSTARS_MAX_EVENTS'):
+    MAX_EVENTS = int(os.getenv('POLYSTARS_MAX_EVENTS'))
+else:
+    MAX_EVENTS = None  # Default: unlimited (set to a number like 1000 for testing)
 
 # API Settings
 REQUEST_DELAY = 0.2  # Delay between requests in seconds
