@@ -56,8 +56,8 @@ load_dotenv()
 GENESIS_START_DATE = date(2026, 2, 1)
 GENESIS_END_DATE = date(2026, 2, 6)
 
-GENESIS_MIN_VOLUME = 100_000_000  # 100M
-DAILY_MIN_VOLUME = 5_000_000  # 5M
+GENESIS_MIN_VOLUME = 100_000  # 100M
+DAILY_MIN_VOLUME = 100_000  # 5M
 
 # OPTIONAL: Limit number of events for testing (None = unlimited)
 # Set this to speed up testing with smaller datasets
@@ -65,14 +65,14 @@ DAILY_MIN_VOLUME = 5_000_000  # 5M
 #   - 100 events for quick test (few minutes)
 #   - 1000 events for medium test (10-15 minutes)
 #   - None for full load (production)
-MAX_EVENTS_LIMIT = None  # Change to number for testing, e.g., 1000
+MAX_EVENTS_LIMIT = 1  # Change to number for testing, e.g., 1000
 
 # OPTIONAL: Maximum event volume filter (in USD) - for testing
 # Set this to exclude very large events that may take longer to process
 # Examples:
 #   - 150_000_000 (150M) to exclude events over 150M USD
 #   - None for no maximum limit (production)
-MAX_VOLUME_FILTER = None  # Change to number for testing, e.g., 150_000_000
+MAX_VOLUME_FILTER = 300_000  # Change to number for testing, e.g., 150_000_000
 
 
 class DataLoadingManager:
@@ -87,11 +87,11 @@ class DataLoadingManager:
         """Get database connection parameters"""
         if self.use_local_db:
             return {
-                'host': os.getenv('POSTGRES_HOST', 'localhost'),
-                'port': int(os.getenv('POSTGRES_PORT', 5432)),
-                'database': os.getenv('POSTGRES_DB', 'polymarket'),
-                'user': os.getenv('POSTGRES_USER', 'postgres'),
-                'password': os.getenv('POSTGRES_PASSWORD', 'your_password_here')
+                'host': os.getenv('LOCAL_DB_HOST', os.getenv('POSTGRES_HOST', 'localhost')),
+                'port': int(os.getenv('LOCAL_DB_PORT', os.getenv('POSTGRES_PORT', 5432))),
+                'database': os.getenv('LOCAL_DB_NAME', os.getenv('POSTGRES_DB', 'polymarket')),
+                'user': os.getenv('LOCAL_DB_USER', os.getenv('POSTGRES_USER', 'postgres')),
+                'password': os.getenv('LOCAL_DB_PASSWORD', os.getenv('POSTGRES_PASSWORD', 'your_password_here'))
             }
         else:
             # Supabase

@@ -388,6 +388,14 @@ class OptimizedParallelEventFetcher:
         if self.failed_offsets:
             self._retry_failed_requests()
         
+        # Apply MAX_EVENTS limit to final result
+        # (Early stopping during pagination may have fetched more events in parallel)
+        if config.MAX_EVENTS and len(self.all_events) > config.MAX_EVENTS:
+            original_count = len(self.all_events)
+            self.all_events = self.all_events[:config.MAX_EVENTS]
+            self.stats['total_filtered'] = len(self.all_events)  # Update stats
+            print(f"\n✂️  Trimmed to MAX_EVENTS limit: {original_count} → {config.MAX_EVENTS} events")
+        
         self.stats['end_time'] = datetime.now()
         return self.all_events
     

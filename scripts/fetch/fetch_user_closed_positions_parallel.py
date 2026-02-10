@@ -394,9 +394,16 @@ def get_redeemers_from_db_generator(use_local_db: bool = False, limit: Optional[
             try:
                 import fetch_events_config as config
                 
-                # Добавляем фильтры по датам в SQL запрос
+                # Добавляем фильтры по датам и volume в SQL запрос
                 date_filters = []
                 query_params = {}  # Dict для named параметров
+                
+                # Добавляем MIN_VOLUME (обязательный параметр для SQL запроса)
+                if hasattr(config, 'MIN_VOLUME'):
+                    query_params['min_volume'] = config.MIN_VOLUME
+                    print(f"🔍 Filter: MIN_VOLUME = ${config.MIN_VOLUME:,}")
+                else:
+                    query_params['min_volume'] = 5_000_000  # Fallback значение
                 
                 if hasattr(config, 'START_DATE') and config.START_DATE:
                     date_filters.append("e.end_date::date >= %(date_from)s")

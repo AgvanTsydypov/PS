@@ -12,7 +12,7 @@ services:
       POSTGRES_PASSWORD: ${LOCAL_DB_PASSWORD:-1234}
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
-      - "${LOCAL_DB_PORT:-5432}:5432"
+      - "${LOCAL_DB_PORT:-5433}:5432"
     volumes:
       # Persistent data storage
       - postgres_data:/var/lib/postgresql/data
