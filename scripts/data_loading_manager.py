@@ -36,10 +36,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Constants
-GENESIS_START_DATE = date(2024, 7, 6)
-GENESIS_END_DATE = date(2026, 1, 5)
+# GENESIS_START_DATE = date(2024, 7, 6)
+# GENESIS_END_DATE = date(2026, 1, 5)
+GENESIS_START_DATE = date(2025, 12, 1)
+GENESIS_END_DATE = date(2026, 2, 6)
 GENESIS_MIN_VOLUME = 100_000_000  # 100M
-DAILY_MIN_VOLUME = 5_000_000  # 5M
+DAILY_MIN_VOLUME = 50_000_000  # 50M
 
 
 class DataLoadingManager:

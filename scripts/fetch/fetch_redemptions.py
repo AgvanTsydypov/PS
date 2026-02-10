@@ -391,11 +391,9 @@ def get_markets_from_db(use_local_db: bool = False, limit: Optional[int] = None)
             
             # ⚠️ КРИТИЧЕСКИ ВАЖНО: Фильтр по датам событий
             # Импортируем конфиг для получения дат
-            import sys
-            import os
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            if script_dir not in sys.path:
-                sys.path.insert(0, script_dir)
+            current_script_dir = os.path.dirname(os.path.abspath(__file__))
+            if current_script_dir not in sys.path:
+                sys.path.insert(0, current_script_dir)
             
             try:
                 import fetch_events_config as config
