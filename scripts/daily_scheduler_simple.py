@@ -149,10 +149,30 @@ class SimplifiedScheduler:
             os.environ['POLYSTARS_MIN_VOLUME'] = str(self.manager.get_volume_filter(is_genesis=is_genesis))
             os.environ['POLYSTARS_IS_GENESIS'] = 'true' if is_genesis else 'false'
             
+            # Set MAX_EVENTS if specified (for testing)
+            events_limit = self.manager.get_events_limit()
+            if events_limit:
+                os.environ['POLYSTARS_MAX_EVENTS'] = str(events_limit)
+            elif 'POLYSTARS_MAX_EVENTS' in os.environ:
+                # Clear if was set before
+                del os.environ['POLYSTARS_MAX_EVENTS']
+            
+            # Set MAX_VOLUME if specified (for testing)
+            max_volume = self.manager.get_max_volume_filter()
+            if max_volume:
+                os.environ['POLYSTARS_MAX_VOLUME'] = str(max_volume)
+            elif 'POLYSTARS_MAX_VOLUME' in os.environ:
+                # Clear if was set before
+                del os.environ['POLYSTARS_MAX_VOLUME']
+            
             volume_label = "100M (Genesis)" if is_genesis else "5M (Daily)"
             print(f"📅 Config set (via env vars):")
             print(f"   Date range: {start_date} to {end_date}")
             print(f"   MIN_VOLUME: {os.environ['POLYSTARS_MIN_VOLUME']} ({volume_label})")
+            if max_volume:
+                print(f"   ⚠️  MAX_VOLUME: {max_volume:,} (Testing: excludes large events)")
+            if events_limit:
+                print(f"   ⚠️  MAX_EVENTS: {events_limit} (Testing: limits total count)")
             
         except Exception as e:
             print(f"⚠️  Could not configure: {e}")

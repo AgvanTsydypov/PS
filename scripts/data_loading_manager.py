@@ -1,11 +1,9 @@
 """
-Simplified Data Loading Manager (No Seasons)
-
-Manages daily data loading with historical backfill support.
+Data Loading Manager - Simplified (no seasons)
 
 STRUCTURE:
 ==========
-- Genesis: Historical data (2024-07-06 to yyyy-mm-dd) with 100M filter
+- Genesis: Historical data (2024-07-06 to 2026-01-05) with 100M filter
 - Daily: Current data (after Genesis) with 5M filter
 
 DATE LOGIC:
@@ -13,35 +11,68 @@ DATE LOGIC:
 - Events/Markets: Yesterday (completed day)
 - Redemptions/Positions/Leaderboard: 3 days ago
 
+TESTING MODE:
+=============
+For faster testing, configure these parameters in this file:
+
+1. MAX_EVENTS_LIMIT - Limit total number of events:
+    MAX_EVENTS_LIMIT = 100    # Quick test (~5 min)
+    MAX_EVENTS_LIMIT = 1000   # Medium test (~15 min)
+    MAX_EVENTS_LIMIT = None   # Full load (production)
+
+2. MAX_VOLUME_FILTER - Exclude large events (in USD):
+    MAX_VOLUME_FILTER = 150_000_000  # Skip events over 150M USD
+    MAX_VOLUME_FILTER = None         # No maximum limit (production)
+
+These filters help speed up testing by reducing data volume.
+
 Usage:
     from scripts.data_loading_manager import DataLoadingManager
     
     manager = DataLoadingManager()
     
-    # Check if Genesis loaded
+    # Check if Genesis needed
     if manager.needs_genesis_load():
-        manager.load_genesis()
+        print("Load Genesis first")
     
     # Get today's loading dates
     dates = manager.get_loading_dates()
+    # dates = {'events_date': yesterday, 'redemptions_date': 3_days_ago}
 """
 
-import os
 import psycopg2
-import psycopg2.extras
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Dict, Optional
+import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Constants
+# Genesis period definition
 # GENESIS_START_DATE = date(2024, 7, 6)
 # GENESIS_END_DATE = date(2026, 1, 5)
-GENESIS_START_DATE = date(2025, 12, 1)
+
+# For testing - use shorter period:
+GENESIS_START_DATE = date(2026, 2, 1)
 GENESIS_END_DATE = date(2026, 2, 6)
+
 GENESIS_MIN_VOLUME = 100_000_000  # 100M
-DAILY_MIN_VOLUME = 50_000_000  # 50M
+DAILY_MIN_VOLUME = 5_000_000  # 5M
+
+# OPTIONAL: Limit number of events for testing (None = unlimited)
+# Set this to speed up testing with smaller datasets
+# Examples:
+#   - 100 events for quick test (few minutes)
+#   - 1000 events for medium test (10-15 minutes)
+#   - None for full load (production)
+MAX_EVENTS_LIMIT = None  # Change to number for testing, e.g., 1000
+
+# OPTIONAL: Maximum event volume filter (in USD) - for testing
+# Set this to exclude very large events that may take longer to process
+# Examples:
+#   - 150_000_000 (150M) to exclude events over 150M USD
+#   - None for no maximum limit (production)
+MAX_VOLUME_FILTER = None  # Change to number for testing, e.g., 150_000_000
 
 
 class DataLoadingManager:
@@ -52,85 +83,95 @@ class DataLoadingManager:
         self.connection_params = self._get_db_params()
         self._ensure_tables()
     
-    def _get_db_params(self) -> Dict:
+    def _get_db_params(self):
         """Get database connection parameters"""
         if self.use_local_db:
             return {
-                'host': os.getenv('LOCAL_DB_HOST', 'localhost'),
-                'port': int(os.getenv('LOCAL_DB_PORT', 5432)),
-                'database': os.getenv('LOCAL_DB_NAME', 'polymarket'),
-                'user': os.getenv('LOCAL_DB_USER', 'postgres'),
-                'password': os.getenv('LOCAL_DB_PASSWORD', '1234')
+                'host': os.getenv('POSTGRES_HOST', 'localhost'),
+                'port': int(os.getenv('POSTGRES_PORT', 5432)),
+                'database': os.getenv('POSTGRES_DB', 'polymarket'),
+                'user': os.getenv('POSTGRES_USER', 'postgres'),
+                'password': os.getenv('POSTGRES_PASSWORD', 'your_password_here')
             }
         else:
-            raise NotImplementedError("Supabase not implemented")
+            # Supabase
+            raise NotImplementedError("Supabase connection not implemented")
     
     def _ensure_tables(self):
-        """Create tracking tables if they don't exist"""
-        conn = psycopg2.connect(**self.connection_params)
-        cursor = conn.cursor()
-        
+        """Ensure tracking tables exist"""
         try:
+            conn = psycopg2.connect(**self.connection_params)
+            cursor = conn.cursor()
+            
+            # Check if data_loads table exists
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS data_loads (
-                    id SERIAL PRIMARY KEY,
-                    load_date DATE NOT NULL UNIQUE,
-                    
-                    -- Track which data types loaded
-                    events_loaded BOOLEAN DEFAULT FALSE,
-                    redemptions_loaded BOOLEAN DEFAULT FALSE,
-                    positions_loaded BOOLEAN DEFAULT FALSE,
-                    leaderboard_loaded BOOLEAN DEFAULT FALSE,
-                    
-                    -- Timestamps
-                    events_loaded_at TIMESTAMPTZ,
-                    redemptions_loaded_at TIMESTAMPTZ,
-                    positions_loaded_at TIMESTAMPTZ,
-                    leaderboard_loaded_at TIMESTAMPTZ,
-                    
-                    -- Record counts
-                    events_count INTEGER DEFAULT 0,
-                    redemptions_count INTEGER DEFAULT 0,
-                    positions_count INTEGER DEFAULT 0,
-                    leaderboard_count INTEGER DEFAULT 0,
-                    
-                    -- Type: 'genesis' or 'daily'
-                    load_type VARCHAR(20) DEFAULT 'daily',
-                    
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ DEFAULT NOW()
-                );
-                
-                CREATE INDEX IF NOT EXISTS idx_data_loads_date ON data_loads(load_date DESC);
-                CREATE INDEX IF NOT EXISTS idx_data_loads_type ON data_loads(load_type);
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'data_loads'
+                )
             """)
             
-            conn.commit()
-        finally:
+            table_exists = cursor.fetchone()[0]
+            
+            if not table_exists:
+                print("⚠️  Table 'data_loads' not found - creating...")
+                
+                # Create table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS data_loads (
+                        id SERIAL PRIMARY KEY,
+                        load_date DATE NOT NULL UNIQUE,
+                        
+                        events_loaded BOOLEAN DEFAULT FALSE,
+                        redemptions_loaded BOOLEAN DEFAULT FALSE,
+                        positions_loaded BOOLEAN DEFAULT FALSE,
+                        leaderboard_loaded BOOLEAN DEFAULT FALSE,
+                        
+                        events_loaded_at TIMESTAMPTZ,
+                        redemptions_loaded_at TIMESTAMPTZ,
+                        positions_loaded_at TIMESTAMPTZ,
+                        leaderboard_loaded_at TIMESTAMPTZ,
+                        
+                        events_count INTEGER DEFAULT 0,
+                        redemptions_count INTEGER DEFAULT 0,
+                        positions_count INTEGER DEFAULT 0,
+                        leaderboard_count INTEGER DEFAULT 0,
+                        
+                        load_type VARCHAR(20) DEFAULT 'daily' CHECK (load_type IN ('genesis', 'daily')),
+                        
+                        events_error TEXT,
+                        redemptions_error TEXT,
+                        positions_error TEXT,
+                        leaderboard_error TEXT,
+                        
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                
+                conn.commit()
+                print("✅ Table 'data_loads' created")
+            
             cursor.close()
             conn.close()
+            
+        except Exception as e:
+            print(f"⚠️  Could not ensure tables: {e}")
     
     def get_loading_dates(self, reference_date: date = None) -> Dict:
         """
-        Get dates for loading different data types
+        Calculate dates for data loading
         
         Args:
             reference_date: Reference date (default: today)
             
         Returns:
-            {
-                'events_date': date,  # Yesterday
-                'redemptions_date': date,  # 3 days ago
-                'reference_date': date  # Today
-            }
+            Dict with events_date (yesterday) and redemptions_date (3 days ago)
         """
         if reference_date is None:
             reference_date = date.today()
         
-        # Events/Markets: Yesterday (completed day)
         events_date = reference_date - timedelta(days=1)
-        
-        # Redemptions/Positions/Leaderboard: 3 days ago
         redemptions_date = reference_date - timedelta(days=3)
         
         return {
@@ -139,43 +180,45 @@ class DataLoadingManager:
             'reference_date': reference_date
         }
     
+    def has_any_data(self) -> bool:
+        """Check if any data exists in events table"""
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("SELECT COUNT(*) FROM events")
+            count = cursor.fetchone()[0]
+            return count > 0
+        finally:
+            cursor.close()
+            conn.close()
+    
     def needs_genesis_load(self) -> bool:
         """Check if Genesis data needs to be loaded"""
         conn = psycopg2.connect(**self.connection_params)
         cursor = conn.cursor()
         
         try:
-            # Check if we have any Genesis loads
             cursor.execute("""
-                SELECT COUNT(*) FROM data_loads
+                SELECT COUNT(*) FROM data_loads 
                 WHERE load_type = 'genesis' AND events_loaded = TRUE
             """)
-            
             count = cursor.fetchone()[0]
             return count == 0
         finally:
             cursor.close()
             conn.close()
     
-    def has_any_data(self) -> bool:
-        """Check if database has any data"""
-        conn = psycopg2.connect(**self.connection_params)
-        cursor = conn.cursor()
-        
-        try:
-            cursor.execute("SELECT COUNT(*) FROM events LIMIT 1")
-            return cursor.fetchone()[0] > 0
-        finally:
-            cursor.close()
-            conn.close()
-    
     def is_data_loaded_for_date(self, load_date: date, data_type: str) -> bool:
         """
-        Check if data is loaded for a specific date
+        Check if data is loaded for a specific date and type
         
         Args:
             load_date: Date to check
-            data_type: Type (events, redemptions, positions, leaderboard)
+            data_type: Type of data (events, redemptions, positions, leaderboard)
+            
+        Returns:
+            True if data is loaded
         """
         conn = psycopg2.connect(**self.connection_params)
         cursor = conn.cursor()
@@ -183,41 +226,47 @@ class DataLoadingManager:
         try:
             column = f'{data_type}_loaded'
             cursor.execute(f"""
-                SELECT {column} FROM data_loads WHERE load_date = %s
+                SELECT {column} FROM data_loads
+                WHERE load_date = %s
             """, (load_date,))
             
             result = cursor.fetchone()
-            return result and result[0]
+            return result[0] if result else False
         finally:
             cursor.close()
             conn.close()
     
     def mark_data_loaded(self, data_type: str, load_date: date, record_count: int = 0, load_type: str = 'daily'):
         """
-        Mark data as loaded
+        Mark data as loaded for a specific date
         
         Args:
-            data_type: Type (events, redemptions, positions, leaderboard)
-            load_date: Date loaded
-            record_count: Number of records
-            load_type: 'genesis' or 'daily'
+            data_type: Type of data (events, redemptions, positions, leaderboard)
+            load_date: Date the data is for
+            record_count: Number of records loaded
+            load_type: Type of load (genesis, daily)
         """
         conn = psycopg2.connect(**self.connection_params)
         cursor = conn.cursor()
         
         try:
+            column_loaded = f'{data_type}_loaded'
+            column_loaded_at = f'{data_type}_loaded_at'
+            column_count = f'{data_type}_count'
+            
             cursor.execute(f"""
                 INSERT INTO data_loads (
-                    load_date, load_type,
-                    {data_type}_loaded, {data_type}_loaded_at, {data_type}_count
+                    load_date, {column_loaded}, {column_loaded_at}, {column_count}, load_type
                 )
-                VALUES (%s, %s, TRUE, NOW(), %s)
-                ON CONFLICT (load_date) DO UPDATE SET
-                    {data_type}_loaded = TRUE,
-                    {data_type}_loaded_at = NOW(),
-                    {data_type}_count = EXCLUDED.{data_type}_count,
+                VALUES (%s, TRUE, NOW(), %s, %s)
+                ON CONFLICT (load_date) 
+                DO UPDATE SET
+                    {column_loaded} = TRUE,
+                    {column_loaded_at} = NOW(),
+                    {column_count} = %s,
+                    load_type = %s,
                     updated_at = NOW()
-            """, (load_date, load_type, record_count))
+            """, (load_date, record_count, load_type, record_count, load_type))
             
             conn.commit()
         finally:
@@ -228,6 +277,24 @@ class DataLoadingManager:
         """Get appropriate volume filter"""
         return GENESIS_MIN_VOLUME if is_genesis else DAILY_MIN_VOLUME
     
+    def get_events_limit(self) -> Optional[int]:
+        """
+        Get events limit for testing
+        
+        Returns:
+            Number of events to limit (None = unlimited)
+        """
+        return MAX_EVENTS_LIMIT
+    
+    def get_max_volume_filter(self) -> Optional[int]:
+        """
+        Get maximum volume filter for testing
+        
+        Returns:
+            Maximum volume in USD (None = no limit)
+        """
+        return MAX_VOLUME_FILTER
+    
     def get_missing_dates(self, start_from: date = None, up_to: date = None) -> list:
         """
         Get list of dates that need data loading
@@ -237,13 +304,12 @@ class DataLoadingManager:
             up_to: Check up to this date (default: yesterday)
             
         Returns:
-            List of dates that need data: [(date, 'events'|'redemptions'), ...]
+            List of dates that need data
         """
         if start_from is None:
             start_from = GENESIS_END_DATE + timedelta(days=1)
         
         if up_to is None:
-            # Up to yesterday (for events) or 3 days ago (for redemptions)
             up_to = date.today() - timedelta(days=1)
         
         conn = psycopg2.connect(**self.connection_params)
@@ -306,6 +372,17 @@ class DataLoadingManager:
         print("📊 DATA LOADING STATUS")
         print("=" * 70)
         
+        # Check for testing mode
+        testing_mode = False
+        if MAX_EVENTS_LIMIT or MAX_VOLUME_FILTER:
+            testing_mode = True
+            print(f"\n⚠️  TESTING MODE ACTIVE:")
+            if MAX_EVENTS_LIMIT:
+                print(f"   • Event count limit: {MAX_EVENTS_LIMIT:,} events per run")
+            if MAX_VOLUME_FILTER:
+                print(f"   • Max volume filter: ${MAX_VOLUME_FILTER:,} (excludes events over this)")
+            print(f"   (Set both to None for full production load)")
+        
         # Check Genesis
         genesis_loaded = not self.needs_genesis_load()
         print(f"\nGenesis ({GENESIS_START_DATE} → {GENESIS_END_DATE}):")
@@ -355,40 +432,31 @@ class DataLoadingManager:
         print("=" * 70)
 
 
-def main():
-    """Test the manager"""
-    import argparse
+# ============================================================================
+# CLI for testing
+# ============================================================================
+if __name__ == '__main__':
+    import sys
     
-    parser = argparse.ArgumentParser(description='Data Loading Manager')
-    parser.add_argument('--status', action='store_true', help='Show current status')
-    parser.add_argument('--check-genesis', action='store_true', help='Check if Genesis loaded')
-    parser.add_argument('--dates', action='store_true', help='Show loading dates')
+    manager = DataLoadingManager(use_local_db=True)
     
-    args = parser.parse_args()
-    
-    manager = DataLoadingManager()
-    
-    if args.status:
+    if len(sys.argv) > 1 and sys.argv[1] == '--status':
         manager.print_status()
-    
-    elif args.check_genesis:
+    else:
+        print("Data Loading Manager")
+        print("=" * 70)
+        
         if manager.needs_genesis_load():
             print("❌ Genesis data NOT loaded")
             print(f"   Load data for: {GENESIS_START_DATE} to {GENESIS_END_DATE}")
             print(f"   Filter: MIN_VOLUME = {GENESIS_MIN_VOLUME:,}")
         else:
             print("✅ Genesis data loaded")
-    
-    elif args.dates:
+        
         dates = manager.get_loading_dates()
-        print("📅 Loading Dates:")
-        print(f"  Reference (today): {dates['reference_date']}")
-        print(f"  Events: {dates['events_date']}")
-        print(f"  Redemptions: {dates['redemptions_date']}")
-    
-    else:
-        print("Use --help for usage")
-
-
-if __name__ == '__main__':
-    main()
+        print(f"\nToday's dates:")
+        print(f"  • Events: {dates['events_date']}")
+        print(f"  • Redemptions: {dates['redemptions_date']}")
+        
+        print("\nUsage:")
+        print("  python scripts/data_loading_manager.py --status")

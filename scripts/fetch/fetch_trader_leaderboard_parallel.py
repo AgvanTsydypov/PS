@@ -453,34 +453,32 @@ def get_unique_wallets_from_db_generator(
                 
                 # Добавляем фильтры по датам в SQL запрос
                 date_filters = []
-                query_params = []
+                query_params = {}  # Dict для named параметров
                 
                 if hasattr(config, 'START_DATE') and config.START_DATE:
-                    date_filters.append("e.end_date >= %s")
-                    query_params.append(config.START_DATE)
+                    date_filters.append("e.end_date::date >= %(date_from)s")
+                    query_params['date_from'] = config.START_DATE.date()
                     print(f"🔍 Filter: Events from {config.START_DATE.date()}")
                 
                 if hasattr(config, 'END_DATE') and config.END_DATE:
-                    date_filters.append("e.end_date <= %s")
-                    query_params.append(config.END_DATE)
+                    date_filters.append("e.end_date::date <= %(date_to)s")
+                    query_params['date_to'] = config.END_DATE.date()
                     print(f"🔍 Filter: Events until {config.END_DATE.date()}")
                 
                 if date_filters:
-                    # Добавляем фильтры к запросу (заменяем ORDER BY)
-                    sql_query_with_filters = sql_query.replace(
+                    # Вставляем фильтры ПЕРЕД ORDER BY
+                    sql_query = sql_query.replace(
                         "ORDER BY r.redeemer_address",
-                        "AND " + " AND ".join(date_filters) + "\n        ORDER BY r.redeemer_address"
+                        " AND " + " AND ".join(date_filters) + "\nORDER BY r.redeemer_address"
                     )
-                    sql_query = sql_query_with_filters
                     print(f"✅ Date filters applied to query")
             except ImportError:
                 print("⚠️  Warning: Could not import fetch_events_config, skipping date filters")
-                query_params = []
+                query_params = {}
             
             print(f"🔍 Executing query (server-side cursor)...")
             if query_params:
-                # Convert list to tuple for psycopg2
-                cursor.execute(sql_query, tuple(query_params))
+                cursor.execute(sql_query, query_params)
             else:
                 cursor.execute(sql_query)
             

@@ -193,6 +193,7 @@ class OptimizedParallelEventFetcher:
             'total_filtered': 0,
             'total_filtered_by_date': 0,
             'total_filtered_by_volume': 0,
+            'total_filtered_by_max_volume': 0,
             'total_filtered_by_status': 0,
             'total_markets_original': 0,
             'total_markets_filtered': 0,
@@ -215,6 +216,8 @@ class OptimizedParallelEventFetcher:
         print("=" * 70)
         print(f"📋 Configuration:")
         print(f"   • Minimum Event Volume: ${config.MIN_VOLUME:,.0f}")
+        if config.MAX_VOLUME:
+            print(f"   • Maximum Event Volume: ${config.MAX_VOLUME:,.0f} ⚠️ (Testing filter)")
         print(f"   • Minimum Market Volume: ${config.MIN_MARKET_VOLUME:,.0f}")
         print(f"   • Closed Only: {config.CLOSED_ONLY}")
         print(f"   • Resolution Status: {config.RESOLUTION_STATUS}")
@@ -562,6 +565,12 @@ class OptimizedParallelEventFetcher:
                     self.stats['total_filtered_by_volume'] += 1
                 continue
             
+            # Check maximum volume (for testing - exclude very large events)
+            if config.MAX_VOLUME and volume > config.MAX_VOLUME:
+                with self.lock:
+                    self.stats['total_filtered_by_max_volume'] += 1
+                continue
+            
             if not self._check_resolution_status(event, config.RESOLUTION_STATUS):
                 with self.lock:
                     self.stats['total_filtered_by_status'] += 1
@@ -697,7 +706,9 @@ class OptimizedParallelEventFetcher:
         
         print(f"\n🔍 Filtering breakdown:")
         print(f"   • Excluded by date range: {self.stats['total_filtered_by_date']:,}")
-        print(f"   • Excluded by volume: {self.stats['total_filtered_by_volume']:,}")
+        print(f"   • Excluded by min volume (<${config.MIN_VOLUME:,.0f}): {self.stats['total_filtered_by_volume']:,}")
+        if config.MAX_VOLUME:
+            print(f"   • Excluded by max volume (>${config.MAX_VOLUME:,.0f}): {self.stats['total_filtered_by_max_volume']:,}")
         print(f"   • Excluded by resolution status: {self.stats['total_filtered_by_status']:,}")
         
         if self.stats['total_markets_original'] > 0:
@@ -747,6 +758,7 @@ def save_events_to_json(events: List[Dict], filename: str = None) -> str:
             'filters': {
                 'closed': config.CLOSED_ONLY,
                 'min_event_volume': config.MIN_VOLUME,
+                'max_event_volume': config.MAX_VOLUME,
                 'min_market_volume': config.MIN_MARKET_VOLUME,
                 'resolution_status': config.RESOLUTION_STATUS,
                 'date_range': {
@@ -863,6 +875,7 @@ def main():
                         'filters': {
                             'closed': config.CLOSED_ONLY,
                             'min_event_volume': config.MIN_VOLUME,
+                            'max_event_volume': config.MAX_VOLUME,
                             'min_market_volume': config.MIN_MARKET_VOLUME,
                             'resolution_status': config.RESOLUTION_STATUS,
                             'date_range': {
