@@ -1,26 +1,26 @@
 """
 Configuration for parallel events fetcher
-Adjust these parameters to filter events
 
-AUTO-SEASON SUPPORT:
-====================
-Genesis Period: 2024-07-06 to 2026-01-05 (исторические данные)
-Season 1+:      2026-01-06 onwards (по 10 дней каждый сезон)
+SIMPLIFIED LOGIC:
+=================
+- Genesis: 2024-07-06 to 2026-01-05 with 100M filter
+- Daily: After Genesis with 5M filter
 
-To enable automatic date filtering based on current season:
-1. Set AUTO_SEASON = True
-2. Script will automatically load dates from season_manager
-3. Or use daily_scheduler.py which handles this automatically
+The daily_scheduler_simple.py will automatically configure:
+- Dates based on load type (yesterday for events)
+- MIN_VOLUME based on load type (100M for Genesis, 5M for daily)
+
+You can also configure manually for testing.
 """
 
 from datetime import datetime, timedelta
 
 # ============================================================================
-# AUTO-SEASON MODE
+# AUTO-CONFIG MODE
 # ============================================================================
 
-# Enable automatic season-based date filtering
-AUTO_SEASON = False  # Set to True to use season dates automatically
+# Enable automatic configuration by scheduler (recommended)
+AUTO_CONFIG = False  # Set to True if using daily_scheduler_simple.py
 
 # ============================================================================
 # FILTERING CRITERIA
@@ -45,18 +45,16 @@ RESOLUTION_STATUS = 'Resolved'  # Only resolved events
 # DATE RANGE FILTERING
 # ============================================================================
 
-# Date range filtering (None = no filter)
-# If AUTO_SEASON = True, these will be overridden by season dates
+# Date range filtering
+# If AUTO_CONFIG = True, these will be set by scheduler:
+#   - Events: Yesterday's date
+#   - Genesis: Full Genesis period (2024-07-06 to 2026-01-05)
 
-# Genesis period (historical data)
-# START_DATE = datetime(2024, 7, 6)   # Genesis start
-# END_DATE = datetime(2026, 1, 5)     # Genesis end
+# Manual configuration (for testing):
+START_DATE = datetime(2024, 7, 6)  # Genesis start or specific date
+END_DATE = datetime.now()  # Current or specific date
 
-# Or use current date for testing
-END_DATE = datetime.now()  # End date (now)
-START_DATE = datetime(2024, 7, 6)  # Start from Genesis
-
-# Or set to None to fetch all events regardless of date
+# Or set to None for no date filtering
 # START_DATE = None
 # END_DATE = None
 

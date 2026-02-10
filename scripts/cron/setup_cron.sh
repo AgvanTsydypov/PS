@@ -10,7 +10,7 @@ echo "🕐 Setting up daily data scheduler cron job..."
 # Path to project
 PROJECT_DIR="/app"
 PYTHON_BIN="/usr/local/bin/python"
-SCHEDULER_SCRIPT="$PROJECT_DIR/scripts/daily_scheduler.py"
+SCHEDULER_SCRIPT="$PROJECT_DIR/scripts/daily_scheduler_simple.py"
 LOG_DIR="$PROJECT_DIR/logs"
 LOG_FILE="$LOG_DIR/scheduler.log"
 
