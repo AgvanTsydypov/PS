@@ -11,9 +11,9 @@ SELECT DISTINCT
 FROM public.redemptions r
 JOIN public.events e ON r.event_id = e.id
 WHERE r.event_id IS NOT NULL
-  AND e.volume >= 5000000
+  AND e.volume >= %(min_volume)s  -- Динамический параметр из конфигурации
   AND r.payout_usdc > 0
-  -- Фильтр по датам будет добавлен динамически из Python:
+  -- Фильтры добавляются динамически из Python:
   -- AND e.end_date::date >= %(date_from)s
   -- AND e.end_date::date <= %(date_to)s
 ORDER BY r.event_id, r.condition_id, r.redeemer_address;

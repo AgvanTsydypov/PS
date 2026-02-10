@@ -35,7 +35,7 @@ AUTO_CONFIG = True  # Set to True if using daily_scheduler_simple.py
 if os.getenv('POLYSTARS_MIN_VOLUME'):
     MIN_VOLUME = int(os.getenv('POLYSTARS_MIN_VOLUME'))
 else:
-    MIN_VOLUME = 1_000_000  # Default: 10M USD
+    MIN_VOLUME = 2_500_000  # Default: 10M USD
 
 # Maximum event volume (in USD) - for testing, to exclude very large events
 # Set to None for no maximum limit (production)

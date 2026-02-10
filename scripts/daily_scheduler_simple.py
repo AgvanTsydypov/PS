@@ -79,6 +79,17 @@ class SimplifiedScheduler:
         print("🔍 SYSTEM STATE CHECK")
         print("="*70)
         
+        # Check testing mode
+        events_limit = self.manager.get_events_limit()
+        max_volume = self.manager.get_max_volume_filter()
+        if events_limit or max_volume:
+            print(f"\n⚠️  TESTING MODE ACTIVE:")
+            if events_limit:
+                print(f"  • MAX_EVENTS: {events_limit} (limited event count)")
+            if max_volume:
+                print(f"  • MAX_VOLUME: ${max_volume:,} (excludes large events)")
+            print(f"  • Change in scripts/data_loading_manager.py")
+        
         # Check if any data exists
         has_data = self.manager.has_any_data()
         needs_genesis = self.manager.needs_genesis_load()
@@ -169,10 +180,15 @@ class SimplifiedScheduler:
             print(f"📅 Config set (via env vars):")
             print(f"   Date range: {start_date} to {end_date}")
             print(f"   MIN_VOLUME: {os.environ['POLYSTARS_MIN_VOLUME']} ({volume_label})")
-            if max_volume:
-                print(f"   ⚠️  MAX_VOLUME: {max_volume:,} (Testing: excludes large events)")
-            if events_limit:
-                print(f"   ⚠️  MAX_EVENTS: {events_limit} (Testing: limits total count)")
+            
+            # Show testing mode warnings
+            if max_volume or events_limit:
+                print(f"\n   ⚠️  TESTING MODE ACTIVE:")
+                if max_volume:
+                    print(f"      • MAX_VOLUME: ${max_volume:,} (excludes events over this)")
+                if events_limit:
+                    print(f"      • MAX_EVENTS: {events_limit} events (limits total count)")
+                print(f"      • Set both to None in data_loading_manager.py for production")
             
         except Exception as e:
             print(f"⚠️  Could not configure: {e}")
@@ -244,6 +260,8 @@ class SimplifiedScheduler:
                 self.manager.mark_data_loaded('events', events_date, load_type='daily')
         
         # STEP 2-4: Redemptions, Positions, Leaderboard (3 days ago)
+        # ℹ️ For DAILY pipeline: 3-day lag allows data to finalize
+        # (For CATCH-UP of historical data, see run_catch_up - no lag needed there)
         print(f"\n📅 Redemptions/Positions/Leaderboard: Loading for {redemptions_date}")
         
         # ⚠️ ВАЖНО: Проверка на Genesis период (защита от дублей)
@@ -267,6 +285,35 @@ class SimplifiedScheduler:
                     if results[script_key]['success'] and not self.dry_run:
                         self.manager.mark_data_loaded(script_key, redemptions_date, load_type='daily')
         
+        # STEP 5: Auto-fix incomplete days (events loaded but redemptions missing)
+        # This handles the first 3 days after Genesis where daily pipeline skipped redemptions
+        print(f"\n🔍 Checking for incomplete days...")
+        incomplete = self.manager.get_incomplete_dates(
+            start_from=GENESIS_END_DATE + timedelta(days=1),
+            up_to=date.today() - timedelta(days=1)
+        )
+        
+        if incomplete:
+            print(f"\n⚠️  Found {len(incomplete)} day(s) with incomplete data!")
+            print(f"   (Events loaded but redemptions/positions/leaderboard missing)")
+            
+            for incomplete_date, missing_types in incomplete:
+                print(f"\n📅 Auto-fixing: {incomplete_date}")
+                print(f"   Missing: {', '.join(missing_types)}")
+                
+                # Configure for this date (no lag - historical data)
+                self.configure_for_date(incomplete_date, is_genesis=False)
+                
+                for script_key in missing_types:
+                    result = self.run_script(script_key)
+                    if result['success'] and not self.dry_run:
+                        self.manager.mark_data_loaded(script_key, incomplete_date, load_type='daily')
+                        print(f"   ✅ {self.scripts[script_key]['name']} loaded")
+                    else:
+                        print(f"   ⚠️  {self.scripts[script_key]['name']} failed")
+        else:
+            print("   ✅ No incomplete days found")
+        
         # Summary
         print("\n" + "="*70)
         print("📊 PIPELINE SUMMARY")
@@ -276,6 +323,8 @@ class SimplifiedScheduler:
         print(f"✅ Successful: {success_count}/{len(results)}")
         if skipped_count > 0:
             print(f"⏭️  Skipped: {skipped_count} (already loaded or Genesis period)")
+        if incomplete:
+            print(f"🔧 Auto-fixed: {len(incomplete)} incomplete day(s)")
         print("="*70)
         
         return {'success': all(r.get('success') for r in results.values()), 'results': results}
@@ -288,6 +337,17 @@ class SimplifiedScheduler:
         print("="*70)
         print(f"Period: {GENESIS_START_DATE} to {GENESIS_END_DATE}")
         print(f"Filter: 100M volume")
+        
+        # Show testing mode warnings
+        events_limit = self.manager.get_events_limit()
+        max_volume = self.manager.get_max_volume_filter()
+        if events_limit or max_volume:
+            print(f"\n⚠️  TESTING MODE:")
+            if events_limit:
+                print(f"   • MAX_EVENTS: {events_limit} events (will load only first {events_limit})")
+            if max_volume:
+                print(f"   • MAX_VOLUME: ${max_volume:,} (excludes events over this)")
+            print(f"   • Set to None in data_loading_manager.py for full load")
         
         if not self.manager.needs_genesis_load():
             print("\n✅ Genesis already loaded")
@@ -393,29 +453,39 @@ class SimplifiedScheduler:
                 results[str(missing_date)] = {'success': False, 'step': 'events'}
                 continue  # Skip other steps if events failed
             
-            # STEP 2-4: Redemptions, Positions, Leaderboard (for date - 3 days)
-            redemptions_date = missing_date - timedelta(days=3)
+            # STEP 2-4: Redemptions, Positions, Leaderboard
+            # Check if data is ready (3-day lag for finalization)
+            today = date.today()
+            days_since_event = (today - missing_date).days
             
-            # Only load redemptions if date is after Genesis
-            if redemptions_date > GENESIS_END_DATE:
-                print(f"\n2️⃣ Redemptions/Positions/Leaderboard for {redemptions_date} (3 days lag)")
+            # Only load redemptions if:
+            # 1. Event ended >= 3 days ago (data is finalized)
+            # 2. Event is after Genesis period (avoid duplicates)
+            if missing_date <= GENESIS_END_DATE:
+                print(f"\n⏭️  Skipping redemptions/positions/leaderboard for {missing_date}")
+                print(f"   Reason: Date is within Genesis period (already loaded)")
+            elif days_since_event < 3:
+                print(f"\n⏳ Skipping redemptions/positions/leaderboard for {missing_date}")
+                print(f"   Reason: Event ended only {days_since_event} day(s) ago (need 3 days)")
+                print(f"   Will be available on: {missing_date + timedelta(days=3)}")
+            else:
+                print(f"\n2️⃣ Redemptions/Positions/Leaderboard for {missing_date}")
+                print(f"   ℹ️  Event ended {days_since_event} days ago - data is finalized")
                 
-                # Configure for redemptions date
-                self.configure_for_date(redemptions_date, is_genesis=False)
+                # Configure for this date
+                self.configure_for_date(missing_date, is_genesis=False)
                 
                 for script_key in ['redemptions', 'positions', 'leaderboard']:
                     # Check if already loaded
-                    if self.manager.is_data_loaded_for_date(redemptions_date, script_key):
+                    if self.manager.is_data_loaded_for_date(missing_date, script_key):
                         print(f"  ⏭️  {self.scripts[script_key]['name']}: Already loaded")
                         continue
                     
                     result = self.run_script(script_key)
                     if result['success']:
-                        self.manager.mark_data_loaded(script_key, redemptions_date, load_type='daily')
+                        self.manager.mark_data_loaded(script_key, missing_date, load_type='daily')
                     else:
                         print(f"  ⚠️  {self.scripts[script_key]['name']} failed (continuing...)")
-            else:
-                print(f"\n⏭️  Skipping redemptions for {redemptions_date} (within Genesis period)")
             
             results[str(missing_date)] = {'success': True}
             
