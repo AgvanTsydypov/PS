@@ -405,12 +405,15 @@ def get_unique_wallets_from_db_generator(
     
     # SQL query to get unique wallet addresses from redemptions
     # Same source as closed positions - ensures consistency
+    # ⚠️ ВАЖНО: Фильтруем по датам событий через JOIN с events
     sql_query = """
-        SELECT DISTINCT redeemer_address
-        FROM public.redemptions
-        WHERE redeemer_address IS NOT NULL
-          AND redeemer_address != ''
-        ORDER BY redeemer_address;
+        SELECT DISTINCT r.redeemer_address
+        FROM public.redemptions r
+        JOIN public.events e ON r.event_id = e.id
+        WHERE r.redeemer_address IS NOT NULL
+          AND r.redeemer_address != ''
+          AND r.event_id IS NOT NULL
+        ORDER BY r.redeemer_address
     """
     
     print(f"📄 Using unique wallets from redemptions table")
@@ -438,8 +441,49 @@ def get_unique_wallets_from_db_generator(
         cursor.itersize = batch_size
         
         try:
+            # ⚠️ КРИТИЧЕСКИ ВАЖНО: Добавить фильтр по датам событий
+            # Импортируем конфиг для получения дат
+            import sys
+            import os
+            script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            fetch_dir = os.path.join(script_dir, 'fetch')
+            if fetch_dir not in sys.path:
+                sys.path.insert(0, fetch_dir)
+            
+            try:
+                import fetch_events_config as config
+                
+                # Добавляем фильтры по датам в SQL запрос
+                date_filters = []
+                query_params = []
+                
+                if hasattr(config, 'START_DATE') and config.START_DATE:
+                    date_filters.append("e.end_date >= %s")
+                    query_params.append(config.START_DATE)
+                    print(f"🔍 Filter: Events from {config.START_DATE.date()}")
+                
+                if hasattr(config, 'END_DATE') and config.END_DATE:
+                    date_filters.append("e.end_date <= %s")
+                    query_params.append(config.END_DATE)
+                    print(f"🔍 Filter: Events until {config.END_DATE.date()}")
+                
+                if date_filters:
+                    # Добавляем фильтры к запросу (заменяем ORDER BY)
+                    sql_query_with_filters = sql_query.replace(
+                        "ORDER BY r.redeemer_address",
+                        "AND " + " AND ".join(date_filters) + "\n        ORDER BY r.redeemer_address"
+                    )
+                    sql_query = sql_query_with_filters
+                    print(f"✅ Date filters applied to query")
+            except ImportError:
+                print("⚠️  Warning: Could not import fetch_events_config, skipping date filters")
+                query_params = []
+            
             print(f"🔍 Executing query (server-side cursor)...")
-            cursor.execute(sql_query)
+            if query_params:
+                cursor.execute(sql_query, query_params)
+            else:
+                cursor.execute(sql_query)
             
             total_fetched = 0
             batch_num = 0

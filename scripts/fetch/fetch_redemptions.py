@@ -389,6 +389,29 @@ def get_markets_from_db(use_local_db: bool = False, limit: Optional[int] = None)
                 params.append(MIN_VOLUME)
                 print(f"🔍 Filter: Min volume ${MIN_VOLUME:,.0f}")
             
+            # ⚠️ КРИТИЧЕСКИ ВАЖНО: Фильтр по датам событий
+            # Импортируем конфиг для получения дат
+            import sys
+            import os
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            if script_dir not in sys.path:
+                sys.path.insert(0, script_dir)
+            
+            try:
+                import fetch_events_config as config
+                
+                if hasattr(config, 'START_DATE') and config.START_DATE:
+                    filters.append("e.end_date >= %s")
+                    params.append(config.START_DATE)
+                    print(f"🔍 Filter: Events from {config.START_DATE.date()}")
+                
+                if hasattr(config, 'END_DATE') and config.END_DATE:
+                    filters.append("e.end_date <= %s")
+                    params.append(config.END_DATE)
+                    print(f"🔍 Filter: Events until {config.END_DATE.date()}")
+            except ImportError:
+                print("⚠️  Warning: Could not import fetch_events_config, skipping date filters")
+            
             if filters:
                 sql_query += " AND " + " AND ".join(filters)
             
