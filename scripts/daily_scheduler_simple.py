@@ -135,24 +135,24 @@ class SimplifiedScheduler:
             is_genesis: Whether this is Genesis load
         """
         try:
-            import scripts.fetch.fetch_events_config as config
-            
-            # Set dates
-            config.START_DATE = datetime.combine(target_date, datetime.min.time())
-            config.END_DATE = datetime.combine(target_date, datetime.max.time())
-            
-            # Set volume filter
-            config.MIN_VOLUME = self.manager.get_volume_filter(is_genesis=is_genesis)
-            
-            # For Genesis, load entire period
+            # Calculate dates
             if is_genesis:
-                config.START_DATE = datetime.combine(GENESIS_START_DATE, datetime.min.time())
-                config.END_DATE = datetime.combine(GENESIS_END_DATE, datetime.max.time())
+                start_date = GENESIS_START_DATE
+                end_date = GENESIS_END_DATE
+            else:
+                start_date = target_date
+                end_date = target_date
+            
+            # Set environment variables (will be passed to subprocesses)
+            os.environ['POLYSTARS_START_DATE'] = start_date.strftime('%Y-%m-%d')
+            os.environ['POLYSTARS_END_DATE'] = end_date.strftime('%Y-%m-%d')
+            os.environ['POLYSTARS_MIN_VOLUME'] = str(self.manager.get_volume_filter(is_genesis=is_genesis))
+            os.environ['POLYSTARS_IS_GENESIS'] = 'true' if is_genesis else 'false'
             
             volume_label = "100M (Genesis)" if is_genesis else "5M (Daily)"
-            print(f"📅 Config set:")
-            print(f"   Date range: {config.START_DATE.date()} to {config.END_DATE.date()}")
-            print(f"   MIN_VOLUME: {config.MIN_VOLUME:,} ({volume_label})")
+            print(f"📅 Config set (via env vars):")
+            print(f"   Date range: {start_date} to {end_date}")
+            print(f"   MIN_VOLUME: {os.environ['POLYSTARS_MIN_VOLUME']} ({volume_label})")
             
         except Exception as e:
             print(f"⚠️  Could not configure: {e}")

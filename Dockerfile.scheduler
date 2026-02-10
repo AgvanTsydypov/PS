@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     cron \
     curl \
     postgresql-client \
+    dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -28,16 +29,16 @@ COPY .env /app/.env
 # Create logs directory
 RUN mkdir -p /app/logs
 
-# Copy cron setup script
-COPY scripts/cron/setup_cron.sh /app/scripts/cron/setup_cron.sh
-RUN chmod +x /app/scripts/cron/setup_cron.sh
+# Fix line endings and make scripts executable
+RUN find /app/scripts/cron -type f -name "*.sh" -exec dos2unix {} \; && \
+    chmod +x /app/scripts/cron/setup_cron.sh
 
 # Setup cron job
 RUN /app/scripts/cron/setup_cron.sh
 
-# Copy entrypoint script
+# Copy entrypoint script and fix line endings
 COPY scripts/cron/docker-entrypoint-scheduler.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+RUN dos2unix /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh
 
 # Healthcheck
 HEALTHCHECK --interval=1h --timeout=10s --start-period=30s --retries=3 \

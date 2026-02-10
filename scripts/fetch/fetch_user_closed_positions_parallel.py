@@ -386,10 +386,8 @@ def get_redeemers_from_db_generator(use_local_db: bool = False, limit: Optional[
         try:
             # ⚠️ КРИТИЧЕСКИ ВАЖНО: Добавить фильтр по датам событий
             # Импортируем конфиг для получения дат
-            import sys
-            import os
-            script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            fetch_dir = os.path.join(script_dir, 'fetch')
+            current_script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            fetch_dir = os.path.join(current_script_dir, 'fetch')
             if fetch_dir not in sys.path:
                 sys.path.insert(0, fetch_dir)
             
@@ -420,7 +418,8 @@ def get_redeemers_from_db_generator(use_local_db: bool = False, limit: Optional[
             
             print(f"🔍 Executing query (server-side cursor)...")
             if query_params:
-                cursor.execute(sql_query, query_params)
+                # Convert list to tuple for psycopg2
+                cursor.execute(sql_query, tuple(query_params))
             else:
                 cursor.execute(sql_query)
             

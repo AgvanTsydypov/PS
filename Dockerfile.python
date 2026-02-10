@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
     curl \
+    dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
 # Установка рабочей директории
@@ -20,6 +21,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копирование всех скриптов
 COPY scripts/ ./scripts/
 COPY sql/ ./sql/
+
+# Исправление line endings для shell скриптов
+RUN find ./scripts -type f -name "*.sh" -exec dos2unix {} \; 2>/dev/null || true && \
+    find ./scripts -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
 # Создание директорий для output
 RUN mkdir -p /app/output /app/data /app/logs
