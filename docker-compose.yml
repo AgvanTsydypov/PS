@@ -1,31 +1,4 @@
-version: '3.8'
-
 services:
-  # PostgreSQL Database
-  postgres:
-    image: postgres:16-alpine
-    container_name: polystars_postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${LOCAL_DB_NAME:-polymarket}
-      POSTGRES_USER: ${LOCAL_DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${LOCAL_DB_PASSWORD:-1234}
-      POSTGRES_HOST_AUTH_METHOD: trust
-    ports:
-      - "${LOCAL_DB_PORT:-5433}:5432"
-    volumes:
-      # Persistent data storage
-      - postgres_data:/var/lib/postgresql/data
-      # SQL schema for initialization (runs on first startup only)
-      - ./sql/schemas/init-db.sql:/docker-entrypoint-initdb.d/01-init-db.sql:ro
-    networks:
-      - polystars_network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${LOCAL_DB_USER:-postgres}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   # Python Scripts Service (for manual execution)
   python_scripts:
     build:
@@ -33,17 +6,21 @@ services:
       dockerfile: Dockerfile.python
     container_name: polystars_python
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
-      # Database connection (внутри Docker сети)
-      LOCAL_DB_HOST: postgres
-      LOCAL_DB_PORT: 5432
-      LOCAL_DB_NAME: ${LOCAL_DB_NAME:-polymarket}
-      LOCAL_DB_USER: ${LOCAL_DB_USER:-postgres}
-      LOCAL_DB_PASSWORD: ${LOCAL_DB_PASSWORD:-1234}
-      DATABASE_URL: postgresql://${LOCAL_DB_USER:-postgres}:${LOCAL_DB_PASSWORD:-1234}@postgres:5432/${LOCAL_DB_NAME:-polymarket}
+      # PostgreSQL connection (external Managed DB or local for testing)
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_SSLMODE: ${DB_SSLMODE:-require}
+      DATABASE_URL: ${DATABASE_URL}
+      # Legacy variables (backwards compatibility)
+      LOCAL_DB_HOST: ${DB_HOST}
+      LOCAL_DB_PORT: ${DB_PORT}
+      LOCAL_DB_NAME: ${DB_NAME}
+      LOCAL_DB_USER: ${DB_USER}
+      LOCAL_DB_PASSWORD: ${DB_PASSWORD}
       
       # Supabase (опционально)
       SUPABASE_URL: ${SUPABASE_URL}
@@ -73,17 +50,21 @@ services:
       dockerfile: Dockerfile.scheduler
     container_name: polystars_scheduler
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
-      # Database connection (внутри Docker сети)
-      LOCAL_DB_HOST: postgres
-      LOCAL_DB_PORT: 5432
-      LOCAL_DB_NAME: ${LOCAL_DB_NAME:-polymarket}
-      LOCAL_DB_USER: ${LOCAL_DB_USER:-postgres}
-      LOCAL_DB_PASSWORD: ${LOCAL_DB_PASSWORD:-1234}
-      DATABASE_URL: postgresql://${LOCAL_DB_USER:-postgres}:${LOCAL_DB_PASSWORD:-1234}@postgres:5432/${LOCAL_DB_NAME:-polymarket}
+      # PostgreSQL connection (external Managed DB or local for testing)
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_SSLMODE: ${DB_SSLMODE:-require}
+      DATABASE_URL: ${DATABASE_URL}
+      # Legacy variables (backwards compatibility)
+      LOCAL_DB_HOST: ${DB_HOST}
+      LOCAL_DB_PORT: ${DB_PORT}
+      LOCAL_DB_NAME: ${DB_NAME}
+      LOCAL_DB_USER: ${DB_USER}
+      LOCAL_DB_PASSWORD: ${DB_PASSWORD}
       
       # Supabase (опционально)
       SUPABASE_URL: ${SUPABASE_URL}
@@ -127,15 +108,10 @@ services:
       - "5050:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
-    depends_on:
-      postgres:
-        condition: service_healthy
     networks:
       - polystars_network
 
 volumes:
-  postgres_data:
-    name: polystars_postgres_data
   pgadmin_data:
     name: polystars_pgadmin_data
 

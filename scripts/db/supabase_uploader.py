@@ -124,12 +124,16 @@ class SupabaseUploader:
                     "Install it with: pip install psycopg2-binary"
                 )
             
+            # Get SSL mode from environment (require for Managed DB, prefer for local testing)
+            ssl_mode = os.getenv('DB_SSLMODE', 'require')
+            
             self.connection_params = {
-                'host': os.getenv('LOCAL_DB_HOST', 'localhost'),
-                'port': os.getenv('LOCAL_DB_PORT', '5432'),
-                'database': os.getenv('LOCAL_DB_NAME', 'polymarket'),
-                'user': os.getenv('LOCAL_DB_USER', 'postgres'),
-                'password': os.getenv('LOCAL_DB_PASSWORD', '')
+                'host': os.getenv('LOCAL_DB_HOST', os.getenv('DB_HOST')),
+                'port': os.getenv('LOCAL_DB_PORT', os.getenv('DB_PORT', '5432')),
+                'database': os.getenv('LOCAL_DB_NAME', os.getenv('DB_NAME')),
+                'user': os.getenv('LOCAL_DB_USER', os.getenv('DB_USER')),
+                'password': os.getenv('LOCAL_DB_PASSWORD', os.getenv('DB_PASSWORD')),
+                'sslmode': ssl_mode  # Configurable SSL mode
             }
             
             # Test connection
