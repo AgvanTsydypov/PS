@@ -41,6 +41,7 @@ Usage:
 """
 
 import psycopg2
+import psycopg2.extras
 from datetime import date, timedelta
 from typing import Dict, Optional
 import os
@@ -56,8 +57,8 @@ load_dotenv()
 GENESIS_START_DATE = date(2026, 2, 1)
 GENESIS_END_DATE = date(2026, 2, 6)
 
-GENESIS_MIN_VOLUME = 100_000  # 100M
-DAILY_MIN_VOLUME = 100_000  # 5M
+GENESIS_MIN_VOLUME = 50_000  # 100M
+DAILY_MIN_VOLUME = 50_000  # 5M
 
 # OPTIONAL: Limit number of events for testing (None = unlimited)
 # Set this to speed up testing with smaller datasets
@@ -86,12 +87,16 @@ class DataLoadingManager:
     def _get_db_params(self):
         """Get database connection parameters"""
         if self.use_local_db:
+            # Get SSL mode from environment (require for Managed DB, prefer for local testing)
+            ssl_mode = os.getenv('DB_SSLMODE', 'require')
+            
             return {
-                'host': os.getenv('LOCAL_DB_HOST', os.getenv('POSTGRES_HOST', 'localhost')),
-                'port': int(os.getenv('LOCAL_DB_PORT', os.getenv('POSTGRES_PORT', 5432))),
-                'database': os.getenv('LOCAL_DB_NAME', os.getenv('POSTGRES_DB', 'polymarket')),
-                'user': os.getenv('LOCAL_DB_USER', os.getenv('POSTGRES_USER', 'postgres')),
-                'password': os.getenv('LOCAL_DB_PASSWORD', os.getenv('POSTGRES_PASSWORD', 'your_password_here'))
+                'host': os.getenv('LOCAL_DB_HOST', os.getenv('DB_HOST')),
+                'port': int(os.getenv('LOCAL_DB_PORT', os.getenv('DB_PORT', 5432))),
+                'database': os.getenv('LOCAL_DB_NAME', os.getenv('DB_NAME')),
+                'user': os.getenv('LOCAL_DB_USER', os.getenv('DB_USER')),
+                'password': os.getenv('LOCAL_DB_PASSWORD', os.getenv('DB_PASSWORD')),
+                'sslmode': ssl_mode  # Configurable SSL mode
             }
         else:
             # Supabase
@@ -236,7 +241,8 @@ class DataLoadingManager:
             cursor.close()
             conn.close()
     
-    def mark_data_loaded(self, data_type: str, load_date: date, record_count: int = 0, load_type: str = 'daily'):
+    def mark_data_loaded(self, data_type: str, load_date: date, record_count: int = 0, 
+                        markets_count: int = 0, load_type: str = 'daily'):
         """
         Mark data as loaded for a specific date
         
@@ -244,6 +250,7 @@ class DataLoadingManager:
             data_type: Type of data (events, redemptions, positions, leaderboard)
             load_date: Date the data is for
             record_count: Number of records loaded
+            markets_count: Number of markets loaded (only for events)
             load_type: Type of load (genesis, daily)
         """
         conn = psycopg2.connect(**self.connection_params)
@@ -254,19 +261,38 @@ class DataLoadingManager:
             column_loaded_at = f'{data_type}_loaded_at'
             column_count = f'{data_type}_count'
             
-            cursor.execute(f"""
-                INSERT INTO data_loads (
-                    load_date, {column_loaded}, {column_loaded_at}, {column_count}, load_type
-                )
-                VALUES (%s, TRUE, NOW(), %s, %s)
-                ON CONFLICT (load_date) 
-                DO UPDATE SET
-                    {column_loaded} = TRUE,
-                    {column_loaded_at} = NOW(),
-                    {column_count} = %s,
-                    load_type = %s,
-                    updated_at = NOW()
-            """, (load_date, record_count, load_type, record_count, load_type))
+            # For events, also update markets_count
+            if data_type == 'events' and markets_count > 0:
+                cursor.execute(f"""
+                    INSERT INTO data_loads (
+                        load_date, {column_loaded}, {column_loaded_at}, {column_count}, 
+                        markets_count, load_type
+                    )
+                    VALUES (%s, TRUE, NOW(), %s, %s, %s)
+                    ON CONFLICT (load_date) 
+                    DO UPDATE SET
+                        {column_loaded} = TRUE,
+                        {column_loaded_at} = NOW(),
+                        {column_count} = %s,
+                        markets_count = %s,
+                        load_type = %s,
+                        updated_at = NOW()
+                """, (load_date, record_count, markets_count, load_type, 
+                     record_count, markets_count, load_type))
+            else:
+                cursor.execute(f"""
+                    INSERT INTO data_loads (
+                        load_date, {column_loaded}, {column_loaded_at}, {column_count}, load_type
+                    )
+                    VALUES (%s, TRUE, NOW(), %s, %s)
+                    ON CONFLICT (load_date) 
+                    DO UPDATE SET
+                        {column_loaded} = TRUE,
+                        {column_loaded_at} = NOW(),
+                        {column_count} = %s,
+                        load_type = %s,
+                        updated_at = NOW()
+                """, (load_date, record_count, load_type, record_count, load_type))
             
             conn.commit()
         finally:
@@ -294,6 +320,28 @@ class DataLoadingManager:
             Maximum volume in USD (None = no limit)
         """
         return MAX_VOLUME_FILTER
+    
+    def get_table_count(self, table_name: str) -> int:
+        """
+        Get count of records in a table
+        
+        Args:
+            table_name: Name of the table (events, markets, redemptions, 
+                       user_closed_positions, trader_leaderboard)
+        
+        Returns:
+            Number of records in the table
+        """
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+            count = cursor.fetchone()[0]
+            return count
+        finally:
+            cursor.close()
+            conn.close()
     
     def get_missing_dates(self, start_from: date = None, up_to: date = None) -> list:
         """
@@ -334,6 +382,62 @@ class DataLoadingManager:
                 current += timedelta(days=1)
             
             return missing
+            
+        finally:
+            cursor.close()
+            conn.close()
+    
+    def get_incomplete_dates(self, start_from: date = None, up_to: date = None) -> list:
+        """
+        Get list of dates where events are loaded but other data is missing
+        
+        Args:
+            start_from: Start checking from this date (default: day after Genesis)
+            up_to: Check up to this date (default: yesterday)
+        
+        Returns:
+            List of (date, missing_types) tuples
+            Example: [(date(2026,2,7), ['redemptions', 'positions']), ...]
+        """
+        if start_from is None:
+            start_from = GENESIS_END_DATE + timedelta(days=1)
+        
+        if up_to is None:
+            up_to = date.today() - timedelta(days=1)
+        
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        try:
+            # Find dates where events are loaded but other data types are not
+            cursor.execute("""
+                SELECT 
+                    load_date,
+                    redemptions_loaded,
+                    positions_loaded,
+                    leaderboard_loaded
+                FROM data_loads
+                WHERE events_loaded = TRUE
+                  AND load_date BETWEEN %s AND %s
+                  AND (redemptions_loaded = FALSE 
+                    OR positions_loaded = FALSE 
+                    OR leaderboard_loaded = FALSE)
+                ORDER BY load_date
+            """, (start_from, up_to))
+            
+            incomplete = []
+            for row in cursor.fetchall():
+                missing_types = []
+                if not row['redemptions_loaded']:
+                    missing_types.append('redemptions')
+                if not row['positions_loaded']:
+                    missing_types.append('positions')
+                if not row['leaderboard_loaded']:
+                    missing_types.append('leaderboard')
+                
+                incomplete.append((row['load_date'], missing_types))
+            
+            return incomplete
             
         finally:
             cursor.close()

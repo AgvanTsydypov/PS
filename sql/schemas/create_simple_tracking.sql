@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS data_loads (
     
     -- Record counts from each type
     events_count INTEGER DEFAULT 0,
+    markets_count INTEGER DEFAULT 0,
     redemptions_count INTEGER DEFAULT 0,
     positions_count INTEGER DEFAULT 0,
     leaderboard_count INTEGER DEFAULT 0,

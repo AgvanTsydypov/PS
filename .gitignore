@@ -30,6 +30,7 @@ build/
 .env
 .env*.local
 .env.docker
+.env.managed
 
 # Docker
 docker-compose.override.yml

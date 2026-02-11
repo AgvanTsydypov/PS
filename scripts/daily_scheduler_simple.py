@@ -194,7 +194,7 @@ class SimplifiedScheduler:
             print(f"⚠️  Could not configure: {e}")
     
     def run_script(self, script_key: str) -> Dict:
-        """Run a data fetching script"""
+        """Run a data fetching script and track record counts"""
         script_config = self.scripts[script_key]
         
         print(f"\n{'='*70}")
@@ -203,7 +203,20 @@ class SimplifiedScheduler:
         
         if self.dry_run:
             print("🔍 DRY RUN - Skipping")
-            return {'success': True, 'duration': 0, 'records': 0}
+            return {'success': True, 'duration': 0, 'records': 0, 'markets': 0}
+        
+        # Map script keys to table names
+        table_map = {
+            'events': 'events',
+            'redemptions': 'redemptions',
+            'positions': 'user_closed_positions',
+            'leaderboard': 'trader_leaderboard'
+        }
+        
+        # Get count BEFORE running script
+        table_name = table_map.get(script_key)
+        count_before = self.manager.get_table_count(table_name) if table_name else 0
+        markets_before = self.manager.get_table_count('markets') if script_key == 'events' else 0
         
         start_time = time.time()
         
@@ -212,14 +225,26 @@ class SimplifiedScheduler:
             result = subprocess.run(cmd, cwd=project_root, check=True)
             
             duration = time.time() - start_time
-            print(f"\n✅ Completed ({duration:.1f}s)")
             
-            return {'success': True, 'duration': duration, 'records': 0}
+            # Get count AFTER running script
+            count_after = self.manager.get_table_count(table_name) if table_name else 0
+            markets_after = self.manager.get_table_count('markets') if script_key == 'events' else 0
+            
+            # Calculate actual loaded records
+            records = count_after - count_before
+            markets = markets_after - markets_before
+            
+            if script_key == 'events':
+                print(f"\n✅ Completed ({duration:.1f}s) - {records:,} events, {markets:,} markets")
+            else:
+                print(f"\n✅ Completed ({duration:.1f}s) - {records:,} records")
+            
+            return {'success': True, 'duration': duration, 'records': records, 'markets': markets}
             
         except subprocess.CalledProcessError as e:
             duration = time.time() - start_time
             print(f"\n❌ Failed (code {e.returncode})")
-            return {'success': False, 'duration': duration, 'error': str(e)}
+            return {'success': False, 'duration': duration, 'error': str(e), 'records': 0, 'markets': 0}
     
     def run_daily_pipeline(self, force: bool = False) -> Dict:
         """Run daily data pipeline"""
@@ -257,7 +282,10 @@ class SimplifiedScheduler:
             self.configure_for_date(events_date, is_genesis=False)
             results['events'] = self.run_script('events')
             if results['events']['success'] and not self.dry_run:
-                self.manager.mark_data_loaded('events', events_date, load_type='daily')
+                self.manager.mark_data_loaded('events', events_date, 
+                                            record_count=results['events']['records'],
+                                            markets_count=results['events']['markets'],
+                                            load_type='daily')
         
         # STEP 2-4: Redemptions, Positions, Leaderboard (3 days ago)
         # ℹ️ For DAILY pipeline: 3-day lag allows data to finalize
@@ -283,7 +311,9 @@ class SimplifiedScheduler:
                     
                     results[script_key] = self.run_script(script_key)
                     if results[script_key]['success'] and not self.dry_run:
-                        self.manager.mark_data_loaded(script_key, redemptions_date, load_type='daily')
+                        self.manager.mark_data_loaded(script_key, redemptions_date,
+                                                    record_count=results[script_key]['records'],
+                                                    load_type='daily')
         
         # STEP 5: Auto-fix incomplete days (events loaded but redemptions missing)
         # This handles the first 3 days after Genesis where daily pipeline skipped redemptions
@@ -293,24 +323,54 @@ class SimplifiedScheduler:
             up_to=date.today() - timedelta(days=1)
         )
         
+        fixed_count = 0
+        skipped_count = 0
+        
         if incomplete:
             print(f"\n⚠️  Found {len(incomplete)} day(s) with incomplete data!")
             print(f"   (Events loaded but redemptions/positions/leaderboard missing)")
             
             for incomplete_date, missing_types in incomplete:
-                print(f"\n📅 Auto-fixing: {incomplete_date}")
+                # Check if data is ready (3-day lag for finalization)
+                today = date.today()
+                days_since = (today - incomplete_date).days
+                
+                # Only auto-fix if events ended >= 3 days ago
+                if days_since < 3:
+                    print(f"\n⏳ Skipping {incomplete_date} (ended {days_since} day(s) ago)")
+                    print(f"   Missing: {', '.join(missing_types)}")
+                    print(f"   Will be available on: {incomplete_date + timedelta(days=3)}")
+                    skipped_count += 1
+                    continue
+                
+                print(f"\n📅 Auto-fixing: {incomplete_date} (ended {days_since} days ago)")
                 print(f"   Missing: {', '.join(missing_types)}")
                 
-                # Configure for this date (no lag - historical data)
+                # Configure for this date (no lag - historical data is finalized)
                 self.configure_for_date(incomplete_date, is_genesis=False)
                 
                 for script_key in missing_types:
                     result = self.run_script(script_key)
                     if result['success'] and not self.dry_run:
-                        self.manager.mark_data_loaded(script_key, incomplete_date, load_type='daily')
-                        print(f"   ✅ {self.scripts[script_key]['name']} loaded")
+                        # For events, also pass markets_count
+                        if script_key == 'events':
+                            self.manager.mark_data_loaded(script_key, incomplete_date,
+                                                        record_count=result['records'],
+                                                        markets_count=result['markets'],
+                                                        load_type='daily')
+                            print(f"   ✅ {self.scripts[script_key]['name']} loaded ({result['records']:,} events, {result['markets']:,} markets)")
+                        else:
+                            self.manager.mark_data_loaded(script_key, incomplete_date,
+                                                        record_count=result['records'],
+                                                        load_type='daily')
+                            print(f"   ✅ {self.scripts[script_key]['name']} loaded ({result['records']:,} records)")
                     else:
                         print(f"   ⚠️  {self.scripts[script_key]['name']} failed")
+                
+                fixed_count += 1
+            
+            if fixed_count == 0 and skipped_count > 0:
+                print(f"\n   ⏳ {skipped_count} day(s) skipped (waiting for 3-day lag)")
         else:
             print("   ✅ No incomplete days found")
         
@@ -319,12 +379,15 @@ class SimplifiedScheduler:
         print("📊 PIPELINE SUMMARY")
         print("="*70)
         success_count = sum(1 for r in results.values() if r.get('success'))
-        skipped_count = sum(1 for r in results.values() if r.get('skipped'))
+        skipped_count_main = sum(1 for r in results.values() if r.get('skipped'))
         print(f"✅ Successful: {success_count}/{len(results)}")
-        if skipped_count > 0:
-            print(f"⏭️  Skipped: {skipped_count} (already loaded or Genesis period)")
+        if skipped_count_main > 0:
+            print(f"⏭️  Skipped: {skipped_count_main} (already loaded or Genesis period)")
         if incomplete:
-            print(f"🔧 Auto-fixed: {len(incomplete)} incomplete day(s)")
+            if fixed_count > 0:
+                print(f"🔧 Auto-fixed: {fixed_count} incomplete day(s)")
+            if skipped_count > 0:
+                print(f"⏳ Waiting for lag: {skipped_count} day(s) (need 3-day finalization)")
         print("="*70)
         
         return {'success': all(r.get('success') for r in results.values()), 'results': results}
@@ -368,7 +431,16 @@ class SimplifiedScheduler:
         for script_key in ['events', 'redemptions', 'positions', 'leaderboard']:
             results[script_key] = self.run_script(script_key)
             if results[script_key]['success']:
-                self.manager.mark_data_loaded(script_key, GENESIS_START_DATE, load_type='genesis')
+                # For events, also pass markets_count
+                if script_key == 'events':
+                    self.manager.mark_data_loaded(script_key, GENESIS_START_DATE,
+                                                record_count=results[script_key]['records'],
+                                                markets_count=results[script_key]['markets'],
+                                                load_type='genesis')
+                else:
+                    self.manager.mark_data_loaded(script_key, GENESIS_START_DATE,
+                                                record_count=results[script_key]['records'],
+                                                load_type='genesis')
         
         # Summary
         print("\n" + "="*70)
@@ -446,8 +518,11 @@ class SimplifiedScheduler:
             result_events = self.run_script('events')
             
             if result_events['success']:
-                self.manager.mark_data_loaded('events', missing_date, load_type='daily')
-                print(f"✅ Events loaded for {missing_date}")
+                self.manager.mark_data_loaded('events', missing_date,
+                                            record_count=result_events['records'],
+                                            markets_count=result_events['markets'],
+                                            load_type='daily')
+                print(f"✅ Events loaded for {missing_date} ({result_events['records']:,} events, {result_events['markets']:,} markets)")
             else:
                 print(f"❌ Events failed for {missing_date}")
                 results[str(missing_date)] = {'success': False, 'step': 'events'}
@@ -483,7 +558,9 @@ class SimplifiedScheduler:
                     
                     result = self.run_script(script_key)
                     if result['success']:
-                        self.manager.mark_data_loaded(script_key, missing_date, load_type='daily')
+                        self.manager.mark_data_loaded(script_key, missing_date,
+                                                    record_count=result['records'],
+                                                    load_type='daily')
                     else:
                         print(f"  ⚠️  {self.scripts[script_key]['name']} failed (continuing...)")
             

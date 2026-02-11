@@ -5,12 +5,12 @@
 -- Auto-executed by Docker PostgreSQL on first container startup
 -- ============================================================================
 
-\echo '🚀 Starting PolyStars database initialization...'
+DO $$ BEGIN RAISE NOTICE '🚀 Starting PolyStars database initialization...'; END $$;
 
 -- ============================================================================
 -- 1. EVENTS TABLE - Main events data
 -- ============================================================================
-\echo '📊 Creating events table...'
+DO $$ BEGIN RAISE NOTICE '📊 Creating events table...'; END $$;
 
 CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY,
@@ -67,12 +67,12 @@ CREATE INDEX IF NOT EXISTS idx_events_volume ON events(volume DESC);
 CREATE INDEX IF NOT EXISTS idx_events_active ON events(active);
 CREATE INDEX IF NOT EXISTS idx_events_ticker ON events(ticker);
 
-\echo '✅ Events table created'
+DO $$ BEGIN RAISE NOTICE '✅ Events table created'; END $$;
 
 -- ============================================================================
 -- 2. MARKETS TABLE - Individual markets within events
 -- ============================================================================
-\echo '📈 Creating markets table...'
+DO $$ BEGIN RAISE NOTICE '📈 Creating markets table...'; END $$;
 
 CREATE TABLE IF NOT EXISTS markets (
     id TEXT PRIMARY KEY,
@@ -198,12 +198,12 @@ CREATE INDEX IF NOT EXISTS idx_markets_volume ON markets(volume_num DESC);
 CREATE INDEX IF NOT EXISTS idx_markets_status ON markets(uma_resolution_status);
 CREATE INDEX IF NOT EXISTS idx_markets_end_date ON markets(end_date);
 
-\echo '✅ Markets table created'
+DO $$ BEGIN RAISE NOTICE '✅ Markets table created'; END $$;
 
 -- ============================================================================
 -- 3. FETCH METADATA TABLE - Track data fetches
 -- ============================================================================
-\echo '📝 Creating fetch_metadata table...'
+DO $$ BEGIN RAISE NOTICE '📝 Creating fetch_metadata table...'; END $$;
 
 CREATE TABLE IF NOT EXISTS fetch_metadata (
     id BIGSERIAL PRIMARY KEY,
@@ -216,12 +216,12 @@ CREATE TABLE IF NOT EXISTS fetch_metadata (
 
 CREATE INDEX IF NOT EXISTS idx_fetch_metadata_timestamp ON fetch_metadata(timestamp DESC);
 
-\echo '✅ Fetch_metadata table created'
+DO $$ BEGIN RAISE NOTICE '✅ Fetch_metadata table created'; END $$;
 
 -- ============================================================================
 -- 4. REDEMPTIONS TABLE - When users claim their winnings
 -- ============================================================================
-\echo '💰 Creating redemptions table...'
+DO $$ BEGIN RAISE NOTICE '💰 Creating redemptions table...'; END $$;
 
 CREATE TABLE IF NOT EXISTS redemptions (
     id BIGSERIAL PRIMARY KEY,
@@ -247,12 +247,12 @@ CREATE INDEX IF NOT EXISTS idx_redemptions_redeemer ON redemptions(redeemer_addr
 CREATE INDEX IF NOT EXISTS idx_redemptions_timestamp ON redemptions(timestamp_unix DESC);
 CREATE INDEX IF NOT EXISTS idx_redemptions_payout ON redemptions(payout_usdc DESC);
 
-\echo '✅ Redemptions table created'
+DO $$ BEGIN RAISE NOTICE '✅ Redemptions table created'; END $$;
 
 -- ============================================================================
 -- 5. USER CLOSED POSITIONS TABLE - Closed trading positions
 -- ============================================================================
-\echo '📊 Creating user_closed_positions table...'
+DO $$ BEGIN RAISE NOTICE '📊 Creating user_closed_positions table...'; END $$;
 
 CREATE TABLE IF NOT EXISTS user_closed_positions (
     id BIGSERIAL PRIMARY KEY,
@@ -308,12 +308,12 @@ CREATE INDEX IF NOT EXISTS idx_user_closed_positions_realized_pnl ON user_closed
 CREATE INDEX IF NOT EXISTS idx_user_closed_positions_event_slug ON user_closed_positions(event_slug);
 CREATE INDEX IF NOT EXISTS idx_user_closed_positions_outcome ON user_closed_positions(outcome_index);
 
-\echo '✅ User_closed_positions table created'
+DO $$ BEGIN RAISE NOTICE '✅ User_closed_positions table created'; END $$;
 
 -- ============================================================================
 -- 6. TRADER LEADERBOARD TABLE - Trader rankings
 -- ============================================================================
-\echo '🏆 Creating trader_leaderboard table...'
+DO $$ BEGIN RAISE NOTICE '🏆 Creating trader_leaderboard table...'; END $$;
 
 CREATE TABLE IF NOT EXISTS trader_leaderboard (
     -- Primary identifiers
@@ -361,12 +361,12 @@ CREATE INDEX IF NOT EXISTS idx_trader_leaderboard_category_period_rank ON trader
 CREATE INDEX IF NOT EXISTS idx_trader_leaderboard_vol ON trader_leaderboard(vol DESC);
 CREATE INDEX IF NOT EXISTS idx_trader_leaderboard_pnl ON trader_leaderboard(pnl DESC);
 
-\echo '✅ Trader_leaderboard table created'
+DO $$ BEGIN RAISE NOTICE '✅ Trader_leaderboard table created'; END $$;
 
 -- ============================================================================
 -- 7. NFT CLAIM TABLES (для Next.js приложения)
 -- ============================================================================
-\echo '🎨 Creating NFT claim tables...'
+DO $$ BEGIN RAISE NOTICE '🎨 Creating NFT claim tables...'; END $$;
 
 -- NftClaim table
 CREATE TABLE IF NOT EXISTS nft_claims (
@@ -395,12 +395,12 @@ CREATE TABLE IF NOT EXISTS rate_limits (
 
 CREATE INDEX IF NOT EXISTS idx_rate_limits_identifier ON rate_limits(identifier);
 
-\echo '✅ NFT claim tables created'
+DO $$ BEGIN RAISE NOTICE '✅ NFT claim tables created'; END $$;
 
 -- ============================================================================
 -- 8. USEFUL VIEWS FOR ANALYTICS
 -- ============================================================================
-\echo '📊 Creating analytics views...'
+DO $$ BEGIN RAISE NOTICE '📊 Creating analytics views...'; END $$;
 
 -- Events with market count and total volume
 CREATE OR REPLACE VIEW events_summary AS
@@ -439,13 +439,13 @@ SELECT
 FROM user_closed_positions
 GROUP BY proxy_wallet;
 
-\echo '✅ Analytics views created'
+DO $$ BEGIN RAISE NOTICE '✅ Analytics views created'; END $$;
 
 -- ============================================================================
 -- DATA LOADING TRACKING (for daily scheduler)
 -- ============================================================================
-\echo ''
-\echo '📊 Creating data loading tracking table...'
+DO $$ BEGIN RAISE NOTICE ''; END $$;
+DO $$ BEGIN RAISE NOTICE '📊 Creating data loading tracking table...'; END $$;
 
 CREATE TABLE IF NOT EXISTS data_loads (
     id SERIAL PRIMARY KEY,
@@ -465,6 +465,7 @@ CREATE TABLE IF NOT EXISTS data_loads (
     
     -- Record counts from each type
     events_count INTEGER DEFAULT 0,
+    markets_count INTEGER DEFAULT 0,
     redemptions_count INTEGER DEFAULT 0,
     positions_count INTEGER DEFAULT 0,
     leaderboard_count INTEGER DEFAULT 0,
@@ -488,7 +489,10 @@ CREATE INDEX IF NOT EXISTS idx_data_loads_status ON data_loads(
     events_loaded, redemptions_loaded, positions_loaded, leaderboard_loaded
 );
 
-\echo '✅ data_loads table created'
+-- Add markets_count column if it doesn't exist (for existing databases)
+ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS markets_count INTEGER DEFAULT 0;
+
+DO $$ BEGIN RAISE NOTICE '✅ data_loads table created'; END $$;
 
 -- Tracking views
 CREATE OR REPLACE VIEW recent_loads AS
@@ -539,32 +543,32 @@ SELECT
 FROM data_loads
 WHERE load_type = 'daily';
 
-\echo '✅ Tracking views created'
+DO $$ BEGIN RAISE NOTICE '✅ Tracking views created'; END $$;
 
 -- ============================================================================
 -- COMPLETION
 -- ============================================================================
-\echo ''
-\echo '✅ PolyStars database initialization complete!'
-\echo ''
-\echo '📊 Created tables:'
-\echo '   - events'
-\echo '   - markets'
-\echo '   - fetch_metadata'
-\echo '   - redemptions'
-\echo '   - user_closed_positions'
-\echo '   - trader_leaderboard'
-\echo '   - nft_claims'
-\echo '   - rate_limits'
-\echo '   - data_loads (tracking)'
-\echo ''
-\echo '📈 Created views:'
-\echo '   - events_summary'
-\echo '   - top_volume_events'
-\echo '   - user_pnl_summary'
-\echo '   - recent_loads'
-\echo '   - genesis_status'
-\echo '   - daily_loads_summary'
-\echo ''
-\echo '🚀 Database is ready for data ingestion!'
-\echo ''
+DO $$ BEGIN RAISE NOTICE ''; END $$;
+DO $$ BEGIN RAISE NOTICE '✅ PolyStars database initialization complete!'; END $$;
+DO $$ BEGIN RAISE NOTICE ''; END $$;
+DO $$ BEGIN RAISE NOTICE '📊 Created tables:'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - events'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - markets'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - fetch_metadata'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - redemptions'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - user_closed_positions'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - trader_leaderboard'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - nft_claims'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - rate_limits'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - data_loads (tracking)'; END $$;
+DO $$ BEGIN RAISE NOTICE ''; END $$;
+DO $$ BEGIN RAISE NOTICE '📈 Created views:'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - events_summary'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - top_volume_events'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - user_pnl_summary'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - recent_loads'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - genesis_status'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - daily_loads_summary'; END $$;
+DO $$ BEGIN RAISE NOTICE ''; END $$;
+DO $$ BEGIN RAISE NOTICE '🚀 Database is ready for data ingestion!'; END $$;
+DO $$ BEGIN RAISE NOTICE ''; END $$;
