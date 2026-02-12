@@ -21,6 +21,12 @@ Run daily pipeline:
 Load Genesis:
     python scripts/daily_scheduler_simple.py --historical
 
+Catch-up missing data (AUTO-RETRY):
+    python scripts/daily_scheduler_simple.py --catch-up
+    
+    Note: If catch-up takes >24h and new day passes, it will automatically
+    detect the gap and run another iteration (max 10 iterations).
+
 Docker:
     docker exec polystars_scheduler python /app/scripts/daily_scheduler_simple.py --run
 """
@@ -623,21 +629,29 @@ class SimplifiedScheduler:
             # Always release lock
             lock.release()
     
-    def run_catch_up(self) -> Dict:
+    def _run_catch_up_iteration(self, iteration: int = 1) -> Dict:
         """
-        Automatically load all missing data between Genesis and now
+        Single iteration of catch-up (internal method)
         
+        Args:
+            iteration: Current iteration number (for logging)
+            
         Returns:
             Dict with catch-up results
         """
-        print("\n" + "="*70)
-        print("🔄 CATCH-UP MODE: Loading missing data")
-        print("="*70)
+        if iteration == 1:
+            print("\n" + "="*70)
+            print("🔄 CATCH-UP MODE: Loading missing data")
+            print("="*70)
+        else:
+            print("\n" + "="*70)
+            print(f"🔄 CATCH-UP ITERATION #{iteration}: Checking for new gaps")
+            print("="*70)
         
         # Check Genesis first
         if self.manager.needs_genesis_load():
             print("\n❌ Genesis not loaded - run --historical first!")
-            return {'success': False, 'error': 'Genesis not loaded'}
+            return {'success': False, 'error': 'Genesis not loaded', 'iteration': iteration}
         
         # Get target date for events (respecting lag)
         events_target_date = date.today() - timedelta(days=EVENTS_LAG_DAYS)
@@ -653,8 +667,11 @@ class SimplifiedScheduler:
         )
         
         if not missing_dates:
-            print("\n✅ No missing data - system is up to date!")
-            return {'success': True, 'missing': 0}
+            if iteration == 1:
+                print("\n✅ No missing data - system is up to date!")
+            else:
+                print(f"\n✅ No new gaps found - all caught up!")
+            return {'success': True, 'missing': 0, 'iteration': iteration}
         
         print(f"\nFound {len(missing_dates)} missing day(s):")
         print(f"  From: {missing_dates[0]}")
@@ -667,22 +684,16 @@ class SimplifiedScheduler:
                 print(f"  • {d}")
             if len(missing_dates) > 10:
                 print(f"  • ... and {len(missing_dates) - 10} more")
-            return {'success': True, 'missing': len(missing_dates)}
+            return {'success': True, 'missing': len(missing_dates), 'iteration': iteration}
         
         # Estimate time
         estimated_minutes = len(missing_dates) * 5  # ~5 min per day average
         print(f"\n⏱️  Estimated time: ~{estimated_minutes} minutes ({estimated_minutes/60:.1f} hours)")
         print(f"   (about 5 minutes per day)")
         
-        # Acquire lock to prevent concurrent runs
-        lock = ProcessLock()
-        if not lock.acquire('catch-up'):
-            return {'success': False, 'error': 'Could not acquire lock'}
-        
-        try:
-            print("\n" + "="*70)
-            print("Starting catch-up process...")
-            print("="*70)
+        print("\n" + "="*70)
+        print("Starting catch-up process...")
+        print("="*70)
             
             # Load each missing date
             results = {}
@@ -756,17 +767,118 @@ class SimplifiedScheduler:
                 print(f"\n📊 Progress: {i}/{len(missing_dates)} days")
                 print(f"⏱️  Elapsed: {elapsed/60:.1f} min | Remaining: ~{estimated_remaining/60:.1f} min")
         
-            # Summary
-            total_time = time.time() - start_time
+        # Summary
+        total_time = time.time() - start_time
+        print("\n" + "="*70)
+        print(f"📊 CATCH-UP ITERATION #{iteration} SUMMARY")
+        print("="*70)
+        print(f"✅ Loaded: {len(missing_dates)} days")
+        print(f"⏱️  Total time: {total_time/60:.1f} minutes ({total_time/3600:.1f} hours)")
+        print(f"⚡ Average: {total_time/len(missing_dates)/60:.1f} minutes per day")
+        print("="*70)
+        
+        return {'success': True, 'days_loaded': len(missing_dates), 'duration': total_time, 'iteration': iteration}
+    
+    def run_catch_up(self) -> Dict:
+        """
+        Automatically load all missing data with auto-retry
+        
+        This method runs catch-up iterations in a loop. After each successful
+        iteration, it checks if new dates became available (e.g., if catch-up
+        took >24h, a new day might have passed). If so, it automatically runs
+        another iteration.
+        
+        Protection: Maximum 10 iterations to prevent infinite loops.
+        
+        Returns:
+            Dict with catch-up results including total iterations
+        """
+        MAX_ITERATIONS = 10
+        total_days_loaded = 0
+        total_duration = 0
+        iteration = 0
+        
+        # Acquire lock once for all iterations
+        lock = ProcessLock()
+        if not lock.acquire('catch-up'):
+            return {'success': False, 'error': 'Could not acquire lock'}
+        
+        try:
+            overall_start_time = time.time()
+            
+            for iteration in range(1, MAX_ITERATIONS + 1):
+                # Run one catch-up iteration
+                result = self._run_catch_up_iteration(iteration)
+                
+                if not result['success']:
+                    # Error occurred
+                    return result
+                
+                # Accumulate stats
+                days_loaded = result.get('days_loaded', 0)
+                total_days_loaded += days_loaded
+                if 'duration' in result:
+                    total_duration += result['duration']
+                
+                # No missing dates in this iteration
+                if days_loaded == 0:
+                    if iteration == 1:
+                        # First check - no missing data at all
+                        return result
+                    else:
+                        # Subsequent check - no new gaps, we're done
+                        break
+                
+                # Check if there are MORE missing dates now
+                # (could happen if this iteration took >24h and new day passed)
+                print("\n" + "="*70)
+                print(f"🔍 Checking for new gaps after iteration #{iteration}...")
+                print("="*70)
+                
+                events_target_date = date.today() - timedelta(days=EVENTS_LAG_DAYS)
+                new_missing_dates = self.manager.get_missing_dates(
+                    start_from=GENESIS_END_DATE + timedelta(days=1),
+                    up_to=events_target_date
+                )
+                
+                if not new_missing_dates:
+                    print("\n✅ No new gaps detected - catch-up complete!")
+                    break
+                
+                # New gaps detected
+                print(f"\n⚠️  New gap(s) detected: {len(new_missing_dates)} day(s)")
+                print(f"   Range: {new_missing_dates[0]} to {new_missing_dates[-1]}")
+                
+                if iteration < MAX_ITERATIONS:
+                    print(f"\n🔄 Automatically starting iteration #{iteration + 1}...")
+                    print(f"   (This can happen if catch-up took >24h and new day passed)")
+                    time.sleep(2)  # Brief pause before next iteration
+                else:
+                    print(f"\n⚠️  Maximum iterations ({MAX_ITERATIONS}) reached!")
+                    print(f"   Stopping to prevent infinite loop")
+                    print(f"   Remaining gaps: {len(new_missing_dates)} day(s)")
+                    print(f"\n   👉 Run --catch-up again to continue")
+                    break
+        
+            # Final summary
+            overall_duration = time.time() - overall_start_time
+            
             print("\n" + "="*70)
-            print("📊 CATCH-UP SUMMARY")
+            print("🎉 CATCH-UP COMPLETE - FINAL SUMMARY")
             print("="*70)
-            print(f"✅ Loaded: {len(missing_dates)} days")
-            print(f"⏱️  Total time: {total_time/60:.1f} minutes ({total_time/3600:.1f} hours)")
-            print(f"⚡ Average: {total_time/len(missing_dates)/60:.1f} minutes per day")
+            print(f"✅ Total days loaded: {total_days_loaded}")
+            print(f"🔄 Iterations: {iteration}")
+            print(f"⏱️  Total time: {overall_duration/60:.1f} minutes ({overall_duration/3600:.1f} hours)")
+            if total_days_loaded > 0:
+                print(f"⚡ Average: {overall_duration/total_days_loaded/60:.1f} minutes per day")
             print("="*70)
             
-            return {'success': True, 'days_loaded': len(missing_dates), 'duration': total_time}
+            return {
+                'success': True,
+                'total_days_loaded': total_days_loaded,
+                'iterations': iteration,
+                'total_duration': overall_duration
+            }
         
         finally:
             # Always release lock
