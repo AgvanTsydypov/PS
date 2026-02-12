@@ -69,8 +69,46 @@ docker-compose exec python_scripts python scripts/db/test_db_connection.py
 docker-compose logs python_scripts
 docker-compose logs scheduler
 
+# Посмотреть последние 100 строк логов с live-обновлением:
+docker-compose logs -f --tail=100 scheduler
+
 # Статус контейнеров:
 docker-compose ps
+```
+
+## 🧹 Управление логами
+
+### Автоматическая очистка
+Логи автоматически очищаются каждое воскресенье в 3:00 AM UTC:
+- Хранятся последние 14 дней
+- Старые файлы удаляются автоматически
+
+### Ручная очистка логов
+```bash
+# Посмотреть что будет удалено (dry run):
+docker exec polystars_scheduler python /app/scripts/utils/cleanup_old_logs.py --dry-run
+
+# Удалить логи старше 14 дней:
+docker exec polystars_scheduler python /app/scripts/utils/cleanup_old_logs.py
+
+# Удалить логи старше 7 дней:
+docker exec polystars_scheduler python /app/scripts/utils/cleanup_old_logs.py --keep-days 7
+```
+
+### Ограничения размера Docker логов
+Docker автоматически ротирует логи:
+- Максимум 10MB на файл
+- 3 ротируемых файла (всего 30MB)
+- Старые логи автоматически сжимаются
+
+```bash
+# Проверить размер Docker логов:
+docker inspect polystars_scheduler --format='{{.HostConfig.LogConfig}}'
+
+# Очистить все Docker логи:
+docker-compose down
+rm -rf /var/lib/docker/containers/*/*-json.log
+docker-compose up -d
 ```
 
 ## 💡 Когда перезапускать

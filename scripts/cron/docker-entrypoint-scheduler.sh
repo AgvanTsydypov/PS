@@ -53,24 +53,38 @@ echo "🔧 Setting up cron environment..."
 printenv | grep -E '^(DB_|LOCAL_DB_|POSTGRES_)' | sed 's/^\(.*\)$/export \1/g' > /app/cron_env.sh
 chmod +x /app/cron_env.sh
 
-# Setup cron job with current environment
-echo "🕐 Setting up cron job..."
+# Setup cron jobs with current environment
+echo "🕐 Setting up cron jobs..."
 
-# Create cron job (inline to avoid line ending issues)
-CRON_SCHEDULE="0 2 * * *"
 PROJECT_DIR="/app"
 PYTHON_BIN="/usr/local/bin/python"
+
+# Job 1: Daily data pipeline (2:00 AM UTC)
+DAILY_SCHEDULE="0 2 * * *"
 SCHEDULER_SCRIPT="$PROJECT_DIR/scripts/daily_scheduler_simple.py"
-LOG_FILE="$PROJECT_DIR/logs/scheduler.log"
+SCHEDULER_LOG="$PROJECT_DIR/logs/scheduler.log"
 
-# Remove old cron job if exists
-crontab -l 2>/dev/null | grep -v "$SCHEDULER_SCRIPT" | crontab - 2>/dev/null || true
+# Job 2: Weekly log cleanup (3:00 AM UTC every Sunday)
+CLEANUP_SCHEDULE="0 3 * * 0"
+CLEANUP_SCRIPT="$PROJECT_DIR/scripts/utils/cleanup_old_logs.py"
+CLEANUP_LOG="$PROJECT_DIR/logs/cleanup.log"
 
-# Add new cron job
-(crontab -l 2>/dev/null; echo "$CRON_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $SCHEDULER_SCRIPT --run >> $LOG_FILE 2>&1") | crontab -
+# Clear existing crontab
+crontab -r 2>/dev/null || true
 
-echo "✅ Cron job added successfully!"
-echo "   Schedule: $CRON_SCHEDULE (Every day at 00:05 AM UTC)"
+# Add both cron jobs
+(
+  echo "# Daily data pipeline (2:00 AM UTC)"
+  echo "$DAILY_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $SCHEDULER_SCRIPT --run >> $SCHEDULER_LOG 2>&1"
+  echo ""
+  echo "# Weekly log cleanup - keep 14 days (3:00 AM UTC every Sunday)"
+  echo "$CLEANUP_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $CLEANUP_SCRIPT --keep-days 14 >> $CLEANUP_LOG 2>&1"
+) | crontab -
+
+echo "✅ Cron jobs added successfully!"
+echo "   Daily pipeline: $DAILY_SCHEDULE (2:00 AM UTC)"
+echo "   Weekly cleanup: $CLEANUP_SCHEDULE (3:00 AM UTC every Sunday)"
+echo ""
 crontab -l
 
 # Check system status
@@ -80,11 +94,21 @@ python /app/scripts/data_loading_manager.py --status || echo "  Could not get st
 # Start cron
 echo ""
 echo "✅ Scheduler service initialized successfully!"
-echo "🕐 Cron schedule: Daily at 00:05 UTC"
-echo "📝 Logs: /app/logs/scheduler.log"
 echo ""
-echo "To run manually:"
+echo "📅 Scheduled Tasks:"
+echo "   • Daily pipeline: 2:00 AM UTC"
+echo "   • Log cleanup: 3:00 AM UTC (Sundays)"
+echo ""
+echo "📝 Logs:"
+echo "   • Pipeline: /app/logs/scheduler.log"
+echo "   • Cleanup: /app/logs/cleanup.log"
+echo ""
+echo "Manual commands:"
+echo "  # Run daily pipeline"
 echo "  docker exec polystars_scheduler python /app/scripts/daily_scheduler_simple.py --run"
+echo ""
+echo "  # Run log cleanup"
+echo "  docker exec polystars_scheduler python /app/scripts/utils/cleanup_old_logs.py"
 echo ""
 echo "======================================"
 
