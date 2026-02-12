@@ -57,7 +57,7 @@ chmod +x /app/cron_env.sh
 echo "🕐 Setting up cron job..."
 
 # Create cron job (inline to avoid line ending issues)
-CRON_SCHEDULE="2 1 * * *"
+CRON_SCHEDULE="0 2 * * *"
 PROJECT_DIR="/app"
 PYTHON_BIN="/usr/local/bin/python"
 SCHEDULER_SCRIPT="$PROJECT_DIR/scripts/daily_scheduler_simple.py"
