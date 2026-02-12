@@ -46,10 +46,89 @@ from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE,
 class ProcessLock:
     """Manages lock file to prevent concurrent script execution"""
     
+    # Максимальное время жизни lock-файла (30 часов)
+    # Защита от зависших процессов (нормальная работа: до 22 часов)
+    MAX_LOCK_AGE_HOURS = 30
+    
     def __init__(self, lock_name: str = "polystars_scheduler"):
         self.lock_dir = Path(tempfile.gettempdir())
         self.lock_file = self.lock_dir / f"{lock_name}.lock"
         self.is_locked_by_me = False
+    
+    def _is_process_running(self, pid: int) -> bool:
+        """Check if process with given PID is running"""
+        try:
+            # Проверка на Unix/Linux
+            if os.name != 'nt':  # Not Windows
+                os.kill(pid, 0)  # Signal 0 - just check, don't kill
+                return True
+            else:
+                # На Windows используем psutil если доступен, иначе считаем что работает
+                try:
+                    import psutil
+                    return psutil.pid_exists(pid)
+                except ImportError:
+                    # Если psutil нет, проверяем через tasklist
+                    import subprocess
+                    result = subprocess.run(
+                        ['tasklist', '/FI', f'PID eq {pid}', '/NH'],
+                        capture_output=True, text=True
+                    )
+                    return str(pid) in result.stdout
+        except (OSError, ProcessLookupError):
+            return False
+        except Exception:
+            # В случае любой ошибки считаем что процесс работает (безопаснее)
+            return True
+    
+    def _clean_stale_lock(self) -> bool:
+        """Remove lock file if process is dead or lock is too old"""
+        if not self.lock_file.exists():
+            return True
+        
+        try:
+            with open(self.lock_file, 'r') as f:
+                lines = f.read().strip().split('\n')
+                if len(lines) < 3:
+                    # Неправильный формат - удаляем
+                    print(f"⚠️  Invalid lock file format - removing")
+                    self.lock_file.unlink()
+                    return True
+                
+                operation = lines[0]
+                lock_time_str = lines[1]
+                pid_line = lines[2]
+                
+                # Извлечь PID
+                pid = int(pid_line.split(':')[1].strip())
+                
+                # Проверить возраст lock-файла
+                lock_time = datetime.strptime(lock_time_str, '%Y-%m-%d %H:%M:%S')
+                age_hours = (datetime.now() - lock_time).total_seconds() / 3600
+                
+                if age_hours > self.MAX_LOCK_AGE_HOURS:
+                    print(f"⚠️  Lock file is too old ({age_hours:.1f}h > {self.MAX_LOCK_AGE_HOURS}h) - removing")
+                    print(f"   Operation: {operation}")
+                    print(f"   Started: {lock_time_str}")
+                    print(f"   Note: Normal operations take up to 22h, this looks like a stuck process")
+                    self.lock_file.unlink()
+                    return True
+                
+                # Проверить живость процесса
+                if not self._is_process_running(pid):
+                    print(f"⚠️  Process {pid} is not running - removing stale lock")
+                    print(f"   Operation: {operation}")
+                    print(f"   Started: {lock_time_str}")
+                    self.lock_file.unlink()
+                    return True
+                
+                # Процесс жив и lock свежий
+                return False
+                
+        except Exception as e:
+            print(f"⚠️  Error checking lock file: {e}")
+            # В случае ошибки НЕ удаляем lock (безопаснее)
+            return False
     
     def acquire(self, operation: str) -> bool:
         """
@@ -61,7 +140,9 @@ class ProcessLock:
         Returns:
             True if lock acquired, False if already locked
         """
-        if self.lock_file.exists():
+        # Сначала проверить и почистить устаревший lock
+        if not self._clean_stale_lock():
+            # Lock существует и валиден
             try:
                 with open(self.lock_file, 'r') as f:
                     lock_info = f.read().strip().split('\n')
@@ -75,8 +156,9 @@ class ProcessLock:
                         return False
             except Exception as e:
                 print(f"⚠️  Warning: Could not read lock file: {e}")
+                return False
         
-        # Create lock file
+        # Создать новый lock file
         try:
             with open(self.lock_file, 'w') as f:
                 f.write(f"{operation}\n")
