@@ -694,78 +694,78 @@ class SimplifiedScheduler:
         print("\n" + "="*70)
         print("Starting catch-up process...")
         print("="*70)
+        
+        # Load each missing date
+        results = {}
+        start_time = time.time()
+        
+        for i, missing_date in enumerate(missing_dates, 1):
+            print(f"\n{'='*70}")
+            print(f"📅 Day {i}/{len(missing_dates)}: Loading {missing_date}")
+            print(f"{'='*70}")
             
-            # Load each missing date
-            results = {}
-            start_time = time.time()
+            # STEP 1: Events for this date
+            print(f"\n1️⃣ Events for {missing_date}")
+            self.configure_for_date(missing_date, is_genesis=False)
+            result_events = self.run_script('events')
             
-            for i, missing_date in enumerate(missing_dates, 1):
-                print(f"\n{'='*70}")
-                print(f"📅 Day {i}/{len(missing_dates)}: Loading {missing_date}")
-                print(f"{'='*70}")
+            if result_events['success']:
+                self.manager.mark_data_loaded('events', missing_date,
+                                            record_count=result_events['records'],
+                                            markets_count=result_events['markets'],
+                                            load_type='daily')
+                print(f"✅ Events loaded for {missing_date} ({result_events['records']:,} events, {result_events['markets']:,} markets)")
+            else:
+                print(f"❌ Events failed for {missing_date}")
+                results[str(missing_date)] = {'success': False, 'step': 'events'}
+                continue  # Skip other steps if events failed
+            
+            # STEP 2-4: Redemptions, Positions, Leaderboard
+            # Check if data is ready (DATA_LAG_DAYS lag for finalization)
+            today = date.today()
+            days_since_event = (today - missing_date).days
+            
+            # Only load redemptions if:
+            # 1. Event ended >= DATA_LAG_DAYS ago (data is finalized)
+            # 2. Event is after Genesis period (avoid duplicates)
+            if missing_date <= GENESIS_END_DATE:
+                print(f"\n⏭️  Skipping redemptions/positions/leaderboard for {missing_date}")
+                print(f"   Reason: Date is within Genesis period (already loaded)")
+            elif days_since_event < DATA_LAG_DAYS:
+                print(f"\n⏳ Skipping redemptions/positions/leaderboard for {missing_date}")
+                print(f"   Reason: Event ended only {days_since_event} day(s) ago (need {DATA_LAG_DAYS} days)")
+                print(f"   Will be available on: {missing_date + timedelta(days=DATA_LAG_DAYS)}")
+            else:
+                print(f"\n2️⃣ Redemptions/Positions/Leaderboard for {missing_date}")
+                print(f"   ℹ️  Event ended {days_since_event} days ago - data is finalized")
                 
-                # STEP 1: Events for this date
-                print(f"\n1️⃣ Events for {missing_date}")
+                # Configure for this date
                 self.configure_for_date(missing_date, is_genesis=False)
-                result_events = self.run_script('events')
                 
-                if result_events['success']:
-                    self.manager.mark_data_loaded('events', missing_date,
-                                                record_count=result_events['records'],
-                                                markets_count=result_events['markets'],
-                                                load_type='daily')
-                    print(f"✅ Events loaded for {missing_date} ({result_events['records']:,} events, {result_events['markets']:,} markets)")
-                else:
-                    print(f"❌ Events failed for {missing_date}")
-                    results[str(missing_date)] = {'success': False, 'step': 'events'}
-                    continue  # Skip other steps if events failed
-                
-                # STEP 2-4: Redemptions, Positions, Leaderboard
-                # Check if data is ready (DATA_LAG_DAYS lag for finalization)
-                today = date.today()
-                days_since_event = (today - missing_date).days
-                
-                # Only load redemptions if:
-                # 1. Event ended >= DATA_LAG_DAYS ago (data is finalized)
-                # 2. Event is after Genesis period (avoid duplicates)
-                if missing_date <= GENESIS_END_DATE:
-                    print(f"\n⏭️  Skipping redemptions/positions/leaderboard for {missing_date}")
-                    print(f"   Reason: Date is within Genesis period (already loaded)")
-                elif days_since_event < DATA_LAG_DAYS:
-                    print(f"\n⏳ Skipping redemptions/positions/leaderboard for {missing_date}")
-                    print(f"   Reason: Event ended only {days_since_event} day(s) ago (need {DATA_LAG_DAYS} days)")
-                    print(f"   Will be available on: {missing_date + timedelta(days=DATA_LAG_DAYS)}")
-                else:
-                    print(f"\n2️⃣ Redemptions/Positions/Leaderboard for {missing_date}")
-                    print(f"   ℹ️  Event ended {days_since_event} days ago - data is finalized")
+                for script_key in ['redemptions', 'positions', 'leaderboard']:
+                    # Check if already loaded
+                    if self.manager.is_data_loaded_for_date(missing_date, script_key):
+                        print(f"  ⏭️  {self.scripts[script_key]['name']}: Already loaded")
+                        continue
                     
-                    # Configure for this date
-                    self.configure_for_date(missing_date, is_genesis=False)
-                    
-                    for script_key in ['redemptions', 'positions', 'leaderboard']:
-                        # Check if already loaded
-                        if self.manager.is_data_loaded_for_date(missing_date, script_key):
-                            print(f"  ⏭️  {self.scripts[script_key]['name']}: Already loaded")
-                            continue
-                        
-                        result = self.run_script(script_key)
-                        if result['success']:
-                            self.manager.mark_data_loaded(script_key, missing_date,
-                                                        record_count=result['records'],
-                                                        load_type='daily')
-                        else:
-                            print(f"  ⚠️  {self.scripts[script_key]['name']} failed (continuing...)")
-                
-                results[str(missing_date)] = {'success': True}
-                
-                # Progress
-                elapsed = time.time() - start_time
-                avg_time_per_day = elapsed / i
-                remaining_days = len(missing_dates) - i
-                estimated_remaining = remaining_days * avg_time_per_day
-                
-                print(f"\n📊 Progress: {i}/{len(missing_dates)} days")
-                print(f"⏱️  Elapsed: {elapsed/60:.1f} min | Remaining: ~{estimated_remaining/60:.1f} min")
+                    result = self.run_script(script_key)
+                    if result['success']:
+                        self.manager.mark_data_loaded(script_key, missing_date,
+                                                    record_count=result['records'],
+                                                    load_type='daily')
+                    else:
+                        print(f"  ⚠️  {self.scripts[script_key]['name']} failed (continuing...)")
+            
+            results[str(missing_date)] = {'success': True}
+            
+            # Progress
+            elapsed = time.time() - start_time
+            avg_time_per_day = elapsed / i
+            remaining_days = len(missing_dates) - i
+            estimated_remaining = remaining_days * avg_time_per_day
+            
+            print(f"\n📊 Progress: {i}/{len(missing_dates)} days")
+            print(f"⏱️  Elapsed: {elapsed/60:.1f} min | Remaining: ~{estimated_remaining/60:.1f} min")
         
         # Summary
         total_time = time.time() - start_time
