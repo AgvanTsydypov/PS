@@ -30,11 +30,7 @@ COPY .env /app/.env
 RUN mkdir -p /app/logs
 
 # Fix line endings and make scripts executable
-RUN find /app/scripts/cron -type f -name "*.sh" -exec dos2unix {} \; && \
-    chmod +x /app/scripts/cron/setup_cron.sh
-
-# Setup cron job
-RUN /app/scripts/cron/setup_cron.sh
+RUN find /app/scripts/cron -type f -name "*.sh" -exec dos2unix {} \;
 
 # Copy entrypoint script and fix line endings
 COPY scripts/cron/docker-entrypoint-scheduler.sh /docker-entrypoint.sh
