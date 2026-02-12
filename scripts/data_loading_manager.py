@@ -57,8 +57,13 @@ load_dotenv()
 GENESIS_START_DATE = date(2026, 2, 1)
 GENESIS_END_DATE = date(2026, 2, 6)
 
-GENESIS_MIN_VOLUME = 50_000  # 100M
-DAILY_MIN_VOLUME = 50_000  # 5M
+GENESIS_MIN_VOLUME = 1_000  # 100M
+DAILY_MIN_VOLUME = 1_000  # 5M
+
+# Data lag configuration (in days)
+# How many days to wait before loading data (allows data to finalize)
+EVENTS_LAG_DAYS = 1        # Events: 2 days ago
+DATA_LAG_DAYS = 2          # Redemptions/Positions/Leaderboard: 2 days after events
 
 # OPTIONAL: Limit number of events for testing (None = unlimited)
 # Set this to speed up testing with smaller datasets
@@ -73,7 +78,7 @@ MAX_EVENTS_LIMIT = 1  # Change to number for testing, e.g., 1000
 # Examples:
 #   - 150_000_000 (150M) to exclude events over 150M USD
 #   - None for no maximum limit (production)
-MAX_VOLUME_FILTER = 300_000  # Change to number for testing, e.g., 150_000_000
+MAX_VOLUME_FILTER = 5_000  # Change to number for testing, e.g., 150_000_000
 
 
 class DataLoadingManager:
@@ -171,13 +176,13 @@ class DataLoadingManager:
             reference_date: Reference date (default: today)
             
         Returns:
-            Dict with events_date (yesterday) and redemptions_date (3 days ago)
+            Dict with events_date (EVENTS_LAG_DAYS ago) and redemptions_date (DATA_LAG_DAYS ago)
         """
         if reference_date is None:
             reference_date = date.today()
         
-        events_date = reference_date - timedelta(days=1)
-        redemptions_date = reference_date - timedelta(days=3)
+        events_date = reference_date - timedelta(days=EVENTS_LAG_DAYS)
+        redemptions_date = reference_date - timedelta(days=DATA_LAG_DAYS)
         
         return {
             'events_date': events_date,

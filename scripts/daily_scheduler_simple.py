@@ -7,8 +7,8 @@ LOGIC:
 ======
 - Genesis: Load once (2024-07-06 to 2026-01-05) with 100M filter
 - Daily: Load every day with 5M filter
-  - Events: Yesterday (completed day)
-  - Redemptions/Positions/Leaderboard: 3 days ago
+  - Events: EVENTS_LAG_DAYS day ago (default: 1 = yesterday)
+  - Redemptions/Positions/Leaderboard: DATA_LAG_DAYS days ago (default: 3)
 
 USAGE:
 ======
@@ -38,7 +38,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE, GENESIS_END_DATE
+from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE, GENESIS_END_DATE, DATA_LAG_DAYS, EVENTS_LAG_DAYS
 
 
 class SimplifiedScheduler:
@@ -109,8 +109,8 @@ class SimplifiedScheduler:
             # Show today's dates
             dates = self.manager.get_loading_dates()
             print(f"\nToday's Loading Dates ({dates['reference_date']}):")
-            print(f"  • Events: {dates['events_date']} (yesterday)")
-            print(f"  • Redemptions: {dates['redemptions_date']} (3 days ago)")
+            print(f"  • Events: {dates['events_date']} ({EVENTS_LAG_DAYS} day{'s' if EVENTS_LAG_DAYS > 1 else ''} ago)")
+            print(f"  • Redemptions: {dates['redemptions_date']} ({DATA_LAG_DAYS} days ago)")
             
             # Check if today's data loaded
             events_loaded = self.manager.is_data_loaded_for_date(dates['events_date'], 'events')
@@ -221,7 +221,8 @@ class SimplifiedScheduler:
         start_time = time.time()
         
         try:
-            cmd = ['python', script_config['script']] + script_config['args']
+            # Use the same Python interpreter that's running this script
+            cmd = [sys.executable, script_config['script']] + script_config['args']
             result = subprocess.run(cmd, cwd=project_root, check=True)
             
             duration = time.time() - start_time
@@ -267,8 +268,8 @@ class SimplifiedScheduler:
         redemptions_date = dates['redemptions_date']
         
         print(f"\nLoading Dates:")
-        print(f"  • Events: {events_date} (yesterday)")
-        print(f"  • Redemptions: {redemptions_date} (3 days ago)")
+        print(f"  • Events: {events_date} ({EVENTS_LAG_DAYS} day{'s' if EVENTS_LAG_DAYS > 1 else ''} ago)")
+        print(f"  • Redemptions: {redemptions_date} ({DATA_LAG_DAYS} days ago)")
         print("="*70)
         
         results = {}
@@ -287,8 +288,8 @@ class SimplifiedScheduler:
                                             markets_count=results['events']['markets'],
                                             load_type='daily')
         
-        # STEP 2-4: Redemptions, Positions, Leaderboard (3 days ago)
-        # ℹ️ For DAILY pipeline: 3-day lag allows data to finalize
+        # STEP 2-4: Redemptions, Positions, Leaderboard (DATA_LAG_DAYS ago)
+        # ℹ️ For DAILY pipeline: lag allows data to finalize
         # (For CATCH-UP of historical data, see run_catch_up - no lag needed there)
         print(f"\n📅 Redemptions/Positions/Leaderboard: Loading for {redemptions_date}")
         
@@ -316,7 +317,7 @@ class SimplifiedScheduler:
                                                     load_type='daily')
         
         # STEP 5: Auto-fix incomplete days (events loaded but redemptions missing)
-        # This handles the first 3 days after Genesis where daily pipeline skipped redemptions
+        # This handles the first DATA_LAG_DAYS days after Genesis where daily pipeline skipped redemptions
         print(f"\n🔍 Checking for incomplete days...")
         incomplete = self.manager.get_incomplete_dates(
             start_from=GENESIS_END_DATE + timedelta(days=1),
@@ -331,15 +332,15 @@ class SimplifiedScheduler:
             print(f"   (Events loaded but redemptions/positions/leaderboard missing)")
             
             for incomplete_date, missing_types in incomplete:
-                # Check if data is ready (3-day lag for finalization)
+                # Check if data is ready (DATA_LAG_DAYS lag for finalization)
                 today = date.today()
                 days_since = (today - incomplete_date).days
                 
-                # Only auto-fix if events ended >= 3 days ago
-                if days_since < 3:
+                # Only auto-fix if events ended >= DATA_LAG_DAYS ago
+                if days_since < DATA_LAG_DAYS:
                     print(f"\n⏳ Skipping {incomplete_date} (ended {days_since} day(s) ago)")
                     print(f"   Missing: {', '.join(missing_types)}")
-                    print(f"   Will be available on: {incomplete_date + timedelta(days=3)}")
+                    print(f"   Will be available on: {incomplete_date + timedelta(days=DATA_LAG_DAYS)}")
                     skipped_count += 1
                     continue
                 
@@ -370,7 +371,7 @@ class SimplifiedScheduler:
                 fixed_count += 1
             
             if fixed_count == 0 and skipped_count > 0:
-                print(f"\n   ⏳ {skipped_count} day(s) skipped (waiting for 3-day lag)")
+                print(f"\n   ⏳ {skipped_count} day(s) skipped (waiting for {DATA_LAG_DAYS}-day lag)")
         else:
             print("   ✅ No incomplete days found")
         
@@ -384,10 +385,10 @@ class SimplifiedScheduler:
         if skipped_count_main > 0:
             print(f"⏭️  Skipped: {skipped_count_main} (already loaded or Genesis period)")
         if incomplete:
-            if fixed_count > 0:
-                print(f"🔧 Auto-fixed: {fixed_count} incomplete day(s)")
-            if skipped_count > 0:
-                print(f"⏳ Waiting for lag: {skipped_count} day(s) (need 3-day finalization)")
+                if fixed_count > 0:
+                    print(f"🔧 Auto-fixed: {fixed_count} incomplete day(s)")
+                if skipped_count > 0:
+                    print(f"⏳ Waiting for lag: {skipped_count} day(s) (need {DATA_LAG_DAYS}-day finalization)")
         print("="*70)
         
         return {'success': all(r.get('success') for r in results.values()), 'results': results}
@@ -468,13 +469,17 @@ class SimplifiedScheduler:
             print("\n❌ Genesis not loaded - run --historical first!")
             return {'success': False, 'error': 'Genesis not loaded'}
         
-        # Get yesterday's date (target for events)
-        yesterday = date.today() - timedelta(days=1)
+        # Get target date for events (respecting lag)
+        events_target_date = date.today() - timedelta(days=EVENTS_LAG_DAYS)
+        
+        print(f"\n📅 Lag configuration:")
+        print(f"   Events lag: {EVENTS_LAG_DAYS} days (loading up to {events_target_date})")
+        print(f"   Data lag: {DATA_LAG_DAYS} days (redemptions/positions/leaderboard)")
         
         # Find missing dates
         missing_dates = self.manager.get_missing_dates(
             start_from=GENESIS_END_DATE + timedelta(days=1),
-            up_to=yesterday
+            up_to=events_target_date
         )
         
         if not missing_dates:
@@ -529,20 +534,20 @@ class SimplifiedScheduler:
                 continue  # Skip other steps if events failed
             
             # STEP 2-4: Redemptions, Positions, Leaderboard
-            # Check if data is ready (3-day lag for finalization)
+            # Check if data is ready (DATA_LAG_DAYS lag for finalization)
             today = date.today()
             days_since_event = (today - missing_date).days
             
             # Only load redemptions if:
-            # 1. Event ended >= 3 days ago (data is finalized)
+            # 1. Event ended >= DATA_LAG_DAYS ago (data is finalized)
             # 2. Event is after Genesis period (avoid duplicates)
             if missing_date <= GENESIS_END_DATE:
                 print(f"\n⏭️  Skipping redemptions/positions/leaderboard for {missing_date}")
                 print(f"   Reason: Date is within Genesis period (already loaded)")
-            elif days_since_event < 3:
+            elif days_since_event < DATA_LAG_DAYS:
                 print(f"\n⏳ Skipping redemptions/positions/leaderboard for {missing_date}")
-                print(f"   Reason: Event ended only {days_since_event} day(s) ago (need 3 days)")
-                print(f"   Will be available on: {missing_date + timedelta(days=3)}")
+                print(f"   Reason: Event ended only {days_since_event} day(s) ago (need {DATA_LAG_DAYS} days)")
+                print(f"   Will be available on: {missing_date + timedelta(days=DATA_LAG_DAYS)}")
             else:
                 print(f"\n2️⃣ Redemptions/Positions/Leaderboard for {missing_date}")
                 print(f"   ℹ️  Event ended {days_since_event} days ago - data is finalized")

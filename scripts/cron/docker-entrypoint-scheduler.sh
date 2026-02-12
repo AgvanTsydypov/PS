@@ -47,6 +47,32 @@ if [ -f "/app/sql/schemas/create_simple_tracking.sql" ]; then
         2>/dev/null || echo "  Tables already exist or error occurred"
 fi
 
+# Export environment variables for cron
+# Cron doesn't inherit environment variables, so we need to add them explicitly
+echo "🔧 Setting up cron environment..."
+printenv | grep -E '^(DB_|LOCAL_DB_|POSTGRES_)' | sed 's/^\(.*\)$/export \1/g' > /app/cron_env.sh
+chmod +x /app/cron_env.sh
+
+# Setup cron job with current environment
+echo "🕐 Setting up cron job..."
+
+# Create cron job (inline to avoid line ending issues)
+CRON_SCHEDULE="2 1 * * *"
+PROJECT_DIR="/app"
+PYTHON_BIN="/usr/local/bin/python"
+SCHEDULER_SCRIPT="$PROJECT_DIR/scripts/daily_scheduler_simple.py"
+LOG_FILE="$PROJECT_DIR/logs/scheduler.log"
+
+# Remove old cron job if exists
+crontab -l 2>/dev/null | grep -v "$SCHEDULER_SCRIPT" | crontab - 2>/dev/null || true
+
+# Add new cron job
+(crontab -l 2>/dev/null; echo "$CRON_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $SCHEDULER_SCRIPT --run >> $LOG_FILE 2>&1") | crontab -
+
+echo "✅ Cron job added successfully!"
+echo "   Schedule: $CRON_SCHEDULE (Every day at 00:05 AM UTC)"
+crontab -l
+
 # Check system status
 echo "📅 Checking system status..."
 python /app/scripts/data_loading_manager.py --status || echo "  Could not get status"
@@ -54,7 +80,7 @@ python /app/scripts/data_loading_manager.py --status || echo "  Could not get st
 # Start cron
 echo ""
 echo "✅ Scheduler service initialized successfully!"
-echo "🕐 Cron schedule: Daily at 2:00 AM UTC"
+echo "🕐 Cron schedule: Daily at 00:05 UTC"
 echo "📝 Logs: /app/logs/scheduler.log"
 echo ""
 echo "To run manually:"
