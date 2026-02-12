@@ -6,6 +6,12 @@ services:
       dockerfile: Dockerfile.python
     container_name: polystars_python
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"      # Максимальный размер одного лог-файла
+        max-file: "3"        # Количество ротируемых файлов (всего 30MB макс)
+        compress: "true"     # Сжимать старые логи
     environment:
       # PostgreSQL connection (external Managed DB or local for testing)
       DB_HOST: ${DB_HOST}
@@ -50,6 +56,12 @@ services:
       dockerfile: Dockerfile.scheduler
     container_name: polystars_scheduler
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"      # Максимальный размер одного лог-файла
+        max-file: "3"        # Количество ротируемых файлов (всего 30MB макс)
+        compress: "true"     # Сжимать старые логи
     environment:
       # PostgreSQL connection (external Managed DB or local for testing)
       DB_HOST: ${DB_HOST}
@@ -103,6 +115,12 @@ services:
     image: dpage/pgadmin4:latest
     container_name: polystars_pgadmin
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"       # Меньше для pgadmin (редко используется)
+        max-file: "2"        # Всего 10MB макс
+        compress: "true"
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@polystars.local}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin_password}
