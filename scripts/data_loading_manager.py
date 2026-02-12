@@ -54,11 +54,11 @@ load_dotenv()
 # GENESIS_END_DATE = date(2026, 1, 5)
 
 # For testing - use shorter period:
-GENESIS_START_DATE = date(2026, 2, 1)
+GENESIS_START_DATE = date(2024, 6, 1)
 GENESIS_END_DATE = date(2026, 2, 6)
 
-GENESIS_MIN_VOLUME = 1_000  # 100M
-DAILY_MIN_VOLUME = 1_000  # 5M
+GENESIS_MIN_VOLUME = 100_000_000  # 100M
+DAILY_MIN_VOLUME = 5_000_000  # 5M
 
 # Data lag configuration (in days)
 # How many days to wait before loading data (allows data to finalize)
@@ -71,14 +71,14 @@ DATA_LAG_DAYS = 4          # Redemptions/Positions/Leaderboard: 4 days after eve
 #   - 100 events for quick test (few minutes)
 #   - 1000 events for medium test (10-15 minutes)
 #   - None for full load (production)
-MAX_EVENTS_LIMIT = 1  # Change to number for testing, e.g., 1000
+MAX_EVENTS_LIMIT = None  # Change to number for testing, e.g., 1000
 
 # OPTIONAL: Maximum event volume filter (in USD) - for testing
 # Set this to exclude very large events that may take longer to process
 # Examples:
 #   - 150_000_000 (150M) to exclude events over 150M USD
 #   - None for no maximum limit (production)
-MAX_VOLUME_FILTER = 5_000  # Change to number for testing, e.g., 150_000_000
+MAX_VOLUME_FILTER = None  # Change to number for testing, e.g., 150_000_000
 
 
 class DataLoadingManager:
