@@ -30,8 +30,10 @@ import sys
 import subprocess
 import time
 import argparse
+import tempfile
 from datetime import datetime, date, timedelta
 from typing import Dict
+from pathlib import Path
 
 # Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -39,6 +41,74 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE, GENESIS_END_DATE, DATA_LAG_DAYS, EVENTS_LAG_DAYS
+
+
+class ProcessLock:
+    """Manages lock file to prevent concurrent script execution"""
+    
+    def __init__(self, lock_name: str = "polystars_scheduler"):
+        self.lock_dir = Path(tempfile.gettempdir())
+        self.lock_file = self.lock_dir / f"{lock_name}.lock"
+        self.is_locked_by_me = False
+    
+    def acquire(self, operation: str) -> bool:
+        """
+        Try to acquire lock
+        
+        Args:
+            operation: Name of operation trying to acquire lock (e.g., 'catch-up', 'historical')
+            
+        Returns:
+            True if lock acquired, False if already locked
+        """
+        if self.lock_file.exists():
+            try:
+                with open(self.lock_file, 'r') as f:
+                    lock_info = f.read().strip().split('\n')
+                    if len(lock_info) >= 2:
+                        locked_operation = lock_info[0]
+                        locked_time = lock_info[1]
+                        print(f"\n❌ Cannot start: Another operation is already running!")
+                        print(f"   Operation: {locked_operation}")
+                        print(f"   Started at: {locked_time}")
+                        print(f"   Lock file: {self.lock_file}")
+                        return False
+            except Exception as e:
+                print(f"⚠️  Warning: Could not read lock file: {e}")
+        
+        # Create lock file
+        try:
+            with open(self.lock_file, 'w') as f:
+                f.write(f"{operation}\n")
+                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"PID: {os.getpid()}\n")
+            self.is_locked_by_me = True
+            print(f"🔒 Lock acquired for '{operation}' operation")
+            print(f"   Lock file: {self.lock_file}")
+            return True
+        except Exception as e:
+            print(f"⚠️  Warning: Could not create lock file: {e}")
+            return False
+    
+    def release(self):
+        """Release lock by removing lock file"""
+        if self.is_locked_by_me and self.lock_file.exists():
+            try:
+                self.lock_file.unlink()
+                self.is_locked_by_me = False
+                print(f"🔓 Lock released")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not remove lock file: {e}")
+    
+    def is_locked(self) -> bool:
+        """Check if lock exists"""
+        return self.lock_file.exists()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
 
 
 class SimplifiedScheduler:
@@ -256,6 +326,14 @@ class SimplifiedScheduler:
         print(f"Mode: {'DRY RUN' if self.dry_run else 'PRODUCTION'}")
         print(f"Database: {'Local PostgreSQL' if self.use_local_db else 'Supabase'}")
         
+        # Check if another long-running operation is in progress
+        lock = ProcessLock()
+        if lock.is_locked():
+            print("\n⚠️  Another operation (--catch-up or --historical) is running")
+            print("   Daily pipeline will be skipped to avoid conflicts")
+            print("   This is normal - cron will retry on next schedule")
+            return {'success': False, 'error': 'Another operation in progress', 'skipped': True}
+        
         # Check Genesis first
         if self.manager.needs_genesis_load() and not force:
             print("\n❌ Cannot run - Genesis data not loaded!")
@@ -421,37 +499,47 @@ class SimplifiedScheduler:
             print("\n🔍 DRY RUN - Skipping")
             return {'success': True}
         
-        print("="*70)
+        # Acquire lock to prevent concurrent runs
+        lock = ProcessLock()
+        if not lock.acquire('historical'):
+            return {'success': False, 'error': 'Could not acquire lock'}
         
-        # Configure for Genesis
-        self.configure_for_date(GENESIS_START_DATE, is_genesis=True)
+        try:
+            print("="*70)
+            
+            # Configure for Genesis
+            self.configure_for_date(GENESIS_START_DATE, is_genesis=True)
+            
+            # Run all scripts for Genesis period
+            results = {}
+            
+            for script_key in ['events', 'redemptions', 'positions', 'leaderboard']:
+                results[script_key] = self.run_script(script_key)
+                if results[script_key]['success']:
+                    # For events, also pass markets_count
+                    if script_key == 'events':
+                        self.manager.mark_data_loaded(script_key, GENESIS_START_DATE,
+                                                    record_count=results[script_key]['records'],
+                                                    markets_count=results[script_key]['markets'],
+                                                    load_type='genesis')
+                    else:
+                        self.manager.mark_data_loaded(script_key, GENESIS_START_DATE,
+                                                    record_count=results[script_key]['records'],
+                                                    load_type='genesis')
+            
+            # Summary
+            print("\n" + "="*70)
+            print("📊 GENESIS LOAD SUMMARY")
+            print("="*70)
+            success_count = sum(1 for r in results.values() if r.get('success'))
+            print(f"✅ Successful: {success_count}/{len(results)}")
+            print("="*70)
+            
+            return {'success': all(r.get('success') for r in results.values()), 'results': results}
         
-        # Run all scripts for Genesis period
-        results = {}
-        
-        for script_key in ['events', 'redemptions', 'positions', 'leaderboard']:
-            results[script_key] = self.run_script(script_key)
-            if results[script_key]['success']:
-                # For events, also pass markets_count
-                if script_key == 'events':
-                    self.manager.mark_data_loaded(script_key, GENESIS_START_DATE,
-                                                record_count=results[script_key]['records'],
-                                                markets_count=results[script_key]['markets'],
-                                                load_type='genesis')
-                else:
-                    self.manager.mark_data_loaded(script_key, GENESIS_START_DATE,
-                                                record_count=results[script_key]['records'],
-                                                load_type='genesis')
-        
-        # Summary
-        print("\n" + "="*70)
-        print("📊 GENESIS LOAD SUMMARY")
-        print("="*70)
-        success_count = sum(1 for r in results.values() if r.get('success'))
-        print(f"✅ Successful: {success_count}/{len(results)}")
-        print("="*70)
-        
-        return {'success': all(r.get('success') for r in results.values()), 'results': results}
+        finally:
+            # Always release lock
+            lock.release()
     
     def run_catch_up(self) -> Dict:
         """
@@ -504,93 +592,103 @@ class SimplifiedScheduler:
         print(f"\n⏱️  Estimated time: ~{estimated_minutes} minutes ({estimated_minutes/60:.1f} hours)")
         print(f"   (about 5 minutes per day)")
         
-        print("\n" + "="*70)
-        print("Starting catch-up process...")
-        print("="*70)
+        # Acquire lock to prevent concurrent runs
+        lock = ProcessLock()
+        if not lock.acquire('catch-up'):
+            return {'success': False, 'error': 'Could not acquire lock'}
         
-        # Load each missing date
-        results = {}
-        start_time = time.time()
-        
-        for i, missing_date in enumerate(missing_dates, 1):
-            print(f"\n{'='*70}")
-            print(f"📅 Day {i}/{len(missing_dates)}: Loading {missing_date}")
-            print(f"{'='*70}")
+        try:
+            print("\n" + "="*70)
+            print("Starting catch-up process...")
+            print("="*70)
             
-            # STEP 1: Events for this date
-            print(f"\n1️⃣ Events for {missing_date}")
-            self.configure_for_date(missing_date, is_genesis=False)
-            result_events = self.run_script('events')
+            # Load each missing date
+            results = {}
+            start_time = time.time()
             
-            if result_events['success']:
-                self.manager.mark_data_loaded('events', missing_date,
-                                            record_count=result_events['records'],
-                                            markets_count=result_events['markets'],
-                                            load_type='daily')
-                print(f"✅ Events loaded for {missing_date} ({result_events['records']:,} events, {result_events['markets']:,} markets)")
-            else:
-                print(f"❌ Events failed for {missing_date}")
-                results[str(missing_date)] = {'success': False, 'step': 'events'}
-                continue  # Skip other steps if events failed
-            
-            # STEP 2-4: Redemptions, Positions, Leaderboard
-            # Check if data is ready (DATA_LAG_DAYS lag for finalization)
-            today = date.today()
-            days_since_event = (today - missing_date).days
-            
-            # Only load redemptions if:
-            # 1. Event ended >= DATA_LAG_DAYS ago (data is finalized)
-            # 2. Event is after Genesis period (avoid duplicates)
-            if missing_date <= GENESIS_END_DATE:
-                print(f"\n⏭️  Skipping redemptions/positions/leaderboard for {missing_date}")
-                print(f"   Reason: Date is within Genesis period (already loaded)")
-            elif days_since_event < DATA_LAG_DAYS:
-                print(f"\n⏳ Skipping redemptions/positions/leaderboard for {missing_date}")
-                print(f"   Reason: Event ended only {days_since_event} day(s) ago (need {DATA_LAG_DAYS} days)")
-                print(f"   Will be available on: {missing_date + timedelta(days=DATA_LAG_DAYS)}")
-            else:
-                print(f"\n2️⃣ Redemptions/Positions/Leaderboard for {missing_date}")
-                print(f"   ℹ️  Event ended {days_since_event} days ago - data is finalized")
+            for i, missing_date in enumerate(missing_dates, 1):
+                print(f"\n{'='*70}")
+                print(f"📅 Day {i}/{len(missing_dates)}: Loading {missing_date}")
+                print(f"{'='*70}")
                 
-                # Configure for this date
+                # STEP 1: Events for this date
+                print(f"\n1️⃣ Events for {missing_date}")
                 self.configure_for_date(missing_date, is_genesis=False)
+                result_events = self.run_script('events')
                 
-                for script_key in ['redemptions', 'positions', 'leaderboard']:
-                    # Check if already loaded
-                    if self.manager.is_data_loaded_for_date(missing_date, script_key):
-                        print(f"  ⏭️  {self.scripts[script_key]['name']}: Already loaded")
-                        continue
+                if result_events['success']:
+                    self.manager.mark_data_loaded('events', missing_date,
+                                                record_count=result_events['records'],
+                                                markets_count=result_events['markets'],
+                                                load_type='daily')
+                    print(f"✅ Events loaded for {missing_date} ({result_events['records']:,} events, {result_events['markets']:,} markets)")
+                else:
+                    print(f"❌ Events failed for {missing_date}")
+                    results[str(missing_date)] = {'success': False, 'step': 'events'}
+                    continue  # Skip other steps if events failed
+                
+                # STEP 2-4: Redemptions, Positions, Leaderboard
+                # Check if data is ready (DATA_LAG_DAYS lag for finalization)
+                today = date.today()
+                days_since_event = (today - missing_date).days
+                
+                # Only load redemptions if:
+                # 1. Event ended >= DATA_LAG_DAYS ago (data is finalized)
+                # 2. Event is after Genesis period (avoid duplicates)
+                if missing_date <= GENESIS_END_DATE:
+                    print(f"\n⏭️  Skipping redemptions/positions/leaderboard for {missing_date}")
+                    print(f"   Reason: Date is within Genesis period (already loaded)")
+                elif days_since_event < DATA_LAG_DAYS:
+                    print(f"\n⏳ Skipping redemptions/positions/leaderboard for {missing_date}")
+                    print(f"   Reason: Event ended only {days_since_event} day(s) ago (need {DATA_LAG_DAYS} days)")
+                    print(f"   Will be available on: {missing_date + timedelta(days=DATA_LAG_DAYS)}")
+                else:
+                    print(f"\n2️⃣ Redemptions/Positions/Leaderboard for {missing_date}")
+                    print(f"   ℹ️  Event ended {days_since_event} days ago - data is finalized")
                     
-                    result = self.run_script(script_key)
-                    if result['success']:
-                        self.manager.mark_data_loaded(script_key, missing_date,
-                                                    record_count=result['records'],
-                                                    load_type='daily')
-                    else:
-                        print(f"  ⚠️  {self.scripts[script_key]['name']} failed (continuing...)")
-            
-            results[str(missing_date)] = {'success': True}
-            
-            # Progress
-            elapsed = time.time() - start_time
-            avg_time_per_day = elapsed / i
-            remaining_days = len(missing_dates) - i
-            estimated_remaining = remaining_days * avg_time_per_day
-            
-            print(f"\n📊 Progress: {i}/{len(missing_dates)} days")
-            print(f"⏱️  Elapsed: {elapsed/60:.1f} min | Remaining: ~{estimated_remaining/60:.1f} min")
+                    # Configure for this date
+                    self.configure_for_date(missing_date, is_genesis=False)
+                    
+                    for script_key in ['redemptions', 'positions', 'leaderboard']:
+                        # Check if already loaded
+                        if self.manager.is_data_loaded_for_date(missing_date, script_key):
+                            print(f"  ⏭️  {self.scripts[script_key]['name']}: Already loaded")
+                            continue
+                        
+                        result = self.run_script(script_key)
+                        if result['success']:
+                            self.manager.mark_data_loaded(script_key, missing_date,
+                                                        record_count=result['records'],
+                                                        load_type='daily')
+                        else:
+                            print(f"  ⚠️  {self.scripts[script_key]['name']} failed (continuing...)")
+                
+                results[str(missing_date)] = {'success': True}
+                
+                # Progress
+                elapsed = time.time() - start_time
+                avg_time_per_day = elapsed / i
+                remaining_days = len(missing_dates) - i
+                estimated_remaining = remaining_days * avg_time_per_day
+                
+                print(f"\n📊 Progress: {i}/{len(missing_dates)} days")
+                print(f"⏱️  Elapsed: {elapsed/60:.1f} min | Remaining: ~{estimated_remaining/60:.1f} min")
         
-        # Summary
-        total_time = time.time() - start_time
-        print("\n" + "="*70)
-        print("📊 CATCH-UP SUMMARY")
-        print("="*70)
-        print(f"✅ Loaded: {len(missing_dates)} days")
-        print(f"⏱️  Total time: {total_time/60:.1f} minutes ({total_time/3600:.1f} hours)")
-        print(f"⚡ Average: {total_time/len(missing_dates)/60:.1f} minutes per day")
-        print("="*70)
+            # Summary
+            total_time = time.time() - start_time
+            print("\n" + "="*70)
+            print("📊 CATCH-UP SUMMARY")
+            print("="*70)
+            print(f"✅ Loaded: {len(missing_dates)} days")
+            print(f"⏱️  Total time: {total_time/60:.1f} minutes ({total_time/3600:.1f} hours)")
+            print(f"⚡ Average: {total_time/len(missing_dates)/60:.1f} minutes per day")
+            print("="*70)
+            
+            return {'success': True, 'days_loaded': len(missing_dates), 'duration': total_time}
         
-        return {'success': True, 'days_loaded': len(missing_dates), 'duration': total_time}
+        finally:
+            # Always release lock
+            lock.release()
 
 
 def main():
