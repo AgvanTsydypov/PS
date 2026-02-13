@@ -43,7 +43,7 @@ else:
 if os.getenv('POLYSTARS_MAX_VOLUME'):
     MAX_VOLUME = int(os.getenv('POLYSTARS_MAX_VOLUME'))
 else:
-    MAX_VOLUME = 5_000_000  # Default: No maximum limit
+    MAX_VOLUME = None  # Default: No maximum limit (production)
 
 # Minimum market volume (in USD) - markets below this will be filtered out
 MIN_MARKET_VOLUME = 100  # Minimum volume for individual markets

@@ -7,12 +7,10 @@
 
 DO $$ BEGIN RAISE NOTICE '🧹 Starting database cleanup...'; END $$;
 
--- Disable foreign key checks temporarily for faster cleanup
-SET session_replication_role = 'replica';
-
 -- ============================================================================
 -- Clear all main data tables
 -- ============================================================================
+-- Note: CASCADE will handle foreign key dependencies automatically
 
 DO $$ BEGIN RAISE NOTICE '📊 Cleaning events and markets...'; END $$;
 TRUNCATE TABLE markets CASCADE;
@@ -43,9 +41,6 @@ DO $$ BEGIN RAISE NOTICE '✅ NFT tables cleaned'; END $$;
 DO $$ BEGIN RAISE NOTICE '📊 Cleaning data_loads tracking...'; END $$;
 TRUNCATE TABLE data_loads RESTART IDENTITY CASCADE;
 DO $$ BEGIN RAISE NOTICE '✅ Data_loads cleaned'; END $$;
-
--- Re-enable foreign key checks
-SET session_replication_role = 'origin';
 
 -- ============================================================================
 -- Verify cleanup
