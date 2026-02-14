@@ -334,6 +334,13 @@ TIMEOUT_WINDOW_SIZE = 10  # Отслеживаем последние 10 зап�
 TIMEOUT_THRESHOLD_FOR_REDUCTION = 0.7  # 70%+ timeout'ов → уменьшить batch (менее агрессивно)
 TIMEOUT_THRESHOLD_CRITICAL = 0.9  # 90%+ timeout'ов → увеличить retry delay (очень редко)
 
+# ==========================================
+# MARKET SIZE THRESHOLDS (Пороги разделения маркетов)
+# ==========================================
+# Эти значения определяют когда применяются специальные стратегии обработки
+EXCLUSIVE_ACCESS_THRESHOLD = 200_000_000  # $200M+ маркеты: эксклюзивный доступ (останавливает другие маркеты)
+TEMPORAL_WINDOWING_THRESHOLD = 500_000_000  # $300M+ маркеты: временные окна + специальные задержки
+
 # Initial delay level for large markets ($300M+)
 # Delay levels: [2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0]
 # Level 0 = 2s, Level 1 = 4s, Level 2 = 6s, Level 3 = 8s, Level 4 = 10s, Level 5 = 15s, Level 6 = 20s
@@ -341,8 +348,8 @@ INITIAL_DELAY_LEVEL_LARGE_MARKETS = 1  # Start at 4s delay (balanced between spe
 
 # Early exit threshold for temporal windowing ($300M+)
 # After N consecutive empty windows, switch to probe mode (LIMIT 1 check for each remaining window)
-EARLY_EXIT_THRESHOLD = 1  # AGGRESSIVE: Switch to smart skip after just 1 empty window (faster!)
-PROBE_MODE_ENABLED = True  # Smart skip enabled - probes once for all remaining windows
+EARLY_EXIT_THRESHOLD = 3  # AGGRESSIVE: Switch to smart skip after just 1 empty window (faster!)
+PROBE_MODE_ENABLED = False  # Smart skip enabled - probes once for all remaining windows
 
 # Legacy retry settings (для совместимости с другими местами в коде)
 MAX_RETRIES = IMMEDIATE_RETRIES
@@ -719,8 +726,8 @@ async def fetch_redemptions_for_market_async(
         
         # Check market volume for special handling
         market_volume = float(market_info.get('volume', 0) or 0)
-        use_temporal_windows = market_volume >= 300_000_000  # $300M+ uses temporal windowing
-        is_very_large_market = market_volume >= 300_000_000  # $300M+ gets exclusive mode
+        use_temporal_windows = market_volume >= TEMPORAL_WINDOWING_THRESHOLD  # Uses temporal windowing
+        is_very_large_market = market_volume >= TEMPORAL_WINDOWING_THRESHOLD  # Gets exclusive mode + special strategies
         
         # TEMPORAL WINDOWING setup for large markets
         if use_temporal_windows:
@@ -796,13 +803,15 @@ async def fetch_redemptions_for_market_async(
             # All $300M+ markets use same conservative approach
             window_days = 7  # 7 days = MORE windows but NO timeouts
             
-            time_windows = split_into_time_windows(market_start_time, market_end_time, window_days)
+            # 🎯 CRITICAL FIX: Windows should start from market CLOSE time, not open time
+            # Redemptions happen AFTER market closes, so no point checking windows before that
+            time_windows = split_into_time_windows(original_end_time, market_end_time, window_days)
             
-            # Show market date range
-            start_str = datetime.fromtimestamp(market_start_time).strftime('%Y-%m-%d')
-            end_str = datetime.fromtimestamp(market_end_time).strftime('%Y-%m-%d')
+            # Show market date range (from close to now)
+            close_str = datetime.fromtimestamp(original_end_time).strftime('%Y-%m-%d')
+            now_str = datetime.fromtimestamp(market_end_time).strftime('%Y-%m-%d')
             print(f"      TEMPORAL WINDOWING: {len(time_windows)} windows ({window_days} days)", flush=True)
-            print(f"      Market range: {start_str} to {end_str}", flush=True)
+            print(f"      Redemption range: {close_str} (market close) to {now_str} (now)", flush=True)
         else:
             time_windows = [(0, int(time.time()))]
         
@@ -1755,7 +1764,7 @@ async def process_market_async(
         
         # Check if this is a very large market that needs exclusive API access
         market_volume = float(market.get('volume', 0) or 0)
-        needs_exclusive_access = market_volume >= 200_000_000  # $200M+
+        needs_exclusive_access = market_volume >= EXCLUSIVE_ACCESS_THRESHOLD  # Needs exclusive processing
         
         if needs_exclusive_access:
             # LARGE MARKET: Wait for all active markets to finish, then get exclusive access
