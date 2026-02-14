@@ -109,29 +109,72 @@ from collections import deque
 # ==========================================
 class DualLogger:
     """Logger that writes to both console and file in real-time"""
-    def __init__(self, log_file):
+    def __init__(self, log_file, original_stdout=None):
         self.terminal = sys.stdout
+        self.original_stdout = original_stdout or sys.stdout  # For Docker logs
         self.log_file = open(log_file, 'a', encoding='utf-8')
+        # Try to also write to /dev/stdout for Docker logs visibility
+        self.docker_stdout = None
+        try:
+            if os.path.exists('/dev/stdout'):
+                self.docker_stdout = open('/dev/stdout', 'w', encoding='utf-8', buffering=1)
+        except:
+            pass
         
     def write(self, message):
         self.terminal.write(message)
         self.terminal.flush()  # Force immediate output to terminal
         self.log_file.write(message)
         self.log_file.flush()  # Force immediate write to file
+        # Also write to /dev/stdout for Docker logs (if in container)
+        if self.docker_stdout:
+            try:
+                self.docker_stdout.write(message)
+                self.docker_stdout.flush()
+            except:
+                pass  # Ignore errors if stdout is closed
         
     def flush(self):
         self.terminal.flush()
         self.log_file.flush()
+        if self.docker_stdout:
+            try:
+                self.docker_stdout.flush()
+            except:
+                pass
     
     def close(self):
         self.log_file.close()
+        if self.docker_stdout:
+            try:
+                self.docker_stdout.close()
+            except:
+                pass
 
 # Global logger instance
 _logger = None
+_log_file_handle = None
+_original_print = print  # Save original print function
+
+def _custom_print(*args, **kwargs):
+    """Custom print that also writes to log file in Docker mode"""
+    global _log_file_handle
+    # Call original print (goes to stdout)
+    _original_print(*args, **kwargs)
+    # Also write to log file if in Docker mode
+    if _log_file_handle:
+        try:
+            # Convert args to string like print does
+            message = ' '.join(str(arg) for arg in args)
+            end = kwargs.get('end', '\n')
+            _log_file_handle.write(message + end)
+            _log_file_handle.flush()
+        except:
+            pass
 
 def setup_logging():
     """Setup dual logging to console and file"""
-    global _logger
+    global _logger, _log_file_handle, print
     
     # Create logs directory if it doesn't exist
     log_dir = 'logs'
@@ -141,23 +184,42 @@ def setup_logging():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_file = os.path.join(log_dir, f'redemptions_fetch_{timestamp}.log')
     
+    # Save original stdout BEFORE DualLogger intercepts it (for Docker logs)
+    original_stdout = sys.stdout
+    
     # Setup dual logger
-    _logger = DualLogger(log_file)
-    sys.stdout = _logger
+    _logger = DualLogger(log_file, original_stdout=original_stdout)
+    _log_file_handle = _logger.log_file  # Keep reference for direct writing
+    
+    # ⚠️ DO NOT intercept sys.stdout in Docker (breaks cron | tee piping)
+    # Only intercept in local development (no /dev/stdout)
+    in_docker = os.path.exists('/dev/stdout')
+    if not in_docker:
+        sys.stdout = _logger
+    else:
+        # In Docker: replace print() with custom version that writes to file
+        import builtins
+        builtins.print = _custom_print
     
     print(f"📝 Logging to: {log_file}")
     print(f"   All output will be saved to this file in real-time")
+    if in_docker:
+        print(f"   Docker mode: stdout not intercepted (visible in docker logs)")
     print()
     
     return log_file
 
 def cleanup_logging():
     """Cleanup logging and restore stdout"""
-    global _logger
+    global _logger, _log_file_handle
     if _logger:
         sys.stdout = _logger.terminal
         _logger.close()
         _logger = None
+        _log_file_handle = None
+    # Restore original print
+    import builtins
+    builtins.print = _original_print
 
 # ==========================================
 # RATE LIMITER FOR GOLDSKY API
@@ -279,8 +341,8 @@ INITIAL_DELAY_LEVEL_LARGE_MARKETS = 1  # Start at 4s delay (balanced between spe
 
 # Early exit threshold for temporal windowing ($300M+)
 # After N consecutive empty windows, switch to probe mode (LIMIT 1 check for each remaining window)
-EARLY_EXIT_THRESHOLD = 5  # If 5 consecutive empty windows after data found, switch to probe mode
-PROBE_MODE_ENABLED = True  # If True, probe remaining windows; if False, stop completely
+EARLY_EXIT_THRESHOLD = 1  # AGGRESSIVE: Switch to smart skip after just 1 empty window (faster!)
+PROBE_MODE_ENABLED = True  # Smart skip enabled - probes once for all remaining windows
 
 # Legacy retry settings (для совместимости с другими местами в коде)
 MAX_RETRIES = IMMEDIATE_RETRIES
@@ -834,7 +896,7 @@ async def fetch_redemptions_for_market_async(
                     GRAPH_URL,
                     json={'query': probe_query, 'variables': probe_variables},
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=60)
+                    timeout=aiohttp.ClientTimeout(total=30)  # Shorter timeout for probe
                 ) as response:
                     probe_data = await response.json()
                 
@@ -848,6 +910,17 @@ async def fetch_redemptions_for_market_async(
                         print(f"         Will skip empty windows before this timestamp", flush=True)
                     else:
                         print(f"      ⚠️  No redemptions found for this market", flush=True)
+                elif probe_data and probe_data.get('errors'):
+                    # GraphQL timeout or other error
+                    error_msg = str(probe_data.get('errors', []))
+                    if 'timeout' in error_msg.lower():
+                        print(f"      ⚠️  Probe timeout (expected for large empty market) - will process windows normally", flush=True)
+                    else:
+                        print(f"      ⚠️  Probe error: {error_msg[:100]}... - continuing with normal flow", flush=True)
+                else:
+                    print(f"      ⚠️  Probe returned no data - continuing with normal flow", flush=True)
+            except asyncio.TimeoutError:
+                print(f"      ⚠️  Probe timeout after 30s (expected for large market) - will process windows normally", flush=True)
             except Exception as e:
                 print(f"      ⚠️  Probe failed: {e} - continuing with normal flow", flush=True)
         
@@ -855,7 +928,8 @@ async def fetch_redemptions_for_market_async(
         consecutive_empty_windows = 0  # Track empty windows to detect data end
         found_any_data = False  # Track if we've found ANY data yet (prevents premature exit)
         consecutive_skipped_windows = 0  # Track consecutive skips for delay reset
-        probe_mode = False  # When True, probe each window before full processing
+        probe_mode = False  # When True, use smart skip based on next_redemption_timestamp
+        next_redemption_timestamp = None  # Timestamp of next redemption (from smart skip probe)
         
         for window_idx, (window_start, window_end) in enumerate(time_windows, 1):
             # Show window info
@@ -864,66 +938,6 @@ async def fetch_redemptions_for_market_async(
                 start_dt = dt.fromtimestamp(window_start).strftime('%Y-%m-%d')
                 end_dt = dt.fromtimestamp(window_end).strftime('%Y-%m-%d')
                 print(f"\n      Window {window_idx}/{len(time_windows)}: {start_dt} -> {end_dt}", flush=True)
-            
-            # 🔍 PROBE MODE: Check if window has data before full processing
-            if probe_mode:
-                try:
-                    print(f"      🔍 Probing window for data (LIMIT 1)...", flush=True)
-                    
-                    # Quick LIMIT 1 query to check if window has any data
-                    probe_query = """
-                    query ProbeWindow($condId: String!, $timestampGte: BigInt!) {
-                        redemptions(
-                            where: { 
-                                condition: $condId,
-                                timestamp_gte: $timestampGte
-                            }
-                            first: 1
-                            orderBy: timestamp
-                            orderDirection: asc
-                        ) {
-                            timestamp
-                        }
-                    }
-                    """
-                    
-                    probe_variables = {
-                        'condId': cond_id,
-                        'timestampGte': str(window_start)
-                    }
-                    
-                    await rate_limiter.acquire()
-                    
-                    async with session.post(
-                        GRAPH_URL,
-                        json={'query': probe_query, 'variables': probe_variables},
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=30)
-                    ) as probe_response:
-                        probe_data = await probe_response.json()
-                        
-                        if 'data' in probe_data and probe_data['data'].get('redemptions'):
-                            probe_redemptions = probe_data['data']['redemptions']
-                            if probe_redemptions:
-                                probe_timestamp = int(probe_redemptions[0]['timestamp'])
-                                # Check if redemption is within this window
-                                if probe_timestamp < window_end:
-                                    from datetime import datetime as dt
-                                    probe_dt = dt.fromtimestamp(probe_timestamp).strftime('%Y-%m-%d %H:%M:%S')
-                                    print(f"      ✅ Probe found data at {probe_dt} - processing window", flush=True)
-                                else:
-                                    print(f"      ⏭️  Probe: data found but outside window - skipping", flush=True)
-                                    continue  # Skip to next window
-                            else:
-                                print(f"      ⏭️  Probe: no data in window - skipping", flush=True)
-                                continue  # Skip to next window
-                        else:
-                            print(f"      ⏭️  Probe: no data in window - skipping", flush=True)
-                            continue  # Skip to next window
-                            
-                except Exception as e:
-                    print(f"      ⚠️  Probe failed: {e} - processing window anyway", flush=True)
-                    # Continue with normal processing if probe fails
             
             # Initialize cursor for this window
             # Use max(window_start, last_timestamp) to skip empty windows
@@ -954,6 +968,15 @@ async def fetch_redemptions_for_market_async(
                     end_dt = dt.fromtimestamp(window_end).strftime('%Y-%m-%d')
                     first_dt = dt.fromtimestamp(first_redemption_timestamp).strftime('%Y-%m-%d')
                     print(f"      ⏭️  Smart skip: Window ends {end_dt}, data starts {first_dt}", flush=True)
+                continue  # Skip to next window
+            
+            # 🚀 SMART SKIP (PROBE MODE): If we probed and found next redemption, skip windows before it
+            if next_redemption_timestamp and window_end < next_redemption_timestamp:
+                if use_temporal_windows and len(time_windows) > 1:
+                    from datetime import datetime as dt
+                    end_dt = dt.fromtimestamp(window_end).strftime('%Y-%m-%d')
+                    next_dt = dt.fromtimestamp(next_redemption_timestamp).strftime('%Y-%m-%d')
+                    print(f"      ⏭️  Smart skip: Window ends {end_dt}, next data at {next_dt}", flush=True)
                 continue  # Skip to next window
             
             window_redemptions_count = 0
@@ -1581,13 +1604,72 @@ async def fetch_redemptions_for_market_async(
                 # Track empty windows for early exit / probe mode
                 if window_redemptions_count == 0:
                     consecutive_empty_windows += 1
-                    # Switch to PROBE MODE after threshold (if enabled) or EARLY EXIT (if disabled)
+                    # Switch to SMART SKIP after threshold (like first probe!)
                     if consecutive_empty_windows >= EARLY_EXIT_THRESHOLD and found_any_data and not probe_mode:
                         remaining_windows = len(time_windows) - window_idx
                         if PROBE_MODE_ENABLED:
-                            probe_mode = True
-                            print(f"      🔍 PROBE MODE ACTIVATED: {consecutive_empty_windows} consecutive empty windows", flush=True)
-                            print(f"         Will probe remaining {remaining_windows} windows with LIMIT 1 before processing", flush=True)
+                            # Do ONE probe for ALL remaining windows (like first probe!)
+                            print(f"      🔍 SMART SKIP: {consecutive_empty_windows} consecutive empty windows", flush=True)
+                            print(f"         Probing for next redemption in remaining {remaining_windows} windows...", flush=True)
+                            
+                            try:
+                                # ONE probe query for all remaining windows
+                                probe_query = """
+                                query ProbeNext($condId: String!, $timestampGte: BigInt!) {
+                                    redemptions(
+                                        where: { 
+                                            condition: $condId,
+                                            timestamp_gte: $timestampGte
+                                        }
+                                        first: 1
+                                        orderBy: timestamp
+                                        orderDirection: asc
+                                    ) {
+                                        timestamp
+                                    }
+                                }
+                                """
+                                
+                                probe_variables = {
+                                    'condId': condition_id,
+                                    'timestampGte': str(last_timestamp)
+                                }
+                                
+                                await rate_limiter.acquire()
+                                
+                                async with session.post(
+                                    GRAPH_URL,
+                                    json={'query': probe_query, 'variables': probe_variables},
+                                    headers=headers,
+                                    timeout=aiohttp.ClientTimeout(total=30)
+                                ) as probe_response:
+                                    probe_data = await probe_response.json()
+                                    
+                                    if 'data' in probe_data and probe_data['data'].get('redemptions'):
+                                        probe_redemptions = probe_data['data']['redemptions']
+                                        if probe_redemptions:
+                                            next_redemption_ts = int(probe_redemptions[0]['timestamp'])
+                                            from datetime import datetime as dt
+                                            next_dt = dt.fromtimestamp(next_redemption_ts).strftime('%Y-%m-%d %H:%M:%S')
+                                            print(f"      ✅ Found next redemption at: {next_dt}", flush=True)
+                                            print(f"         Will skip windows before this timestamp", flush=True)
+                                            
+                                            # Set probe mode with skip timestamp (like first probe!)
+                                            probe_mode = True
+                                            next_redemption_timestamp = next_redemption_ts
+                                        else:
+                                            print(f"      ⚠️  No more redemptions found - stopping", flush=True)
+                                            break  # Exit - no more data
+                                    else:
+                                        print(f"      ⚠️  No more redemptions found - stopping", flush=True)
+                                        break  # Exit - no more data
+                                        
+                            except asyncio.TimeoutError:
+                                print(f"      ⚠️  Probe timeout - will try processing remaining windows normally", flush=True)
+                                probe_mode = True  # Fallback to per-window probe
+                            except Exception as e:
+                                print(f"      ⚠️  Probe failed: {e} - will try processing remaining windows normally", flush=True)
+                                probe_mode = True  # Fallback to per-window probe
                         else:
                             print(f"      🛑 EARLY EXIT: {consecutive_empty_windows} consecutive empty windows detected", flush=True)
                             print(f"         Skipping remaining {remaining_windows} windows (no more data expected)", flush=True)
@@ -1597,8 +1679,9 @@ async def fetch_redemptions_for_market_async(
                     consecutive_empty_windows = 0
                     # Exit probe mode if we found data again
                     if probe_mode:
-                        print(f"      ✅ Probe found data! Resuming normal processing", flush=True)
+                        print(f"      ✅ Data found! Resuming normal processing", flush=True)
                         probe_mode = False
+                        next_redemption_timestamp = None
                     
                     # First window with data - reset delay level!
                     if not found_any_data and is_very_large_market:
