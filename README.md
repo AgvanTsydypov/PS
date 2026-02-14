@@ -271,17 +271,37 @@ docker exec polystars_scheduler sh -c 'tail -50 $(ls -t /app/logs/*.log | head -
 
 📊 Команды для мониторинга логов в Ubuntu/Linux:
 🚀 Запуск скриптов:
-# Historical/Genesis загрузкаdocker exec -d polystars_scheduler python /app/scripts/daily_scheduler_simple.py --historical# Catch-up загрузкаdocker exec -d polystars_scheduler python /app/scripts/daily_scheduler_simple.py --catch-up# Daily pipelinedocker exec -d polystars_scheduler python /app/scripts/daily_scheduler_simple.py --run# Fetch redemptionsdocker exec -d polystars_scheduler python /app/scripts/fetch/fetch_redemptions.py --upload --local# Fetch leaderboarddocker exec -d polystars_scheduler python /app/scripts/fetch/fetch_trader_leaderboard_parallel.py --upload --local --from-db# Fetch positionsdocker exec -d polystars_scheduler python /app/scripts/fetch/fetch_user_closed_positions_parallel.py --upload --local
+# Historical/Genesis загрузкаdocker exec -d polystars_scheduler python /app/scripts/daily_scheduler_simple.py --historical
+# Catch-up загрузкаdocker exec -d polystars_scheduler python /app/scripts/daily_scheduler_simple.py --catch-up
+# Daily pipelinedocker exec -d polystars_scheduler python /app/scripts/daily_scheduler_simple.py --run
+# Fetch redemptionsdocker exec -d polystars_scheduler python /app/scripts/fetch/fetch_redemptions.py --upload --local
+# Fetch leaderboarddocker exec -d polystars_scheduler python /app/scripts/fetch/fetch_trader_leaderboard_parallel.py --upload --local --from-db
+# Fetch positionsdocker exec -d polystars_scheduler python /app/scripts/fetch/fetch_user_closed_positions_parallel.py --upload --local
 👀 Мониторинг логов в реальном времени (tail -f):
-# ✅ Historical/Genesis загрузка:docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/scheduler_historical_*.log 2>/dev/null | head -1)'# ✅ Catch-up загрузка:docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/scheduler_catchup_*.log 2>/dev/null | head -1)'# ✅ Daily pipeline:docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/scheduler_daily_*.log 2>/dev/null | head -1)'# ✅ Redemptions fetch:docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/redemptions_fetch_*.log 2>/dev/null | head -1)'# ✅ Leaderboard fetch:docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/leaderboard_fetch_*.log 2>/dev/null | head -1)'# ✅ Positions fetch:docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/positions_fetch_*.log 2>/dev/null | head -1)'
+# ✅ Historical/Genesis загрузка:docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/scheduler_historical_*.log 2>/dev/null | head -1)'
+# ✅ Catch-up загрузка:docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/scheduler_catchup_*.log 2>/dev/null | head -1)'
+# ✅ Daily pipeline:docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/scheduler_daily_*.log 2>/dev/null | head -1)'
+# ✅ Redemptions fetch:docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/redemptions_fetch_*.log 2>/dev/null | head -1)'
+# ✅ Leaderboard fetch:docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/leaderboard_fetch_*.log 2>/dev/null | head -1)'
+# ✅ Positions fetch:docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/positions_fetch_*.log 2>/dev/null | head -1)'
 📝 Просмотр последних N строк:
-# Последние 50 строк из последнего historical лога:docker exec polystars_scheduler sh -c 'tail -50 $(ls -t /app/logs/scheduler_historical_*.log 2>/dev/null | head -1)'# Последние 100 строк из последнего redemptions лога:docker exec polystars_scheduler sh -c 'tail -100 $(ls -t /app/logs/redemptions_fetch_*.log 2>/dev/null | head -1)'# Последние 50 строк из ЛЮБОГО последнего лога:docker exec polystars_scheduler sh -c 'tail -50 $(ls -t /app/logs/*.log | head -1)'
+# Последние 50 строк из последнего historical лога:docker exec polystars_scheduler sh -c 'tail -50 $(ls -t /app/logs/scheduler_historical_*.log 2>/dev/null | head -1)'
+# Последние 100 строк из последнего redemptions лога:docker exec polystars_scheduler sh -c 'tail -100 $(ls -t /app/logs/redemptions_fetch_*.log 2>/dev/null | head -1)'
+# Последние 50 строк из ЛЮБОГО последнего лога:docker exec polystars_scheduler sh -c 'tail -50 $(ls -t /app/logs/*.log | head -1)'
 📂 Список всех логов:
-# Список ВСЕХ логов с размерами:docker exec polystars_scheduler ls -lh /app/logs/*.log# Список логов отсортированных по времени (последние сверху):docker exec polystars_scheduler ls -lt /app/logs/*.log# Только scheduler логи:docker exec polystars_scheduler ls -lt /app/logs/scheduler_*.log# Только redemptions логи:docker exec polystars_scheduler ls -lt /app/logs/redemptions_fetch_*.log
+# Список ВСЕХ логов с размерами:docker exec polystars_scheduler ls -lh /app/logs/*.log
+# Список логов отсортированных по времени (последние сверху):docker exec polystars_scheduler ls -lt /app/logs/*.log
+# Только scheduler логи:docker exec polystars_scheduler ls -lt /app/logs/scheduler_*.log
+# Только redemptions логи:docker exec polystars_scheduler ls -lt /app/logs/redemptions_fetch_*.log
 🔍 Поиск в логах:
-# Найти ошибки в последнем логе:docker exec polystars_scheduler sh -c 'grep -i "error\|failed\|timeout" $(ls -t /app/logs/*.log | head -1)'# Найти все "✅ Completed" в redemptions логах:docker exec polystars_scheduler sh -c 'grep "✅ Completed" /app/logs/redemptions_fetch_*.log'# Показать последние 20 строк с ошибками:docker exec polystars_scheduler sh -c 'tail -1000 $(ls -t /app/logs/*.log | head -1) | grep -i error | tail -20'
+# Найти ошибки в последнем логе:docker exec polystars_scheduler sh -c 'grep -i "error\|failed\|timeout" $(ls -t /app/logs/*.log | head -1)'
+# Найти все "✅ Completed" в redemptions логах:docker exec polystars_scheduler sh -c 'grep "✅ Completed" /app/logs/redemptions_fetch_*.log'
+# Показать последние 20 строк с ошибками:docker exec polystars_scheduler sh -c 'tail -1000 $(ls -t /app/logs/*.log | head -1) | grep -i error | tail -20'
 🎯 Комбо команды (запуск + мониторинг):
-# Запустить historical и сразу следить за логами:docker exec -d polystars_scheduler python /app/scripts/daily_scheduler_simple.py --historical && \sleep 2 && \docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/scheduler_historical_*.log | head -1)'# Запустить catch-up и сразу следить за логами:docker exec -d polystars_scheduler python /app/scripts/daily_scheduler_simple.py --catch-up && \sleep 2 && \docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/scheduler_catchup_*.log | head -1)'
+# Запустить historical и сразу следить за логами:docker exec -d polystars_scheduler python /app/scripts/daily_scheduler_simple.py --historical && \sleep 2 && \docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/scheduler_historical_*.log | head -1)'
+# Запустить catch-up и сразу следить за логами:docker exec -d polystars_scheduler python /app/scripts/daily_scheduler_simple.py --catch-up && \sleep 2 && \docker exec polystars_scheduler sh -c 'tail -f $(ls -t /app/logs/scheduler_catchup_*.log | head -1)'
 📊 Статистика и размеры:
-# Общий размер всех логов:docker exec polystars_scheduler du -sh /app/logs/# Топ-5 самых больших логов:docker exec polystars_scheduler sh -c 'ls -lhS /app/logs/*.log | head -5'# Количество логов каждого типа:docker exec polystars_scheduler sh -c 'echo "Scheduler: $(ls /app/logs/scheduler_*.log 2>/dev/null | wc -l)" && \echo "Redemptions: $(ls /app/logs/redemptions_fetch_*.log 2>/dev/null | wc -l)" && \echo "Leaderboard: $(ls /app/logs/leaderboard_fetch_*.log 2>/dev/null | wc -l)" && \echo "Positions: $(ls /app/logs/positions_fetch_*.log 2>/dev/null | wc -l)"'
+# Общий размер всех логов:docker exec polystars_scheduler du -sh /app/logs/
+# Топ-5 самых больших логов:docker exec polystars_scheduler sh -c 'ls -lhS /app/logs/*.log | head -5'
+# Количество логов каждого типа:docker exec polystars_scheduler sh -c 'echo "Scheduler: $(ls /app/logs/scheduler_*.log 2>/dev/null | wc -l)" && \echo "Redemptions: $(ls /app/logs/redemptions_fetch_*.log 2>/dev/null | wc -l)" && \echo "Leaderboard: $(ls /app/logs/leaderboard_fetch_*.log 2>/dev/null | wc -l)" && \echo "Positions: $(ls /app/logs/positions_fetch_*.log 2>/dev/null | wc -l)"'
 Все команды идентичны для Ubuntu и PowerShell, так как мы используем docker exec с sh -c внутри контейнера! 🎉
