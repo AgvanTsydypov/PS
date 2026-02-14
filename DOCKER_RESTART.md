@@ -69,6 +69,12 @@ docker-compose exec python_scripts python scripts/db/test_db_connection.py
 docker-compose logs python_scripts
 docker-compose logs scheduler
 
+# ⭐ НОВОЕ! Посмотреть логи Python скриптов в реальном времени:
+# Все логи из fetch_redemptions.py, fetch_events_parallel_optimized.py, 
+# fetch_trader_leaderboard_parallel.py, fetch_user_closed_positions_parallel.py
+# теперь видны через docker logs!
+docker logs -f polystars_scheduler
+
 # Посмотреть последние 100 строк логов с live-обновлением:
 docker-compose logs -f --tail=100 scheduler
 
@@ -110,6 +116,34 @@ docker exec polystars_scheduler python /app/scripts/daily_scheduler_simple.py --
 ```
 
 ## 🧹 Управление логами
+
+### 📺 Логи через Docker (Real-time)
+**НОВОЕ!** Все логи Python скриптов теперь дублируются в stdout контейнера:
+
+```bash
+# Смотреть логи scheduler'а в реальном времени:
+docker logs -f polystars_scheduler
+
+# Посмотреть последние 100 строк:
+docker logs --tail 100 polystars_scheduler
+
+# Логи с временными метками:
+docker logs --timestamps polystars_scheduler
+```
+
+**Что видно:**
+- ✅ Логи из `fetch_redemptions.py` (redemptions fetcher)
+- ✅ Логи из `fetch_events_parallel_optimized.py` (events fetcher)
+- ✅ Логи из `fetch_trader_leaderboard_parallel.py` (leaderboard fetcher)
+- ✅ Логи из `fetch_user_closed_positions_parallel.py` (positions fetcher)
+- ✅ Все print() выводы и ошибки
+- ✅ Логи cron jobs (daily pipeline, cleanup)
+
+**Как это работает:**
+- Логи записываются **одновременно** в файлы (/app/logs/) **И** в stdout
+- Используется команда `tee` для дублирования потока
+- Python запускается с `PYTHONUNBUFFERED=1` для отключения буферизации
+- Файловые логи сохраняются для истории, Docker логи - для мониторинга
 
 ### Автоматическая очистка
 Логи автоматически очищаются каждое воскресенье в 3:00 AM UTC:

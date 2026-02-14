@@ -3,6 +3,12 @@
 # Docker Entrypoint for Scheduler Service
 # ============================================================================
 # Initializes the scheduler container and starts cron
+# 
+# LOGGING:
+# - Logs are duplicated to BOTH files AND stdout using 'tee'
+# - View in real-time: docker logs -f polystars_scheduler
+# - File logs: /app/logs/scheduler.log and /app/logs/cleanup.log
+# - Python scripts output (with PYTHONUNBUFFERED=1) is visible in docker logs
 # ============================================================================
 
 set -e
@@ -50,7 +56,7 @@ fi
 # Export environment variables for cron
 # Cron doesn't inherit environment variables, so we need to add them explicitly
 echo "🔧 Setting up cron environment..."
-printenv | grep -E '^(DB_|LOCAL_DB_|POSTGRES_)' | sed 's/^\(.*\)$/export \1/g' > /app/cron_env.sh
+printenv | grep -E '^(DB_|LOCAL_DB_|POSTGRES_|PYTHON|SUPABASE_|ALCHEMY_)' | sed 's/^\(.*\)$/export \1/g' > /app/cron_env.sh
 chmod +x /app/cron_env.sh
 
 # Setup cron jobs with current environment
@@ -73,12 +79,13 @@ CLEANUP_LOG="$PROJECT_DIR/logs/cleanup.log"
 crontab -r 2>/dev/null || true
 
 # Add both cron jobs
+# Using tee to duplicate logs: both to file AND to stdout (visible in docker logs)
 (
   echo "# Daily data pipeline (2:00 AM UTC)"
-  echo "$DAILY_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $SCHEDULER_SCRIPT --run >> $SCHEDULER_LOG 2>&1"
+  echo "$DAILY_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $SCHEDULER_SCRIPT --run 2>&1 | tee -a $SCHEDULER_LOG"
   echo ""
   echo "# Weekly log cleanup - keep 14 days (3:00 AM UTC every Sunday)"
-  echo "$CLEANUP_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $CLEANUP_SCRIPT --keep-days 14 >> $CLEANUP_LOG 2>&1"
+  echo "$CLEANUP_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $CLEANUP_SCRIPT --keep-days 14 2>&1 | tee -a $CLEANUP_LOG"
 ) | crontab -
 
 echo "✅ Cron jobs added successfully!"
@@ -102,6 +109,7 @@ echo ""
 echo "📝 Logs:"
 echo "   • Pipeline: /app/logs/scheduler.log"
 echo "   • Cleanup: /app/logs/cleanup.log"
+echo "   • Docker logs: docker logs -f polystars_scheduler (real-time)"
 echo ""
 echo "Manual commands:"
 echo "  # Run daily pipeline"
