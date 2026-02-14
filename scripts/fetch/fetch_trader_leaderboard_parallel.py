@@ -94,6 +94,109 @@ from scripts.db.supabase_uploader import SupabaseUploader
 
 
 # ==========================================
+# LOGGING SETUP
+# ==========================================
+class DualLogger:
+    """Logger that writes to both console and file in real-time"""
+    def __init__(self, log_file, original_stdout=None):
+        self.terminal = sys.stdout
+        self.original_stdout = original_stdout or sys.stdout
+        self.log_file = open(log_file, 'a', encoding='utf-8')
+        self.docker_stdout = None
+        try:
+            if os.path.exists('/dev/stdout'):
+                self.docker_stdout = open('/dev/stdout', 'w', encoding='utf-8', buffering=1)
+        except:
+            pass
+        
+    def write(self, message):
+        self.terminal.write(message)
+        self.terminal.flush()
+        self.log_file.write(message)
+        self.log_file.flush()
+        if self.docker_stdout:
+            try:
+                self.docker_stdout.write(message)
+                self.docker_stdout.flush()
+            except:
+                pass
+        
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
+        if self.docker_stdout:
+            try:
+                self.docker_stdout.flush()
+            except:
+                pass
+    
+    def close(self):
+        self.log_file.close()
+        if self.docker_stdout:
+            try:
+                self.docker_stdout.close()
+            except:
+                pass
+
+_logger = None
+_log_file_handle = None
+_original_print = print
+
+def _custom_print(*args, **kwargs):
+    """Custom print that also writes to log file in Docker mode"""
+    global _log_file_handle
+    _original_print(*args, **kwargs)
+    if _log_file_handle:
+        try:
+            message = ' '.join(str(arg) for arg in args)
+            end = kwargs.get('end', '\n')
+            _log_file_handle.write(message + end)
+            _log_file_handle.flush()
+        except:
+            pass
+
+def setup_logging():
+    """Setup dual logging to console and file"""
+    global _logger, _log_file_handle
+    
+    log_dir = 'logs'
+    os.makedirs(log_dir, exist_ok=True)
+    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file = os.path.join(log_dir, f'leaderboard_fetch_{timestamp}.log')
+    
+    original_stdout = sys.stdout
+    _logger = DualLogger(log_file, original_stdout=original_stdout)
+    _log_file_handle = _logger.log_file
+    
+    in_docker = os.path.exists('/dev/stdout')
+    if not in_docker:
+        sys.stdout = _logger
+    else:
+        import builtins
+        builtins.print = _custom_print
+    
+    print(f"📝 Logging to: {log_file}")
+    print(f"   All output will be saved to this file in real-time")
+    if in_docker:
+        print(f"   Docker mode: stdout not intercepted (visible in docker logs)")
+    print()
+    
+    return log_file
+
+def cleanup_logging():
+    """Cleanup logging and restore stdout"""
+    global _logger, _log_file_handle
+    if _logger:
+        sys.stdout = _logger.terminal
+        _logger.close()
+        _logger = None
+        _log_file_handle = None
+    import builtins
+    builtins.print = _original_print
+
+
+# ==========================================
 # CONFIGURATION
 # ==========================================
 
@@ -1316,6 +1419,9 @@ Examples:
     
     args = parser.parse_args()
     
+    # Setup logging
+    setup_logging()
+    
     # Validate workers
     if args.workers > 15:
         print(f"⚠️  WARNING: {args.workers} workers may exceed API rate limits")
@@ -1395,6 +1501,8 @@ Examples:
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        cleanup_logging()
 
 
 if __name__ == '__main__':
