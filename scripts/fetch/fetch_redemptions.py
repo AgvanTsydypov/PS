@@ -39,19 +39,36 @@ Automatically scans latest events file and fetches redemptions for each market
 - Просмотр: python view_logs.py
 
 Features:
+- HYBRID TEMPORAL PAGINATION ($200M+ markets):
+  * Timestamp-based pagination (timestamp_gte)
+  * Temporal windows: 7-21 days per window (зависит от volume)
+  * Early break: прерывается при достижении window_end
+  * GoldSky limitation: timestamp_lt не работает, используем manual filtering
+  * Exclusive mode: isolated thread for stability
+  * Aggressive batch reduction on timeouts
 - Умный Rate Limiter для Goldsky API:
   * Token Bucket алгоритм - точно 9 RPS
   * Lock не держится во время sleep - полная параллельность
   * Автоматическое распределение временных слотов
-- 🔒 EXCLUSIVE MODE для тяжелых маркетов (>$300M):
+- 🔒 EXCLUSIVE MODE для больших маркетов (>=$200M):
   * Останавливает ВСЕ другие маркеты
   * ПОСЛЕДОВАТЕЛЬНАЯ обработка: ждет ответа от предыдущего запроса
-  * 🎯 УМНАЯ АДАПТАЦИЯ ЗАДЕРЖКИ (приоритет над уменьшением batch size):
-    - 7 уровней задержки: 2s → 4s → 6s → 8s → 10s → 15s → 20s
-    - При timeout: СНАЧАЛА увеличивает задержку (до 10 попыток)
-    - Только после 10 неудач: уменьшает batch size
-    - При 5+ успехах подряд: уменьшает задержку обратно (восстановление)
-  * Результат: стабильная обработка крупных маркетов БЕЗ потери производительности
+  * 🎯 SMART DELAY STARTUP (2026):
+    - $1B+: стартует с 8s delay (дает БД больше времени)
+    - $500M+: стартует с 6s delay
+    - $200M+: стартует с 4s delay
+    - Меньше timeouts с первого запроса
+  * 🎯 АГРЕССИВНОЕ СНИЖЕНИЕ BATCH SIZE:
+    - При 3+ consecutive timeouts: СРАЗУ снижает batch size
+    - Приоритет снижению batch над увеличением delay
+    - Progressive batch sizing: 1000 → 500 → 250 → 100 → 50
+    - Delay увеличивается только когда batch на минимуме (50)
+    - При 5+ успехах подряд: увеличивает batch size обратно
+  * 🎯 CONNECTION POOL REFRESH:
+    - Детектирует "Session is closed" ошибки
+    - Прерывает обработку окна для reconnect
+    - Позволяет продолжить в новом запуске
+  * Результат: стабильная работа + быстрая адаптация к нагрузке БД
 - Intelligent Immediate Retry System:
   * 5 попыток с экспоненциальной задержкой (3s → 6s → 12s → 24s → 48s)
   * Retry СРАЗУ при ошибке, не откладывая на потом
@@ -199,6 +216,9 @@ class GoldskyRateLimiter:
 # ==========================================
 GRAPH_URL = "https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/activity-subgraph/0.0.4/gn"
 
+# Goldsky API Token (optional)
+GOLDSKY_API_TOKEN = os.getenv('GOLDSKY_API_TOKEN', None)
+
 # Filter settings
 FILTER_CLOSED_ONLY = True  # Only fetch redemptions for closed markets
 MIN_VOLUME = 0  # Minimum market volume to process ($100k+, значительно уменьшит количество)
@@ -234,7 +254,7 @@ MAX_CONCURRENT_MARKETS = MAX_CONCURRENT_MARKETS_CLOUD  # Default
 BATCH_SIZE = BATCH_SIZE_CLOUD
 BATCH_DELAY = BATCH_DELAY_CLOUD
 
-REQUEST_TIMEOUT = 180  # Timeout for each request in seconds (increased for large markets like Trump)
+REQUEST_TIMEOUT = 300  # Timeout 5 min for very large markets
 
 # Immediate retry settings (при сбое на месте)
 IMMEDIATE_RETRIES = 5  # Количество немедленных retry при ошибке
@@ -251,6 +271,16 @@ BATCH_SIZE_REDUCTION_FACTOR = 2  # Делитель при уменьшении 
 TIMEOUT_WINDOW_SIZE = 10  # Отслеживаем последние 10 запросов
 TIMEOUT_THRESHOLD_FOR_REDUCTION = 0.7  # 70%+ timeout'ов → уменьшить batch (менее агрессивно)
 TIMEOUT_THRESHOLD_CRITICAL = 0.9  # 90%+ timeout'ов → увеличить retry delay (очень редко)
+
+# Initial delay level for large markets ($300M+)
+# Delay levels: [2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0]
+# Level 0 = 2s, Level 1 = 4s, Level 2 = 6s, Level 3 = 8s, Level 4 = 10s, Level 5 = 15s, Level 6 = 20s
+INITIAL_DELAY_LEVEL_LARGE_MARKETS = 1  # Start at 4s delay (balanced between speed and reliability)
+
+# Early exit threshold for temporal windowing ($300M+)
+# After N consecutive empty windows, switch to probe mode (LIMIT 1 check for each remaining window)
+EARLY_EXIT_THRESHOLD = 5  # If 5 consecutive empty windows after data found, switch to probe mode
+PROBE_MODE_ENABLED = True  # If True, probe remaining windows; if False, stop completely
 
 # Legacy retry settings (для совместимости с другими местами в коде)
 MAX_RETRIES = IMMEDIATE_RETRIES
@@ -312,6 +342,8 @@ def load_failed_markets_file(filepath: str) -> List[Dict]:
             'event_title': 'Unknown Event',  # Not available in failed markets file
             'closed': True,  # Assume closed since they were being processed
             'volume': float(fm.get('volume', 0) or 0),
+            'start_date': None,  # Not available in failed markets - will use fallback
+            'end_date': None,    # Not available in failed markets - will use fallback
         }
         markets.append(market_info)
     
@@ -438,6 +470,8 @@ def get_markets_from_db(use_local_db: bool = False, limit: Optional[int] = None)
                     'event_title': row['event_title'] or 'Unknown Event',
                     'closed': row['closed'],
                     'volume': float(row['volume'] or 0),
+                    'start_date': row.get('start_date') or row.get('start_date_iso'),  # For temporal windowing
+                    'end_date': row.get('end_date') or row.get('end_date_iso'),      # For temporal windowing
                 }
                 markets.append(market_info)
             
@@ -504,6 +538,8 @@ def get_markets_from_db(use_local_db: bool = False, limit: Optional[int] = None)
                     'event_title': event_title,
                     'closed': row.get('closed', False),
                     'volume': volume,
+                    'start_date': row.get('start_date') or row.get('start_date_iso'),  # For temporal windowing
+                    'end_date': row.get('end_date') or row.get('end_date_iso'),      # For temporal windowing
                 }
                 markets.append(market_info)
             
@@ -555,6 +591,8 @@ def extract_markets(events: List[Dict]) -> List[Dict]:
                 'event_title': event_title,
                 'closed': market.get('closed', closed),
                 'volume': float(market.get('volume', 0) or 0),
+                'start_date': market.get('startDate') or market.get('startDateIso') or market.get('createdAt') or market.get('creationDate'),
+                'end_date': market.get('endDate') or market.get('endDateIso') or market.get('end_date_iso') or market.get('closedTime') or market.get('closedAt'),
             }
             
             # Apply filters
@@ -573,6 +611,20 @@ def extract_markets(events: List[Dict]) -> List[Dict]:
 # ==========================================
 # REDEMPTIONS FETCHING (ASYNC)
 # ==========================================
+def split_into_time_windows(start_timestamp: int, end_timestamp: int, window_days: int = 7) -> List[tuple]:
+    """Split time range into windows for temporal pagination"""
+    windows = []
+    window_size = window_days * 24 * 60 * 60
+    
+    current_start = start_timestamp
+    while current_start < end_timestamp:
+        current_end = min(current_start + window_size, end_timestamp)
+        windows.append((current_start, current_end))
+        current_start = current_end
+    
+    return windows
+
+
 async def fetch_redemptions_for_market_async(
     session: aiohttp.ClientSession, 
     condition_id: str, 
@@ -583,6 +635,7 @@ async def fetch_redemptions_for_market_async(
 ) -> tuple[List[Dict], Dict]:
     """
     Fetch all redemptions for a specific market (async version)
+    HYBRID TEMPORAL PAGINATION for markets >= $200M
     
     Returns:
         tuple: (redemptions_list, status_dict)
@@ -597,15 +650,99 @@ async def fetch_redemptions_for_market_async(
         # NO initial delay - rate limiter will handle API throttling automatically!
         
         all_redemptions = []
-        last_id = "0x00"
+        last_timestamp = 0  # Timestamp-based pagination
         request_count = 0
         current_batch_size = INITIAL_BATCH_SIZE  # Start with 1000, adaptively reduce on errors
         batch_size_reduced = False  # Track if we've reduced batch size
         
-        # Check if this is a very large market (>$300M) - needs special handling
-        # These markets get EXCLUSIVE ACCESS and SEQUENTIAL request processing
+        # Check market volume for special handling
         market_volume = float(market_info.get('volume', 0) or 0)
-        is_very_large_market = market_volume > 300_000_000  # $300M+ volume (matches exclusive mode threshold)
+        use_temporal_windows = market_volume >= 300_000_000  # $300M+ uses temporal windowing
+        is_very_large_market = market_volume >= 300_000_000  # $300M+ gets exclusive mode
+        
+        # TEMPORAL WINDOWING setup for large markets
+        if use_temporal_windows:
+            # Get market date range from market_info
+            # Default: if no dates, use 1 year window (more reasonable than epoch)
+            current_time = int(time.time())
+            market_start_time = current_time - (365 * 24 * 60 * 60)  # 1 year ago default
+            market_end_time = current_time
+            
+            # DEBUG: Show what we got
+            if market_volume >= 1_000_000_000:  # Only for very large markets
+                print(f"      DEBUG market_info keys: {list(market_info.keys())}", flush=True)
+                print(f"      DEBUG start_date: '{market_info.get('start_date')}'", flush=True)
+                print(f"      DEBUG end_date: '{market_info.get('end_date')}'", flush=True)
+                print(f"      DEBUG market_start_time timestamp: {market_start_time}", flush=True)
+                print(f"      DEBUG market_end_time timestamp: {market_end_time}", flush=True)
+            
+            # Parse start date (ISO string to Unix timestamp)
+            start_date_str = market_info.get('start_date')
+            if start_date_str:
+                try:
+                    # Format: "2024-03-19T00:38:28.293Z" or "2024-03-19"
+                    # Replace Z with +00:00 for Python 3.10 compatibility
+                    if 'Z' in start_date_str:
+                        start_date_str = start_date_str.replace('Z', '+00:00')
+                    
+                    if 'T' in start_date_str:
+                        # ISO datetime with timezone
+                        start_dt = datetime.fromisoformat(start_date_str)
+                    else:
+                        # Just date
+                        start_dt = datetime.strptime(start_date_str[:10], '%Y-%m-%d')
+                    
+                    market_start_time = int(start_dt.timestamp())
+                except Exception as e:
+                    print(f"      ⚠️ Failed to parse start_date '{start_date_str}': {e}", flush=True)
+            
+            # Parse end date (ISO string to Unix timestamp)
+            end_date_str = market_info.get('end_date')
+            if end_date_str:
+                try:
+                    if 'Z' in end_date_str:
+                        end_date_str = end_date_str.replace('Z', '+00:00')
+                    
+                    if 'T' in end_date_str:
+                        end_dt = datetime.fromisoformat(end_date_str)
+                    else:
+                        end_dt = datetime.strptime(end_date_str[:10], '%Y-%m-%d')
+                    
+                    market_end_time = int(end_dt.timestamp())
+                except Exception as e:
+                    print(f"      ⚠️ Failed to parse end_date '{end_date_str}': {e}", flush=True)
+            
+            # CRITICAL: Extend market_end_time to current time
+            # Redemptions happen AFTER market closes (people redeeming winning shares)
+            # If we only use market's official end_date, we'll miss all redemptions!
+            original_end_time = market_end_time
+            market_end_time = max(market_end_time, current_time)  # Extend to now
+            
+            if market_end_time > original_end_time:
+                from datetime import datetime as dt
+                original_str = dt.fromtimestamp(original_end_time).strftime('%Y-%m-%d')
+                extended_str = dt.fromtimestamp(market_end_time).strftime('%Y-%m-%d')
+                print(f"      📅 Extended end date: {original_str} → {extended_str} (redemptions happen after close)", flush=True)
+            
+            # Sanity check: start should be before end
+            if market_start_time >= market_end_time:
+                print(f"      ⚠️ Invalid date range (start >= end), adjusting...", flush=True)
+                market_start_time = market_end_time - (365 * 24 * 60 * 60)  # 1 year before end
+            
+            # Window size based on volume
+            # STRATEGY: SMALLER windows for reliability (prevent timeouts)
+            # All $300M+ markets use same conservative approach
+            window_days = 7  # 7 days = MORE windows but NO timeouts
+            
+            time_windows = split_into_time_windows(market_start_time, market_end_time, window_days)
+            
+            # Show market date range
+            start_str = datetime.fromtimestamp(market_start_time).strftime('%Y-%m-%d')
+            end_str = datetime.fromtimestamp(market_end_time).strftime('%Y-%m-%d')
+            print(f"      TEMPORAL WINDOWING: {len(time_windows)} windows ({window_days} days)", flush=True)
+            print(f"      Market range: {start_str} to {end_str}", flush=True)
+        else:
+            time_windows = [(0, int(time.time()))]
         
         # Pattern tracking for smart adaptation
         timeout_history = deque(maxlen=TIMEOUT_WINDOW_SIZE)  # Track last N requests: True=timeout, False=success
@@ -626,19 +763,25 @@ async def fetch_redemptions_for_market_async(
         if is_very_large_market:
             # Delay levels: 2s → 4s → 6s → 8s → 10s → 15s → 20s
             delay_levels = [2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0]
-            current_delay_level = 0  # Start at level 0 (2s)
+            
+            # 🎯 START WITH MODERATE DELAY for temporal windowing
+            # STRATEGY: All $300M+ markets - balanced between speed and reliability
+            current_delay_level = INITIAL_DELAY_LEVEL_LARGE_MARKETS  # Start at configured initial delay (default 4s)
+            
             delay_increase_attempts = 0  # Track how many times we increased delay
             consecutive_successes = 0  # Track successful requests in a row
             consecutive_timeouts = 0  # Track consecutive timeouts for cooldown
             
             # 🔄 PROGRESSIVE BATCH SIZE: Start small, grow on success
-            batch_size_levels = [50, 100, 250, 500, 1000]
-            current_batch_size = batch_size_levels[0]  # Start with 50
-            current_batch_level = 0  # Level 0 = 50, Level 4 = 1000
+            # STRATEGY: All $300M+ markets start conservative
+            batch_size_levels = [25, 50, 100, 250, 500]  # Conservative for reliability
+            
+            current_batch_size = batch_size_levels[0]  # Start with smallest
+            current_batch_level = 0  # Level 0
             batch_size_reduced = True  # Mark as "reduced" to trigger adaptive logic
             status['adaptive_pagination_used'] = True
             
-            print(f"      🎯 Smart delay adaptation enabled (start: {delay_levels[current_delay_level]:.0f}s)", flush=True)
+            print(f"      🎯 Smart delay adaptation enabled (start: {delay_levels[current_delay_level]:.0f}s - balanced)", flush=True)
             print(f"      🔄 PROGRESSIVE BATCH SIZE: Starting with {current_batch_size} (will increase on success)", flush=True)
         
         def analyze_timeout_pattern():
@@ -656,461 +799,837 @@ async def fetch_redemptions_for_market_async(
                 'recent_timeouts': timeout_count
             }
         
-        while True:
-            request_count += 1
-            
-            # 🎯 IMPORTANT: Apply delay BEFORE making request (not after)
-            # This ensures EVERY request (except first) has proper spacing
-            if is_very_large_market and request_count == 1:
-                # First request for very large market - no delay but log it
-                print(f"      📡 Sending initial request (batch size: {current_batch_size})...", flush=True)
-            elif is_very_large_market and request_count > 1:  # Apply delay before 2nd, 3rd, etc requests
-                # 🎯 SMART DELAY ADAPTATION: Use current delay level
-                adaptive_delay = delay_levels[current_delay_level]
-                
-                # Show delay info based on level
-                if current_delay_level > 0:
-                    print(f"      ⏳ Waiting {adaptive_delay:.0f}s (delay level {current_delay_level+1}/{len(delay_levels)})...", flush=True)
-                
-                await asyncio.sleep(adaptive_delay)
-            elif batch_size_reduced and current_batch_size <= 250 and request_count > 1:
-                # Smart adaptive delay for problematic markets (batch size reduced)
-                if last_request_duration > 30:
-                    adaptive_delay = 2.5
-                elif last_request_duration > 15:
-                    adaptive_delay = 2.0
-                elif last_request_duration > 5:
-                    adaptive_delay = 1.5
-                else:
-                    adaptive_delay = 1.0
-                
-                await asyncio.sleep(adaptive_delay)
-            
-            # Build query with current batch size
-            query = f"""
-            query ($condId: Bytes!, $lastId: ID!) {{
+        # 🚀 SMART FIRST REQUEST: For temporal windowing, find first redemption quickly
+        # Problem: Empty windows cause timeouts (PostgreSQL scans huge table)
+        # Solution: LIMIT 1 probe to find where data starts
+        first_redemption_timestamp = None
+        if use_temporal_windows and len(time_windows) > 1:
+            print(f"      🔍 Probing for first redemption (LIMIT 1)...", flush=True)
+            probe_query = f"""
+            query ($condId: String!, $timestampGte: BigInt!) {{
               redemptions(
-                where: {{ condition: $condId, id_gt: $lastId }}
-                first: {current_batch_size}
-                orderBy: id
+                where: {{ condition: $condId, timestamp_gte: $timestampGte }}
+                first: 1
+                orderBy: timestamp
                 orderDirection: asc
               ) {{
-                id
-                redeemer
-                payout
                 timestamp
               }}
             }}
             """
-            
-            variables = {
+            probe_variables = {
                 "condId": condition_id,
-                "lastId": last_id
+                "timestampGte": str(time_windows[0][0])  # Market start time
             }
             
-            # Retry logic for each request with exponential backoff
-            retry_count = 0
-            request_success = False
-            graphql_error_retries = 0  # Track GraphQL-specific retries separately
-            total_attempts = 0  # Total attempts including all error types
+            try:
+                # Use same pattern as main requests
+                await rate_limiter.acquire()
+                
+                headers = {'Content-Type': 'application/json'}
+                if GOLDSKY_API_TOKEN:
+                    headers['Authorization'] = f'Bearer {GOLDSKY_API_TOKEN}'
+                
+                async with session.post(
+                    GRAPH_URL,
+                    json={'query': probe_query, 'variables': probe_variables},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60)
+                ) as response:
+                    probe_data = await response.json()
+                
+                if probe_data and probe_data.get('data', {}).get('redemptions'):
+                    probe_result = probe_data['data']['redemptions']
+                    if probe_result:
+                        first_redemption_timestamp = int(probe_result[0]['timestamp'])
+                        from datetime import datetime as dt
+                        first_dt = dt.fromtimestamp(first_redemption_timestamp).strftime('%Y-%m-%d %H:%M:%S')
+                        print(f"      ✅ Found first redemption at: {first_dt}", flush=True)
+                        print(f"         Will skip empty windows before this timestamp", flush=True)
+                    else:
+                        print(f"      ⚠️  No redemptions found for this market", flush=True)
+            except Exception as e:
+                print(f"      ⚠️  Probe failed: {e} - continuing with normal flow", flush=True)
+        
+        # TEMPORAL PAGINATION: Process each time window separately
+        consecutive_empty_windows = 0  # Track empty windows to detect data end
+        found_any_data = False  # Track if we've found ANY data yet (prevents premature exit)
+        consecutive_skipped_windows = 0  # Track consecutive skips for delay reset
+        probe_mode = False  # When True, probe each window before full processing
+        
+        for window_idx, (window_start, window_end) in enumerate(time_windows, 1):
+            # Show window info
+            if use_temporal_windows and len(time_windows) > 1:
+                from datetime import datetime as dt
+                start_dt = dt.fromtimestamp(window_start).strftime('%Y-%m-%d')
+                end_dt = dt.fromtimestamp(window_end).strftime('%Y-%m-%d')
+                print(f"\n      Window {window_idx}/{len(time_windows)}: {start_dt} -> {end_dt}", flush=True)
             
-            while total_attempts <= IMMEDIATE_RETRIES and not request_success:
-                total_attempts += 1
+            # 🔍 PROBE MODE: Check if window has data before full processing
+            if probe_mode:
                 try:
-                    # Use rate limiter BEFORE each API request
-                    await rate_limiter.acquire()
+                    print(f"      🔍 Probing window for data (LIMIT 1)...", flush=True)
                     
-                    # Track request duration for adaptive delay
-                    request_start_time = time.time()
+                    # Quick LIMIT 1 query to check if window has any data
+                    probe_query = """
+                    query ProbeWindow($condId: String!, $timestampGte: BigInt!) {
+                        redemptions(
+                            where: { 
+                                condition: $condId,
+                                timestamp_gte: $timestampGte
+                            }
+                            first: 1
+                            orderBy: timestamp
+                            orderDirection: asc
+                        ) {
+                            timestamp
+                        }
+                    }
+                    """
+                    
+                    probe_variables = {
+                        'condId': cond_id,
+                        'timestampGte': str(window_start)
+                    }
+                    
+                    await rate_limiter.acquire()
                     
                     async with session.post(
                         GRAPH_URL,
-                        json={'query': query, 'variables': variables},
-                        timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-                    ) as response:
-                        data = await response.json()
+                        json={'query': probe_query, 'variables': probe_variables},
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as probe_response:
+                        probe_data = await probe_response.json()
                         
-                        # Calculate request duration
-                        request_duration = time.time() - request_start_time
+                        if 'data' in probe_data and probe_data['data'].get('redemptions'):
+                            probe_redemptions = probe_data['data']['redemptions']
+                            if probe_redemptions:
+                                probe_timestamp = int(probe_redemptions[0]['timestamp'])
+                                # Check if redemption is within this window
+                                if probe_timestamp < window_end:
+                                    from datetime import datetime as dt
+                                    probe_dt = dt.fromtimestamp(probe_timestamp).strftime('%Y-%m-%d %H:%M:%S')
+                                    print(f"      ✅ Probe found data at {probe_dt} - processing window", flush=True)
+                                else:
+                                    print(f"      ⏭️  Probe: data found but outside window - skipping", flush=True)
+                                    continue  # Skip to next window
+                            else:
+                                print(f"      ⏭️  Probe: no data in window - skipping", flush=True)
+                                continue  # Skip to next window
+                        else:
+                            print(f"      ⏭️  Probe: no data in window - skipping", flush=True)
+                            continue  # Skip to next window
+                            
+                except Exception as e:
+                    print(f"      ⚠️  Probe failed: {e} - processing window anyway", flush=True)
+                    # Continue with normal processing if probe fails
+            
+            # Initialize cursor for this window
+            # Use max(window_start, last_timestamp) to skip empty windows
+            # If previous window completed with all redemptions filtered, last_timestamp = window_end
+            last_timestamp = max(window_start, last_timestamp)
+            
+            # Skip window entirely if cursor is already past window_end
+            if last_timestamp >= window_end:
+                if use_temporal_windows and len(time_windows) > 1:
+                    print(f"      ⏭️  Skipping window (cursor already at {last_timestamp} >= {window_end})", flush=True)
+                consecutive_skipped_windows += 1
+                continue  # Skip to next window
+            
+            # RESET delay level for first non-skipped window after many skips
+            # This handles: Window 1 timeout → delay 20s → SKIP AHEAD → Window 44 should start fresh at configured initial delay
+            if is_very_large_market and consecutive_skipped_windows >= 5 and current_delay_level > INITIAL_DELAY_LEVEL_LARGE_MARKETS:
+                old_delay_level = current_delay_level
+                current_delay_level = INITIAL_DELAY_LEVEL_LARGE_MARKETS  # Reset to initial delay
+                print(f"      🔄 Reset delay after {consecutive_skipped_windows} skips: level {old_delay_level+1} → {current_delay_level+1} ({delay_levels[old_delay_level]:.0f}s → {delay_levels[current_delay_level]:.0f}s)", flush=True)
+            
+            # Reset skip counter when we process a window
+            consecutive_skipped_windows = 0
+            
+            # 🚀 SMART SKIP: If we probed and found first redemption, skip windows before it
+            if first_redemption_timestamp and window_end < first_redemption_timestamp:
+                if use_temporal_windows and len(time_windows) > 1:
+                    from datetime import datetime as dt
+                    end_dt = dt.fromtimestamp(window_end).strftime('%Y-%m-%d')
+                    first_dt = dt.fromtimestamp(first_redemption_timestamp).strftime('%Y-%m-%d')
+                    print(f"      ⏭️  Smart skip: Window ends {end_dt}, data starts {first_dt}", flush=True)
+                continue  # Skip to next window
+            
+            window_redemptions_count = 0
+            window_complete = False  # Track if window reached its end
+            
+            while True:
+                request_count += 1
+            
+                # 🎯 IMPORTANT: Apply delay BEFORE making request (not after)
+                # This ensures EVERY request (except first) has proper spacing
+                if is_very_large_market and request_count == 1:
+                    # First request for very large market - no delay but log it
+                    print(f"      📡 Sending initial request (batch size: {current_batch_size})...", flush=True)
+                elif is_very_large_market and request_count > 1:  # Apply delay before 2nd, 3rd, etc requests
+                    # 🎯 SMART DELAY ADAPTATION: Use current delay level
+                    adaptive_delay = delay_levels[current_delay_level]
+                
+                    # Show delay info based on level
+                    if current_delay_level > 0:
+                        print(f"      ⏳ Waiting {adaptive_delay:.0f}s (delay level {current_delay_level+1}/{len(delay_levels)})...", flush=True)
+                
+                    await asyncio.sleep(adaptive_delay)
+                elif batch_size_reduced and current_batch_size <= 250 and request_count > 1:
+                    # Smart adaptive delay for problematic markets (batch size reduced)
+                    if last_request_duration > 30:
+                        adaptive_delay = 2.5
+                    elif last_request_duration > 15:
+                        adaptive_delay = 2.0
+                    elif last_request_duration > 5:
+                        adaptive_delay = 1.5
+                    else:
+                        adaptive_delay = 1.0
+                
+                    await asyncio.sleep(adaptive_delay)
+            
+                # Build query with timestamp-based pagination
+                # NOTE: GoldSky doesn't support timestamp_lt properly (returns 0 results)
+                # Solution: Use only timestamp_gte + break early when >= window_end
+                if use_temporal_windows and len(time_windows) > 1:
+                    # NOTE: Can't use timestamp_lt - GoldSky returns 0 results
+                    # Use only timestamp_gte and break manually when >= window_end
+                    query = f"""
+                    query ($condId: String!, $timestampGte: BigInt!) {{
+                      redemptions(
+                        where: {{ condition: $condId, timestamp_gte: $timestampGte }}
+                        first: {current_batch_size}
+                        orderBy: timestamp
+                        orderDirection: asc
+                      ) {{
+                        id
+                        redeemer
+                        payout
+                        timestamp
+                      }}
+                    }}
+                    """
+                    
+                    variables = {
+                        "condId": condition_id,
+                        "timestampGte": str(last_timestamp)
+                    }
+                    
+                    # DEBUG: Show window strategy for first request
+                    if request_count == 1 and window_idx == 1:
+                        from datetime import datetime as dt
+                        ts_gte_dt = dt.fromtimestamp(last_timestamp).strftime('%Y-%m-%d %H:%M:%S')
+                        ts_end_dt = dt.fromtimestamp(window_end).strftime('%Y-%m-%d %H:%M:%S')
+                        print(f"      DEBUG Window strategy:", flush=True)
+                        print(f"        timestamp_gte: {last_timestamp} ({ts_gte_dt})", flush=True)
+                        print(f"        window_end: {window_end} ({ts_end_dt})", flush=True)
+                        print(f"        Will break when timestamp >= {window_end}", flush=True)
+                else:
+                    # Without temporal windowing: only lower bound
+                    query = f"""
+                    query ($condId: String!, $timestampGte: BigInt!) {{
+                      redemptions(
+                        where: {{ condition: $condId, timestamp_gte: $timestampGte }}
+                        first: {current_batch_size}
+                        orderBy: timestamp
+                        orderDirection: asc
+                      ) {{
+                        id
+                        redeemer
+                        payout
+                        timestamp
+                      }}
+                    }}
+                    """
+                    
+                    variables = {
+                        "condId": condition_id,
+                        "timestampGte": str(last_timestamp)
+                    }
+            
+                # Retry logic for each request with exponential backoff
+                retry_count = 0
+                request_success = False
+                graphql_error_retries = 0  # Track GraphQL-specific retries separately
+                total_attempts = 0  # Total attempts including all error types
+            
+                while total_attempts <= IMMEDIATE_RETRIES and not request_success:
+                    total_attempts += 1
+                    try:
+                        # Use rate limiter BEFORE each API request
+                        await rate_limiter.acquire()
+                    
+                        # Track request duration for adaptive delay
+                        request_start_time = time.time()
+                    
+                        # Add API token if available
+                        headers = {'Content-Type': 'application/json'}
+                        if GOLDSKY_API_TOKEN:
+                            headers['Authorization'] = f'Bearer {GOLDSKY_API_TOKEN}'
+                    
+                        async with session.post(
+                            GRAPH_URL,
+                            json={'query': query, 'variables': variables},
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+                        ) as response:
+                            data = await response.json()
                         
-                        if data.get('errors'):
-                            # Log GraphQL errors in real-time
-                            error_details = data.get('errors')
-                            error_msg = str(error_details)
+                            # Calculate request duration
+                            request_duration = time.time() - request_start_time
+                        
+                            if data.get('errors'):
+                                # Log GraphQL errors in real-time
+                                error_details = data.get('errors')
+                                error_msg = str(error_details)
                             
-                            # Check if this is a retryable error (timeout, etc.)
-                            is_timeout = 'timeout' in error_msg.lower() or 'canceling statement' in error_msg.lower()
+                                # Check if this is a retryable error (timeout, etc.)
+                                is_timeout = 'timeout' in error_msg.lower() or 'canceling statement' in error_msg.lower()
                             
-                            if is_timeout and total_attempts <= IMMEDIATE_RETRIES:
-                                graphql_error_retries += 1
-                                timeout_history.append(True)  # Record timeout
+                                if is_timeout and total_attempts <= IMMEDIATE_RETRIES:
+                                    graphql_error_retries += 1
+                                    timeout_history.append(True)  # Record timeout
                                 
-                                # 🎯 NEW: Different strategy for very large markets (>$300M)
-                                if is_very_large_market:
-                                    # STRATEGY: First increase delay (up to 10 attempts), THEN reduce batch size
+                                    # 🎯 AGGRESSIVE BATCH REDUCTION for large markets (>=$200M)
+                                    if is_very_large_market:
+                                        # NEW STRATEGY: Reduce batch EARLY (after 3 timeouts), then increase delay
                                     
-                                    # Reset consecutive successes (we had a failure)
-                                    consecutive_successes = 0
-                                    consecutive_timeouts += 1
+                                        # Reset consecutive successes (we had a failure)
+                                        consecutive_successes = 0
+                                        consecutive_timeouts += 1
                                     
-                                    # Check for cooldown after 3+ consecutive timeouts
-                                    if consecutive_timeouts >= 3:
-                                        cooldown_time = min(10.0 + (consecutive_timeouts - 3) * 2.0, 20.0)  # 10s base, +2s per extra timeout, max 20s
-                                        print(f"\n      🚨 COOLDOWN: {consecutive_timeouts} consecutive timeouts detected!")
-                                        print(f"         💤 Giving PostgreSQL {cooldown_time:.0f}s to recover...", flush=True)
-                                        await asyncio.sleep(cooldown_time)
+                                        # Check for cooldown after 3+ consecutive timeouts
+                                        if consecutive_timeouts >= 3:
+                                            cooldown_time = min(10.0 + (consecutive_timeouts - 3) * 2.0, 20.0)
+                                            print(f"\n      🚨 COOLDOWN: {consecutive_timeouts} consecutive timeouts detected!")
+                                            print(f"         💤 Giving PostgreSQL {cooldown_time:.0f}s to recover...", flush=True)
+                                            await asyncio.sleep(cooldown_time)
                                     
-                                    # Check if we can increase delay level
-                                    can_increase_delay = (current_delay_level < len(delay_levels) - 1 and 
-                                                         delay_increase_attempts < 10)
-                                    
-                                    if can_increase_delay:
-                                        # Increase delay level instead of reducing batch size
-                                        old_level = current_delay_level
-                                        current_delay_level += 1
-                                        delay_increase_attempts += 1
+                                        # PRIORITY: Reduce batch size after 3+ consecutive timeouts
+                                        should_reduce_batch = (consecutive_timeouts >= 3 and current_batch_level > 0)
                                         
-                                        print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
-                                        print(f"         Error: {error_msg[:150]}")
-                                        print(f"         📈 SMART DELAY: Increasing delay level {old_level+1} → {current_delay_level+1} ({delay_levels[old_level]:.0f}s → {delay_levels[current_delay_level]:.0f}s)")
-                                        print(f"         📊 Delay increase attempts: {delay_increase_attempts}/10 (batch size unchanged: {current_batch_size})")
-                                        print(f"         🔄 Retrying with longer delay...", flush=True)
-                                        
-                                        # Use current delay level for retry pause (not fixed 2s!)
-                                        retry_pause = delay_levels[current_delay_level]
-                                        await asyncio.sleep(retry_pause)
-                                        continue  # Retry with increased delay
-                                    else:
-                                        # Exhausted delay increases (10 attempts) - now reduce batch size
-                                        if current_batch_level > 0:  # Can decrease batch level
+                                        # Check if we can increase delay (only if batch at minimum)
+                                        can_increase_delay = (current_delay_level < len(delay_levels) - 1 and 
+                                                             delay_increase_attempts < 10 and
+                                                             current_batch_level == 0)
+                                    
+                                        if should_reduce_batch:
+                                            # PRIORITY: Reduce batch size FIRST
                                             old_batch_level = current_batch_level
                                             old_batch_size = current_batch_size
-                                            current_batch_level -= 1  # Decrease by 1 level
+                                            current_batch_level -= 1
                                             current_batch_size = batch_size_levels[current_batch_level]
-                                            
-                                            # Partially reduce delay level (not reset to 0!)
-                                            # Keep some delay advantage we earned
-                                            old_delay_level = current_delay_level
-                                            current_delay_level = max(current_delay_level - 2, 0)  # Drop by 2 levels, minimum 0
                                             
                                             print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
                                             print(f"         Error: {error_msg[:150]}")
-                                            print(f"         📉 BATCH REDUCTION: Max delay reached, reducing batch level {old_batch_level+1} → {current_batch_level+1} ({old_batch_size} → {current_batch_size})")
-                                            print(f"         📊 Delay increases exhausted (10/10), max delay level: {old_delay_level+1}/{len(delay_levels)}")
-                                            print(f"         📊 PARTIAL DELAY REDUCTION: level {old_delay_level+1} → {current_delay_level+1} ({delay_levels[old_delay_level]:.0f}s → {delay_levels[current_delay_level]:.0f}s)")
+                                            print(f"         📉 BATCH REDUCTION: {consecutive_timeouts} timeouts, reducing {old_batch_size} → {current_batch_size}")
                                             print(f"         🔄 Retrying with smaller batch...", flush=True)
                                             
                                             batch_size_reduced = True
                                             status['adaptive_pagination_used'] = True
+                                            consecutive_timeouts = 0  # Reset counter
                                             
-                                            # Reset delay adaptation counters for new batch size
-                                            delay_increase_attempts = 0
-                                            consecutive_successes = 0  # Reset success counter
-                                            # NOTE: current_delay_level is NOT reset - we keep some delay!
-                                            
-                                            # Use current delay level for retry pause
-                                            retry_pause = delay_levels[current_delay_level]
+                                            retry_pause = delay_levels[min(current_delay_level + 1, len(delay_levels) - 1)]
                                             await asyncio.sleep(retry_pause)
-                                            continue  # Retry with new batch size
-                                        else:
-                                            # Can't reduce batch level further (at level 0 = 50) - use exponential backoff with current delay level
-                                            base_delay = INITIAL_RETRY_DELAY * (2 ** (graphql_error_retries - 1))
-                                            exponential_delay = min(base_delay, MAX_RETRY_DELAY)
-                                            
-                                            # Combine exponential backoff with current delay level
-                                            # Use the MAXIMUM of the two to ensure sufficient pause
-                                            current_level_delay = delay_levels[current_delay_level]
-                                            retry_delay = max(exponential_delay, current_level_delay)
-                                            
+                                            continue
+                                        elif can_increase_delay:
+                                            # Increase delay level instead of reducing batch size
+                                            old_level = current_delay_level
+                                            current_delay_level += 1
+                                            delay_increase_attempts += 1
+                                        
                                             print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
                                             print(f"         Error: {error_msg[:150]}")
-                                            print(f"         Current batch level: {current_batch_level+1}/{len(batch_size_levels)} ({current_batch_size} - minimum)")
-                                            print(f"         Current delay level: {current_delay_level+1}/{len(delay_levels)} ({current_level_delay:.0f}s)")
-                                            print(f"         🔄 Retrying in {retry_delay:.0f}s (max of exponential {exponential_delay:.0f}s and level {current_level_delay:.0f}s)...", flush=True)
+                                            print(f"         📈 SMART DELAY: Increasing delay level {old_level+1} → {current_delay_level+1} ({delay_levels[old_level]:.0f}s → {delay_levels[current_delay_level]:.0f}s)")
+                                            print(f"         📊 Delay increase attempts: {delay_increase_attempts}/10 (batch size unchanged: {current_batch_size})")
+                                            print(f"         🔄 Retrying with longer delay...", flush=True)
+                                        
+                                            # Use current delay level for retry pause (not fixed 2s!)
+                                            retry_pause = delay_levels[current_delay_level]
+                                            await asyncio.sleep(retry_pause)
+                                            continue  # Retry with increased delay
+                                        else:
+                                            # Exhausted delay increases (10 attempts) - now reduce batch size
+                                            if current_batch_level > 0:  # Can decrease batch level
+                                                old_batch_level = current_batch_level
+                                                old_batch_size = current_batch_size
+                                                current_batch_level -= 1  # Decrease by 1 level
+                                                current_batch_size = batch_size_levels[current_batch_level]
                                             
+                                                # Partially reduce delay level (not reset to 0!)
+                                                # Keep some delay advantage we earned
+                                                old_delay_level = current_delay_level
+                                                current_delay_level = max(current_delay_level - 2, 0)  # Drop by 2 levels, minimum 0
+                                            
+                                                print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                                                print(f"         Error: {error_msg[:150]}")
+                                                print(f"         📉 BATCH REDUCTION: Max delay reached, reducing batch level {old_batch_level+1} → {current_batch_level+1} ({old_batch_size} → {current_batch_size})")
+                                                print(f"         📊 Delay increases exhausted (10/10), max delay level: {old_delay_level+1}/{len(delay_levels)}")
+                                                print(f"         📊 PARTIAL DELAY REDUCTION: level {old_delay_level+1} → {current_delay_level+1} ({delay_levels[old_delay_level]:.0f}s → {delay_levels[current_delay_level]:.0f}s)")
+                                                print(f"         🔄 Retrying with smaller batch...", flush=True)
+                                            
+                                                batch_size_reduced = True
+                                                status['adaptive_pagination_used'] = True
+                                            
+                                                # Reset delay adaptation counters for new batch size
+                                                delay_increase_attempts = 0
+                                                consecutive_successes = 0  # Reset success counter
+                                                # NOTE: current_delay_level is NOT reset - we keep some delay!
+                                            
+                                                # Use current delay level for retry pause
+                                                retry_pause = delay_levels[current_delay_level]
+                                                await asyncio.sleep(retry_pause)
+                                                continue  # Retry with new batch size
+                                            else:
+                                                # Can't reduce batch level further (at level 0 = 50) - use exponential backoff with current delay level
+                                                base_delay = INITIAL_RETRY_DELAY * (2 ** (graphql_error_retries - 1))
+                                                exponential_delay = min(base_delay, MAX_RETRY_DELAY)
+                                            
+                                                # Combine exponential backoff with current delay level
+                                                # Use the MAXIMUM of the two to ensure sufficient pause
+                                                current_level_delay = delay_levels[current_delay_level]
+                                                retry_delay = max(exponential_delay, current_level_delay)
+                                            
+                                                print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                                                print(f"         Error: {error_msg[:150]}")
+                                                print(f"         Current batch level: {current_batch_level+1}/{len(batch_size_levels)} ({current_batch_size} - minimum)")
+                                                print(f"         Current delay level: {current_delay_level+1}/{len(delay_levels)} ({current_level_delay:.0f}s)")
+                                                print(f"         🔄 Retrying in {retry_delay:.0f}s (max of exponential {exponential_delay:.0f}s and level {current_level_delay:.0f}s)...", flush=True)
+                                            
+                                                await asyncio.sleep(retry_delay)
+                                                continue
+                                    else:
+                                        # OLD STRATEGY: For smaller markets, use original logic
+                                        # SMART PATTERN ANALYSIS
+                                        pattern = analyze_timeout_pattern()
+                                    
+                                        # ADAPTIVE PAGINATION with pattern detection
+                                        should_reduce_batch = False
+                                    
+                                        # Strategy 1: Immediate reduction after 2 consecutive failures
+                                        if current_batch_size > MIN_BATCH_SIZE and graphql_error_retries >= 2:
+                                            should_reduce_batch = True
+                                            reduction_reason = f"2 consecutive timeouts"
+                                    
+                                        # Strategy 2: Pattern-based reduction (only if 70%+ timeout rate AND min 5 samples)
+                                        elif pattern['should_reduce'] and len(timeout_history) >= 5 and current_batch_size > MIN_BATCH_SIZE:
+                                            should_reduce_batch = True
+                                            reduction_reason = f"high timeout rate ({pattern['timeout_rate']*100:.0f}%)"
+                                    
+                                        # Strategy 3: Critical situation - increase retry delay
+                                        if pattern['is_critical'] and len(timeout_history) >= 7:
+                                            new_multiplier = min(retry_delay_multiplier * 1.2, 2.0)
+                                            if new_multiplier > retry_delay_multiplier:
+                                                retry_delay_multiplier = new_multiplier
+                                                print(f"\n      🚨 CRITICAL: {pattern['recent_timeouts']}/{len(timeout_history)} recent timeouts!")
+                                                print(f"         Increasing retry delay multiplier: {retry_delay_multiplier:.1f}x")
+                                    
+                                        if should_reduce_batch:
+                                            # Reduce batch size
+                                            new_batch_size = max(current_batch_size // BATCH_SIZE_REDUCTION_FACTOR, MIN_BATCH_SIZE)
+                                        
+                                            print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                                            print(f"         Error: {error_msg[:150]}")
+                                            print(f"         📉 ADAPTIVE: Reducing batch size {current_batch_size} → {new_batch_size} ({reduction_reason})")
+                                            if pattern['timeout_rate'] > 0:
+                                                print(f"         📊 Pattern: {pattern['recent_timeouts']}/{len(timeout_history)} recent requests had timeouts")
+                                            print(f"         🔄 Retrying with smaller batch...", flush=True)
+                                        
+                                            current_batch_size = new_batch_size
+                                            batch_size_reduced = True
+                                            status['adaptive_pagination_used'] = True
+                                        
+                                            # Reset retry counter for new batch size attempt
+                                            graphql_error_retries = 0
+                                            if not pattern['is_critical']:
+                                                retry_delay_multiplier = 1.0
+                                        
+                                            await asyncio.sleep(2)
+                                            continue
+                                        else:
+                                            # Normal exponential backoff retry
+                                            base_delay = INITIAL_RETRY_DELAY * (2 ** (graphql_error_retries - 1))
+                                            retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
+                                        
+                                            print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                                            print(f"         Error: {error_msg[:150]}")
+                                            if batch_size_reduced:
+                                                print(f"         Current batch size: {current_batch_size}")
+                                            if pattern['timeout_rate'] > 0.3:
+                                                print(f"         📊 Pattern: {pattern['recent_timeouts']}/{len(timeout_history)} recent timeouts ({pattern['timeout_rate']*100:.0f}%)")
+                                            if retry_delay_multiplier > 1.0:
+                                                print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
+                                            else:
+                                                print(f"         🔄 Retrying in {retry_delay:.0f}s (exponential backoff)...", flush=True)
+                                        
                                             await asyncio.sleep(retry_delay)
                                             continue
                                 else:
-                                    # OLD STRATEGY: For smaller markets, use original logic
-                                    # SMART PATTERN ANALYSIS
-                                    pattern = analyze_timeout_pattern()
-                                    
-                                    # ADAPTIVE PAGINATION with pattern detection
-                                    should_reduce_batch = False
-                                    
-                                    # Strategy 1: Immediate reduction after 2 consecutive failures
-                                    if current_batch_size > MIN_BATCH_SIZE and graphql_error_retries >= 2:
-                                        should_reduce_batch = True
-                                        reduction_reason = f"2 consecutive timeouts"
-                                    
-                                    # Strategy 2: Pattern-based reduction (only if 70%+ timeout rate AND min 5 samples)
-                                    elif pattern['should_reduce'] and len(timeout_history) >= 5 and current_batch_size > MIN_BATCH_SIZE:
-                                        should_reduce_batch = True
-                                        reduction_reason = f"high timeout rate ({pattern['timeout_rate']*100:.0f}%)"
-                                    
-                                    # Strategy 3: Critical situation - increase retry delay
-                                    if pattern['is_critical'] and len(timeout_history) >= 7:
-                                        new_multiplier = min(retry_delay_multiplier * 1.2, 2.0)
-                                        if new_multiplier > retry_delay_multiplier:
-                                            retry_delay_multiplier = new_multiplier
-                                            print(f"\n      🚨 CRITICAL: {pattern['recent_timeouts']}/{len(timeout_history)} recent timeouts!")
-                                            print(f"         Increasing retry delay multiplier: {retry_delay_multiplier:.1f}x")
-                                    
-                                    if should_reduce_batch:
-                                        # Reduce batch size
-                                        new_batch_size = max(current_batch_size // BATCH_SIZE_REDUCTION_FACTOR, MIN_BATCH_SIZE)
-                                        
-                                        print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
-                                        print(f"         Error: {error_msg[:150]}")
-                                        print(f"         📉 ADAPTIVE: Reducing batch size {current_batch_size} → {new_batch_size} ({reduction_reason})")
-                                        if pattern['timeout_rate'] > 0:
-                                            print(f"         📊 Pattern: {pattern['recent_timeouts']}/{len(timeout_history)} recent requests had timeouts")
-                                        print(f"         🔄 Retrying with smaller batch...", flush=True)
-                                        
-                                        current_batch_size = new_batch_size
-                                        batch_size_reduced = True
-                                        status['adaptive_pagination_used'] = True
-                                        
-                                        # Reset retry counter for new batch size attempt
-                                        graphql_error_retries = 0
-                                        if not pattern['is_critical']:
-                                            retry_delay_multiplier = 1.0
-                                        
-                                        await asyncio.sleep(2)
-                                        continue
-                                    else:
-                                        # Normal exponential backoff retry
-                                        base_delay = INITIAL_RETRY_DELAY * (2 ** (graphql_error_retries - 1))
-                                        retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
-                                        
-                                        print(f"\n      ⚠️  GraphQL Timeout for {condition_id[:20]}... (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
-                                        print(f"         Error: {error_msg[:150]}")
+                                    # Non-retryable error or exhausted retries
+                                    if is_timeout:
+                                        print(f"\n      ❌ GraphQL Timeout for {condition_id[:20]}... (failed after {graphql_error_retries} retries)")
                                         if batch_size_reduced:
-                                            print(f"         Current batch size: {current_batch_size}")
-                                        if pattern['timeout_rate'] > 0.3:
-                                            print(f"         📊 Pattern: {pattern['recent_timeouts']}/{len(timeout_history)} recent timeouts ({pattern['timeout_rate']*100:.0f}%)")
-                                        if retry_delay_multiplier > 1.0:
-                                            print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
-                                        else:
-                                            print(f"         🔄 Retrying in {retry_delay:.0f}s (exponential backoff)...", flush=True)
-                                        
-                                        await asyncio.sleep(retry_delay)
-                                        continue
-                            else:
-                                # Non-retryable error or exhausted retries
-                                if is_timeout:
-                                    print(f"\n      ❌ GraphQL Timeout for {condition_id[:20]}... (failed after {graphql_error_retries} retries)")
-                                    if batch_size_reduced:
-                                        print(f"         Final batch size: {current_batch_size}")
-                                else:
-                                    print(f"\n      ❌ GraphQL Error for {condition_id[:20]}... (non-retryable)")
-                                print(f"         Error: {error_msg[:200]}")
+                                            print(f"         Final batch size: {current_batch_size}")
+                                    else:
+                                        print(f"\n      ❌ GraphQL Error for {condition_id[:20]}... (non-retryable)")
+                                    print(f"         Error: {error_msg[:200]}")
                                 
-                                # Mark as incomplete
-                                status['complete'] = False
-                                status['error'] = f"GraphQL Error after {graphql_error_retries} retries: {error_msg[:300]}"
-                                status['requests_made'] = request_count
+                                    # Mark as incomplete
+                                    status['complete'] = False
+                                    status['error'] = f"GraphQL Error after {graphql_error_retries} retries: {error_msg[:300]}"
+                                    status['requests_made'] = request_count
+                                    break
+                        
+                            batch = data.get('data', {}).get('redemptions', [])
+                            
+                            # DEBUG: Show batch info for first few requests
+                            if request_count <= 3 and use_temporal_windows and len(time_windows) > 1:
+                                print(f"      DEBUG Request #{request_count}: received {len(batch)} redemptions", flush=True)
+                                if batch:
+                                    first_ts = int(batch[0]['timestamp'])
+                                    last_ts = int(batch[-1]['timestamp'])
+                                    from datetime import datetime as dt
+                                    print(f"        First: {first_ts} ({dt.fromtimestamp(first_ts).strftime('%Y-%m-%d %H:%M:%S')})", flush=True)
+                                    print(f"        Last: {last_ts} ({dt.fromtimestamp(last_ts).strftime('%Y-%m-%d %H:%M:%S')})", flush=True)
+                                    print(f"        Window end: {window_end} ({dt.fromtimestamp(window_end).strftime('%Y-%m-%d %H:%M:%S')})", flush=True)
+                            
+                            # 🎯 TEMPORAL WINDOWING: Check if we reached window_end
+                            # Since GoldSky doesn't support timestamp_lt, we break manually
+                            window_complete = False
+                            skip_ahead = False  # Flag to skip multiple empty windows
+                            if use_temporal_windows and len(time_windows) > 1 and batch:
+                                # Store first timestamp before filtering (for skip-ahead optimization)
+                                first_redemption_ts = int(batch[0]['timestamp'])
+                                
+                                # Check if any redemptions are beyond window_end
+                                filtered_batch = []
+                                for redemption in batch:
+                                    redemption_ts = int(redemption['timestamp'])
+                                    if redemption_ts >= window_end:
+                                        # Reached end of window
+                                        window_complete = True
+                                        break
+                                    filtered_batch.append(redemption)
+                                
+                                # If we filtered something out, batch is now smaller
+                                if len(filtered_batch) < len(batch):
+                                    original_count = len(batch)
+                                    batch = filtered_batch
+                                    filtered_count = original_count - len(batch)
+                                    print(f"      DEBUG: Filtered out {filtered_count}/{original_count} redemptions (beyond window_end)", flush=True)
+                                    
+                                    # If all were filtered, window is complete with no new data
+                                    if len(batch) == 0:
+                                        window_complete = True
+                                        print(f"      DEBUG: All redemptions filtered - window complete!", flush=True)
+                                        
+                                        # 🚀 SKIP AHEAD OPTIMIZATION: If first redemption is WAY AHEAD of window_end
+                                        # We can skip multiple empty windows by jumping cursor forward
+                                        time_gap = first_redemption_ts - window_end
+                                        days_gap = time_gap / (24 * 60 * 60)
+                                        
+                                        # If gap is more than 2 window sizes, worth skipping ahead
+                                        if days_gap > (window_days * 2):
+                                            from datetime import datetime as dt
+                                            gap_str = dt.fromtimestamp(first_redemption_ts).strftime('%Y-%m-%d')
+                                            print(f"      ⚡ SKIP AHEAD: First redemption at {gap_str} ({days_gap:.0f} days ahead)", flush=True)
+                                            print(f"         Jumping cursor forward to skip empty windows", flush=True)
+                                            # Set cursor to first redemption timestamp
+                                            # This will cause next windows to be skipped via the skip logic
+                                            last_timestamp = first_redemption_ts
+                                            skip_ahead = True
+                                            
+                                            # RESET delay level after skip ahead - we're starting fresh!
+                                            if is_very_large_market:
+                                                old_delay_level = current_delay_level
+                                                # Reset to initial level
+                                                current_delay_level = INITIAL_DELAY_LEVEL_LARGE_MARKETS
+                                                print(f"      🔄 Reset delay: level {old_delay_level+1} → {current_delay_level+1} ({delay_levels[old_delay_level]:.0f}s → {delay_levels[current_delay_level]:.0f}s)", flush=True)
+                        
+                            # Record success in timeout history
+                            if graphql_error_retries > 0:
+                                # This was a successful retry after timeout(s)
+                                timeout_history.append(False)  # Record as success
+                            else:
+                                # First-time success, no timeout
+                                timeout_history.append(False)
+                        
+                            # 🎯 NEW: Track consecutive successes for very large markets
+                            if is_very_large_market:
+                                consecutive_successes += 1
+                                consecutive_timeouts = 0  # Reset consecutive timeouts on success
+                            
+                                # 🔄 PROGRESSIVE BATCH SIZE: Increase batch size after 3+ successes
+                                if consecutive_successes >= 3 and current_batch_level < len(batch_size_levels) - 1:
+                                    old_batch_level = current_batch_level
+                                    old_batch_size = current_batch_size
+                                    current_batch_level += 1
+                                    current_batch_size = batch_size_levels[current_batch_level]
+                                    consecutive_successes = 0  # Reset counter
+                                
+                                    print(f"      📈 3+ successes! Increasing batch size level {old_batch_level+1} → {current_batch_level+1} ({old_batch_size} → {current_batch_size})", flush=True)
+                            
+                                # After 5+ consecutive successes, decrease delay level (if possible)
+                                elif consecutive_successes >= 5 and current_delay_level > 0:
+                                    old_level = current_delay_level
+                                    current_delay_level -= 1
+                                    consecutive_successes = 0  # Reset counter
+                                
+                                    print(f"      ✅ 5+ successes! Decreasing delay level {old_level+1} → {current_delay_level+1} ({delay_levels[old_level]:.0f}s → {delay_levels[current_delay_level]:.0f}s)", flush=True)
+                        
+                            # Show success message if we recovered from GraphQL errors
+                            if graphql_error_retries > 0:
+                                if batch_size_reduced:
+                                    pattern = analyze_timeout_pattern()
+                                    if pattern['timeout_rate'] > 0.3:
+                                        print(f"      ✅ Recovered! (batch: {current_batch_size}, pattern: {pattern['recent_timeouts']}/{len(timeout_history)} timeouts)", flush=True)
+                                    else:
+                                        print(f"      ✅ Recovered after {graphql_error_retries} GraphQL retries with batch size {current_batch_size}!", flush=True)
+                                else:
+                                    print(f"      ✅ Recovered after {graphql_error_retries} GraphQL retries!", flush=True)
+                                graphql_error_retries = 0  # Reset counter
+                            
+                                # Gradually reduce retry delay multiplier on success
+                                if retry_delay_multiplier > 1.0:
+                                    retry_delay_multiplier = max(retry_delay_multiplier * 0.8, 1.0)
+                        
+                            # Check if window is complete (for temporal windowing)
+                            if window_complete:
+                                if use_temporal_windows and len(time_windows) > 1:
+                                    print(f"      ✅ Window {window_idx}/{len(time_windows)} complete - reached window_end ({window_redemptions_count} redemptions)", flush=True)
+                                    
+                                    # Update cursor (skip_ahead already updated it to first_redemption_ts)
+                                    if not skip_ahead:
+                                        # Normal case: update cursor to window_end
+                                        from datetime import datetime as dt
+                                        old_cursor = last_timestamp
+                                        last_timestamp = window_end
+                                        print(f"      DEBUG: Cursor updated: {old_cursor} → {last_timestamp} ({dt.fromtimestamp(last_timestamp).strftime('%Y-%m-%d %H:%M:%S')})", flush=True)
+                                    # else: cursor already updated to first_redemption_ts in skip_ahead logic
+                                break
+                            
+                            if not batch:
+                                # Show final stats for very large markets with progressive batch size
+                                if is_very_large_market and len(all_redemptions) > 0:
+                                    print(f"      ℹ️  Completed! Final batch level: {current_batch_level+1}/{len(batch_size_levels)} (size: {current_batch_size})", flush=True)
+                                    if current_batch_level > 0:
+                                        print(f"      📈 Successfully scaled up from {batch_size_levels[0]} to {current_batch_size}!", flush=True)
+                                # Show final stats if batch size was reduced for regular markets
+                                elif batch_size_reduced and len(all_redemptions) > 0:
+                                    print(f"      ℹ️  Completed with adaptive batch size: {current_batch_size} (started with {INITIAL_BATCH_SIZE})", flush=True)
                                 break
                         
-                        batch = data.get('data', {}).get('redemptions', [])
+                            # Process batch
+                            for redemption in batch:
+                                raw_id = redemption.get('id', "")
+                                tx_hash = raw_id.split('-')[0] if '-' in raw_id else raw_id
+                                amount = float(redemption['payout']) / 1e6
+                            
+                                all_redemptions.append({
+                                    "transaction_hash": tx_hash,
+                                    "condition_id": condition_id,
+                                    "event_id": market_info['event_id'],
+                                    "market_id": market_info['market_id'],
+                                    "market_question": market_info['question'],
+                                    "event_title": market_info['event_title'],
+                                    "redeemer_address": redemption['redeemer'],
+                                    "payout_usdc": amount,
+                                    "timestamp_unix": redemption['timestamp'],
+                                    "timestamp_human": time.strftime('%Y-%m-%d %H:%M:%S', 
+                                                                     time.localtime(int(redemption['timestamp'])))
+                                })
                         
-                        # Record success in timeout history
-                        if graphql_error_retries > 0:
-                            # This was a successful retry after timeout(s)
-                            timeout_history.append(False)  # Record as success
-                        else:
-                            # First-time success, no timeout
-                            timeout_history.append(False)
+                            # Update cursor with timestamp
+                            last_timestamp = int(batch[-1]['timestamp']) + 1
+                            window_redemptions_count += len(batch)
+                            request_success = True
+                            last_request_duration = request_duration  # Save for adaptive delay
                         
-                        # 🎯 NEW: Track consecutive successes for very large markets
+                            # Show success message if we recovered from network errors
+                            if retry_count > 0:
+                                print(f"      ✅ Recovered after {retry_count} network retries!", flush=True)
+                        
+                            # Show progress for large markets (every 3 batches)
+                            if request_count > 1 and request_count % 3 == 0:
+                                progress_msg = f"      ... fetched {len(all_redemptions):,} redemptions ({request_count} requests)"
+                                if batch_size_reduced:
+                                    progress_msg += f" [batch: {current_batch_size}]"
+                                print(progress_msg, flush=True)
+                        
+                            # Safety limit per market (increased for large markets)
+                            if len(all_redemptions) > 500000:  # Увеличили до 500k
+                                print(f"      ⚠️  Reached safety limit of 500k redemptions")
+                                break
+                        
+                            # Delay is now applied at the START of next iteration (before request)
+                            # See delay logic at the beginning of while loop
+                            
+                    except asyncio.TimeoutError:
+                        retry_count += 1
+                        timeout_history.append(True)  # Record timeout
+                    
+                        # Track consecutive timeouts for very large markets
                         if is_very_large_market:
-                            consecutive_successes += 1
-                            consecutive_timeouts = 0  # Reset consecutive timeouts on success
-                            
-                            # 🔄 PROGRESSIVE BATCH SIZE: Increase batch size after 3+ successes
-                            if consecutive_successes >= 3 and current_batch_level < len(batch_size_levels) - 1:
-                                old_batch_level = current_batch_level
-                                old_batch_size = current_batch_size
-                                current_batch_level += 1
-                                current_batch_size = batch_size_levels[current_batch_level]
-                                consecutive_successes = 0  # Reset counter
-                                
-                                print(f"      📈 3+ successes! Increasing batch size level {old_batch_level+1} → {current_batch_level+1} ({old_batch_size} → {current_batch_size})", flush=True)
-                            
-                            # After 5+ consecutive successes, decrease delay level (if possible)
-                            elif consecutive_successes >= 5 and current_delay_level > 0:
-                                old_level = current_delay_level
-                                current_delay_level -= 1
-                                consecutive_successes = 0  # Reset counter
-                                
-                                print(f"      ✅ 5+ successes! Decreasing delay level {old_level+1} → {current_delay_level+1} ({delay_levels[old_level]:.0f}s → {delay_levels[current_delay_level]:.0f}s)", flush=True)
+                            consecutive_timeouts += 1
+                            consecutive_successes = 0
                         
-                        # Show success message if we recovered from GraphQL errors
-                        if graphql_error_retries > 0:
-                            if batch_size_reduced:
-                                pattern = analyze_timeout_pattern()
-                                if pattern['timeout_rate'] > 0.3:
-                                    print(f"      ✅ Recovered! (batch: {current_batch_size}, pattern: {pattern['recent_timeouts']}/{len(timeout_history)} timeouts)", flush=True)
-                                else:
-                                    print(f"      ✅ Recovered after {graphql_error_retries} GraphQL retries with batch size {current_batch_size}!", flush=True)
-                            else:
-                                print(f"      ✅ Recovered after {graphql_error_retries} GraphQL retries!", flush=True)
-                            graphql_error_retries = 0  # Reset counter
-                            
-                            # Gradually reduce retry delay multiplier on success
-                            if retry_delay_multiplier > 1.0:
-                                retry_delay_multiplier = max(retry_delay_multiplier * 0.8, 1.0)
-                        
-                        if not batch:
-                            # Show final stats for very large markets with progressive batch size
-                            if is_very_large_market and len(all_redemptions) > 0:
-                                print(f"      ℹ️  Completed! Final batch level: {current_batch_level+1}/{len(batch_size_levels)} (size: {current_batch_size})", flush=True)
-                                if current_batch_level > 0:
-                                    print(f"      📈 Successfully scaled up from {batch_size_levels[0]} to {current_batch_size}!", flush=True)
-                            # Show final stats if batch size was reduced for regular markets
-                            elif batch_size_reduced and len(all_redemptions) > 0:
-                                print(f"      ℹ️  Completed with adaptive batch size: {current_batch_size} (started with {INITIAL_BATCH_SIZE})", flush=True)
+                            # Cooldown after 3+ consecutive timeouts
+                            if consecutive_timeouts >= 3:
+                                cooldown_time = min(10.0 + (consecutive_timeouts - 3) * 2.0, 20.0)
+                                print(f"\n      🚨 COOLDOWN: {consecutive_timeouts} consecutive timeouts detected!")
+                                print(f"         💤 Giving PostgreSQL {cooldown_time:.0f}s to recover...", flush=True)
+                                await asyncio.sleep(cooldown_time)
+                    
+                        # Apply dynamic retry delay multiplier
+                        base_delay = INITIAL_RETRY_DELAY * (2 ** (retry_count - 1))
+                        retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
+                    
+                        # For very large markets, use at least current delay level
+                        if is_very_large_market:
+                            current_level_delay = delay_levels[current_delay_level]
+                            retry_delay = max(retry_delay, current_level_delay)
+                    
+                        print(f"\n      ⚠️  Request timeout (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                        print(f"         Condition: {condition_id[:30]}...")
+                        print(f"         Request: {request_count}, Last timestamp: {last_timestamp}")
+                    
+                        if total_attempts > IMMEDIATE_RETRIES:
+                            print(f"      ❌ Failed after {total_attempts - 1} total attempts - giving up")
+                            status['success'] = False
+                            status['complete'] = False
+                            status['error'] = f"Timeout after {total_attempts - 1} attempts at request {request_count}"
+                            status['requests_made'] = request_count
                             break
+                    
+                        if is_very_large_market:
+                            print(f"         Current delay level: {current_delay_level+1}/{len(delay_levels)} ({delay_levels[current_delay_level]:.0f}s)")
+                    
+                        if retry_delay_multiplier > 1.0:
+                            print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
+                        else:
+                            print(f"         🔄 Retrying in {retry_delay:.0f}s (exponential backoff)...", flush=True)
+                        await asyncio.sleep(retry_delay)
+                    except Exception as e:
+                        retry_count += 1
+                        timeout_history.append(True)  # Record error as timeout-equivalent
                         
-                        # Process batch
-                        for redemption in batch:
-                            raw_id = redemption.get('id', "")
-                            tx_hash = raw_id.split('-')[0] if '-' in raw_id else raw_id
-                            amount = float(redemption['payout']) / 1e6
-                            
-                            all_redemptions.append({
-                                "transaction_hash": tx_hash,
-                                "condition_id": condition_id,
-                                "event_id": market_info['event_id'],
-                                "market_id": market_info['market_id'],
-                                "market_question": market_info['question'],
-                                "event_title": market_info['event_title'],
-                                "redeemer_address": redemption['redeemer'],
-                                "payout_usdc": amount,
-                                "timestamp_unix": redemption['timestamp'],
-                                "timestamp_human": time.strftime('%Y-%m-%d %H:%M:%S', 
-                                                                 time.localtime(int(redemption['timestamp'])))
-                            })
+                        error_type = type(e).__name__
+                        error_msg = str(e)
                         
-                        last_id = batch[-1]['id']
-                        request_success = True
-                        last_request_duration = request_duration  # Save for adaptive delay
-                        
-                        # Show success message if we recovered from network errors
-                        if retry_count > 0:
-                            print(f"      ✅ Recovered after {retry_count} network retries!", flush=True)
-                        
-                        # Show progress for large markets (every 3 batches)
-                        if request_count > 1 and request_count % 3 == 0:
-                            progress_msg = f"      ... fetched {len(all_redemptions):,} redemptions ({request_count} requests)"
-                            if batch_size_reduced:
-                                progress_msg += f" [batch: {current_batch_size}]"
-                            print(progress_msg, flush=True)
-                        
-                        # Safety limit per market (increased for large markets)
-                        if len(all_redemptions) > 500000:  # Увеличили до 500k
-                            print(f"      ⚠️  Reached safety limit of 500k redemptions")
+                        # CRITICAL: Check for "Session is closed" error
+                        if 'session' in error_msg.lower() and 'closed' in error_msg.lower():
+                            print(f"\n      ❌ CRITICAL: Session closed - cannot retry")
+                            print(f"         Error: {error_msg[:150]}")
+                            print(f"         💡 This window needs new session/run")
+                            status['success'] = False
+                            status['complete'] = False
+                            status['error'] = f"Session closed: {error_msg[:200]}"
+                            status['requests_made'] = request_count
                             break
+                    
+                        # Track consecutive timeouts for very large markets
+                        if is_very_large_market:
+                            consecutive_timeouts += 1
+                            consecutive_successes = 0
                         
-                        # Delay is now applied at the START of next iteration (before request)
-                        # See delay logic at the beginning of while loop
-                            
-                except asyncio.TimeoutError:
-                    retry_count += 1
-                    timeout_history.append(True)  # Record timeout
+                            # Cooldown after 3+ consecutive timeouts
+                            if consecutive_timeouts >= 3:
+                                cooldown_time = min(10.0 + (consecutive_timeouts - 3) * 2.0, 20.0)
+                                print(f"\n      🚨 COOLDOWN: {consecutive_timeouts} consecutive errors detected!")
+                                print(f"         💤 Giving PostgreSQL {cooldown_time:.0f}s to recover...", flush=True)
+                                await asyncio.sleep(cooldown_time)
                     
-                    # Track consecutive timeouts for very large markets
-                    if is_very_large_market:
-                        consecutive_timeouts += 1
-                        consecutive_successes = 0
-                        
-                        # Cooldown after 3+ consecutive timeouts
-                        if consecutive_timeouts >= 3:
-                            cooldown_time = min(10.0 + (consecutive_timeouts - 3) * 2.0, 20.0)
-                            print(f"\n      🚨 COOLDOWN: {consecutive_timeouts} consecutive timeouts detected!")
-                            print(f"         💤 Giving PostgreSQL {cooldown_time:.0f}s to recover...", flush=True)
-                            await asyncio.sleep(cooldown_time)
+                        # Apply dynamic retry delay multiplier
+                        base_delay = INITIAL_RETRY_DELAY * (2 ** (retry_count - 1))
+                        retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
                     
-                    # Apply dynamic retry delay multiplier
-                    base_delay = INITIAL_RETRY_DELAY * (2 ** (retry_count - 1))
-                    retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
+                        # For very large markets, use at least current delay level
+                        if is_very_large_market:
+                            current_level_delay = delay_levels[current_delay_level]
+                            retry_delay = max(retry_delay, current_level_delay)
                     
-                    # For very large markets, use at least current delay level
-                    if is_very_large_market:
-                        current_level_delay = delay_levels[current_delay_level]
-                        retry_delay = max(retry_delay, current_level_delay)
+                        print(f"\n      ⚠️  {error_type} (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
+                        print(f"         Condition: {condition_id[:30]}...")
+                        print(f"         Error: {error_msg[:150]}")
                     
-                    print(f"\n      ⚠️  Request timeout (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
-                    print(f"         Condition: {condition_id[:30]}...")
-                    print(f"         Request: {request_count}, Last ID: {last_id[:20]}...")
+                        if total_attempts > IMMEDIATE_RETRIES:
+                            print(f"      ❌ Failed after {total_attempts - 1} total attempts - giving up")
+                            status['success'] = False
+                            status['complete'] = False
+                            status['error'] = f"{error_type}: {error_msg[:200]}"
+                            status['requests_made'] = request_count
+                            break
                     
-                    if total_attempts > IMMEDIATE_RETRIES:
-                        print(f"      ❌ Failed after {total_attempts - 1} total attempts - giving up")
-                        status['success'] = False
-                        status['complete'] = False
-                        status['error'] = f"Timeout after {total_attempts - 1} attempts at request {request_count}"
-                        status['requests_made'] = request_count
-                        break
+                        if is_very_large_market:
+                            print(f"         Current delay level: {current_delay_level+1}/{len(delay_levels)} ({delay_levels[current_delay_level]:.0f}s)")
                     
-                    if is_very_large_market:
-                        print(f"         Current delay level: {current_delay_level+1}/{len(delay_levels)} ({delay_levels[current_delay_level]:.0f}s)")
-                    
-                    if retry_delay_multiplier > 1.0:
-                        print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
-                    else:
-                        print(f"         🔄 Retrying in {retry_delay:.0f}s (exponential backoff)...", flush=True)
-                    await asyncio.sleep(retry_delay)
-                except Exception as e:
-                    retry_count += 1
-                    timeout_history.append(True)  # Record error as timeout-equivalent
-                    
-                    # Track consecutive timeouts for very large markets
-                    if is_very_large_market:
-                        consecutive_timeouts += 1
-                        consecutive_successes = 0
-                        
-                        # Cooldown after 3+ consecutive timeouts
-                        if consecutive_timeouts >= 3:
-                            cooldown_time = min(10.0 + (consecutive_timeouts - 3) * 2.0, 20.0)
-                            print(f"\n      🚨 COOLDOWN: {consecutive_timeouts} consecutive errors detected!")
-                            print(f"         💤 Giving PostgreSQL {cooldown_time:.0f}s to recover...", flush=True)
-                            await asyncio.sleep(cooldown_time)
-                    
-                    # Apply dynamic retry delay multiplier
-                    base_delay = INITIAL_RETRY_DELAY * (2 ** (retry_count - 1))
-                    retry_delay = min(base_delay * retry_delay_multiplier, MAX_RETRY_DELAY)
-                    
-                    # For very large markets, use at least current delay level
-                    if is_very_large_market:
-                        current_level_delay = delay_levels[current_delay_level]
-                        retry_delay = max(retry_delay, current_level_delay)
-                    
-                    error_type = type(e).__name__
-                    error_msg = str(e)
-                    
-                    print(f"\n      ⚠️  {error_type} (attempt {total_attempts}/{IMMEDIATE_RETRIES + 1})")
-                    print(f"         Condition: {condition_id[:30]}...")
-                    print(f"         Error: {error_msg[:150]}")
-                    
-                    if total_attempts > IMMEDIATE_RETRIES:
-                        print(f"      ❌ Failed after {total_attempts - 1} total attempts - giving up")
-                        status['success'] = False
-                        status['complete'] = False
-                        status['error'] = f"{error_type}: {error_msg[:200]}"
-                        status['requests_made'] = request_count
-                        break
-                    
-                    if is_very_large_market:
-                        print(f"         Current delay level: {current_delay_level+1}/{len(delay_levels)} ({delay_levels[current_delay_level]:.0f}s)")
-                    
-                    if retry_delay_multiplier > 1.0:
-                        print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
-                    else:
-                        print(f"         🔄 Retrying in {retry_delay:.0f}s (exponential backoff)...", flush=True)
-                    await asyncio.sleep(retry_delay)
+                        if retry_delay_multiplier > 1.0:
+                            print(f"         🔄 Retrying in {retry_delay:.0f}s (×{retry_delay_multiplier:.1f} critical backoff)...", flush=True)
+                        else:
+                            print(f"         🔄 Retrying in {retry_delay:.0f}s (exponential backoff)...", flush=True)
+                        await asyncio.sleep(retry_delay)
             
-            # If all retries failed, break the pagination loop
-            if not request_success:
+                # If all retries failed, break the pagination loop
+                if not request_success:
+                    break
+            
+            # Show window completion stats
+            if use_temporal_windows and len(time_windows) > 1:
+                print(f"      Window {window_idx}/{len(time_windows)} complete: {window_redemptions_count:,} redemptions", flush=True)
+                
+                # Track empty windows for early exit / probe mode
+                if window_redemptions_count == 0:
+                    consecutive_empty_windows += 1
+                    # Switch to PROBE MODE after threshold (if enabled) or EARLY EXIT (if disabled)
+                    if consecutive_empty_windows >= EARLY_EXIT_THRESHOLD and found_any_data and not probe_mode:
+                        remaining_windows = len(time_windows) - window_idx
+                        if PROBE_MODE_ENABLED:
+                            probe_mode = True
+                            print(f"      🔍 PROBE MODE ACTIVATED: {consecutive_empty_windows} consecutive empty windows", flush=True)
+                            print(f"         Will probe remaining {remaining_windows} windows with LIMIT 1 before processing", flush=True)
+                        else:
+                            print(f"      🛑 EARLY EXIT: {consecutive_empty_windows} consecutive empty windows detected", flush=True)
+                            print(f"         Skipping remaining {remaining_windows} windows (no more data expected)", flush=True)
+                            break  # Exit the window loop - no more data
+                else:
+                    # Reset counter when we find data
+                    consecutive_empty_windows = 0
+                    # Exit probe mode if we found data again
+                    if probe_mode:
+                        print(f"      ✅ Probe found data! Resuming normal processing", flush=True)
+                        probe_mode = False
+                    
+                    # First window with data - reset delay level!
+                    if not found_any_data and is_very_large_market:
+                        old_delay_level = current_delay_level
+                        # Reset to initial level
+                        current_delay_level = INITIAL_DELAY_LEVEL_LARGE_MARKETS
+                        if old_delay_level != current_delay_level:
+                            print(f"      🔄 First data found! Reset delay: level {old_delay_level+1} → {current_delay_level+1} ({delay_levels[old_delay_level]:.0f}s → {delay_levels[current_delay_level]:.0f}s)", flush=True)
+                    
+                    found_any_data = True  # Mark that we've found at least some data
+                
+                # ADAPTIVE COOLDOWN between windows
+                # STRATEGY: Fast through empty windows, slow through data windows
+                if is_very_large_market and window_idx < len(time_windows):
+                    if window_redemptions_count > 0:
+                        # Window has data - use standard cooldown for PostgreSQL recovery
+                        cooldown_time = 3.0
+                        print(f"      💤 Window cooldown: {cooldown_time:.0f}s (PostgreSQL recovery time)", flush=True)
+                    elif not found_any_data:
+                        # Empty window before finding any data - fast skip to next
+                        cooldown_time = 0.5
+                        print(f"      ⚡ Fast skip: {cooldown_time}s (empty window, searching for data)", flush=True)
+                    else:
+                        # Empty window after data found - no cooldown needed (EARLY EXIT will trigger soon)
+                        cooldown_time = 0
+                    
+                    if cooldown_time > 0:
+                        await asyncio.sleep(cooldown_time)
+            
+            # If critical error, don't continue to next window
+            if not status['complete'] or not status['success']:
                 break
         
         # Set final request count
@@ -1153,7 +1672,7 @@ async def process_market_async(
         
         # Check if this is a very large market that needs exclusive API access
         market_volume = float(market.get('volume', 0) or 0)
-        needs_exclusive_access = market_volume > 300_000_000  # $300M+
+        needs_exclusive_access = market_volume >= 200_000_000  # $200M+
         
         if needs_exclusive_access:
             # LARGE MARKET: Wait for all active markets to finish, then get exclusive access

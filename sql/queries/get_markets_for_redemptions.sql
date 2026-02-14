@@ -24,7 +24,9 @@ SELECT
         END,
         m.volume_num,
         0
-    ) as volume
+    ) as volume,
+    COALESCE(m.start_date_iso, m.start_date::TEXT) as start_date,
+    COALESCE(m.end_date_iso, m.end_date::TEXT) as end_date
 FROM markets m
 LEFT JOIN events e ON m.event_id = e.id
 WHERE m.condition_id IS NOT NULL
