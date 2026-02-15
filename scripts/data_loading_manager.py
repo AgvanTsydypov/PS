@@ -54,11 +54,11 @@ load_dotenv()
 # GENESIS_END_DATE = date(2026, 1, 5)
 
 # For testing - use shorter period:
-GENESIS_START_DATE = date(2026, 2, 1)
+GENESIS_START_DATE = date(2024, 6, 1)
 GENESIS_END_DATE = date(2026, 2, 6)
 
-GENESIS_MIN_VOLUME = 1_000  # 100M
-DAILY_MIN_VOLUME = 1_000  # 5M
+GENESIS_MIN_VOLUME = 100_000_000  # 100M
+DAILY_MIN_VOLUME = 5_000_000  # 5M
 
 # Data lag configuration (in days)
 # How many days to wait before loading data (allows data to finalize)
@@ -71,14 +71,14 @@ DATA_LAG_DAYS = 4          # Redemptions/Positions/Leaderboard: 4 days after eve
 #   - 100 events for quick test (few minutes)
 #   - 1000 events for medium test (10-15 minutes)
 #   - None for full load (production)
-MAX_EVENTS_LIMIT = 1  # Change to number for testing, e.g., 1000
+MAX_EVENTS_LIMIT = None  # Change to number for testing, e.g., 1000
 
 # OPTIONAL: Maximum event volume filter (in USD) - for testing
 # Set this to exclude very large events that may take longer to process
 # Examples:
 #   - 150_000_000 (150M) to exclude events over 150M USD
 #   - None for no maximum limit (production)
-MAX_VOLUME_FILTER = 5000  # Change to number for testing, e.g., 150_000_000
+MAX_VOLUME_FILTER = None  # Change to number for testing, e.g., 150_000_000
 
 
 class DataLoadingManager:
@@ -298,42 +298,6 @@ class DataLoadingManager:
                         load_type = %s,
                         updated_at = NOW()
                 """, (load_date, record_count, load_type, record_count, load_type))
-            
-            conn.commit()
-        finally:
-            cursor.close()
-            conn.close()
-    
-    def mark_data_error(self, data_type: str, load_date: date, error_message: str):
-        """
-        Mark data load as failed with error message
-        
-        Args:
-            data_type: Type of data (events, redemptions, positions, leaderboard)
-            load_date: Date the data is for
-            error_message: Error message to store
-        """
-        conn = psycopg2.connect(**self.connection_params)
-        cursor = conn.cursor()
-        
-        try:
-            column_error = f'{data_type}_error'
-            column_loaded = f'{data_type}_loaded'
-            
-            # Truncate error message if too long (keep first 500 chars)
-            error_message = str(error_message)[:500] if error_message else 'Unknown error'
-            
-            cursor.execute(f"""
-                INSERT INTO data_loads (
-                    load_date, {column_loaded}, {column_error}
-                )
-                VALUES (%s, FALSE, %s)
-                ON CONFLICT (load_date) 
-                DO UPDATE SET
-                    {column_loaded} = FALSE,
-                    {column_error} = %s,
-                    updated_at = NOW()
-            """, (load_date, error_message, error_message))
             
             conn.commit()
         finally:
