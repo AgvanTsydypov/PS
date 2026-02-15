@@ -15,13 +15,19 @@ USAGE:
 Check system state:
     python scripts/daily_scheduler_simple.py --check
 
-Run daily pipeline:
+Run daily pipeline (AUTO-CHECKS for missing data):
     python scripts/daily_scheduler_simple.py --run
+    
+    Note: --run automatically checks for missing dates and runs catch-up first
+    if needed. This ensures no data gaps before loading today's data.
 
 Load Genesis:
     python scripts/daily_scheduler_simple.py --historical
+    
+Genesis + Auto catch-up (RECOMMENDED for initial setup):
+    python scripts/daily_scheduler_simple.py --historical --auto-catchup
 
-Catch-up missing data (AUTO-RETRY):
+Catch-up missing data (MANUAL):
     python scripts/daily_scheduler_simple.py --catch-up
     
     Note: If catch-up takes >24h and new day passes, it will automatically
@@ -538,6 +544,47 @@ class SimplifiedScheduler:
         events_date = dates['events_date']
         redemptions_date = dates['redemptions_date']
         
+        # 🔍 AUTO-CHECK: Verify no missing dates before daily load
+        print(f"\n🔍 Checking for missing data...")
+        missing_dates = self.manager.get_missing_dates(
+            start_from=GENESIS_END_DATE + timedelta(days=1),
+            up_to=events_date - timedelta(days=1)  # Up to day before today's load
+        )
+        
+        if missing_dates:
+            print(f"\n⚠️  Found {len(missing_dates)} missing date(s) before today's load")
+            print(f"   Missing: {', '.join(str(d) for d in missing_dates[:5])}")
+            if len(missing_dates) > 5:
+                print(f"   ... and {len(missing_dates) - 5} more")
+            print(f"\n🔄 AUTO-CATCHUP: Running catch-up first to fill gaps...")
+            print("="*70)
+            
+            # Cleanup current logging
+            cleanup_logging()
+            
+            # Setup logging for catch-up
+            setup_logging("catchup")
+            
+            # Run catch-up
+            catchup_result = self.run_catch_up()
+            
+            # Cleanup catch-up logging
+            cleanup_logging()
+            
+            # Resume logging for daily run
+            setup_logging("daily")
+            
+            if not catchup_result['success']:
+                print(f"\n❌ Catch-up failed - cannot proceed with daily load")
+                return {'success': False, 'error': 'Catch-up failed', 'details': catchup_result}
+            
+            print(f"\n✅ Catch-up completed successfully")
+            print(f"   Loaded {catchup_result.get('dates_loaded', 0)} date(s)")
+            print(f"\n📅 Resuming daily pipeline...")
+            print("="*70)
+        else:
+            print(f"✅ No missing dates - proceeding with today's load")
+        
         print(f"\nLoading Dates:")
         print(f"  • Events: {events_date} ({EVENTS_LAG_DAYS} day{'s' if EVENTS_LAG_DAYS > 1 else ''} ago)")
         print(f"  • Redemptions: {redemptions_date} ({DATA_LAG_DAYS} days ago)")
@@ -558,6 +605,9 @@ class SimplifiedScheduler:
                                             record_count=results['events']['records'],
                                             markets_count=results['events']['markets'],
                                             load_type='daily')
+            elif not results['events']['success'] and not self.dry_run:
+                error_msg = results['events'].get('error', 'Script execution failed')
+                self.manager.mark_data_error('events', events_date, error_msg)
         
         # STEP 2-4: Redemptions, Positions, Leaderboard (DATA_LAG_DAYS ago)
         # ℹ️ For DAILY pipeline: lag allows data to finalize
@@ -586,6 +636,9 @@ class SimplifiedScheduler:
                         self.manager.mark_data_loaded(script_key, redemptions_date,
                                                     record_count=results[script_key]['records'],
                                                     load_type='daily')
+                    elif not results[script_key]['success'] and not self.dry_run:
+                        error_msg = results[script_key].get('error', 'Script execution failed')
+                        self.manager.mark_data_error(script_key, redemptions_date, error_msg)
         
         # STEP 5: Auto-fix incomplete days (events loaded but redemptions missing)
         # This handles the first DATA_LAG_DAYS days after Genesis where daily pipeline skipped redemptions
@@ -637,6 +690,9 @@ class SimplifiedScheduler:
                                                         load_type='daily')
                             print(f"   ✅ {self.scripts[script_key]['name']} loaded ({result['records']:,} records)")
                     else:
+                        if not self.dry_run:
+                            error_msg = result.get('error', 'Script execution failed')
+                            self.manager.mark_data_error(script_key, incomplete_date, error_msg)
                         print(f"   ⚠️  {self.scripts[script_key]['name']} failed")
                 
                 fixed_count += 1
@@ -719,6 +775,10 @@ class SimplifiedScheduler:
                         self.manager.mark_data_loaded(script_key, GENESIS_START_DATE,
                                                     record_count=results[script_key]['records'],
                                                     load_type='genesis')
+                else:
+                    # Mark error for failed loads
+                    error_msg = results[script_key].get('error', 'Script execution failed')
+                    self.manager.mark_data_error(script_key, GENESIS_START_DATE, error_msg)
             
             # Summary
             print("\n" + "="*70)
@@ -821,6 +881,8 @@ class SimplifiedScheduler:
                                             load_type='daily')
                 print(f"✅ Events loaded for {missing_date} ({result_events['records']:,} events, {result_events['markets']:,} markets)")
             else:
+                error_msg = result_events.get('error', 'Script execution failed')
+                self.manager.mark_data_error('events', missing_date, error_msg)
                 print(f"❌ Events failed for {missing_date}")
                 results[str(missing_date)] = {'success': False, 'step': 'events'}
                 continue  # Skip other steps if events failed
@@ -859,6 +921,8 @@ class SimplifiedScheduler:
                                                     record_count=result['records'],
                                                     load_type='daily')
                     else:
+                        error_msg = result.get('error', 'Script execution failed')
+                        self.manager.mark_data_error(script_key, missing_date, error_msg)
                         print(f"  ⚠️  {self.scripts[script_key]['name']} failed (continuing...)")
             
             results[str(missing_date)] = {'success': True}
