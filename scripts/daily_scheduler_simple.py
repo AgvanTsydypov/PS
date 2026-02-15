@@ -1005,14 +1005,20 @@ Examples:
   # Load Genesis (historical data)
   python scripts/daily_scheduler_simple.py --historical
   
+  # Load Genesis + auto catch-up (recommended for initial setup)
+  python scripts/daily_scheduler_simple.py --historical --auto-catchup
+  
+  # Catch-up missing data
+  python scripts/daily_scheduler_simple.py --catch-up
+  
   # Force reload
   python scripts/daily_scheduler_simple.py --run --force
   
   # Dry run
   python scripts/daily_scheduler_simple.py --run --dry-run
   
-  # Docker
-  docker exec polystars_scheduler python /app/scripts/daily_scheduler_simple.py --run
+  # Docker (with auto catch-up)
+  docker exec polystars_scheduler python /app/scripts/daily_scheduler_simple.py --historical --auto-catchup
         """
     )
     
@@ -1020,6 +1026,7 @@ Examples:
     parser.add_argument('--check', action='store_true', help='Check system state')
     parser.add_argument('--historical', action='store_true', help='Load Genesis data')
     parser.add_argument('--catch-up', action='store_true', help='Load all missing data automatically')
+    parser.add_argument('--auto-catchup', action='store_true', help='After --historical, automatically run --catch-up')
     parser.add_argument('--force', action='store_true', help='Force reload')
     parser.add_argument('--dry-run', action='store_true', help='Dry run (test)')
     parser.add_argument('--local', action='store_true', default=True, help='Use local PostgreSQL')
@@ -1052,7 +1059,25 @@ Examples:
         
         elif args.historical:
             result = scheduler.run_genesis_load()
-            sys.exit(0 if result['success'] else 1)
+            
+            # Auto-run catch-up after successful historical load
+            if result['success'] and args.auto_catchup:
+                print("\n" + "="*70)
+                print("🔄 AUTO-CATCHUP: Historical load completed successfully")
+                print("   Now running catch-up to load missing data...")
+                print("="*70 + "\n")
+                
+                # Cleanup historical logging
+                cleanup_logging()
+                
+                # Setup new logging for catchup
+                setup_logging("catchup")
+                
+                # Run catch-up
+                catchup_result = scheduler.run_catch_up()
+                sys.exit(0 if catchup_result['success'] else 1)
+            else:
+                sys.exit(0 if result['success'] else 1)
         
         elif args.catch_up:
             result = scheduler.run_catch_up()
@@ -1062,9 +1087,11 @@ Examples:
             print("Use --help for usage")
             print("\n🚀 Quick start (new server):")
             print("  1. Check: python scripts/daily_scheduler_simple.py --check")
-            print("  2. Genesis: python scripts/daily_scheduler_simple.py --historical")
-            print("  3. Catch-up: python scripts/daily_scheduler_simple.py --catch-up")
-            print("  4. Daily: python scripts/daily_scheduler_simple.py --run")
+            print("  2. Genesis + Catch-up: python scripts/daily_scheduler_simple.py --historical --auto-catchup")
+            print("  3. Daily: python scripts/daily_scheduler_simple.py --run")
+            print("\n💡 Or manually:")
+            print("  2a. Genesis only: python scripts/daily_scheduler_simple.py --historical")
+            print("  2b. Catch-up: python scripts/daily_scheduler_simple.py --catch-up")
     finally:
         if operation_name:
             cleanup_logging()
