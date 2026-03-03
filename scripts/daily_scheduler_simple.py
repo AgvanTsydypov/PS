@@ -43,9 +43,10 @@ import subprocess
 import time
 import argparse
 import tempfile
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Dict
 from pathlib import Path
+import psycopg2.extras
 
 # Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -53,6 +54,12 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE, GENESIS_END_DATE, DATA_LAG_DAYS, EVENTS_LAG_DAYS
+
+STANDARD_SEASON_TOTAL_SUPPLY_TEST = 30
+STANDARD_SEASON_ACTIVE_DAYS = 9
+STANDARD_SEASON_CYCLE_DAYS = 10
+GENESIS_SEASON_TOTAL_SUPPLY_TEST = 40
+GENESIS_SEASON_FAR_FUTURE_END = datetime(9999, 12, 31, tzinfo=timezone.utc)
 
 
 # ==========================================
@@ -341,6 +348,353 @@ class SimplifiedScheduler:
                 'args': ['--upload', '--local', '--from-db'] if use_local_db else ['--upload', '--from-db']
             }
         }
+
+    def _create_standard_season(self, cursor, start_date: datetime, season_number: int) -> int:
+        """Create a new standard season and return its id."""
+        end_date = start_date + timedelta(days=STANDARD_SEASON_CYCLE_DAYS)
+        cursor.execute("""
+            INSERT INTO seasons (
+                type,
+                season_number,
+                start_date,
+                end_date,
+                total_supply,
+                remaining_supply,
+                is_active,
+                is_completed,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                'standard',
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                TRUE,
+                FALSE,
+                NOW(),
+                NOW()
+            )
+            RETURNING id
+        """, (
+            season_number,
+            start_date,
+            end_date,
+            STANDARD_SEASON_TOTAL_SUPPLY_TEST,
+            STANDARD_SEASON_TOTAL_SUPPLY_TEST,
+        ))
+        inserted = cursor.fetchone()
+        if isinstance(inserted, dict):
+            return inserted["id"]
+        return inserted[0]
+
+    def _create_genesis_season(self, cursor, start_date: datetime, season_number: int) -> int:
+        """Create a new genesis season and return its id."""
+        cursor.execute("""
+            INSERT INTO seasons (
+                type,
+                season_number,
+                start_date,
+                end_date,
+                total_supply,
+                remaining_supply,
+                is_active,
+                is_completed,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                'genesis',
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                TRUE,
+                FALSE,
+                NOW(),
+                NOW()
+            )
+            RETURNING id
+        """, (
+            season_number,
+            start_date,
+            GENESIS_SEASON_FAR_FUTURE_END,
+            GENESIS_SEASON_TOTAL_SUPPLY_TEST,
+            GENESIS_SEASON_TOTAL_SUPPLY_TEST,
+        ))
+        inserted = cursor.fetchone()
+        if isinstance(inserted, dict):
+            return inserted["id"]
+        return inserted[0]
+
+    def ensure_genesis_season(self, cursor, now: datetime):
+        """
+        Ensure there is one active Genesis season.
+
+        Genesis is long-running by design, so we use a far-future end date
+        and keep one active genesis stream unless manually rotated.
+        """
+        cursor.execute("""
+            SELECT id, season_number
+            FROM seasons
+            WHERE type = 'genesis'
+              AND is_active = TRUE
+            ORDER BY start_date DESC, id DESC
+            LIMIT 1
+        """)
+        active_genesis = cursor.fetchone()
+        if active_genesis:
+            return int(active_genesis["id"]), False
+
+        cursor.execute("""
+            SELECT COALESCE(MAX(season_number), 0) AS max_season_number
+            FROM seasons
+            WHERE type = 'genesis'
+        """)
+        max_row = cursor.fetchone()
+        next_season_number = int(max_row["max_season_number"]) + 1
+
+        new_genesis_id = self._create_genesis_season(
+            cursor,
+            start_date=now,
+            season_number=next_season_number,
+        )
+        return new_genesis_id, True
+
+    def run_standard_season_update(self):
+        """
+        Manage standard season lifecycle:
+        - Auto-create first season if none exists
+        - Hard Stop burn at day 9 if supply remains
+        - Ghost State wait if sold out early
+        - Start next season exactly at day 10 boundary
+        """
+        if self.dry_run:
+            print("\n🎮 Season update skipped in DRY RUN mode")
+            return
+
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                now = datetime.now(timezone.utc)
+                print("\n" + "=" * 70)
+                print("🎮 SEASON LIFECYCLE UPDATE")
+                print("=" * 70)
+                print(f"🕒 Now (UTC): {now.isoformat()}")
+
+                genesis_id, created_genesis = self.ensure_genesis_season(cursor, now)
+                if created_genesis:
+                    conn.commit()
+                    self.manager.log_season_update(
+                        event_name="genesis_created",
+                        season_id=genesis_id,
+                        details=(
+                            f"season_number=auto "
+                            f"start_date={now.isoformat()} "
+                            f"end_date={GENESIS_SEASON_FAR_FUTURE_END.isoformat()}"
+                        ),
+                    )
+                    print(f"\n🧬 Created Genesis Season (id={genesis_id})")
+                else:
+                    cursor.execute("""
+                        SELECT id, season_number, start_date, end_date, total_supply, remaining_supply, is_active
+                        FROM seasons
+                        WHERE id = %s
+                    """, (genesis_id,))
+                    genesis = cursor.fetchone()
+                    if genesis:
+                        print(
+                            f"\n🧬 Genesis active: id={genesis['id']} "
+                            f"season_number={genesis['season_number']} "
+                            f"supply={genesis['remaining_supply']}/{genesis['total_supply']} "
+                            f"active={genesis['is_active']}"
+                        )
+
+                cursor.execute("""
+                    SELECT
+                        id,
+                        type,
+                        season_number,
+                        start_date,
+                        end_date,
+                        total_supply,
+                        remaining_supply,
+                        is_active,
+                        is_completed
+                    FROM seasons
+                    WHERE type = 'standard'
+                    ORDER BY start_date DESC, id DESC
+                    LIMIT 1
+                """)
+                latest = cursor.fetchone()
+
+                # Bootstrap: create first standard season if table has no standard seasons.
+                if not latest:
+                    print("\nℹ️ No standard season found. Bootstrapping Standard #1...")
+                    season_start = datetime.combine(date.today(), datetime.min.time(), tzinfo=timezone.utc)
+                    new_season_id = self._create_standard_season(cursor, season_start, 1)
+                    conn.commit()
+                    self.manager.log_season_update(
+                        event_name="new_standard_season_started",
+                        season_id=new_season_id,
+                        details=f"season_number=1 start_date={season_start.isoformat()} supply={STANDARD_SEASON_TOTAL_SUPPLY_TEST}",
+                    )
+                    print(f"\n🎮 Created Standard Season #1 (id={new_season_id})")
+                    print("=" * 70)
+                    return
+
+                season_id = int(latest["id"])
+                season_number = int(latest["season_number"])
+                start_date = latest["start_date"]
+                if start_date.tzinfo is None:
+                    start_date = start_date.replace(tzinfo=timezone.utc)
+                total_supply = int(latest["total_supply"])
+                remaining_supply = int(latest["remaining_supply"])
+                is_active = bool(latest["is_active"])
+                is_completed = bool(latest.get("is_completed", False))
+                claimed_supply = max(total_supply - remaining_supply, 0)
+
+                hard_stop_at = start_date + timedelta(days=STANDARD_SEASON_ACTIVE_DAYS)
+                next_cycle_at = start_date + timedelta(days=STANDARD_SEASON_CYCLE_DAYS)
+                print(
+                    f"\n📦 Standard state: id={season_id} season_number={season_number} "
+                    f"supply={remaining_supply}/{total_supply} active={is_active} completed={is_completed}"
+                )
+                print(
+                    f"   start={start_date.isoformat()} | hard_stop={hard_stop_at.isoformat()} | "
+                    f"next_cycle={next_cycle_at.isoformat()}"
+                )
+
+                # Ghost State: sold out before day 9 -> wait until day 10 boundary.
+                if now < hard_stop_at and remaining_supply == 0:
+                    if is_active:
+                        cursor.execute("""
+                            UPDATE seasons
+                            SET is_active = FALSE, updated_at = NOW()
+                            WHERE id = %s
+                        """, (season_id,))
+                        conn.commit()
+                        self.manager.log_season_update(
+                            event_name="ghost_state_entered",
+                            season_id=season_id,
+                            details=f"sold_out_early=true cycle_restart_at={next_cycle_at.isoformat()}",
+                        )
+                        print(f"\n👻 Season {season_id} entered Ghost State (waiting until cycle day 10)")
+                    else:
+                        print(f"\n👻 Season {season_id} already in Ghost State, waiting for next cycle boundary")
+                    print("=" * 70)
+                    return
+
+                # Day 9 hard stop window (Transmission start) - no new season yet.
+                if hard_stop_at <= now < next_cycle_at:
+                    if remaining_supply > 0:
+                        cursor.execute("""
+                            UPDATE seasons
+                            SET
+                                total_supply = %s,
+                                remaining_supply = 0,
+                                is_active = FALSE,
+                                is_completed = TRUE,
+                                updated_at = NOW()
+                            WHERE id = %s
+                        """, (claimed_supply, season_id))
+                        conn.commit()
+                        self.manager.log_season_update(
+                            event_name="hard_stop_burn",
+                            season_id=season_id,
+                            details=f"burned={remaining_supply} new_total_supply={claimed_supply} transmission_started_at={now.isoformat()}",
+                        )
+                        print(f"\n🔥 Hard Stop Burn applied to season {season_id}: burned {remaining_supply}")
+                    elif is_active:
+                        cursor.execute("""
+                            UPDATE seasons
+                            SET
+                                is_active = FALSE,
+                                is_completed = TRUE,
+                                updated_at = NOW()
+                            WHERE id = %s
+                        """, (season_id,))
+                        conn.commit()
+                        self.manager.log_season_update(
+                            event_name="transmission_started",
+                            season_id=season_id,
+                            details=f"transmission_started_at={now.isoformat()} sold_out=true",
+                        )
+                        print(f"\n📡 Season {season_id} moved to Transmission")
+                    else:
+                        print(f"\n📡 Season {season_id} already closed in Transmission window")
+                    print("=" * 70)
+                    return
+
+                # Day 10 boundary reached: start next cycle exactly at start+10 days.
+                if now >= next_cycle_at:
+                    if is_active or not is_completed:
+                        cursor.execute("""
+                            UPDATE seasons
+                            SET
+                                is_active = FALSE,
+                                is_completed = TRUE,
+                                updated_at = NOW()
+                            WHERE id = %s
+                        """, (season_id,))
+
+                    cursor.execute("""
+                        SELECT id
+                        FROM seasons
+                        WHERE type = 'standard'
+                          AND is_active = TRUE
+                        ORDER BY start_date DESC, id DESC
+                        LIMIT 1
+                    """)
+                    active_standard = cursor.fetchone()
+                    if active_standard:
+                        conn.commit()
+                        return
+
+                    new_season_number = season_number + 1
+                    new_season_id = self._create_standard_season(
+                        cursor,
+                        start_date=next_cycle_at,
+                        season_number=new_season_number,
+                    )
+                    conn.commit()
+                    self.manager.log_season_update(
+                        event_name="new_standard_season_started",
+                        season_id=new_season_id,
+                        details=(
+                            f"season_number={new_season_number} "
+                            f"start_date={next_cycle_at.isoformat()} "
+                            f"previous_season_id={season_id}"
+                        ),
+                    )
+                    print(f"\n🎮 Started Standard Season #{new_season_number} (id={new_season_id})")
+                    print("=" * 70)
+                    return
+
+                # Active cycle before hard stop with positive supply: ensure active marker.
+                if not is_active and remaining_supply > 0 and now < hard_stop_at:
+                    cursor.execute("""
+                        UPDATE seasons
+                        SET is_active = TRUE, updated_at = NOW()
+                        WHERE id = %s
+                    """, (season_id,))
+                    conn.commit()
+                    self.manager.log_season_update(
+                        event_name="season_reactivated",
+                        season_id=season_id,
+                        details="active_window_not_finished_and_supply_available",
+                    )
+                    print(f"\n🔁 Season {season_id} reactivated")
+                    print("=" * 70)
+                    return
+
+                print("\n✅ No season state transition required")
+                print("=" * 70)
+        finally:
+            conn.close()
     
     def check_system_state(self):
         """Check and display system state"""
@@ -524,6 +878,9 @@ class SimplifiedScheduler:
         print("="*70)
         print(f"Mode: {'DRY RUN' if self.dry_run else 'PRODUCTION'}")
         print(f"Database: {'Local PostgreSQL' if self.use_local_db else 'Supabase'}")
+
+        # Update standard season lifecycle before daily ETL tasks.
+        self.run_standard_season_update()
         
         # Check if another long-running operation is in progress
         lock = ProcessLock()
@@ -1074,6 +1431,9 @@ Examples:
   
   # Catch-up missing data
   python scripts/daily_scheduler_simple.py --catch-up
+
+  # Run only season lifecycle update
+  python scripts/daily_scheduler_simple.py --season-update
   
   # Force reload
   python scripts/daily_scheduler_simple.py --run --force
@@ -1090,6 +1450,7 @@ Examples:
     parser.add_argument('--check', action='store_true', help='Check system state')
     parser.add_argument('--historical', action='store_true', help='Load Genesis data')
     parser.add_argument('--catch-up', action='store_true', help='Load all missing data automatically')
+    parser.add_argument('--season-update', action='store_true', help='Run only seasons lifecycle logic')
     parser.add_argument('--auto-catchup', action='store_true', help='After --historical, automatically run --catch-up')
     parser.add_argument('--force', action='store_true', help='Force reload')
     parser.add_argument('--dry-run', action='store_true', help='Dry run (test)')
@@ -1109,6 +1470,8 @@ Examples:
         operation_name = "historical"
     elif args.catch_up:
         operation_name = "catchup"
+    elif args.season_update:
+        operation_name = "season_update"
     
     if operation_name:
         setup_logging(operation_name)
@@ -1146,6 +1509,11 @@ Examples:
         elif args.catch_up:
             result = scheduler.run_catch_up()
             sys.exit(0 if result['success'] else 1)
+
+        elif args.season_update:
+            scheduler.run_standard_season_update()
+            print("\n✅ Season lifecycle update completed")
+            sys.exit(0)
         
         else:
             print("Use --help for usage")
@@ -1153,6 +1521,7 @@ Examples:
             print("  1. Check: python scripts/daily_scheduler_simple.py --check")
             print("  2. Genesis + Catch-up: python scripts/daily_scheduler_simple.py --historical --auto-catchup")
             print("  3. Daily: python scripts/daily_scheduler_simple.py --run")
+            print("  4. Seasons only: python scripts/daily_scheduler_simple.py --season-update")
             print("\n💡 Or manually:")
             print("  2a. Genesis only: python scripts/daily_scheduler_simple.py --historical")
             print("  2b. Catch-up: python scripts/daily_scheduler_simple.py --catch-up")

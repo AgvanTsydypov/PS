@@ -57,8 +57,8 @@ load_dotenv()
 GENESIS_START_DATE = date(2024, 6, 1)
 GENESIS_END_DATE = date(2026, 2, 6)
 
-GENESIS_MIN_VOLUME = 100_000_000  # 100M
-DAILY_MIN_VOLUME = 5_000_000  # 5M
+GENESIS_MIN_VOLUME = 5_000  # 100M
+DAILY_MIN_VOLUME = 5_000  # 5M
 
 # Data lag configuration (in days)
 # How many days to wait before loading data (allows data to finalize)
@@ -71,14 +71,14 @@ DATA_LAG_DAYS = 4          # Redemptions/Positions/Leaderboard: 4 days after eve
 #   - 100 events for quick test (few minutes)
 #   - 1000 events for medium test (10-15 minutes)
 #   - None for full load (production)
-MAX_EVENTS_LIMIT = None  # Change to number for testing, e.g., 1000
+MAX_EVENTS_LIMIT = 3  # Change to number for testing, e.g., 1000
 
 # OPTIONAL: Maximum event volume filter (in USD) - for testing
 # Set this to exclude very large events that may take longer to process
 # Examples:
 #   - 150_000_000 (150M) to exclude events over 150M USD
 #   - None for no maximum limit (production)
-MAX_VOLUME_FILTER = None  # Change to number for testing, e.g., 150_000_000
+MAX_VOLUME_FILTER = 10_000  # Change to number for testing, e.g., 150_000_000
 
 
 class DataLoadingManager:
@@ -161,12 +161,56 @@ class DataLoadingManager:
                 
                 conn.commit()
                 print("✅ Table 'data_loads' created")
+
+            # Ensure season events table exists for dedicated lifecycle logs.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS season_events_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_name TEXT NOT NULL,
+                    season_id INTEGER,
+                    details TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_season_events_log_created_at
+                ON season_events_log(created_at DESC)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_season_events_log_event_name
+                ON season_events_log(event_name)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_season_events_log_season_id
+                ON season_events_log(season_id)
+            """)
+            conn.commit()
             
             cursor.close()
             conn.close()
             
         except Exception as e:
             print(f"⚠️  Could not ensure tables: {e}")
+
+    def get_connection(self):
+        """Get a DB connection using manager settings."""
+        return psycopg2.connect(**self.connection_params)
+
+    def log_season_update(self, event_name: str, season_id: int, details: str = ""):
+        """
+        Log season lifecycle events into dedicated season_events_log table.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO season_events_log (event_name, season_id, details)
+                VALUES (%s, %s, %s)
+            """, (event_name, season_id, details or None))
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
     
     def get_loading_dates(self, reference_date: date = None) -> Dict:
         """
