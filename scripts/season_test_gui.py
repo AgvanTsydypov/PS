@@ -44,6 +44,7 @@ class SeasonTestWorkbench:
         self.sample_wallets: List[str] = []
         self.seasons_lookup: Dict[str, int] = {}
         self.wallet_filter_var = tk.StringVar(value="all")
+        self.wallet_filter_var.trace_add("write", self._on_wallet_filter_changed)
         self.auto_refresh_ms = 1000
 
         self._build_ui()
@@ -225,6 +226,7 @@ class SeasonTestWorkbench:
         self.claim_season_info_text = tk.Text(info_frame, height=11, wrap="word")
         self.claim_season_info_text.pack(fill="both", expand=True, pady=(4, 0))
         self.claim_season_info_text.tag_configure("countdown_active", foreground="#0b5d1e")
+        self.claim_season_info_text.tag_configure("season_age", foreground="#0b5ed7")
 
         output_frame = ttk.Frame(claims_paned)
         ttk.Label(output_frame, text="Fake claims output").pack(anchor="w")
@@ -413,6 +415,12 @@ class SeasonTestWorkbench:
         finally:
             self.root.after(self.auto_refresh_ms, self._auto_refresh_tick)
 
+    def _on_wallet_filter_changed(self, *_args: object) -> None:
+        """Refresh wallet candidates immediately when filter changes."""
+        if not hasattr(self, "elig_wallet_combo") or not hasattr(self, "claim_wallet_combo"):
+            return
+        self._refresh_wallets()
+
     def _refresh_wallets(self) -> None:
         wallet_filter = self.wallet_filter_var.get().strip() or "all"
         if wallet_filter not in {"all", "origin", "non_origin"}:
@@ -482,10 +490,15 @@ class SeasonTestWorkbench:
         self.elig_wallet_combo["values"] = self.sample_wallets
         self.claim_wallet_combo["values"] = self.sample_wallets
 
-        if self.sample_wallets and not self.elig_wallet_var.get():
+        if self.sample_wallets and self.elig_wallet_var.get() not in self.sample_wallets:
             self.elig_wallet_var.set(self.sample_wallets[0])
-        if self.sample_wallets and not self.claim_wallet_var.get():
+        elif not self.sample_wallets:
+            self.elig_wallet_var.set("")
+
+        if self.sample_wallets and self.claim_wallet_var.get() not in self.sample_wallets:
             self.claim_wallet_var.set(self.sample_wallets[0])
+        elif not self.sample_wallets:
+            self.claim_wallet_var.set("")
 
     def _refresh_seasons(self) -> None:
         previous_claim_season_id = self._extract_season_id_from_label(self.claim_season_var.get())
@@ -696,18 +709,19 @@ class SeasonTestWorkbench:
     def _fmt_remaining(delta_seconds: float) -> str:
         """Format remaining seconds as compact human-readable duration."""
         if delta_seconds <= 0:
-            return "0m"
+            return "0s"
         total = int(delta_seconds)
         days, rem = divmod(total, 86400)
         hours, rem = divmod(rem, 3600)
-        minutes, _ = divmod(rem, 60)
+        minutes, seconds = divmod(rem, 60)
         parts: List[str] = []
         if days:
             parts.append(f"{days}d")
         if hours:
             parts.append(f"{hours}h")
-        if minutes or not parts:
+        if minutes or parts:
             parts.append(f"{minutes}m")
+        parts.append(f"{seconds}s")
         return " ".join(parts)
 
     def _refresh_claim_season_info(self) -> None:
@@ -766,6 +780,7 @@ class SeasonTestWorkbench:
             f"Supply: claimed={claimed_supply} / total={total_supply} | remaining={remaining_supply}",
             f"Current phase: {phase} | reason: {phase_reason}",
             f"Window: start={self._fmt_dt(start_date)} | end={self._fmt_dt(end_date)} | now={self._fmt_dt(now)}",
+            f"- season_alive_for: {self._fmt_remaining(max((now - start_date).total_seconds(), 0.0))}",
             "",
         ]
 
@@ -880,6 +895,8 @@ class SeasonTestWorkbench:
         for idx, line in enumerate(lines):
             if line.startswith("- time_to_"):
                 self.claim_season_info_text.insert("end", line, ("countdown_active",))
+            elif line.startswith("- season_alive_for:"):
+                self.claim_season_info_text.insert("end", line, ("season_age",))
             else:
                 self.claim_season_info_text.insert("end", line)
             if idx < len(lines) - 1:
