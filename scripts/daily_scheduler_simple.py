@@ -629,22 +629,21 @@ class SimplifiedScheduler:
 
     def ensure_genesis_season(self, cursor, now: datetime):
         """
-        Ensure there is one active Genesis season.
+        Ensure there is at most one Genesis season in total.
 
-        Genesis is long-running by design, so we use a far-future end date
-        and keep one active genesis stream unless manually rotated.
+        Genesis is a one-time stream. If any Genesis season already exists
+        (active or completed), do not create a new one.
         """
         cursor.execute("""
             SELECT id, season_number
             FROM seasons
             WHERE type = 'genesis'
-              AND is_active = TRUE
             ORDER BY start_date DESC, id DESC
             LIMIT 1
         """)
-        active_genesis = cursor.fetchone()
-        if active_genesis:
-            return int(active_genesis["id"]), False
+        existing_genesis = cursor.fetchone()
+        if existing_genesis:
+            return int(existing_genesis["id"]), False
 
         cursor.execute("""
             SELECT COALESCE(MAX(season_number), 0) AS max_season_number
@@ -707,7 +706,7 @@ class SimplifiedScheduler:
                     genesis = cursor.fetchone()
                     if genesis:
                         print(
-                            f"\n🧬 Genesis active: id={genesis['id']} "
+                            f"\n🧬 Genesis found: id={genesis['id']} "
                             f"season_number={genesis['season_number']} "
                             f"supply={genesis['remaining_supply']}/{genesis['total_supply']} "
                             f"active={genesis['is_active']}"
