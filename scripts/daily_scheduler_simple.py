@@ -55,10 +55,13 @@ if project_root not in sys.path:
 
 from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE, GENESIS_END_DATE, DATA_LAG_DAYS, EVENTS_LAG_DAYS
 
-STANDARD_SEASON_TOTAL_SUPPLY_TEST = 30
+STANDARD_SEASON_TOTAL_SUPPLY_TEST = 10
 STANDARD_SEASON_ACTIVE_DAYS = 9
 STANDARD_SEASON_CYCLE_DAYS = 10
-GENESIS_SEASON_TOTAL_SUPPLY_TEST = 40
+ORIGIN_LOOKBACK_DAYS_STANDARD = 10
+ORIGIN_TOP_WALLETS_STANDARD = 10
+ORIGIN_TOP_WALLETS_GENESIS = 20
+GENESIS_SEASON_TOTAL_SUPPLY_TEST = 15
 GENESIS_SEASON_FAR_FUTURE_END = datetime(9999, 12, 31, tzinfo=timezone.utc)
 
 
@@ -430,6 +433,200 @@ class SimplifiedScheduler:
             return inserted["id"]
         return inserted[0]
 
+    def _snapshot_origin_wallets_for_season(self, cursor, season_id: int, season_start_date: datetime) -> int:
+        """
+        Freeze Origins list at season start and persist it into winner_wallets_nft_to_claim.
+
+        Rules:
+        - standard: [season_start - DATA_LAG_DAYS - 10d, season_start - DATA_LAG_DAYS)
+        - genesis: [GENESIS_START_DATE, GENESIS_END_DATE + 1 day)
+        - include only wallets with positive realized PnL sum
+        - standard keeps top-10, genesis keeps top-20
+        - require at least N eligible wallets, otherwise save none
+        """
+        if season_start_date.tzinfo is None:
+            season_start_date = season_start_date.replace(tzinfo=timezone.utc)
+
+        cursor.execute(
+            """
+            SELECT type
+            FROM seasons
+            WHERE id = %s
+            """,
+            (season_id,),
+        )
+        season_row = cursor.fetchone()
+        season_type = (season_row or {}).get("type") if isinstance(season_row, dict) else (season_row[0] if season_row else None)
+
+        if season_type == "standard":
+            window_end = season_start_date - timedelta(days=DATA_LAG_DAYS)
+            window_start = window_end - timedelta(days=ORIGIN_LOOKBACK_DAYS_STANDARD)
+            source = "top_pnl_10d_lagged_standard"
+            rank_limit = ORIGIN_TOP_WALLETS_STANDARD
+        else:
+            window_start = datetime.combine(GENESIS_START_DATE, datetime.min.time(), tzinfo=timezone.utc)
+            # Exclusive upper bound includes all rows of GENESIS_END_DATE.
+            window_end = datetime.combine(
+                GENESIS_END_DATE + timedelta(days=1),
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            )
+            source = "top_pnl_genesis_window"
+            rank_limit = ORIGIN_TOP_WALLETS_GENESIS
+
+        # Idempotent re-snapshot in case of retries / manual re-initialization.
+        cursor.execute(
+            """
+            DELETE FROM winner_wallets_nft_to_claim
+            WHERE season_id = %s
+            """,
+            (season_id,),
+        )
+        cursor.execute(
+            """
+            WITH pnl_window AS (
+                SELECT
+                    LOWER(proxy_wallet) AS wallet_address,
+                    SUM(realized_pnl) AS total_pnl_window
+                FROM user_closed_positions
+                WHERE proxy_wallet IS NOT NULL
+                  AND COALESCE(
+                        end_date_parsed,
+                        timestamp_human,
+                        TO_TIMESTAMP(timestamp_unix)
+                      ) >= %s
+                  AND COALESCE(
+                        end_date_parsed,
+                        timestamp_human,
+                        TO_TIMESTAMP(timestamp_unix)
+                      ) < %s
+                GROUP BY LOWER(proxy_wallet)
+                HAVING SUM(realized_pnl) > 0
+            ),
+            qualifying_position AS (
+                SELECT DISTINCT ON (LOWER(ucp.proxy_wallet))
+                    LOWER(ucp.proxy_wallet) AS wallet_address,
+                    COALESCE(
+                        ucp.event_id,
+                        m_by_id.event_id,
+                        m_by_condition.event_id,
+                        e_by_slug.id,
+                        e_by_title.id
+                    ) AS event_id,
+                    COALESCE(ucp.market_id, m_by_id.id, m_by_condition.id) AS market_id,
+                    COALESCE(ucp.condition_id, m_by_id.condition_id, m_by_condition.condition_id) AS condition_id,
+                    COALESCE(ucp.event_slug, e_by_id.slug, e_by_slug.slug, e_by_title.slug) AS event_slug,
+                    COALESCE(ucp.title, e_by_id.title, e_by_slug.title, e_by_title.title) AS title
+                FROM user_closed_positions ucp
+                LEFT JOIN markets m_by_id
+                    ON ucp.market_id IS NOT NULL
+                   AND m_by_id.id = ucp.market_id
+                LEFT JOIN markets m_by_condition
+                    ON m_by_id.id IS NULL
+                   AND ucp.condition_id IS NOT NULL
+                   AND m_by_condition.condition_id = ucp.condition_id
+                LEFT JOIN events e_by_id
+                    ON e_by_id.id = COALESCE(ucp.event_id, m_by_id.event_id, m_by_condition.event_id)
+                LEFT JOIN LATERAL (
+                    SELECT e.id, e.slug, e.title
+                    FROM events e
+                    WHERE ucp.event_slug IS NOT NULL
+                      AND e.slug = ucp.event_slug
+                    LIMIT 1
+                ) e_by_slug
+                    ON e_by_id.id IS NULL
+                LEFT JOIN LATERAL (
+                    SELECT e.id, e.slug, e.title
+                    FROM events e
+                    WHERE ucp.title IS NOT NULL
+                      AND e.title = ucp.title
+                    LIMIT 1
+                ) e_by_title
+                    ON e_by_id.id IS NULL
+                   AND e_by_slug.id IS NULL
+                WHERE ucp.proxy_wallet IS NOT NULL
+                  AND COALESCE(
+                        ucp.end_date_parsed,
+                        ucp.timestamp_human,
+                        TO_TIMESTAMP(ucp.timestamp_unix)
+                      ) >= %s
+                  AND COALESCE(
+                        ucp.end_date_parsed,
+                        ucp.timestamp_human,
+                        TO_TIMESTAMP(ucp.timestamp_unix)
+                      ) < %s
+                ORDER BY
+                    LOWER(ucp.proxy_wallet),
+                    ucp.realized_pnl DESC,
+                    COALESCE(
+                        ucp.end_date_parsed,
+                        ucp.timestamp_human,
+                        TO_TIMESTAMP(ucp.timestamp_unix)
+                    ) DESC
+            ),
+            ranked AS (
+                SELECT
+                    wallet_address,
+                    total_pnl_window,
+                    ROW_NUMBER() OVER (ORDER BY total_pnl_window DESC, wallet_address ASC) AS pnl_rank
+                FROM pnl_window
+            ),
+            enough_data AS (
+                SELECT COUNT(*) AS wallet_count
+                FROM ranked
+            )
+            INSERT INTO winner_wallets_nft_to_claim (
+                season_id,
+                wallet_address,
+                source,
+                total_pnl_window,
+                pnl_rank,
+                window_start,
+                window_end,
+                snapshot_at,
+                event_id,
+                market_id,
+                condition_id,
+                event_slug,
+                event_title
+            )
+            SELECT
+                %s AS season_id,
+                r.wallet_address,
+                %s::TEXT AS source,
+                r.total_pnl_window,
+                r.pnl_rank,
+                %s AS window_start,
+                %s AS window_end,
+                NOW() AS snapshot_at,
+                qp.event_id,
+                qp.market_id,
+                qp.condition_id,
+                qp.event_slug,
+                qp.title AS event_title
+            FROM ranked r
+            LEFT JOIN qualifying_position qp
+                ON qp.wallet_address = r.wallet_address
+            CROSS JOIN enough_data d
+            WHERE d.wallet_count >= %s
+              AND r.pnl_rank <= %s
+            ORDER BY r.pnl_rank
+            """,
+            (
+                window_start,
+                window_end,
+                window_start,
+                window_end,
+                season_id,
+                source,
+                window_start,
+                window_end,
+                rank_limit,
+                rank_limit,
+            ),
+        )
+        return int(cursor.rowcount or 0)
+
     def ensure_genesis_season(self, cursor, now: datetime):
         """
         Ensure there is one active Genesis season.
@@ -487,6 +684,7 @@ class SimplifiedScheduler:
 
                 genesis_id, created_genesis = self.ensure_genesis_season(cursor, now)
                 if created_genesis:
+                    origins_count = self._snapshot_origin_wallets_for_season(cursor, genesis_id, now)
                     conn.commit()
                     self.manager.log_season_update(
                         event_name="genesis_created",
@@ -494,10 +692,12 @@ class SimplifiedScheduler:
                         details=(
                             f"season_number=auto "
                             f"start_date={now.isoformat()} "
-                            f"end_date={GENESIS_SEASON_FAR_FUTURE_END.isoformat()}"
+                            f"end_date={GENESIS_SEASON_FAR_FUTURE_END.isoformat()} "
+                            f"origin_snapshot_count={origins_count}"
                         ),
                     )
                     print(f"\n🧬 Created Genesis Season (id={genesis_id})")
+                    print(f"   🏛️  Origin snapshot saved: {origins_count} wallets")
                 else:
                     cursor.execute("""
                         SELECT id, season_number, start_date, end_date, total_supply, remaining_supply, is_active
@@ -536,13 +736,20 @@ class SimplifiedScheduler:
                     print("\nℹ️ No standard season found. Bootstrapping Standard #1...")
                     season_start = datetime.combine(date.today(), datetime.min.time(), tzinfo=timezone.utc)
                     new_season_id = self._create_standard_season(cursor, season_start, 1)
+                    origins_count = self._snapshot_origin_wallets_for_season(cursor, new_season_id, season_start)
                     conn.commit()
                     self.manager.log_season_update(
                         event_name="new_standard_season_started",
                         season_id=new_season_id,
-                        details=f"season_number=1 start_date={season_start.isoformat()} supply={STANDARD_SEASON_TOTAL_SUPPLY_TEST}",
+                        details=(
+                            f"season_number=1 "
+                            f"start_date={season_start.isoformat()} "
+                            f"supply={STANDARD_SEASON_TOTAL_SUPPLY_TEST} "
+                            f"origin_snapshot_count={origins_count}"
+                        ),
                     )
                     print(f"\n🎮 Created Standard Season #1 (id={new_season_id})")
+                    print(f"   🏛️  Origin snapshot saved: {origins_count} wallets")
                     print("=" * 70)
                     return
 
@@ -660,6 +867,7 @@ class SimplifiedScheduler:
                         start_date=next_cycle_at,
                         season_number=new_season_number,
                     )
+                    origins_count = self._snapshot_origin_wallets_for_season(cursor, new_season_id, next_cycle_at)
                     conn.commit()
                     self.manager.log_season_update(
                         event_name="new_standard_season_started",
@@ -667,10 +875,12 @@ class SimplifiedScheduler:
                         details=(
                             f"season_number={new_season_number} "
                             f"start_date={next_cycle_at.isoformat()} "
-                            f"previous_season_id={season_id}"
+                            f"previous_season_id={season_id} "
+                            f"origin_snapshot_count={origins_count}"
                         ),
                     )
                     print(f"\n🎮 Started Standard Season #{new_season_number} (id={new_season_id})")
+                    print(f"   🏛️  Origin snapshot saved: {origins_count} wallets")
                     print("=" * 70)
                     return
 

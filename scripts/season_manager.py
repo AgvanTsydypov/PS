@@ -3,7 +3,7 @@ Season manager for NFT minting phases.
 
 State machine:
 - Breach (days 1-3): open for all, capped at 20% of total supply.
-- Vault (days 4-6): open only for Origins from v_origin_wallets.
+- Vault (days 4-6): open only for Origins from season start snapshot.
 - Scavenge (days 7-9): open for all (hard stop at day 9 end).
 - Transmission (day 10): claims closed.
 
@@ -139,8 +139,8 @@ class SeasonManager:
         finally:
             conn.close()
 
-    def is_origin_wallet(self, user_wallet: str) -> bool:
-        """Check Origins eligibility by v_origin_wallets view."""
+    def is_origin_wallet_for_season(self, user_wallet: str, season_id: int) -> bool:
+        """Check whether wallet is in Origins snapshot for a specific season."""
         conn = psycopg2.connect(**self.connection_params)
         try:
             with conn.cursor() as cursor:
@@ -148,8 +148,40 @@ class SeasonManager:
                     """
                     SELECT EXISTS (
                         SELECT 1
-                        FROM v_origin_wallets
-                        WHERE lower(wallet_address) = lower(%s)
+                        FROM winner_wallets_nft_to_claim
+                        WHERE season_id = %s
+                          AND lower(wallet_address) = lower(%s)
+                    )
+                    """,
+                    (season_id, user_wallet),
+                )
+                return bool(cursor.fetchone()[0])
+        finally:
+            conn.close()
+
+    def is_origin_wallet(self, user_wallet: str) -> bool:
+        """
+        Compatibility helper:
+        checks Origins membership for the currently active standard season.
+        """
+        conn = psycopg2.connect(**self.connection_params)
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    WITH active_standard AS (
+                        SELECT id
+                        FROM seasons
+                        WHERE type = 'standard'
+                          AND is_active = TRUE
+                        ORDER BY start_date DESC, id DESC
+                        LIMIT 1
+                    )
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM winner_wallets_nft_to_claim sow
+                        JOIN active_standard a ON a.id = sow.season_id
+                        WHERE lower(sow.wallet_address) = lower(%s)
                     )
                     """,
                     (user_wallet,),
@@ -319,6 +351,7 @@ class SeasonManager:
             season_id = int(stream_season["id"])
             phase_info = self.get_current_phase(season_id)
             already_claimed = self._has_claimed_in_season(normalized_wallet, season_id)
+            is_origin_for_stream = self.is_origin_wallet_for_season(normalized_wallet, season_id)
 
             if already_claimed:
                 eligible_now = False
@@ -326,7 +359,7 @@ class SeasonManager:
             elif not phase_info["is_claim_open"]:
                 eligible_now = False
                 ineligible_reason = f"Claims closed in current phase: {phase_info['phase']}"
-            elif phase_info["requires_origin"] and not is_origin:
+            elif phase_info["requires_origin"] and not is_origin_for_stream:
                 eligible_now = False
                 ineligible_reason = "Current phase requires Origin wallet (Vault)"
             else:
@@ -343,6 +376,7 @@ class SeasonManager:
                 "ineligible_reason": ineligible_reason,
                 "requires_origin": phase_info["requires_origin"],
                 "is_claim_open": phase_info["is_claim_open"],
+                "is_origin_wallet": is_origin_for_stream,
             }
 
         genesis_status = build_stream_status(genesis_season)
