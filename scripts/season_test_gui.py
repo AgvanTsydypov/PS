@@ -44,7 +44,7 @@ class SeasonTestWorkbench:
         self.sample_wallets: List[str] = []
         self.seasons_lookup: Dict[str, int] = {}
         self.wallet_filter_var = tk.StringVar(value="all")
-        self.auto_refresh_ms = 4000
+        self.auto_refresh_ms = 1000
 
         self._build_ui()
         self._refresh_all()
@@ -166,11 +166,11 @@ class SeasonTestWorkbench:
         self.claim_season_combo.grid(row=1, column=1, sticky="w", padx=(8, 8), pady=(8, 0))
 
         ttk.Label(frame, text="Phase").grid(row=1, column=2, sticky="w", pady=(8, 0))
-        self.claim_phase_var = tk.StringVar(value="public")
+        self.claim_phase_var = tk.StringVar(value="breach")
         self.claim_phase_combo = ttk.Combobox(
             frame,
             textvariable=self.claim_phase_var,
-            values=["public", "vault"],
+            values=["breach", "vault", "scavenge"],
             width=16,
             state="readonly",
         )
@@ -217,12 +217,22 @@ class SeasonTestWorkbench:
         self.claim_wallet_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_claim_season_info())
         self._on_phase_mode_toggle()
 
-        ttk.Label(self.tab_claims, text="Selected season context").pack(anchor="w", padx=8, pady=(2, 0))
-        self.claim_season_info_text = tk.Text(self.tab_claims, height=11, wrap="word")
-        self.claim_season_info_text.pack(fill="x", padx=8, pady=(4, 8))
+        claims_paned = ttk.Panedwindow(self.tab_claims, orient=tk.VERTICAL)
+        claims_paned.pack(fill="both", expand=True, padx=8, pady=(2, 8))
 
-        self.claims_output_text = tk.Text(self.tab_claims, height=22, wrap="word")
-        self.claims_output_text.pack(fill="both", expand=True, padx=8, pady=(8, 8))
+        info_frame = ttk.Frame(claims_paned)
+        ttk.Label(info_frame, text="Selected season context").pack(anchor="w")
+        self.claim_season_info_text = tk.Text(info_frame, height=11, wrap="word")
+        self.claim_season_info_text.pack(fill="both", expand=True, pady=(4, 0))
+        self.claim_season_info_text.tag_configure("countdown_active", foreground="#0b5d1e")
+
+        output_frame = ttk.Frame(claims_paned)
+        ttk.Label(output_frame, text="Fake claims output").pack(anchor="w")
+        self.claims_output_text = tk.Text(output_frame, height=22, wrap="word")
+        self.claims_output_text.pack(fill="both", expand=True, pady=(4, 0))
+
+        claims_paned.add(info_frame, weight=1)
+        claims_paned.add(output_frame, weight=2)
 
     def _build_season_claims_tab(self) -> None:
         frame = ttk.Frame(self.tab_season_claims)
@@ -366,7 +376,7 @@ class SeasonTestWorkbench:
 
         ttk.Label(
             frame,
-            text="Reset uses sql/queries/clear_seasons_logic.sql and will wipe seasons/claims/season_events_log.",
+            text="Reset uses sql/queries/clear_seasons_logic.sql and will wipe seasons/claims/season_events_log/winner_wallets_nft_to_claim.",
         ).pack(anchor="w")
 
         self.confirm_reset_var = tk.BooleanVar(value=False)
@@ -397,6 +407,7 @@ class SeasonTestWorkbench:
     def _auto_refresh_tick(self) -> None:
         try:
             self._refresh_seasons()
+            self._refresh_claim_season_info()
         except Exception:
             pass
         finally:
@@ -617,6 +628,24 @@ class SeasonTestWorkbench:
             return direct
         return self._extract_season_id_from_label(label)
 
+    def _get_phase_enum_values(self) -> List[str]:
+        """Read current enum labels for claims.phase_type from PostgreSQL."""
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT e.enumlabel
+                    FROM pg_type t
+                    JOIN pg_enum e ON t.oid = e.enumtypid
+                    WHERE t.typname = 'phase_type'
+                    ORDER BY e.enumsortorder
+                    """
+                )
+                return [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
     def _derive_claim_phase_type(self, season_id: int) -> tuple[Optional[str], Optional[str]]:
         try:
             phase_info = self.season_manager.get_current_phase(season_id)
@@ -627,9 +656,9 @@ class SeasonTestWorkbench:
         is_claim_open = bool(phase_info.get("is_claim_open"))
         if not is_claim_open:
             return None, f"Claims are closed in phase: {current_phase or 'unknown'}"
-        if current_phase == "vault":
-            return "vault", None
-        return "public", None
+        if current_phase in {"breach", "vault", "scavenge"}:
+            return current_phase, None
+        return None, f"Unsupported claim phase for insert: {current_phase or 'unknown'}"
 
     def _on_phase_mode_toggle(self) -> None:
         if self.auto_phase_var.get():
@@ -645,11 +674,11 @@ class SeasonTestWorkbench:
             return
         season_id = self._get_selected_season_id(self.claim_season_var.get().strip())
         if not season_id:
-            self.claim_phase_var.set("public")
+            self.claim_phase_var.set("breach")
             self._refresh_claim_season_info()
             return
         detected_phase, _ = self._derive_claim_phase_type(season_id)
-        self.claim_phase_var.set(detected_phase or "public")
+        self.claim_phase_var.set(detected_phase or "breach")
         self._refresh_claim_season_info()
 
     def _on_claim_season_changed(self) -> None:
@@ -663,14 +692,35 @@ class SeasonTestWorkbench:
             value = value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
+    @staticmethod
+    def _fmt_remaining(delta_seconds: float) -> str:
+        """Format remaining seconds as compact human-readable duration."""
+        if delta_seconds <= 0:
+            return "0m"
+        total = int(delta_seconds)
+        days, rem = divmod(total, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, _ = divmod(rem, 60)
+        parts: List[str] = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes or not parts:
+            parts.append(f"{minutes}m")
+        return " ".join(parts)
+
     def _refresh_claim_season_info(self) -> None:
         if not hasattr(self, "claim_season_info_text"):
             return
 
         season_id = self._get_selected_season_id(self.claim_season_var.get().strip())
+        prev_yview = self.claim_season_info_text.yview()
         self.claim_season_info_text.delete("1.0", "end")
         if not season_id:
             self.claim_season_info_text.insert("end", "Select season to show current phase and transition rules.")
+            if prev_yview:
+                self.claim_season_info_text.yview_moveto(prev_yview[0])
             return
 
         conn = self.manager.get_connection()
@@ -690,6 +740,8 @@ class SeasonTestWorkbench:
 
         if not season:
             self.claim_season_info_text.insert("end", f"Season {season_id} not found.")
+            if prev_yview:
+                self.claim_season_info_text.yview_moveto(prev_yview[0])
             return
 
         try:
@@ -721,7 +773,7 @@ class SeasonTestWorkbench:
             lines.extend(
                 [
                     "Transition rules (Genesis):",
-                    "- Claims are open (Scavenge/public) while remaining_supply > 0.",
+                    "- Claims are open in Scavenge while remaining_supply > 0.",
                     "- Transition to Transmission happens when remaining_supply reaches 0.",
                     "- No day-based windows are used.",
                 ]
@@ -745,6 +797,12 @@ class SeasonTestWorkbench:
                     f"- vault_end: {self._fmt_dt(vault_end)}",
                     f"- scavenge_end: {self._fmt_dt(scavenge_end)}",
                     f"- cycle_boundary(day10): {self._fmt_dt(transmission_end)}",
+                    "",
+                    "Phase timeline (UTC):",
+                    f"- Breach:      {self._fmt_dt(start_date)}  ->  {self._fmt_dt(breach_end)}",
+                    f"- Vault:       {self._fmt_dt(breach_end)}  ->  {self._fmt_dt(vault_end)}",
+                    f"- Scavenge:    {self._fmt_dt(vault_end)}  ->  {self._fmt_dt(scavenge_end)}",
+                    f"- Transmission:{self._fmt_dt(scavenge_end)}  ->  {self._fmt_dt(transmission_end)}",
                 ]
             )
 
@@ -763,6 +821,16 @@ class SeasonTestWorkbench:
             else:
                 next_note = "Cycle boundary passed: scheduler should have rotated/closed this standard season."
             lines.extend(["", next_note])
+
+            # Explicit countdowns help when manually validating scenario windows.
+            if now < breach_end:
+                lines.append(f"- time_to_vault_window: {self._fmt_remaining((breach_end - now).total_seconds())}")
+            if now < vault_end:
+                lines.append(f"- time_to_scavenge_window: {self._fmt_remaining((vault_end - now).total_seconds())}")
+            if now < scavenge_end:
+                lines.append(f"- time_to_transmission_window: {self._fmt_remaining((scavenge_end - now).total_seconds())}")
+            if now < transmission_end:
+                lines.append(f"- time_to_cycle_rollover: {self._fmt_remaining((transmission_end - now).total_seconds())}")
 
         if self.auto_phase_var.get():
             lines.append(f"\nInsert mode: Auto phase ON -> claim phase_type will be '{self.claim_phase_var.get()}'.")
@@ -809,7 +877,15 @@ class SeasonTestWorkbench:
                 lines.append(f"- eligibility_check_error: {exc}")
                 lines.append("- verdict: eligibility unknown (manual review)")
 
-        self.claim_season_info_text.insert("end", "\n".join(lines))
+        for idx, line in enumerate(lines):
+            if line.startswith("- time_to_"):
+                self.claim_season_info_text.insert("end", line, ("countdown_active",))
+            else:
+                self.claim_season_info_text.insert("end", line)
+            if idx < len(lines) - 1:
+                self.claim_season_info_text.insert("end", "\n")
+        if prev_yview:
+            self.claim_season_info_text.yview_moveto(prev_yview[0])
 
     @staticmethod
     def _resolve_stream_for_season_id(eligibility: Dict[str, object], season_id: int) -> Optional[Dict[str, object]]:
@@ -868,9 +944,10 @@ class SeasonTestWorkbench:
             warning_reason: Optional[str] = None
 
             if stream:
+                stream_is_origin = bool(stream.get("is_origin_wallet", eligibility.get("is_origin_wallet")))
                 if not stream.get("eligible_now", False):
                     warning_reason = str(stream.get("ineligible_reason") or "Wallet not eligible for this season now")
-                elif phase == "vault" and not bool(eligibility.get("is_origin_wallet")):
+                elif phase == "vault" and not stream_is_origin:
                     warning_reason = "Wallet is non-origin but phase='vault'"
             elif phase == "vault" and not bool(eligibility.get("is_origin_wallet")):
                 warning_reason = "Wallet is non-origin but phase='vault'"
@@ -903,6 +980,18 @@ class SeasonTestWorkbench:
             except ValueError:
                 messagebox.showwarning("Token ID", "Token ID must be an integer.")
                 return
+
+        supported_phases = set(self._get_phase_enum_values())
+        if phase not in supported_phases:
+            supported = ", ".join(sorted(supported_phases)) if supported_phases else "(none)"
+            message = (
+                f"DB enum phase_type does not support '{phase}'.\n"
+                f"Supported now: {supported}\n\n"
+                "Update DB enum to include breach/vault/scavenge."
+            )
+            messagebox.showerror("phase_type enum mismatch", message)
+            self._append_text(self.claims_output_text, f"Insert blocked: {message}")
+            return
 
         conn = self.manager.get_connection()
         try:
@@ -972,8 +1061,10 @@ class SeasonTestWorkbench:
                         COUNT(*) FILTER (WHERE status = 'PENDING') AS pending_claims,
                         COUNT(*) FILTER (WHERE status = 'PROCESSING') AS processing_claims,
                         COUNT(*) FILTER (WHERE status = 'FAILED') AS failed_claims,
-                        COUNT(*) FILTER (WHERE phase_type = 'vault') AS vault_claims,
-                        COUNT(*) FILTER (WHERE phase_type = 'public') AS public_claims
+                        COUNT(*) FILTER (WHERE phase_type::text = 'breach') AS breach_claims,
+                        COUNT(*) FILTER (WHERE phase_type::text = 'vault') AS vault_claims,
+                        COUNT(*) FILTER (WHERE phase_type::text = 'scavenge') AS scavenge_claims,
+                        COUNT(*) FILTER (WHERE phase_type::text = 'public') AS legacy_public_claims
                     FROM claims
                     WHERE season_id = %s
                     """,
@@ -986,7 +1077,8 @@ class SeasonTestWorkbench:
         summary = (
             f"season_id={season_id} | total={stats['total_claims']} | completed={stats['completed_claims']} | "
             f"pending={stats['pending_claims']} | processing={stats['processing_claims']} | failed={stats['failed_claims']} | "
-            f"vault={stats['vault_claims']} | public={stats['public_claims']}"
+            f"breach={stats['breach_claims']} | vault={stats['vault_claims']} | "
+            f"scavenge={stats['scavenge_claims']} | legacy_public={stats['legacy_public_claims']}"
         )
         self.season_claims_summary_text.insert("end", summary)
 

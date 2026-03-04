@@ -68,6 +68,16 @@ WHERE type IN ('genesis', 'standard');
 -- 5) (Опционально) почистить тех-логи сезонов
 DELETE FROM season_events_log;
 
-TRUNCATE TABLE claims, seasons, season_events_log RESTART IDENTITY;
+-- 6) Универсальная очистка (работает и до/после миграции winners table rename)
+DO $$
+BEGIN
+  IF to_regclass('public.winner_wallets_nft_to_claim') IS NOT NULL THEN
+    TRUNCATE TABLE claims, seasons, season_events_log, winner_wallets_nft_to_claim RESTART IDENTITY;
+  ELSIF to_regclass('public.season_origin_wallets') IS NOT NULL THEN
+    TRUNCATE TABLE claims, seasons, season_events_log, season_origin_wallets RESTART IDENTITY;
+  ELSE
+    TRUNCATE TABLE claims, seasons, season_events_log RESTART IDENTITY;
+  END IF;
+END $$;
 
 COMMIT;
