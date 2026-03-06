@@ -32,8 +32,13 @@ from scripts.data_loading_manager import DataLoadingManager
 from scripts.daily_scheduler_simple import SimplifiedScheduler
 from scripts.season_manager import SeasonManager
 from scripts.solana_service import MintedNftResult, SolanaClient
+from scripts.zora_service import ZoraClient
 
 MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
+BLOCKCHAIN_SOLANA = "solana"
+BLOCKCHAIN_BASE_ZORA = "base_zora"
+DEFAULT_SOLANA_RECIPIENT = "H1wsggroxpW3LwCCv8dVeiJW73oYPkcDGgSqhiT5Zbz3"
+DEFAULT_BASE_RECIPIENT = "0xdC65DFF7EED4c1C05511395Ccf19CF507066aCe1"
 
 
 @dataclass(frozen=True)
@@ -198,21 +203,32 @@ class SeasonTestWorkbench:
         )
         self.claim_phase_combo.grid(row=1, column=3, sticky="w", pady=(8, 0))
 
-        ttk.Label(frame, text="Solana address").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.claim_solana_var = tk.StringVar(
-            value="H1wsggroxpW3LwCCv8dVeiJW73oYPkcDGgSqhiT5Zbz3"
+        ttk.Label(frame, text="Blockchain").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.claim_blockchain_var = tk.StringVar(value=BLOCKCHAIN_SOLANA)
+        self.claim_blockchain_combo = ttk.Combobox(
+            frame,
+            textvariable=self.claim_blockchain_var,
+            values=[BLOCKCHAIN_SOLANA, BLOCKCHAIN_BASE_ZORA],
+            width=18,
+            state="readonly",
         )
+        self.claim_blockchain_combo.grid(row=2, column=1, sticky="w", padx=(8, 8), pady=(8, 0))
+        self.claim_blockchain_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_blockchain_changed())
+
+        self.claim_recipient_label_var = tk.StringVar(value="Solana address")
+        ttk.Label(frame, textvariable=self.claim_recipient_label_var).grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.claim_solana_var = tk.StringVar(value=DEFAULT_SOLANA_RECIPIENT)
         ttk.Entry(frame, textvariable=self.claim_solana_var, width=72).grid(
-            row=2, column=1, columnspan=4, sticky="w", padx=(8, 8), pady=(8, 0)
+            row=3, column=1, columnspan=4, sticky="w", padx=(8, 8), pady=(8, 0)
         )
 
-        ttk.Label(frame, text="PnL value").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="PnL value").grid(row=4, column=0, sticky="w", pady=(8, 0))
         self.claim_pnl_var = tk.StringVar(value="0")
-        ttk.Entry(frame, textvariable=self.claim_pnl_var, width=20).grid(row=3, column=1, sticky="w", padx=(8, 8), pady=(8, 0))
+        ttk.Entry(frame, textvariable=self.claim_pnl_var, width=20).grid(row=4, column=1, sticky="w", padx=(8, 8), pady=(8, 0))
 
-        ttk.Label(frame, text="Rank").grid(row=3, column=2, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="Rank").grid(row=4, column=2, sticky="w", pady=(8, 0))
         self.claim_rank_var = tk.StringVar(value="0")
-        ttk.Entry(frame, textvariable=self.claim_rank_var, width=20).grid(row=3, column=3, sticky="w", pady=(8, 0))
+        ttk.Entry(frame, textvariable=self.claim_rank_var, width=20).grid(row=4, column=3, sticky="w", pady=(8, 0))
 
         self.auto_phase_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
@@ -220,40 +236,41 @@ class SeasonTestWorkbench:
             text="Auto phase from season window",
             variable=self.auto_phase_var,
             command=self._on_phase_mode_toggle,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         self.db_only_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             frame,
             text="DB only (skip mint, insert claim row only)",
             variable=self.db_only_var,
-        ).grid(row=4, column=2, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=5, column=2, columnspan=2, sticky="w", pady=(8, 0))
 
         self.force_insert_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             frame,
             text="Force insert (ignore eligibility warning)",
             variable=self.force_insert_var,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         self.claim_action_btn = ttk.Button(
             frame,
             text="Claim (Mint NFT)",
             command=self._insert_fake_claim,
         )
-        self.claim_action_btn.grid(row=5, column=4, sticky="e", pady=(8, 0))
+        self.claim_action_btn.grid(row=6, column=4, sticky="e", pady=(8, 0))
         self.open_collection_btn = ttk.Button(
             frame,
             text="Open Master Collection",
             command=self._open_master_collection_in_explorer,
         )
-        self.open_collection_btn.grid(row=5, column=3, sticky="e", padx=(8, 8), pady=(8, 0))
+        self.open_collection_btn.grid(row=6, column=3, sticky="e", padx=(8, 8), pady=(8, 0))
         self.claim_progress_var = tk.StringVar(value="")
         ttk.Label(frame, textvariable=self.claim_progress_var).grid(
-            row=6, column=0, columnspan=5, sticky="w", pady=(8, 0)
+            row=7, column=0, columnspan=5, sticky="w", pady=(8, 0)
         )
         self.claim_season_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_claim_season_changed())
         self.claim_wallet_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_claim_season_info())
+        self._on_blockchain_changed()
         self._on_phase_mode_toggle()
 
         claims_paned = ttk.Panedwindow(self.tab_claims, orient=tk.VERTICAL)
@@ -472,6 +489,15 @@ class SeasonTestWorkbench:
         wallet_filter = self.wallet_filter_var.get().strip() or "all"
         if wallet_filter not in {"all", "origin", "non_origin"}:
             wallet_filter = "all"
+        selected_season_id = self._get_selected_season_id(self.claim_season_var.get().strip())
+
+        if not selected_season_id:
+            self.sample_wallets = []
+            self.elig_wallet_combo["values"] = self.sample_wallets
+            self.claim_wallet_combo["values"] = self.sample_wallets
+            self.elig_wallet_var.set("")
+            self.claim_wallet_var.set("")
+            return
 
         conn = self.manager.get_connection()
         try:
@@ -480,20 +506,54 @@ class SeasonTestWorkbench:
                     """
                     WITH origin_wallets AS (
                         SELECT lower(wallet_address) AS wallet
-                        FROM v_origin_wallets
+                        FROM winner_wallets_nft_to_claim
+                        WHERE season_id = %s
+                    ),
+                    season_bounds AS (
+                        SELECT start_date, end_date
+                        FROM seasons
+                        WHERE id = %s
+                        LIMIT 1
+                    ),
+                    season_snapshot_window AS (
+                        SELECT
+                            MIN(window_start) AS window_start,
+                            MAX(window_end) AS window_end
+                        FROM winner_wallets_nft_to_claim
+                        WHERE season_id = %s
                     ),
                     position_wallets AS (
-                        SELECT lower(proxy_wallet) AS wallet
-                        FROM user_closed_positions
-                        WHERE proxy_wallet IS NOT NULL
-                        ORDER BY lower(proxy_wallet)
-                        LIMIT 200
+                        SELECT DISTINCT lower(ucp.proxy_wallet) AS wallet
+                        FROM user_closed_positions ucp
+                        CROSS JOIN season_bounds sb
+                        CROSS JOIN season_snapshot_window ssw
+                        CROSS JOIN LATERAL (
+                            SELECT COALESCE(
+                                ucp.timestamp_human,
+                                CASE
+                                    WHEN ucp.timestamp_unix IS NULL THEN NULL
+                                    WHEN ucp.timestamp_unix > 1000000000000
+                                        THEN to_timestamp(ucp.timestamp_unix / 1000.0)
+                                    ELSE to_timestamp(ucp.timestamp_unix)
+                                END
+                            ) AS position_ts
+                        ) pts
+                        WHERE ucp.proxy_wallet IS NOT NULL
+                          AND lower(ucp.proxy_wallet) ~* '^0x[a-f0-9]{40}$'
+                          AND pts.position_ts IS NOT NULL
+                          AND pts.position_ts >= COALESCE(
+                              ssw.window_start,
+                              sb.start_date - INTERVAL '30 days'
+                          )
+                          AND pts.position_ts < COALESCE(
+                              ssw.window_end,
+                              sb.start_date
+                          )
                     ),
                     claimed_wallets AS (
                         SELECT lower(user_wallet) AS wallet
                         FROM claims
-                        ORDER BY lower(user_wallet)
-                        LIMIT 200
+                        WHERE season_id = %s
                     ),
                     candidates AS (
                         SELECT wallet FROM origin_wallets
@@ -510,10 +570,10 @@ class SeasonTestWorkbench:
                     classified AS (
                         SELECT
                             n.wallet,
-                            (o.wallet_address IS NOT NULL) AS is_origin
+                            (o.wallet IS NOT NULL) AS is_origin
                         FROM normalized n
-                        LEFT JOIN v_origin_wallets o
-                            ON o.wallet_address = n.wallet
+                        LEFT JOIN origin_wallets o
+                            ON o.wallet = n.wallet
                     )
                     SELECT wallet
                     FROM classified
@@ -523,9 +583,17 @@ class SeasonTestWorkbench:
                         OR (%s = 'non_origin' AND is_origin = FALSE)
                     )
                     ORDER BY wallet
-                    LIMIT 300
+                    LIMIT 30
                     """,
-                    (wallet_filter, wallet_filter, wallet_filter),
+                    (
+                        selected_season_id,
+                        selected_season_id,
+                        selected_season_id,
+                        selected_season_id,
+                        wallet_filter,
+                        wallet_filter,
+                        wallet_filter,
+                    ),
                 )
                 rows = cursor.fetchall()
             self.sample_wallets = [r[0] for r in rows]
@@ -612,6 +680,7 @@ class SeasonTestWorkbench:
             self.scenario_season_var.set(default_label)
 
         self._sync_claim_phase_preview()
+        self._refresh_wallets()
         if hasattr(self, "scenario_auto_sync_var") and self.scenario_auto_sync_var.get():
             self._load_scenario_season_params(silent=True)
 
@@ -728,6 +797,22 @@ class SeasonTestWorkbench:
             self.claim_phase_combo.configure(state="readonly")
         self._refresh_claim_season_info()
 
+    def _on_blockchain_changed(self) -> None:
+        selected = self.claim_blockchain_var.get().strip()
+        current_recipient = self.claim_solana_var.get().strip()
+        if selected == BLOCKCHAIN_BASE_ZORA:
+            self.claim_recipient_label_var.set("Base recipient (0x...)")
+            wallet = self.claim_wallet_var.get().strip().lower()
+            if current_recipient == DEFAULT_SOLANA_RECIPIENT or not current_recipient:
+                self.claim_solana_var.set(DEFAULT_BASE_RECIPIENT)
+            elif wallet.startswith("0x") and len(wallet) == 42 and not current_recipient:
+                self.claim_solana_var.set(wallet)
+        else:
+            self.claim_recipient_label_var.set("Solana address")
+            if current_recipient == DEFAULT_BASE_RECIPIENT or not current_recipient:
+                self.claim_solana_var.set(DEFAULT_SOLANA_RECIPIENT)
+        self._refresh_claim_season_info()
+
     def _sync_claim_phase_preview(self) -> None:
         if not self.auto_phase_var.get():
             self._refresh_claim_season_info()
@@ -742,6 +827,7 @@ class SeasonTestWorkbench:
         self._refresh_claim_season_info()
 
     def _on_claim_season_changed(self) -> None:
+        self._refresh_wallets()
         self._sync_claim_phase_preview()
 
     @staticmethod
@@ -910,6 +996,7 @@ class SeasonTestWorkbench:
                 stream = self._resolve_stream_for_season_id(eligibility, season_id)
 
                 lines.append(f"- wallet: {wallet}")
+                lines.append(f"- blockchain: {self.claim_blockchain_var.get().strip()}")
                 lines.append(f"- is_origin_wallet: {bool(eligibility.get('is_origin_wallet'))}")
 
                 if stream:
@@ -976,22 +1063,34 @@ class SeasonTestWorkbench:
 
     def _insert_fake_claim(self) -> None:
         wallet = self.claim_wallet_var.get().strip()
-        solana_wallet_raw = self.claim_solana_var.get().strip()
+        recipient_raw = self.claim_solana_var.get().strip()
         season_label = self.claim_season_var.get().strip()
         season_id = self._get_selected_season_id(season_label)
         phase = self.claim_phase_var.get().strip()
+        selected_blockchain = self.claim_blockchain_var.get().strip()
 
-        if not wallet or not season_id or not solana_wallet_raw:
-            messagebox.showwarning("Missing fields", "Select wallet/season and enter Solana address.")
+        if not wallet or not season_id or not recipient_raw:
+            messagebox.showwarning("Missing fields", "Select wallet/season and enter recipient address.")
             return
         if self.claim_in_progress:
             messagebox.showinfo("Mint in progress", "Please wait until current mint finishes.")
             return
-        try:
-            solana_wallet = str(Pubkey.from_string(solana_wallet_raw))
-            self.claim_solana_var.set(solana_wallet)
-        except Exception:
-            messagebox.showwarning("Invalid Solana address", "Enter a valid Solana wallet address.")
+
+        if selected_blockchain == BLOCKCHAIN_SOLANA:
+            try:
+                recipient_address = str(Pubkey.from_string(recipient_raw))
+                self.claim_solana_var.set(recipient_address)
+            except Exception:
+                messagebox.showwarning("Invalid Solana address", "Enter a valid Solana wallet address.")
+                return
+        elif selected_blockchain == BLOCKCHAIN_BASE_ZORA:
+            recipient_address = recipient_raw.lower()
+            if not (recipient_address.startswith("0x") and len(recipient_address) == 42):
+                messagebox.showwarning("Invalid Base address", "Enter a valid EVM address (0x...).")
+                return
+            self.claim_solana_var.set(recipient_address)
+        else:
+            messagebox.showwarning("Invalid blockchain", f"Unsupported blockchain: {selected_blockchain}")
             return
 
         auto_phase_reason: Optional[str] = None
@@ -1077,15 +1176,17 @@ class SeasonTestWorkbench:
                 self._insert_pending_claim_db_only(
                     claim_id=claim_id,
                     wallet=wallet,
-                    solana_wallet=solana_wallet,
+                    solana_wallet=recipient_address,
                     season_id=season_id,
                     phase=phase,
+                    mint_chain=selected_blockchain,
                 )
                 self._append_text(
                     self.claims_output_text,
                     (
                         f"DB-only claim inserted: claim_id={claim_id} wallet={wallet} "
-                        f"solana_wallet={solana_wallet} season_id={season_id} phase={phase}"
+                        f"recipient={recipient_address} season_id={season_id} phase={phase} "
+                        f"chain={selected_blockchain}"
                     ),
                 )
                 self._refresh_all()
@@ -1104,7 +1205,16 @@ class SeasonTestWorkbench:
         self._set_claim_ui_busy(True, "Minting in progress...")
         worker = threading.Thread(
             target=self._mint_claim_worker,
-            args=(claim_id, wallet, solana_wallet, season_name, season_id, phase, allocation),
+            args=(
+                claim_id,
+                wallet,
+                recipient_address,
+                season_name,
+                season_id,
+                phase,
+                allocation,
+                selected_blockchain,
+            ),
             daemon=True,
         )
         worker.start()
@@ -1113,41 +1223,59 @@ class SeasonTestWorkbench:
         self,
         claim_id: int,
         wallet: str,
-        solana_wallet: str,
+        recipient_address: str,
         season_name: str,
         season_id: int,
         phase: str,
         allocation: WinnerClaimAllocation,
+        selected_blockchain: str,
     ) -> None:
         try:
-            solana_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
-            mint_result = solana_client.mint_user_nft(
-                user_wallet_address=solana_wallet,
-                pnl_value=allocation.pnl_value,
-                rank=allocation.rank,
-                season_name=season_name,
-                claim_id=claim_id,
-                winner_context={
-                    "assignment_type": allocation.assignment_type,
-                    "winner_wallet_address": allocation.winner_wallet_address,
-                    "claimer_wallet_address": wallet,
-                    "season_id": season_id,
-                    "snapshot": allocation.snapshot,
-                },
-            )
+            winner_context = {
+                "assignment_type": allocation.assignment_type,
+                "winner_wallet_address": allocation.winner_wallet_address,
+                "claimer_wallet_address": wallet,
+                "season_id": season_id,
+                "snapshot": allocation.snapshot,
+                "blockchain": selected_blockchain,
+            }
+            if selected_blockchain == BLOCKCHAIN_SOLANA:
+                mint_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
+                mint_result = mint_client.mint_user_nft(
+                    user_wallet_address=recipient_address,
+                    pnl_value=allocation.pnl_value,
+                    rank=allocation.rank,
+                    season_name=season_name,
+                    claim_id=claim_id,
+                    winner_context=winner_context,
+                )
+            elif selected_blockchain == BLOCKCHAIN_BASE_ZORA:
+                zora_client = ZoraClient(project_root=project_root)
+                mint_result = zora_client.mint_user_nft(
+                    user_wallet_address=recipient_address,
+                    pnl_value=allocation.pnl_value,
+                    rank=allocation.rank,
+                    season_name=season_name,
+                    claim_id=claim_id,
+                    winner_context=winner_context,
+                )
+            else:
+                raise ValueError(f"Unsupported blockchain: {selected_blockchain}")
+
             self._insert_completed_claim(
                 claim_id=claim_id,
                 wallet=wallet,
-                solana_wallet=solana_wallet,
+                solana_wallet=recipient_address,
                 season_id=season_id,
                 phase=phase,
                 mint_result=mint_result,
+                mint_chain=selected_blockchain,
             )
             self._mark_winner_row_as_minted(
                 allocation=allocation,
                 claim_id=claim_id,
                 claimer_wallet=wallet,
-                recipient_solana_wallet=solana_wallet,
+                recipient_solana_wallet=recipient_address,
                 mint_result=mint_result,
             )
             self.root.after(
@@ -1155,7 +1283,7 @@ class SeasonTestWorkbench:
                 lambda: self._on_mint_success(
                     claim_id=claim_id,
                     wallet=wallet,
-                    solana_wallet=solana_wallet,
+                    solana_wallet=recipient_address,
                     season_id=season_id,
                     mint_result=mint_result,
                 ),
@@ -1183,7 +1311,8 @@ class SeasonTestWorkbench:
             self.claims_output_text,
             (
                 f"Mint completed: claim_id={claim_id} wallet={wallet} season_id={season_id} "
-                f"solana_wallet={solana_wallet} asset_address={mint_result.asset_address} "
+                f"recipient={solana_wallet} chain={self.claim_blockchain_var.get().strip()} "
+                f"asset_address={mint_result.asset_address} "
                 f"tx_hash={mint_result.tx_hash}"
             ),
         )
@@ -1463,6 +1592,7 @@ class SeasonTestWorkbench:
         season_id: int,
         phase: str,
         mint_result: MintedNftResult,
+        mint_chain: str,
     ) -> None:
         payload = (
             claim_id,
@@ -1475,6 +1605,7 @@ class SeasonTestWorkbench:
             mint_result.metadata_uri,
             mint_result.asset_address,
             "COMPLETED",
+            mint_chain,
         )
         insert_sql = """
             INSERT INTO claims (
@@ -1489,10 +1620,11 @@ class SeasonTestWorkbench:
                 metadata_uri,
                 asset_address,
                 status,
+                mint_chain,
                 created_at,
                 updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, NOW(), NOW())
+            VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, NOW(), NOW())
         """
 
         for attempt in range(2):
@@ -1523,6 +1655,7 @@ class SeasonTestWorkbench:
         solana_wallet: str,
         season_id: int,
         phase: str,
+        mint_chain: str,
     ) -> None:
         conn = self.manager.get_connection()
         try:
@@ -1538,10 +1671,11 @@ class SeasonTestWorkbench:
                         timestamp,
                         status,
                         metadata_uri,
+                        mint_chain,
                         created_at,
                         updated_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, NOW(), NOW())
+                    VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, NOW(), NOW())
                     """,
                     (
                         claim_id,
@@ -1551,6 +1685,7 @@ class SeasonTestWorkbench:
                         phase,
                         "PENDING",
                         "https://arweave.net/placeholder",
+                        mint_chain,
                     ),
                 )
             conn.commit()
@@ -1953,6 +2088,9 @@ class SeasonTestWorkbench:
                 )
                 cursor.execute(
                     "ALTER TABLE claims ADD COLUMN IF NOT EXISTS asset_address TEXT"
+                )
+                cursor.execute(
+                    "ALTER TABLE claims ADD COLUMN IF NOT EXISTS mint_chain TEXT"
                 )
                 # Legacy schemas often keep EVM-sized VARCHAR columns (e.g. tx_hash=66),
                 # which is too short for Solana signatures/URIs.
