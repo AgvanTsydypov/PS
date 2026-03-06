@@ -159,6 +159,42 @@ class SeasonManager:
         finally:
             conn.close()
 
+    def _get_origin_snapshot_mint_status(
+        self, user_wallet: str, season_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return mint status for user's origin snapshot row in this season.
+
+        Useful to detect cases where an Origin allocation was already consumed
+        in open/public phases by another claimant.
+        """
+        conn = psycopg2.connect(**self.connection_params)
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        id,
+                        wallet_address,
+                        COALESCE(is_minted, FALSE) AS is_minted,
+                        minted_to_wallet,
+                        minted_to_solana_wallet,
+                        minted_claim_id,
+                        minted_tx_hash,
+                        minted_asset_address,
+                        minted_at
+                    FROM winner_wallets_nft_to_claim
+                    WHERE season_id = %s
+                      AND lower(wallet_address) = lower(%s)
+                    LIMIT 1
+                    """,
+                    (season_id, user_wallet),
+                )
+                row = cursor.fetchone()
+                return dict(row) if row else None
+        finally:
+            conn.close()
+
     def is_origin_wallet(self, user_wallet: str) -> bool:
         """
         Compatibility helper:
@@ -352,6 +388,14 @@ class SeasonManager:
             phase_info = self.get_current_phase(season_id)
             already_claimed = self._has_claimed_in_season(normalized_wallet, season_id)
             is_origin_for_stream = self.is_origin_wallet_for_season(normalized_wallet, season_id)
+            origin_snapshot_status = (
+                self._get_origin_snapshot_mint_status(normalized_wallet, season_id)
+                if is_origin_for_stream
+                else None
+            )
+            origin_snapshot_is_minted = bool(
+                origin_snapshot_status and origin_snapshot_status.get("is_minted")
+            )
 
             if already_claimed:
                 eligible_now = False
@@ -362,6 +406,16 @@ class SeasonManager:
             elif phase_info["requires_origin"] and not is_origin_for_stream:
                 eligible_now = False
                 ineligible_reason = "Current phase requires Origin wallet (Vault)"
+            elif is_origin_for_stream and origin_snapshot_is_minted:
+                minted_to = origin_snapshot_status.get("minted_to_wallet")
+                if minted_to and minted_to.lower() != normalized_wallet:
+                    ineligible_reason = (
+                        "Origin allocation already minted "
+                        f"by another wallet: {minted_to}"
+                    )
+                else:
+                    ineligible_reason = "Origin allocation already minted"
+                eligible_now = False
             else:
                 eligible_now = True
                 ineligible_reason = None
@@ -377,6 +431,12 @@ class SeasonManager:
                 "requires_origin": phase_info["requires_origin"],
                 "is_claim_open": phase_info["is_claim_open"],
                 "is_origin_wallet": is_origin_for_stream,
+                "origin_snapshot_is_minted": origin_snapshot_is_minted,
+                "origin_snapshot_minted_to_wallet": (
+                    origin_snapshot_status.get("minted_to_wallet")
+                    if origin_snapshot_status
+                    else None
+                ),
             }
 
         genesis_status = build_stream_status(genesis_season)
