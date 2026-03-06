@@ -1246,7 +1246,12 @@ class SeasonTestWorkbench:
                             "This winner row was already minted and cannot be reused"
                             f"{assignee_suffix}."
                         )
-                    return self._build_winner_allocation(row=row, assignment_type="winner_self")
+                    event_image_url = self._resolve_event_image_url(cursor=cursor, row=row)
+                    return self._build_winner_allocation(
+                        row=row,
+                        assignment_type="winner_self",
+                        event_image_url=event_image_url,
+                    )
 
                 cursor.execute(
                     """
@@ -1278,7 +1283,12 @@ class SeasonTestWorkbench:
                         "No unminted winner rows left in this season. "
                         "Cannot mint an NFT with snapshot data."
                     )
-                return self._build_winner_allocation(row=fallback_row, assignment_type="random_fallback")
+                event_image_url = self._resolve_event_image_url(cursor=cursor, row=fallback_row)
+                return self._build_winner_allocation(
+                    row=fallback_row,
+                    assignment_type="random_fallback",
+                    event_image_url=event_image_url,
+                )
         except ValueError as exc:
             messagebox.showwarning("Winner allocation unavailable", str(exc))
             raise
@@ -1286,7 +1296,11 @@ class SeasonTestWorkbench:
             conn.close()
 
     @staticmethod
-    def _build_winner_allocation(row: Dict[str, Any], assignment_type: str) -> WinnerClaimAllocation:
+    def _build_winner_allocation(
+        row: Dict[str, Any],
+        assignment_type: str,
+        event_image_url: Optional[str] = None,
+    ) -> WinnerClaimAllocation:
         snapshot: Dict[str, Any] = {
             "winner_row_id": int(row["id"]),
             "winner_wallet_address": str(row["wallet_address"]),
@@ -1301,6 +1315,7 @@ class SeasonTestWorkbench:
             "condition_id": row.get("condition_id"),
             "event_slug": row.get("event_slug"),
             "event_title": row.get("event_title"),
+            "event_image_url": event_image_url,
         }
         return WinnerClaimAllocation(
             row_id=int(row["id"]),
@@ -1310,6 +1325,62 @@ class SeasonTestWorkbench:
             rank=int(row.get("pnl_rank") or 0),
             snapshot=snapshot,
         )
+
+    @staticmethod
+    def _resolve_event_image_url(cursor: Any, row: Dict[str, Any]) -> Optional[str]:
+        def _extract_image(record: Optional[Dict[str, Any]]) -> Optional[str]:
+            if not record:
+                return None
+            image = (record.get("event_image") or "").strip()
+            return image or None
+
+        event_id = str(row.get("event_id") or "").strip()
+        event_slug = str(row.get("event_slug") or "").strip()
+        event_title = str(row.get("event_title") or "").strip()
+
+        if event_id:
+            cursor.execute(
+                """
+                SELECT COALESCE(NULLIF(TRIM(image), ''), NULLIF(TRIM(icon), '')) AS event_image
+                FROM events
+                WHERE id = %s
+                LIMIT 1
+                """,
+                (event_id,),
+            )
+            image = _extract_image(cursor.fetchone())
+            if image:
+                return image
+
+        if event_slug:
+            cursor.execute(
+                """
+                SELECT COALESCE(NULLIF(TRIM(image), ''), NULLIF(TRIM(icon), '')) AS event_image
+                FROM events
+                WHERE slug = %s
+                LIMIT 1
+                """,
+                (event_slug,),
+            )
+            image = _extract_image(cursor.fetchone())
+            if image:
+                return image
+
+        if event_title:
+            cursor.execute(
+                """
+                SELECT COALESCE(NULLIF(TRIM(image), ''), NULLIF(TRIM(icon), '')) AS event_image
+                FROM events
+                WHERE title = %s
+                LIMIT 1
+                """,
+                (event_title,),
+            )
+            image = _extract_image(cursor.fetchone())
+            if image:
+                return image
+
+        return None
 
     def _mark_winner_row_as_minted(
         self,
