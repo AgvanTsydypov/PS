@@ -19,8 +19,7 @@
 4. `redemptions` - выплаты пользователям
 5. `user_closed_positions` - закрытые позиции трейдеров
 6. `trader_leaderboard` - рейтинг трейдеров
-7. `nft_claims` - заявки на NFT
-8. `rate_limits` - rate limiting
+7. `data_loads` - трекинг ежедневных загрузок
 
 **Также создает views:**
 - `events_summary` - события с статистикой
@@ -142,11 +141,11 @@ id (PK), rank, proxy_wallet, pnl, vol, category, time_period...
 ```
 **Индексы:** proxy_wallet, category, rank, pnl, vol
 
-### 6. **nft_claims** - NFT заявки
+### 6. **data_loads** - Трекинг загрузок
 ```sql
-id (PK), eth_address, solana_address, status, mint_tx_hash...
+id (PK), load_date, events_loaded, redemptions_loaded, positions_loaded...
 ```
-**Индексы:** eth_address, status
+**Индексы:** load_date, load_type
 
 ---
 

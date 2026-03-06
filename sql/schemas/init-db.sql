@@ -364,41 +364,7 @@ CREATE INDEX IF NOT EXISTS idx_trader_leaderboard_pnl ON trader_leaderboard(pnl 
 DO $$ BEGIN RAISE NOTICE '✅ Trader_leaderboard table created'; END $$;
 
 -- ============================================================================
--- 7. NFT CLAIM TABLES (для Next.js приложения)
--- ============================================================================
-DO $$ BEGIN RAISE NOTICE '🎨 Creating NFT claim tables...'; END $$;
-
--- NftClaim table
-CREATE TABLE IF NOT EXISTS nft_claims (
-    id SERIAL PRIMARY KEY,
-    eth_address VARCHAR(42) UNIQUE NOT NULL,
-    proxy_wallet VARCHAR(42) NOT NULL,
-    solana_address VARCHAR(44) NOT NULL,
-    status VARCHAR(20) DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    processed_at TIMESTAMPTZ,
-    mint_tx_hash VARCHAR(200),
-    error_message TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_nft_claims_status_created ON nft_claims(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_nft_claims_eth_address ON nft_claims(eth_address);
-
--- RateLimit table
-CREATE TABLE IF NOT EXISTS rate_limits (
-    id SERIAL PRIMARY KEY,
-    identifier VARCHAR(100) UNIQUE NOT NULL,
-    count INTEGER DEFAULT 0,
-    window_start TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_rate_limits_identifier ON rate_limits(identifier);
-
-DO $$ BEGIN RAISE NOTICE '✅ NFT claim tables created'; END $$;
-
--- ============================================================================
--- 8. USEFUL VIEWS FOR ANALYTICS
+-- 7. USEFUL VIEWS FOR ANALYTICS
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE '📊 Creating analytics views...'; END $$;
 
@@ -558,8 +524,6 @@ DO $$ BEGIN RAISE NOTICE '   - fetch_metadata'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - redemptions'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - user_closed_positions'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - trader_leaderboard'; END $$;
-DO $$ BEGIN RAISE NOTICE '   - nft_claims'; END $$;
-DO $$ BEGIN RAISE NOTICE '   - rate_limits'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - data_loads (tracking)'; END $$;
 DO $$ BEGIN RAISE NOTICE ''; END $$;
 DO $$ BEGIN RAISE NOTICE '📈 Created views:'; END $$;

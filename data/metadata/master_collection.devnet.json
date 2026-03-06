@@ -1,0 +1,18 @@
+{
+  "name": "PS DEV",
+  "symbol": "POLY",
+  "description": "Official PS collection on Solana Devnet.",
+  "image": "https://ub6hjrgyg2ipgflb4qsuuzkvrjg6pvj5w5ynceipajvbxtoafmaa.ardrive.net/oHx0xNg2kPMVYeQlSmVVik3n1T23cNERDwJqG83AKwA?",
+  "external_url": "https://example.com",
+  "seller_fee_basis_points": 500,
+  "attributes": [],
+  "properties": {
+    "category": "image",
+    "creators": [
+      {
+        "address": "H1wsggroxpW3LwCCv8dVeiJW73oYPkcDGgSqhiT5Zbz3",
+        "share": 100
+      }
+    ]
+  }
+}

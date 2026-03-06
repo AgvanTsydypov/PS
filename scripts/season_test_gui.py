@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
 import sys
+import threading
 import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +19,7 @@ from tkinter import messagebox, ttk
 from typing import Dict, List, Optional
 
 import psycopg2.extras
+from solders.pubkey import Pubkey
 
 # Add project root to path (same approach as other scripts)
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -28,6 +29,7 @@ if project_root not in sys.path:
 from scripts.data_loading_manager import DataLoadingManager
 from scripts.daily_scheduler_simple import SimplifiedScheduler
 from scripts.season_manager import SeasonManager
+from scripts.solana_service import MintedNftResult, SolanaClient
 
 
 class SeasonTestWorkbench:
@@ -46,8 +48,12 @@ class SeasonTestWorkbench:
         self.wallet_filter_var = tk.StringVar(value="all")
         self.wallet_filter_var.trace_add("write", self._on_wallet_filter_changed)
         self.auto_refresh_ms = 1000
+        self._auto_refresh_tick_count = 0
+        self._season_refresh_every_ticks = 10
+        self.claim_in_progress = False
 
         self._build_ui()
+        self._ensure_claims_schema_for_solana_mint()
         self._refresh_all()
         self._start_auto_refresh()
 
@@ -67,7 +73,7 @@ class SeasonTestWorkbench:
 
         notebook.add(self.tab_overview, text="Overview")
         notebook.add(self.tab_eligibility, text="Eligibility")
-        notebook.add(self.tab_claims, text="Fake Claims")
+        notebook.add(self.tab_claims, text="Claims Mint")
         notebook.add(self.tab_season_claims, text="Season Claims")
         notebook.add(self.tab_scenarios, text="Scenarios")
         notebook.add(self.tab_reset, text="Reset")
@@ -177,26 +183,21 @@ class SeasonTestWorkbench:
         )
         self.claim_phase_combo.grid(row=1, column=3, sticky="w", pady=(8, 0))
 
-        ttk.Label(frame, text="Status").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.claim_status_var = tk.StringVar(value="COMPLETED")
-        ttk.Combobox(
-            frame,
-            textvariable=self.claim_status_var,
-            values=["PENDING", "PROCESSING", "COMPLETED", "FAILED"],
-            width=16,
-            state="readonly",
-        ).grid(row=2, column=1, sticky="w", padx=(8, 8), pady=(8, 0))
+        ttk.Label(frame, text="Solana address").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.claim_solana_var = tk.StringVar(
+            value="H1wsggroxpW3LwCCv8dVeiJW73oYPkcDGgSqhiT5Zbz3"
+        )
+        ttk.Entry(frame, textvariable=self.claim_solana_var, width=72).grid(
+            row=2, column=1, columnspan=4, sticky="w", padx=(8, 8), pady=(8, 0)
+        )
 
-        ttk.Label(frame, text="Token ID (optional)").grid(row=2, column=2, sticky="w", pady=(8, 0))
-        self.claim_token_var = tk.StringVar()
-        ttk.Entry(frame, textvariable=self.claim_token_var, width=20).grid(row=2, column=3, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="PnL value").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.claim_pnl_var = tk.StringVar(value="0")
+        ttk.Entry(frame, textvariable=self.claim_pnl_var, width=20).grid(row=3, column=1, sticky="w", padx=(8, 8), pady=(8, 0))
 
-        self.generate_tx_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            frame,
-            text="Auto-generate tx_hash",
-            variable=self.generate_tx_var,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="Rank").grid(row=3, column=2, sticky="w", pady=(8, 0))
+        self.claim_rank_var = tk.StringVar(value="0")
+        ttk.Entry(frame, textvariable=self.claim_rank_var, width=20).grid(row=3, column=3, sticky="w", pady=(8, 0))
 
         self.auto_phase_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
@@ -204,16 +205,32 @@ class SeasonTestWorkbench:
             text="Auto phase from season window",
             variable=self.auto_phase_var,
             command=self._on_phase_mode_toggle,
-        ).grid(row=3, column=2, sticky="w", pady=(8, 0))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        self.db_only_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            frame,
+            text="DB only (skip mint, insert claim row only)",
+            variable=self.db_only_var,
+        ).grid(row=4, column=2, columnspan=2, sticky="w", pady=(8, 0))
 
         self.force_insert_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             frame,
             text="Force insert (ignore eligibility warning)",
             variable=self.force_insert_var,
-        ).grid(row=3, column=3, sticky="w", pady=(8, 0))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
-        ttk.Button(frame, text="Insert fake claim", command=self._insert_fake_claim).grid(row=3, column=4, sticky="e", pady=(8, 0))
+        self.claim_action_btn = ttk.Button(
+            frame,
+            text="Claim (Mint NFT)",
+            command=self._insert_fake_claim,
+        )
+        self.claim_action_btn.grid(row=5, column=4, sticky="e", pady=(8, 0))
+        self.claim_progress_var = tk.StringVar(value="")
+        ttk.Label(frame, textvariable=self.claim_progress_var).grid(
+            row=6, column=0, columnspan=5, sticky="w", pady=(8, 0)
+        )
         self.claim_season_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_claim_season_changed())
         self.claim_wallet_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_claim_season_info())
         self._on_phase_mode_toggle()
@@ -229,7 +246,7 @@ class SeasonTestWorkbench:
         self.claim_season_info_text.tag_configure("season_age", foreground="#0b5ed7")
 
         output_frame = ttk.Frame(claims_paned)
-        ttk.Label(output_frame, text="Fake claims output").pack(anchor="w")
+        ttk.Label(output_frame, text="Mint/claim output").pack(anchor="w")
         self.claims_output_text = tk.Text(output_frame, height=22, wrap="word")
         self.claims_output_text.pack(fill="both", expand=True, pady=(4, 0))
 
@@ -259,10 +276,11 @@ class SeasonTestWorkbench:
         columns = (
             "id",
             "wallet",
+            "solana_wallet",
             "phase",
             "status",
             "tx_hash",
-            "token_id",
+            "asset_address",
             "timestamp",
             "created_at",
         )
@@ -270,10 +288,12 @@ class SeasonTestWorkbench:
         for col in columns:
             self.season_claims_tree.heading(col, text=col)
             width = 160
-            if col in {"id", "phase", "status", "token_id"}:
+            if col in {"id", "phase", "status"}:
                 width = 90
-            if col == "wallet":
+            if col in {"wallet", "solana_wallet"}:
                 width = 300
+            if col in {"tx_hash", "asset_address"}:
+                width = 340
             self.season_claims_tree.column(col, width=width, anchor="w")
         self.season_claims_tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
@@ -407,9 +427,15 @@ class SeasonTestWorkbench:
         self.root.after(self.auto_refresh_ms, self._auto_refresh_tick)
 
     def _auto_refresh_tick(self) -> None:
+        self._auto_refresh_tick_count += 1
         try:
-            self._refresh_seasons()
             self._refresh_claim_season_info()
+        except Exception:
+            pass
+        try:
+            # Seasons list changes infrequently; refresh it less often.
+            if self._auto_refresh_tick_count % self._season_refresh_every_ticks == 0:
+                self._refresh_seasons()
         except Exception:
             pass
         finally:
@@ -928,14 +954,23 @@ class SeasonTestWorkbench:
             self.eligibility_text.insert("end", f"Error: {exc}\n\n{traceback.format_exc()}")
 
     def _insert_fake_claim(self) -> None:
-        wallet = self.claim_wallet_var.get().strip().lower()
+        wallet = self.claim_wallet_var.get().strip()
+        solana_wallet_raw = self.claim_solana_var.get().strip()
         season_label = self.claim_season_var.get().strip()
         season_id = self._get_selected_season_id(season_label)
         phase = self.claim_phase_var.get().strip()
-        status = self.claim_status_var.get().strip()
 
-        if not wallet or not season_id:
-            messagebox.showwarning("Missing fields", "Select wallet and season.")
+        if not wallet or not season_id or not solana_wallet_raw:
+            messagebox.showwarning("Missing fields", "Select wallet/season and enter Solana address.")
+            return
+        if self.claim_in_progress:
+            messagebox.showinfo("Mint in progress", "Please wait until current mint finishes.")
+            return
+        try:
+            solana_wallet = str(Pubkey.from_string(solana_wallet_raw))
+            self.claim_solana_var.set(solana_wallet)
+        except Exception:
+            messagebox.showwarning("Invalid Solana address", "Enter a valid Solana wallet address.")
             return
 
         auto_phase_reason: Optional[str] = None
@@ -952,7 +987,7 @@ class SeasonTestWorkbench:
                         f"{auto_phase_reason}\n\nUse manual phase value '{phase}' and continue?",
                     )
                     if not proceed:
-                        self._append_text(self.claims_output_text, f"Insert cancelled: {auto_phase_reason}")
+                        self._append_text(self.claims_output_text, f"Mint cancelled: {auto_phase_reason}")
                         return
 
         try:
@@ -975,7 +1010,7 @@ class SeasonTestWorkbench:
                     f"{warning_reason}\n\nInsert claim anyway?",
                 )
                 if not proceed:
-                    self._append_text(self.claims_output_text, f"Insert cancelled: {warning_reason}")
+                    self._append_text(self.claims_output_text, f"Mint cancelled: {warning_reason}")
                     return
         except Exception as exc:
             if not self.force_insert_var.get():
@@ -986,18 +1021,6 @@ class SeasonTestWorkbench:
                 if not proceed:
                     return
 
-        tx_hash: Optional[str] = None
-        if self.generate_tx_var.get():
-            tx_hash = "0x" + secrets.token_hex(32)
-
-        token_id: Optional[int] = None
-        if self.claim_token_var.get().strip():
-            try:
-                token_id = int(self.claim_token_var.get().strip())
-            except ValueError:
-                messagebox.showwarning("Token ID", "Token ID must be an integer.")
-                return
-
         supported_phases = set(self._get_phase_enum_values())
         if phase not in supported_phases:
             supported = ", ".join(sorted(supported_phases)) if supported_phases else "(none)"
@@ -1007,40 +1030,285 @@ class SeasonTestWorkbench:
                 "Update DB enum to include breach/vault/scavenge."
             )
             messagebox.showerror("phase_type enum mismatch", message)
-            self._append_text(self.claims_output_text, f"Insert blocked: {message}")
+            self._append_text(self.claims_output_text, f"Mint blocked: {message}")
             return
 
+        season_name = self._get_season_name(season_id)
+        try:
+            pnl_value, rank = self._resolve_claim_metrics(wallet=wallet, season_id=season_id)
+        except ValueError:
+            return
+        claim_id = self._reserve_claim_id()
+        if claim_id is None:
+            self._append_text(self.claims_output_text, "Mint failed: could not reserve claim id.")
+            return
+
+        if auto_phase_reason:
+            self._append_text(
+                self.claims_output_text,
+                f"Mint note: {auto_phase_reason}",
+            )
+
+        if self.db_only_var.get():
+            try:
+                self._insert_pending_claim_db_only(
+                    claim_id=claim_id,
+                    wallet=wallet,
+                    solana_wallet=solana_wallet,
+                    season_id=season_id,
+                    phase=phase,
+                )
+                self._append_text(
+                    self.claims_output_text,
+                    (
+                        f"DB-only claim inserted: claim_id={claim_id} wallet={wallet} "
+                        f"solana_wallet={solana_wallet} season_id={season_id} phase={phase}"
+                    ),
+                )
+                self._refresh_all()
+            except Exception as exc:
+                self._append_text(self.claims_output_text, f"DB-only insert failed: {exc}")
+            return
+
+        self._set_claim_ui_busy(True, "Minting in progress...")
+        worker = threading.Thread(
+            target=self._mint_claim_worker,
+            args=(claim_id, wallet, solana_wallet, pnl_value, rank, season_name, season_id, phase),
+            daemon=True,
+        )
+        worker.start()
+
+    def _mint_claim_worker(
+        self,
+        claim_id: int,
+        wallet: str,
+        solana_wallet: str,
+        pnl_value: float,
+        rank: int,
+        season_name: str,
+        season_id: int,
+        phase: str,
+    ) -> None:
+        try:
+            solana_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
+            mint_result = solana_client.mint_user_nft(
+                user_wallet_address=solana_wallet,
+                pnl_value=pnl_value,
+                rank=rank,
+                season_name=season_name,
+                claim_id=claim_id,
+            )
+            self._insert_completed_claim(
+                claim_id=claim_id,
+                wallet=wallet,
+                solana_wallet=solana_wallet,
+                season_id=season_id,
+                phase=phase,
+                mint_result=mint_result,
+            )
+            self.root.after(
+                0,
+                lambda: self._on_mint_success(
+                    claim_id=claim_id,
+                    wallet=wallet,
+                    solana_wallet=solana_wallet,
+                    season_id=season_id,
+                    mint_result=mint_result,
+                ),
+            )
+        except Exception as exc:
+            self.root.after(0, lambda: self._on_mint_failed(str(exc)))
+
+    def _set_claim_ui_busy(self, busy: bool, status_text: str = "") -> None:
+        self.claim_in_progress = busy
+        if hasattr(self, "claim_action_btn"):
+            self.claim_action_btn.configure(state="disabled" if busy else "normal")
+        self.claim_progress_var.set(status_text)
+
+    def _on_mint_success(
+        self,
+        claim_id: int,
+        wallet: str,
+        solana_wallet: str,
+        season_id: int,
+        mint_result: MintedNftResult,
+    ) -> None:
+        self._set_claim_ui_busy(False, "")
+        self._append_text(
+            self.claims_output_text,
+            (
+                f"Mint completed: claim_id={claim_id} wallet={wallet} season_id={season_id} "
+                f"solana_wallet={solana_wallet} asset_address={mint_result.asset_address} "
+                f"tx_hash={mint_result.tx_hash}"
+            ),
+        )
+        self._append_text(
+            self.claims_output_text,
+            f"Explorer TX: {mint_result.explorer_tx_url}",
+        )
+        self._append_text(
+            self.claims_output_text,
+            f"Explorer NFT: {mint_result.explorer_asset_url}",
+        )
+        self._refresh_all()
+
+    def _on_mint_failed(self, error_message: str) -> None:
+        self._set_claim_ui_busy(False, "")
+        self._append_text(self.claims_output_text, f"Mint failed: {error_message}")
+
+    def _resolve_claim_metrics(self, wallet: str, season_id: int) -> tuple[float, int]:
+        pnl_text = self.claim_pnl_var.get().strip()
+        rank_text = self.claim_rank_var.get().strip()
+        if pnl_text and rank_text:
+            try:
+                return float(pnl_text), int(rank_text)
+            except ValueError:
+                messagebox.showwarning("Invalid values", "PnL must be number and Rank must be integer.")
+                raise
+
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(
+                    """
+                    SELECT total_pnl_window, pnl_rank
+                    FROM winner_wallets_nft_to_claim
+                    WHERE season_id = %s
+                      AND LOWER(wallet_address) = LOWER(%s)
+                    LIMIT 1
+                    """,
+                    (season_id, wallet),
+                )
+                row = cursor.fetchone()
+            if row:
+                pnl = float(row["total_pnl_window"] or 0)
+                rank = int(row["pnl_rank"] or 0)
+                self.root.after(0, lambda: self.claim_pnl_var.set(str(pnl)))
+                self.root.after(0, lambda: self.claim_rank_var.set(str(rank)))
+                return pnl, rank
+            return 0.0, 0
+        finally:
+            conn.close()
+
+    def _reserve_claim_id(self) -> Optional[int]:
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT nextval(pg_get_serial_sequence('claims', 'id'))"
+                )
+                row = cursor.fetchone()
+                return int(row[0]) if row else None
+        finally:
+            conn.close()
+
+    def _get_season_name(self, season_id: int) -> str:
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(
+                    "SELECT type, season_number FROM seasons WHERE id = %s",
+                    (season_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return f"season-{season_id}"
+                return f"{row['type']}#{row['season_number']}"
+        finally:
+            conn.close()
+
+    def _insert_completed_claim(
+        self,
+        claim_id: int,
+        wallet: str,
+        solana_wallet: str,
+        season_id: int,
+        phase: str,
+        mint_result: MintedNftResult,
+    ) -> None:
         conn = self.manager.get_connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
                     INSERT INTO claims (
+                        id,
                         user_wallet,
+                        recipient_solana_wallet,
                         season_id,
                         phase_type,
                         timestamp,
                         tx_hash,
                         token_id,
+                        metadata_uri,
+                        asset_address,
                         status,
                         created_at,
                         updated_at
                     )
-                    VALUES (%s, %s, %s, NOW(), %s, %s, %s, NOW(), NOW())
-                    RETURNING id
+                    VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, NOW(), NOW())
                     """,
-                    (wallet, season_id, phase, tx_hash, token_id, status),
+                    (
+                        claim_id,
+                        wallet,
+                        solana_wallet,
+                        season_id,
+                        phase,
+                        mint_result.tx_hash,
+                        None,
+                        mint_result.metadata_uri,
+                        mint_result.asset_address,
+                        "COMPLETED",
+                    ),
                 )
-                new_id = cursor.fetchone()[0]
             conn.commit()
-            msg = f"Inserted fake claim id={new_id} wallet={wallet} season_id={season_id} phase={phase} status={status}"
-            if auto_phase_reason:
-                msg += f" | note={auto_phase_reason}"
-            self._append_text(self.claims_output_text, msg)
-            self._refresh_all()
-        except Exception as exc:
+        except Exception:
             conn.rollback()
-            self._append_text(self.claims_output_text, f"Insert failed: {exc}")
+            raise
+        finally:
+            conn.close()
+
+    def _insert_pending_claim_db_only(
+        self,
+        claim_id: int,
+        wallet: str,
+        solana_wallet: str,
+        season_id: int,
+        phase: str,
+    ) -> None:
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO claims (
+                        id,
+                        user_wallet,
+                        recipient_solana_wallet,
+                        season_id,
+                        phase_type,
+                        timestamp,
+                        status,
+                        metadata_uri,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, NOW(), NOW())
+                    """,
+                    (
+                        claim_id,
+                        wallet,
+                        solana_wallet,
+                        season_id,
+                        phase,
+                        "PENDING",
+                        "https://arweave.net/placeholder",
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -1061,7 +1329,7 @@ class SeasonTestWorkbench:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 cursor.execute(
                     """
-                    SELECT id, user_wallet, phase_type, status, tx_hash, token_id, timestamp, created_at
+                    SELECT id, user_wallet, recipient_solana_wallet, phase_type, status, tx_hash, asset_address, timestamp, created_at
                     FROM claims
                     WHERE season_id = %s
                     ORDER BY created_at DESC, id DESC
@@ -1106,10 +1374,11 @@ class SeasonTestWorkbench:
                 values=(
                     row["id"],
                     row["user_wallet"],
+                    row["recipient_solana_wallet"],
                     row["phase_type"],
                     row["status"],
                     row["tx_hash"],
-                    row["token_id"],
+                    row["asset_address"],
                     str(row["timestamp"]),
                     str(row["created_at"]),
                 ),
@@ -1385,6 +1654,42 @@ class SeasonTestWorkbench:
     # ------------------------------
     # Low-level DB helpers
     # ------------------------------
+    def _ensure_claims_schema_for_solana_mint(self) -> None:
+        """
+        Ensure claims table supports Solana mint fields.
+        """
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "ALTER TABLE claims ADD COLUMN IF NOT EXISTS recipient_solana_wallet TEXT"
+                )
+                cursor.execute(
+                    "ALTER TABLE claims ADD COLUMN IF NOT EXISTS asset_address TEXT"
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE claims
+                    DROP CONSTRAINT IF EXISTS claims_wallet_check
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE claims
+                    ADD CONSTRAINT claims_wallet_check
+                    CHECK (
+                        user_wallet ~* '^0x[a-f0-9]{40}$'
+                        OR user_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'
+                    )
+                    """
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _get_selected_season_meta(self) -> tuple[Optional[int], Optional[str]]:
         season_id = self._get_selected_season_id(self.scenario_season_var.get().strip())
         if not season_id:
