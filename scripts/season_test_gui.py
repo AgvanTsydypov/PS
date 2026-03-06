@@ -12,11 +12,13 @@ import os
 import sys
 import threading
 import traceback
+import webbrowser
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import psycopg2.extras
 from solders.pubkey import Pubkey
@@ -30,6 +32,18 @@ from scripts.data_loading_manager import DataLoadingManager
 from scripts.daily_scheduler_simple import SimplifiedScheduler
 from scripts.season_manager import SeasonManager
 from scripts.solana_service import MintedNftResult, SolanaClient
+
+MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
+
+
+@dataclass(frozen=True)
+class WinnerClaimAllocation:
+    row_id: int
+    winner_wallet_address: str
+    assignment_type: str
+    pnl_value: float
+    rank: int
+    snapshot: Dict[str, Any]
 
 
 class SeasonTestWorkbench:
@@ -54,6 +68,7 @@ class SeasonTestWorkbench:
 
         self._build_ui()
         self._ensure_claims_schema_for_solana_mint()
+        self._ensure_winners_schema_for_claim_assignment()
         self._refresh_all()
         self._start_auto_refresh()
 
@@ -227,6 +242,12 @@ class SeasonTestWorkbench:
             command=self._insert_fake_claim,
         )
         self.claim_action_btn.grid(row=5, column=4, sticky="e", pady=(8, 0))
+        self.open_collection_btn = ttk.Button(
+            frame,
+            text="Open Master Collection",
+            command=self._open_master_collection_in_explorer,
+        )
+        self.open_collection_btn.grid(row=5, column=3, sticky="e", padx=(8, 8), pady=(8, 0))
         self.claim_progress_var = tk.StringVar(value="")
         ttk.Label(frame, textvariable=self.claim_progress_var).grid(
             row=6, column=0, columnspan=5, sticky="w", pady=(8, 0)
@@ -1033,11 +1054,13 @@ class SeasonTestWorkbench:
             self._append_text(self.claims_output_text, f"Mint blocked: {message}")
             return
 
-        season_name = self._get_season_name(season_id)
         try:
-            pnl_value, rank = self._resolve_claim_metrics(wallet=wallet, season_id=season_id)
+            allocation = self._allocate_winner_claim_row(wallet=wallet, season_id=season_id)
         except ValueError:
             return
+        season_name = self._get_season_name(season_id)
+        self.claim_pnl_var.set(str(allocation.pnl_value))
+        self.claim_rank_var.set(str(allocation.rank))
         claim_id = self._reserve_claim_id()
         if claim_id is None:
             self._append_text(self.claims_output_text, "Mint failed: could not reserve claim id.")
@@ -1070,10 +1093,18 @@ class SeasonTestWorkbench:
                 self._append_text(self.claims_output_text, f"DB-only insert failed: {exc}")
             return
 
+        self._append_text(
+            self.claims_output_text,
+            (
+                f"Winner allocation: type={allocation.assignment_type} "
+                f"winner_wallet={allocation.winner_wallet_address} "
+                f"pnl={allocation.pnl_value} rank={allocation.rank}"
+            ),
+        )
         self._set_claim_ui_busy(True, "Minting in progress...")
         worker = threading.Thread(
             target=self._mint_claim_worker,
-            args=(claim_id, wallet, solana_wallet, pnl_value, rank, season_name, season_id, phase),
+            args=(claim_id, wallet, solana_wallet, season_name, season_id, phase, allocation),
             daemon=True,
         )
         worker.start()
@@ -1083,20 +1114,26 @@ class SeasonTestWorkbench:
         claim_id: int,
         wallet: str,
         solana_wallet: str,
-        pnl_value: float,
-        rank: int,
         season_name: str,
         season_id: int,
         phase: str,
+        allocation: WinnerClaimAllocation,
     ) -> None:
         try:
             solana_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
             mint_result = solana_client.mint_user_nft(
                 user_wallet_address=solana_wallet,
-                pnl_value=pnl_value,
-                rank=rank,
+                pnl_value=allocation.pnl_value,
+                rank=allocation.rank,
                 season_name=season_name,
                 claim_id=claim_id,
+                winner_context={
+                    "assignment_type": allocation.assignment_type,
+                    "winner_wallet_address": allocation.winner_wallet_address,
+                    "claimer_wallet_address": wallet,
+                    "season_id": season_id,
+                    "snapshot": allocation.snapshot,
+                },
             )
             self._insert_completed_claim(
                 claim_id=claim_id,
@@ -1104,6 +1141,13 @@ class SeasonTestWorkbench:
                 solana_wallet=solana_wallet,
                 season_id=season_id,
                 phase=phase,
+                mint_result=mint_result,
+            )
+            self._mark_winner_row_as_minted(
+                allocation=allocation,
+                claim_id=claim_id,
+                claimer_wallet=wallet,
+                recipient_solana_wallet=solana_wallet,
                 mint_result=mint_result,
             )
             self.root.after(
@@ -1117,7 +1161,8 @@ class SeasonTestWorkbench:
                 ),
             )
         except Exception as exc:
-            self.root.after(0, lambda: self._on_mint_failed(str(exc)))
+            error_message = str(exc)
+            self.root.after(0, lambda: self._on_mint_failed(error_message))
 
     def _set_claim_ui_busy(self, busy: bool, status_text: str = "") -> None:
         self.claim_in_progress = busy
@@ -1150,28 +1195,40 @@ class SeasonTestWorkbench:
             self.claims_output_text,
             f"Explorer NFT: {mint_result.explorer_asset_url}",
         )
+        collection_address = self._get_master_collection_address()
+        if collection_address:
+            self._append_text(
+                self.claims_output_text,
+                f"Explorer Collection: {self._build_devnet_address_url(collection_address)}",
+            )
         self._refresh_all()
 
     def _on_mint_failed(self, error_message: str) -> None:
         self._set_claim_ui_busy(False, "")
         self._append_text(self.claims_output_text, f"Mint failed: {error_message}")
 
-    def _resolve_claim_metrics(self, wallet: str, season_id: int) -> tuple[float, int]:
-        pnl_text = self.claim_pnl_var.get().strip()
-        rank_text = self.claim_rank_var.get().strip()
-        if pnl_text and rank_text:
-            try:
-                return float(pnl_text), int(rank_text)
-            except ValueError:
-                messagebox.showwarning("Invalid values", "PnL must be number and Rank must be integer.")
-                raise
-
+    def _allocate_winner_claim_row(self, wallet: str, season_id: int) -> WinnerClaimAllocation:
         conn = self.manager.get_connection()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 cursor.execute(
                     """
-                    SELECT total_pnl_window, pnl_rank
+                    SELECT
+                        id,
+                        wallet_address,
+                        source,
+                        total_pnl_window,
+                        pnl_rank,
+                        window_start,
+                        window_end,
+                        snapshot_at,
+                        event_id,
+                        market_id,
+                        condition_id,
+                        event_slug,
+                        event_title,
+                        COALESCE(is_minted, FALSE) AS is_minted,
+                        minted_to_wallet
                     FROM winner_wallets_nft_to_claim
                     WHERE season_id = %s
                       AND LOWER(wallet_address) = LOWER(%s)
@@ -1180,13 +1237,123 @@ class SeasonTestWorkbench:
                     (season_id, wallet),
                 )
                 row = cursor.fetchone()
-            if row:
-                pnl = float(row["total_pnl_window"] or 0)
-                rank = int(row["pnl_rank"] or 0)
-                self.root.after(0, lambda: self.claim_pnl_var.set(str(pnl)))
-                self.root.after(0, lambda: self.claim_rank_var.set(str(rank)))
-                return pnl, rank
-            return 0.0, 0
+
+                if row:
+                    if bool(row["is_minted"]):
+                        assignee = row.get("minted_to_wallet")
+                        assignee_suffix = f" (assigned to {assignee})" if assignee else ""
+                        raise ValueError(
+                            "This winner row was already minted and cannot be reused"
+                            f"{assignee_suffix}."
+                        )
+                    return self._build_winner_allocation(row=row, assignment_type="winner_self")
+
+                cursor.execute(
+                    """
+                    SELECT
+                        id,
+                        wallet_address,
+                        source,
+                        total_pnl_window,
+                        pnl_rank,
+                        window_start,
+                        window_end,
+                        snapshot_at,
+                        event_id,
+                        market_id,
+                        condition_id,
+                        event_slug,
+                        event_title
+                    FROM winner_wallets_nft_to_claim
+                    WHERE season_id = %s
+                      AND COALESCE(is_minted, FALSE) = FALSE
+                    ORDER BY RANDOM()
+                    LIMIT 1
+                    """,
+                    (season_id,),
+                )
+                fallback_row = cursor.fetchone()
+                if not fallback_row:
+                    raise ValueError(
+                        "No unminted winner rows left in this season. "
+                        "Cannot mint an NFT with snapshot data."
+                    )
+                return self._build_winner_allocation(row=fallback_row, assignment_type="random_fallback")
+        except ValueError as exc:
+            messagebox.showwarning("Winner allocation unavailable", str(exc))
+            raise
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _build_winner_allocation(row: Dict[str, Any], assignment_type: str) -> WinnerClaimAllocation:
+        snapshot: Dict[str, Any] = {
+            "winner_row_id": int(row["id"]),
+            "winner_wallet_address": str(row["wallet_address"]),
+            "source": row.get("source"),
+            "total_pnl_window": float(row.get("total_pnl_window") or 0),
+            "pnl_rank": int(row.get("pnl_rank") or 0),
+            "window_start": row.get("window_start").isoformat() if row.get("window_start") else None,
+            "window_end": row.get("window_end").isoformat() if row.get("window_end") else None,
+            "snapshot_at": row.get("snapshot_at").isoformat() if row.get("snapshot_at") else None,
+            "event_id": row.get("event_id"),
+            "market_id": row.get("market_id"),
+            "condition_id": row.get("condition_id"),
+            "event_slug": row.get("event_slug"),
+            "event_title": row.get("event_title"),
+        }
+        return WinnerClaimAllocation(
+            row_id=int(row["id"]),
+            winner_wallet_address=str(row["wallet_address"]),
+            assignment_type=assignment_type,
+            pnl_value=float(row.get("total_pnl_window") or 0),
+            rank=int(row.get("pnl_rank") or 0),
+            snapshot=snapshot,
+        )
+
+    def _mark_winner_row_as_minted(
+        self,
+        allocation: WinnerClaimAllocation,
+        claim_id: int,
+        claimer_wallet: str,
+        recipient_solana_wallet: str,
+        mint_result: MintedNftResult,
+    ) -> None:
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE winner_wallets_nft_to_claim
+                    SET
+                        is_minted = TRUE,
+                        minted_at = NOW(),
+                        minted_to_wallet = %s,
+                        minted_to_solana_wallet = %s,
+                        minted_claim_id = %s,
+                        minted_tx_hash = %s,
+                        minted_asset_address = %s
+                    WHERE id = %s
+                      AND COALESCE(is_minted, FALSE) = FALSE
+                    """,
+                    (
+                        claimer_wallet,
+                        recipient_solana_wallet,
+                        claim_id,
+                        mint_result.tx_hash,
+                        mint_result.asset_address,
+                        allocation.row_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "Winner row is already marked as minted. "
+                        "Mint was completed, but winner assignment update failed."
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -1226,47 +1393,57 @@ class SeasonTestWorkbench:
         phase: str,
         mint_result: MintedNftResult,
     ) -> None:
-        conn = self.manager.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO claims (
-                        id,
-                        user_wallet,
-                        recipient_solana_wallet,
-                        season_id,
-                        phase_type,
-                        timestamp,
-                        tx_hash,
-                        token_id,
-                        metadata_uri,
-                        asset_address,
-                        status,
-                        created_at,
-                        updated_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, NOW(), NOW())
-                    """,
-                    (
-                        claim_id,
-                        wallet,
-                        solana_wallet,
-                        season_id,
-                        phase,
-                        mint_result.tx_hash,
-                        None,
-                        mint_result.metadata_uri,
-                        mint_result.asset_address,
-                        "COMPLETED",
-                    ),
+        payload = (
+            claim_id,
+            wallet,
+            solana_wallet,
+            season_id,
+            phase,
+            mint_result.tx_hash,
+            None,
+            mint_result.metadata_uri,
+            mint_result.asset_address,
+            "COMPLETED",
+        )
+        insert_sql = """
+            INSERT INTO claims (
+                id,
+                user_wallet,
+                recipient_solana_wallet,
+                season_id,
+                phase_type,
+                timestamp,
+                tx_hash,
+                token_id,
+                metadata_uri,
+                asset_address,
+                status,
+                created_at,
+                updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, NOW(), NOW())
+        """
+
+        for attempt in range(2):
+            conn = self.manager.get_connection()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(insert_sql, payload)
+                conn.commit()
+                return
+            except Exception as exc:
+                conn.rollback()
+                error_text = str(exc).lower()
+                can_retry = (
+                    attempt == 0
+                    and "value too long for type character varying" in error_text
                 )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+                if can_retry:
+                    self._ensure_claims_schema_for_solana_mint()
+                    continue
+                raise
+            finally:
+                conn.close()
 
     def _insert_pending_claim_db_only(
         self,
@@ -1409,6 +1586,45 @@ class SeasonTestWorkbench:
     @staticmethod
     def _bool_text(value: bool) -> str:
         return "true" if value else "false"
+
+    @staticmethod
+    def _build_devnet_address_url(address: str) -> str:
+        return f"https://explorer.solana.com/address/{address}?cluster=devnet"
+
+    def _get_master_collection_address(self) -> str:
+        value = os.environ.get(MASTER_COLLECTION_ENV_KEY, "").strip()
+        if value:
+            return value
+
+        env_path = Path(project_root) / ".env"
+        if env_path.exists():
+            for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, raw_value = line.split("=", 1)
+                if key.strip() != MASTER_COLLECTION_ENV_KEY:
+                    continue
+                resolved = raw_value.strip().strip('"').strip("'")
+                if resolved:
+                    return resolved
+        return ""
+
+    def _open_master_collection_in_explorer(self) -> None:
+        collection_address = self._get_master_collection_address()
+        if not collection_address:
+            messagebox.showwarning(
+                "Collection address is missing",
+                (
+                    f"{MASTER_COLLECTION_ENV_KEY} is not set. "
+                    "Run setup script or add it to .env first."
+                ),
+            )
+            return
+
+        url = self._build_devnet_address_url(collection_address)
+        webbrowser.open_new_tab(url)
+        self._append_text(self.claims_output_text, f"Opened collection in browser: {url}")
 
     def _load_scenario_season_params(self, silent: bool = False) -> None:
         season_id = self._get_selected_season_id(self.scenario_season_var.get().strip())
@@ -1667,6 +1883,17 @@ class SeasonTestWorkbench:
                 cursor.execute(
                     "ALTER TABLE claims ADD COLUMN IF NOT EXISTS asset_address TEXT"
                 )
+                # Legacy schemas often keep EVM-sized VARCHAR columns (e.g. tx_hash=66),
+                # which is too short for Solana signatures/URIs.
+                cursor.execute(
+                    "ALTER TABLE claims ALTER COLUMN tx_hash TYPE TEXT"
+                )
+                cursor.execute(
+                    "ALTER TABLE claims ALTER COLUMN metadata_uri TYPE TEXT"
+                )
+                cursor.execute(
+                    "ALTER TABLE claims ALTER COLUMN asset_address TYPE TEXT"
+                )
                 cursor.execute(
                     """
                     ALTER TABLE claims
@@ -1681,6 +1908,62 @@ class SeasonTestWorkbench:
                         user_wallet ~* '^0x[a-f0-9]{40}$'
                         OR user_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'
                     )
+                    """
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _ensure_winners_schema_for_claim_assignment(self) -> None:
+        """
+        Ensure winner snapshots table can track one-time NFT assignment.
+        """
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    ALTER TABLE winner_wallets_nft_to_claim
+                    ADD COLUMN IF NOT EXISTS is_minted BOOLEAN NOT NULL DEFAULT FALSE
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE winner_wallets_nft_to_claim
+                    ADD COLUMN IF NOT EXISTS minted_at TIMESTAMPTZ
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE winner_wallets_nft_to_claim
+                    ADD COLUMN IF NOT EXISTS minted_to_wallet TEXT
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE winner_wallets_nft_to_claim
+                    ADD COLUMN IF NOT EXISTS minted_to_solana_wallet TEXT
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE winner_wallets_nft_to_claim
+                    ADD COLUMN IF NOT EXISTS minted_claim_id BIGINT
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE winner_wallets_nft_to_claim
+                    ADD COLUMN IF NOT EXISTS minted_tx_hash TEXT
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE winner_wallets_nft_to_claim
+                    ADD COLUMN IF NOT EXISTS minted_asset_address TEXT
                     """
                 )
             conn.commit()

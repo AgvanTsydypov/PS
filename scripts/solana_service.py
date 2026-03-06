@@ -9,10 +9,10 @@ import os
 import socket
 import struct
 import time
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
-from urllib.parse import quote
 
 import httpx
 from dotenv import load_dotenv
@@ -35,6 +35,8 @@ SPL_NOOP_PROGRAM_ID = Pubkey.from_string(
     "noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmV"
 )
 MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
+PINATA_JWT_ENV_KEY = "PINATA_JWT"
+PINATA_API_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
 LAMPORTS_PER_SOL = 1_000_000_000
 
 
@@ -95,6 +97,7 @@ class SolanaClient:
         rank: int,
         season_name: str,
         claim_id: int | None = None,
+        winner_context: dict[str, Any] | None = None,
     ) -> MintedNftResult:
         """
         Mint a Core NFT for a user wallet and attach it to master collection.
@@ -109,6 +112,7 @@ class SolanaClient:
             season_name=season_name,
             pnl_value=pnl_value,
             rank=rank,
+            winner_context=winner_context,
         )
 
         asset_keypair = Keypair()
@@ -122,7 +126,9 @@ class SolanaClient:
                 AccountMeta(self.public_key, True, False),         # authority
                 AccountMeta(self.public_key, True, True),          # payer
                 AccountMeta(owner_pubkey, False, False),           # owner
-                AccountMeta(self.public_key, False, False),        # update authority
+                # For CreateV2 with collection, keep this slot present but use
+                # MPL Core program id as "none"/sentinel update authority.
+                AccountMeta(MPL_CORE_PROGRAM_ID, False, False),    # update authority
                 AccountMeta(SYSTEM_PROGRAM_ID, False, False),      # system program
                 AccountMeta(SPL_NOOP_PROGRAM_ID, False, False),    # log wrapper
             ],
@@ -209,12 +215,13 @@ class SolanaClient:
             + some_empty_vec   # external_plugin_adapters: Some([])
         )
 
-    @staticmethod
     def _build_metadata_uri(
+        self,
         nft_name: str,
         season_name: str,
         pnl_value: float,
         rank: int,
+        winner_context: dict[str, Any] | None = None,
     ) -> str:
         metadata = {
             "name": nft_name,
@@ -225,14 +232,63 @@ class SolanaClient:
                 {"trait_type": "Rank", "value": rank},
             ],
         }
-        encoded = quote(
-            json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
-            safe="",
-        )
-        data_uri = f"data:application/json,{encoded}"
-        if len(data_uri) > 512:
-            return "https://arweave.net/placeholder"
-        return data_uri
+        if winner_context:
+            metadata["winner_context"] = winner_context
+
+        uploaded_uri = self._upload_metadata_to_pinata(metadata)
+        if uploaded_uri:
+            return uploaded_uri
+
+        # Fallback when Pinata is unavailable: keep URI minimal to stay below
+        # transaction size limits. Full winner snapshot remains in DB records.
+        compact_metadata = {
+            "name": nft_name,
+            "symbol": "POLY",
+            "description": f"PolyStars reward NFT for season {season_name}",
+            "attributes": [
+                {"trait_type": "Profit", "value": pnl_value},
+                {"trait_type": "Rank", "value": rank},
+            ],
+        }
+        if winner_context:
+            compact_metadata["winner_ref"] = {
+                "assignment_type": winner_context.get("assignment_type"),
+                "winner_wallet_address": winner_context.get("winner_wallet_address"),
+                "season_id": winner_context.get("season_id"),
+                "winner_row_id": (winner_context.get("snapshot") or {}).get("winner_row_id"),
+            }
+
+        raw_json = json.dumps(compact_metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        encoded = base64.b64encode(raw_json).decode("ascii")
+        return f"data:application/json;base64,{encoded}"
+
+    @staticmethod
+    def _upload_metadata_to_pinata(metadata: dict[str, Any]) -> str | None:
+        jwt = os.environ.get(PINATA_JWT_ENV_KEY, "").strip()
+        if not jwt:
+            return None
+
+        headers = {
+            "Authorization": f"Bearer {jwt}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "pinataContent": metadata,
+            "pinataMetadata": {"name": f"{metadata.get('name', 'polystars-nft')}.json"},
+        }
+
+        for _attempt in range(2):
+            try:
+                response = httpx.post(PINATA_API_URL, headers=headers, json=payload, timeout=20.0)
+                response.raise_for_status()
+                body = response.json()
+                ipfs_hash = body.get("IpfsHash")
+                if not ipfs_hash:
+                    return None
+                return f"https://gateway.pinata.cloud/ipfs/{ipfs_hash}"
+            except Exception:
+                continue
+        return None
 
     @staticmethod
     def _get_master_collection_pubkey() -> Pubkey:

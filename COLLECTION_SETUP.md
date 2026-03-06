@@ -68,7 +68,7 @@ npm install
 Use URI directly (recommended):
 
 ```bash
-npm run setup:master-collection -- --uri "https://gateway.pinata.cloud/ipfs/<HASH>"
+npm run setup:master-collection -- --uri "https://gateway.pinata.cloud/ipfs/QmSyNS7Uz9tnHr7BYMZcfCTyjbZDHfKTvAXbi7diDDfMWF"
 ```
 
 Optional override:

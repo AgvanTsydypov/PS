@@ -279,6 +279,13 @@ CREATE TABLE IF NOT EXISTS winner_wallets_nft_to_claim (
     condition_id TEXT,
     event_slug TEXT,
     event_title TEXT,
+    is_minted BOOLEAN NOT NULL DEFAULT FALSE,
+    minted_at TIMESTAMPTZ,
+    minted_to_wallet TEXT,
+    minted_to_solana_wallet TEXT,
+    minted_claim_id BIGINT,
+    minted_tx_hash TEXT,
+    minted_asset_address TEXT,
     CONSTRAINT fk_origin_snapshot_season
         FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
     CONSTRAINT origin_wallet_format_check
@@ -293,6 +300,13 @@ ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS market_id TEXT;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS condition_id TEXT;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS event_slug TEXT;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS event_title TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS is_minted BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_at TIMESTAMPTZ;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_to_wallet TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_to_solana_wallet TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_claim_id BIGINT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_tx_hash TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_asset_address TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_winners_snapshot_season
     ON winner_wallets_nft_to_claim(season_id);
