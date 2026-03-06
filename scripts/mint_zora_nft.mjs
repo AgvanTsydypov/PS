@@ -43,6 +43,25 @@ function normalizePrivateKey(privateKey) {
   return raw.startsWith("0x") ? raw : `0x${raw}`;
 }
 
+function normalizeEvmAddress(value) {
+  const raw = String(value || "").trim().replace(/^['"]|['"]$/g, "");
+  if (!raw) return "";
+  const withPrefix = raw.startsWith("0x") ? raw : `0x${raw}`;
+  if (!/^0x[a-fA-F0-9]{40}$/.test(withPrefix)) return "";
+  return withPrefix;
+}
+
+function resolveRoyaltyBps(rawValue) {
+  const fallback = 1000;
+  const raw = String(rawValue || "").trim().replace(/^['"]|['"]$/g, "");
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 10000) {
+    throw new Error("ZORA_ROYALTY_BPS must be a number in range 0..10000");
+  }
+  return Math.trunc(parsed);
+}
+
 function guessMediaType(url, fallbackType) {
   const lower = String(url || "").toLowerCase();
   if (fallbackType) return fallbackType;
@@ -138,12 +157,15 @@ async function main() {
   const privateKey = normalizePrivateKey(process.env.ZORA_MINTER_PRIVATE_KEY || "");
   const contractAddress = (process.env.ZORA_1155_CONTRACT_ADDRESS || "").trim();
   const pinataJwt = (process.env.PINATA_JWT || "").trim();
+  const royaltyBps = resolveRoyaltyBps(process.env.ZORA_ROYALTY_BPS || "");
 
   if (!privateKey || privateKey === "0x") throw new Error("ZORA_MINTER_PRIVATE_KEY is required");
   if (!contractAddress) throw new Error("ZORA_1155_CONTRACT_ADDRESS is required");
   if (!pinataJwt) throw new Error("PINATA_JWT is required");
 
   const account = privateKeyToAccount(privateKey);
+  const payoutRecipient =
+    normalizeEvmAddress(process.env.ZORA_PAYOUT_RECIPIENT || "") || account.address;
   const publicClient = createPublicClient({
     chain,
     transport: http(rpcUrl),
@@ -238,6 +260,8 @@ async function main() {
     token: {
       tokenMetadataURI: metadataUri,
       maxSupply: 1n,
+      royaltyBPS: royaltyBps,
+      payoutRecipient,
       salesConfig: {
         type: "fixedPrice",
         pricePerToken: 0n,
