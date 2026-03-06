@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS claims (
     
     -- User identification
     user_wallet VARCHAR(42) NOT NULL,
+    recipient_solana_wallet TEXT,
     
     -- Claim details
     season_id INTEGER NOT NULL,
@@ -127,6 +128,7 @@ CREATE TABLE IF NOT EXISTS claims (
     -- NFT metadata
     token_id INTEGER,
     metadata_uri TEXT,
+    asset_address TEXT,
     
     -- Status tracking
     status VARCHAR(20) DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
@@ -143,25 +145,32 @@ CREATE TABLE IF NOT EXISTS claims (
     CONSTRAINT unique_user_season_claim UNIQUE(user_wallet, season_id),
     
     -- Wallet address validation
-    CONSTRAINT claims_wallet_check CHECK (user_wallet ~* '^0x[a-f0-9]{40}$')
+    CONSTRAINT claims_wallet_check CHECK (
+        user_wallet ~* '^0x[a-f0-9]{40}$'
+        OR user_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'
+    )
 );
 
 -- Claims indexes
 CREATE INDEX IF NOT EXISTS idx_claims_user_wallet ON claims(user_wallet);
+CREATE INDEX IF NOT EXISTS idx_claims_recipient_solana_wallet ON claims(recipient_solana_wallet) WHERE recipient_solana_wallet IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_claims_season_id ON claims(season_id);
 CREATE INDEX IF NOT EXISTS idx_claims_phase_type ON claims(phase_type);
 CREATE INDEX IF NOT EXISTS idx_claims_timestamp ON claims(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_claims_status ON claims(status);
 CREATE INDEX IF NOT EXISTS idx_claims_tx_hash ON claims(tx_hash) WHERE tx_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_claims_asset_address ON claims(asset_address) WHERE asset_address IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_claims_season_phase ON claims(season_id, phase_type);
 
 -- Add comments
 COMMENT ON TABLE claims IS 'NFT claims for each season - tracks all mint requests';
 COMMENT ON COLUMN claims.user_wallet IS 'Ethereum wallet address of the claimant';
+COMMENT ON COLUMN claims.recipient_solana_wallet IS 'Solana wallet where minted NFT should be delivered';
 COMMENT ON COLUMN claims.season_id IS 'Reference to the season being claimed';
 COMMENT ON COLUMN claims.phase_type IS 'Claim phase: breach, vault (Origins only), or scavenge';
 COMMENT ON COLUMN claims.tx_hash IS 'Blockchain transaction hash for the mint';
 COMMENT ON COLUMN claims.token_id IS 'Minted NFT token ID';
+COMMENT ON COLUMN claims.asset_address IS 'Minted Solana NFT asset address';
 
 DO $$ BEGIN RAISE NOTICE '✅ Claims table created'; END $$;
 

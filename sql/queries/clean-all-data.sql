@@ -33,11 +33,6 @@ DO $$ BEGIN RAISE NOTICE '🏆 Cleaning trader_leaderboard...'; END $$;
 TRUNCATE TABLE trader_leaderboard RESTART IDENTITY CASCADE;
 DO $$ BEGIN RAISE NOTICE '✅ Trader_leaderboard cleaned'; END $$;
 
-DO $$ BEGIN RAISE NOTICE '🎨 Cleaning NFT tables...'; END $$;
-TRUNCATE TABLE nft_claims RESTART IDENTITY CASCADE;
-TRUNCATE TABLE rate_limits RESTART IDENTITY CASCADE;
-DO $$ BEGIN RAISE NOTICE '✅ NFT tables cleaned'; END $$;
-
 DO $$ BEGIN RAISE NOTICE '📊 Cleaning data_loads tracking...'; END $$;
 TRUNCATE TABLE data_loads RESTART IDENTITY CASCADE;
 DO $$ BEGIN RAISE NOTICE '✅ Data_loads cleaned'; END $$;
@@ -52,7 +47,6 @@ DECLARE
     redemptions_count INTEGER;
     positions_count INTEGER;
     leaderboard_count INTEGER;
-    nft_count INTEGER;
     data_loads_count INTEGER;
 BEGIN
     SELECT COUNT(*) INTO events_count FROM events;
@@ -60,7 +54,6 @@ BEGIN
     SELECT COUNT(*) INTO redemptions_count FROM redemptions;
     SELECT COUNT(*) INTO positions_count FROM user_closed_positions;
     SELECT COUNT(*) INTO leaderboard_count FROM trader_leaderboard;
-    SELECT COUNT(*) INTO nft_count FROM nft_claims;
     SELECT COUNT(*) INTO data_loads_count FROM data_loads;
     
     RAISE NOTICE '';
@@ -72,7 +65,6 @@ BEGIN
     RAISE NOTICE '   - redemptions: % records', redemptions_count;
     RAISE NOTICE '   - user_closed_positions: % records', positions_count;
     RAISE NOTICE '   - trader_leaderboard: % records', leaderboard_count;
-    RAISE NOTICE '   - nft_claims: % records', nft_count;
     RAISE NOTICE '   - data_loads: % records', data_loads_count;
     RAISE NOTICE '';
     

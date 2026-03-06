@@ -69,3 +69,5 @@ data/json_output/
 data/logs/
 /logs/
 /output/
+
+my-keypair.json
