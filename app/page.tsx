@@ -252,8 +252,9 @@ export default function HomePage() {
 
     setWalletsLoading(true);
     try {
+      const includePositionWallets = walletFilter === "non_origin";
       const data = await fetchJSON<{ wallets: string[] }>(
-        `/api/wallets?season_id=${seasonId}&wallet_filter=${walletFilter}&include_position_wallets=false&limit=60`,
+        `/api/wallets?season_id=${seasonId}&wallet_filter=${walletFilter}&include_position_wallets=${includePositionWallets}&limit=60`,
       );
       setWallets(data.wallets);
       walletsCacheRef.current.set(cacheKey, data.wallets);
