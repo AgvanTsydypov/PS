@@ -2,22 +2,46 @@
 
 ## 🔄 Быстрый перезапуск
 
+### Единый запуск всех сервисов (core + web):
+```bash
+docker compose up -d --build
+```
+
+### Остановить все сервисы:
+```bash
+docker compose down
+```
+
+### Перезапустить только веб-часть:
+```bash
+docker compose restart web_backend web_frontend web_nginx
+```
+
+### Пересобрать только веб-часть:
+```bash
+docker compose up -d --build web_backend web_frontend web_nginx
+```
+
+### Проверить веб:
+- Приложение: `http://localhost:8088`
+- API health: `http://localhost:8088/api/health`
+
 ### Обновить .env и перезапустить:
 ```bash
-docker-compose restart
+docker compose restart
 ```
 
 ### Полный перезапуск (с пересборкой):
 ```bash
-docker-compose down
-docker-compose up -d
+docker compose down
+docker compose up -d
 ```
 
 ### Пересборка после изменения кода:
 ```bash
-docker-compose down
-docker-compose build --no-cache
-docker-compose up -d
+docker compose down
+docker compose build --no-cache
+docker compose up -d
 ```
 
 ## 🗄️ Как работает внешняя БД
@@ -52,22 +76,22 @@ DB_SSLMODE=require          # SSL обязателен
 ```bash
 # Локальная БД для тестирования:
 cp .env.local .env
-docker-compose restart
+docker compose restart
 
 # Managed DB для production:
 cp .env.managed .env
-docker-compose restart
+docker compose restart
 ```
 
 ## 📊 Проверка подключения
 
 ```bash
 # Проверить подключение к БД:
-docker-compose exec python_scripts python scripts/db/test_db_connection.py
+docker compose exec python_scripts python scripts/db/test_db_connection.py
 
 # Посмотреть логи:
-docker-compose logs python_scripts
-docker-compose logs scheduler
+docker compose logs python_scripts
+docker compose logs scheduler
 
 # ⭐ НОВОЕ! Посмотреть логи Python скриптов в реальном времени:
 # Все логи из fetch_redemptions.py, fetch_events_parallel_optimized.py, 
@@ -76,10 +100,10 @@ docker-compose logs scheduler
 docker logs -f polystars_scheduler
 
 # Посмотреть последние 100 строк логов с live-обновлением:
-docker-compose logs -f --tail=100 scheduler
+docker compose logs -f --tail=100 scheduler
 
 # Статус контейнеров:
-docker-compose ps
+docker compose ps
 ```
 
 ## 🔄 Catch-up с автоматической перепроверкой
@@ -173,19 +197,19 @@ Docker автоматически ротирует логи:
 docker inspect polystars_scheduler --format='{{.HostConfig.LogConfig}}'
 
 # Очистить все Docker логи:
-docker-compose down
+docker compose down
 rm -rf /var/lib/docker/containers/*/*-json.log
-docker-compose up -d
+docker compose up -d
 ```
 
 ## 💡 Когда перезапускать
 
 | Изменение | Команда |
 |-----------|---------|
-| Только .env | `docker-compose restart` |
-| Python код (scripts/) | `docker-compose restart` |
-| Dockerfile | `docker-compose build --no-cache && docker-compose up -d` |
-| docker-compose.yml | `docker-compose down && docker-compose up -d` |
+| Только .env | `docker compose restart` |
+| Python код (scripts/) | `docker compose restart` |
+| Dockerfile | `docker compose build --no-cache && docker compose up -d` |
+| docker-compose.yml | `docker compose down && docker compose up -d` |
 
 ## 🎯 Важно
 
