@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const RAW_API_BASE = process.env.NEXT_PUBLIC_SEASON_API_BASE_URL ?? "http://localhost:8001";
 const API_BASE = RAW_API_BASE === "/" ? "" : RAW_API_BASE.replace(/\/$/, "");
@@ -93,6 +93,7 @@ export default function HomePage() {
   const [wallets, setWallets] = useState<string[]>([]);
   const [walletFilter, setWalletFilter] = useState("all");
   const [walletsLoading, setWalletsLoading] = useState(false);
+  const walletsCacheRef = useRef<Map<string, string[]>>(new Map());
 
   const [eligWallet, setEligWallet] = useState("");
   const [eligibility, setEligibility] = useState("");
@@ -233,14 +234,29 @@ export default function HomePage() {
     }
   };
 
-  const refreshWallets = async (seasonId = claimSeasonId) => {
+  const refreshWallets = async (
+    seasonId = claimSeasonId,
+    options?: { force?: boolean },
+  ) => {
     if (!seasonId) return;
+    const cacheKey = `${seasonId}:${walletFilter}`;
+    const cachedWallets = walletsCacheRef.current.get(cacheKey);
+    if (!options?.force && cachedWallets) {
+      setWallets(cachedWallets);
+      if (cachedWallets.length > 0) {
+        if (!eligWallet || !cachedWallets.includes(eligWallet)) setEligWallet(cachedWallets[0]);
+        if (!claimWallet || !cachedWallets.includes(claimWallet)) setClaimWallet(cachedWallets[0]);
+      }
+      return;
+    }
+
     setWalletsLoading(true);
     try {
       const data = await fetchJSON<{ wallets: string[] }>(
-        `/api/wallets?season_id=${seasonId}&wallet_filter=${walletFilter}`,
+        `/api/wallets?season_id=${seasonId}&wallet_filter=${walletFilter}&include_position_wallets=false&limit=60`,
       );
       setWallets(data.wallets);
+      walletsCacheRef.current.set(cacheKey, data.wallets);
       if (data.wallets.length > 0) {
         if (!eligWallet || !data.wallets.includes(eligWallet)) setEligWallet(data.wallets[0]);
         if (!claimWallet || !data.wallets.includes(claimWallet)) setClaimWallet(data.wallets[0]);
@@ -452,7 +468,7 @@ export default function HomePage() {
               <option value="origin">origin</option>
               <option value="non_origin">non_origin</option>
             </select>
-            <button onClick={() => void run(() => refreshWallets())} disabled={walletsLoading}>
+            <button onClick={() => void run(() => refreshWallets(claimSeasonId, { force: true }))} disabled={walletsLoading}>
               {walletsLoading ? "Loading wallets..." : "Reload wallets"}
             </button>
             <select value={eligWallet} onChange={(e) => setEligWallet(e.target.value)} disabled={walletsLoading}>
@@ -460,6 +476,7 @@ export default function HomePage() {
               {wallets.map((w) => <option key={w} value={w}>{w}</option>)}
             </select>
             {walletsLoading ? <span className="muted">Loading wallets...</span> : null}
+            {!walletsLoading ? <span className="muted">Loaded wallets: {wallets.length}</span> : null}
             <button
               onClick={() =>
                 void run(async () => {
@@ -497,6 +514,7 @@ export default function HomePage() {
               {wallets.map((w) => <option key={w} value={w}>{w}</option>)}
             </select>
             {walletsLoading ? <span className="muted">Loading wallets...</span> : null}
+            {!walletsLoading ? <span className="muted">Loaded wallets: {wallets.length}</span> : null}
             <label>Phase</label>
             <select value={claimPhase} onChange={(e) => setClaimPhase(e.target.value)} disabled={claimAutoPhase}>
               <option value="breach">breach</option>
