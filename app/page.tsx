@@ -92,6 +92,7 @@ export default function HomePage() {
   const [logs, setLogs] = useState<Array<Record<string, unknown>>>([]);
   const [wallets, setWallets] = useState<string[]>([]);
   const [walletFilter, setWalletFilter] = useState("all");
+  const [walletsLoading, setWalletsLoading] = useState(false);
 
   const [eligWallet, setEligWallet] = useState("");
   const [eligibility, setEligibility] = useState("");
@@ -234,13 +235,18 @@ export default function HomePage() {
 
   const refreshWallets = async (seasonId = claimSeasonId) => {
     if (!seasonId) return;
-    const data = await fetchJSON<{ wallets: string[] }>(
-      `/api/wallets?season_id=${seasonId}&wallet_filter=${walletFilter}`,
-    );
-    setWallets(data.wallets);
-    if (data.wallets.length > 0) {
-      if (!eligWallet || !data.wallets.includes(eligWallet)) setEligWallet(data.wallets[0]);
-      if (!claimWallet || !data.wallets.includes(claimWallet)) setClaimWallet(data.wallets[0]);
+    setWalletsLoading(true);
+    try {
+      const data = await fetchJSON<{ wallets: string[] }>(
+        `/api/wallets?season_id=${seasonId}&wallet_filter=${walletFilter}`,
+      );
+      setWallets(data.wallets);
+      if (data.wallets.length > 0) {
+        if (!eligWallet || !data.wallets.includes(eligWallet)) setEligWallet(data.wallets[0]);
+        if (!claimWallet || !data.wallets.includes(claimWallet)) setClaimWallet(data.wallets[0]);
+      }
+    } finally {
+      setWalletsLoading(false);
     }
   };
 
@@ -446,11 +452,14 @@ export default function HomePage() {
               <option value="origin">origin</option>
               <option value="non_origin">non_origin</option>
             </select>
-            <button onClick={() => void run(() => refreshWallets())}>Reload wallets</button>
-            <select value={eligWallet} onChange={(e) => setEligWallet(e.target.value)}>
+            <button onClick={() => void run(() => refreshWallets())} disabled={walletsLoading}>
+              {walletsLoading ? "Loading wallets..." : "Reload wallets"}
+            </button>
+            <select value={eligWallet} onChange={(e) => setEligWallet(e.target.value)} disabled={walletsLoading}>
               <option value="">Select wallet</option>
               {wallets.map((w) => <option key={w} value={w}>{w}</option>)}
             </select>
+            {walletsLoading ? <span className="muted">Loading wallets...</span> : null}
             <button
               onClick={() =>
                 void run(async () => {
@@ -483,10 +492,11 @@ export default function HomePage() {
               <option value="non_origin">non_origin</option>
             </select>
             <label>Wallet</label>
-            <select value={claimWallet} onChange={(e) => setClaimWallet(e.target.value)}>
+            <select value={claimWallet} onChange={(e) => setClaimWallet(e.target.value)} disabled={walletsLoading}>
               <option value="">Select wallet</option>
               {wallets.map((w) => <option key={w} value={w}>{w}</option>)}
             </select>
+            {walletsLoading ? <span className="muted">Loading wallets...</span> : null}
             <label>Phase</label>
             <select value={claimPhase} onChange={(e) => setClaimPhase(e.target.value)} disabled={claimAutoPhase}>
               <option value="breach">breach</option>
