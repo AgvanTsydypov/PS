@@ -93,7 +93,7 @@ async function uploadJsonToPinata(json, jwt, nameHint) {
     body: JSON.stringify({
       pinataContent: json,
       pinataMetadata: {
-        name: `${nameHint || "polystars-zora"}.json`,
+        name: `${nameHint || "ps-test-zora"}.json`,
       },
     }),
   });
@@ -117,7 +117,7 @@ async function uploadImageToPinata(sourceUrl, jwt, nameHint) {
     (sourceResp.headers.get("content-type") || "").split(";")[0].trim() || undefined,
   );
   const ext = guessExtensionFromContentType(mime);
-  const fileName = `${(nameHint || "polystars-image").replace(/[^a-zA-Z0-9_-]+/g, "-")}${ext}`;
+  const fileName = `${(nameHint || "ps-test-image").replace(/[^a-zA-Z0-9_-]+/g, "-")}${ext}`;
 
   const form = new FormData();
   form.append("file", new Blob([arrayBuffer], { type: mime }), fileName);
@@ -216,7 +216,7 @@ async function main() {
   const winnerContext = payload.winner_context || {};
   const snapshot = winnerContext.snapshot || {};
   const sourceImage = String(snapshot.event_image_url || "").trim();
-  const nftName = `PolyStars ${seasonName} #${claimId}`;
+  const nftName = `PS TEST ${seasonName} #${claimId}`;
 
   let pinnedImageUrl = "";
   let pinnedImageMime = "";
@@ -228,8 +228,8 @@ async function main() {
 
   const metadata = {
     name: nftName,
-    symbol: "POLY",
-    description: `PolyStars reward NFT for season ${seasonName}`,
+    symbol: "POLS",
+    description: `PS TEST reward NFT for season ${seasonName}`,
     attributes: [
       { trait_type: "Profit", value: pnl },
       { trait_type: "Rank", value: rank },

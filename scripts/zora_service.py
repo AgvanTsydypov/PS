@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -59,14 +60,23 @@ class ZoraClient:
                 "--payload-file",
                 str(payload_path),
             ]
-            process = subprocess.run(
-                command,
-                cwd=str(self.project_root),
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if process.returncode != 0:
+            # Retry once to smooth over occasional first-call failures
+            # (e.g. nonce/rpc cold-start race right after service restart).
+            process: subprocess.CompletedProcess[str] | None = None
+            for attempt in range(2):
+                process = subprocess.run(
+                    command,
+                    cwd=str(self.project_root),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if process.returncode == 0:
+                    break
+                if attempt == 0:
+                    time.sleep(1.5)
+            if process is None or process.returncode != 0:
+                assert process is not None
                 error_text = process.stderr.strip() or process.stdout.strip()
                 raise RuntimeError(
                     f"Zora mint script failed (exit={process.returncode}): {error_text}"

@@ -109,7 +109,7 @@ class SolanaClient:
         collection_pubkey = self._get_master_collection_pubkey()
 
         resolved_claim_id = claim_id if claim_id is not None else int(time.time())
-        nft_name = f"PolyStars {season_name} #{resolved_claim_id}"
+        nft_name = f"PS TEST {season_name} #{resolved_claim_id}"
         metadata_uri = self._build_metadata_uri(
             nft_name=nft_name,
             season_name=season_name,
@@ -239,8 +239,8 @@ class SolanaClient:
 
         metadata = {
             "name": nft_name,
-            "symbol": "POLY",
-            "description": f"PolyStars reward NFT for season {season_name}",
+            "symbol": "POLS",
+            "description": f"PS TEST reward NFT for season {season_name}",
             "attributes": [
                 {"trait_type": "Profit", "value": pnl_value},
                 {"trait_type": "Rank", "value": rank},
@@ -272,8 +272,8 @@ class SolanaClient:
         # transaction size limits. Full winner snapshot remains in DB records.
         compact_metadata = {
             "name": nft_name,
-            "symbol": "POLY",
-            "description": f"PolyStars reward NFT for season {season_name}",
+            "symbol": "POLS",
+            "description": f"PS TEST reward NFT for season {season_name}",
             "attributes": [
                 {"trait_type": "Profit", "value": pnl_value},
                 {"trait_type": "Rank", "value": rank},
@@ -346,7 +346,7 @@ class SolanaClient:
         if not content_type:
             content_type = self._guess_media_type(source_image_url)
         extension = self._guess_extension_from_content_type(content_type)
-        filename_base = re.sub(r"[^a-zA-Z0-9_-]+", "-", nft_name).strip("-").lower() or "polystars-nft"
+        filename_base = re.sub(r"[^a-zA-Z0-9_-]+", "-", nft_name).strip("-").lower() or "ps-test-nft"
         filename = f"{filename_base}{extension}"
 
         headers = {
@@ -401,7 +401,7 @@ class SolanaClient:
         }
         payload = {
             "pinataContent": metadata,
-            "pinataMetadata": {"name": f"{metadata.get('name', 'polystars-nft')}.json"},
+            "pinataMetadata": {"name": f"{metadata.get('name', 'ps-test-nft')}.json"},
         }
 
         for _attempt in range(2):

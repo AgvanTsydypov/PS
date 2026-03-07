@@ -91,6 +91,41 @@ And updates `.env`:
 
 - `MASTER_COLLECTION_ADDRESS=<new_collection_address>`
 
+## Recreate Base (Zora) collection
+
+Use this when you want a brand new Zora 1155 contract (new collection address).
+
+1) Prepare contract metadata URI (IPFS JSON).
+
+2) Run collection setup:
+
+```bash
+npm run setup:zora-collection -- --uri "https://gateway.pinata.cloud/ipfs/<COLLECTION_METADATA_HASH>"
+```
+
+Optional:
+
+```bash
+npm run setup:zora-collection -- --uri "https://gateway.pinata.cloud/ipfs/<COLLECTION_METADATA_HASH>" --name "PolyStars Base"
+```
+
+3) Script writes new values to `.env`:
+
+- `ZORA_1155_CONTRACT_ADDRESS=<new_contract_address>`
+- `ZORA_CHAIN=...`
+- `ZORA_RPC_URL=...`
+
+4) Copy the same Zora values to `.env.prod` (if minting on VPS), then restart backend:
+
+```bash
+docker compose --env-file .env.prod up -d --build web_backend
+```
+
+Important:
+
+- Old and new collections are different contracts. Old minted NFTs stay in the old collection.
+- Royalty/payout settings are applied for newly created tokens in the new contract flow.
+
 ## Notes
 
 - Creator splits are read from `properties.creators`.
