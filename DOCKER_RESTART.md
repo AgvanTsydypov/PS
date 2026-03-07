@@ -26,6 +26,41 @@ docker compose up -d --build web_backend web_frontend web_nginx
 - Приложение: `http://localhost:8088`
 - API health: `http://localhost:8088/api/health`
 
+## 🚀 Production (VPS)
+
+### 1) Подготовить production env
+- Используй файл `.env.prod` (не храни секреты в git).
+- Проверь обязательные переменные:
+  - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_SSLMODE=require`
+  - `DATABASE_URL`
+  - `SESSION_SECRET`
+  - `PINATA_JWT`
+  - `ZORA_MINTER_PRIVATE_KEY`
+
+### 2) Запуск на сервере
+```bash
+docker compose --env-file .env.prod up -d --build
+```
+
+### 3) Проверка после запуска
+```bash
+docker compose --env-file .env.prod ps
+curl -sS http://localhost:8088/api/health
+curl -sS http://localhost:8088/api/server-time
+```
+
+### 4) Обновление (deploy новой версии)
+```bash
+git pull
+docker compose --env-file .env.prod up -d --build
+```
+
+### 5) Rollback (если нужно быстро откатить)
+```bash
+git checkout <previous-commit-or-tag>
+docker compose --env-file .env.prod up -d --build
+```
+
 ### Обновить .env и перезапустить:
 ```bash
 docker compose restart
@@ -72,15 +107,13 @@ DB_PASSWORD=***             # Пароль
 DB_SSLMODE=require          # SSL обязателен
 ```
 
-**3. Переключение между БД**
+**3. Переключение между окружениями**
 ```bash
-# Локальная БД для тестирования:
-cp .env.local .env
-docker compose restart
+# DEV (локальная/тестовая среда):
+docker compose --env-file .env up -d --build
 
-# Managed DB для production:
-cp .env.managed .env
-docker compose restart
+# PROD (VPS + managed DB):
+docker compose --env-file .env.prod up -d --build
 ```
 
 ## 📊 Проверка подключения
@@ -168,6 +201,8 @@ docker logs --timestamps polystars_scheduler
 - Используется команда `tee` для дублирования потока
 - Python запускается с `PYTHONUNBUFFERED=1` для отключения буферизации
 - Файловые логи сохраняются для истории, Docker логи - для мониторинга
+- Обновление сезонности запускается cron в `00:00 UTC` (`--season-update`)
+- Daily pipeline запускается cron в `02:00 UTC` (`--run`)
 
 ### Автоматическая очистка
 Логи автоматически очищаются каждое воскресенье в 3:00 AM UTC:

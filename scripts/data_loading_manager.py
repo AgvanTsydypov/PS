@@ -57,8 +57,25 @@ load_dotenv()
 GENESIS_START_DATE = date(2024, 6, 1)
 GENESIS_END_DATE = date(2026, 2, 6)
 
-GENESIS_MIN_VOLUME = 5_000  # 100M
-DAILY_MIN_VOLUME = 5_000  # 5M
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return int(raw.strip())
+
+
+def _env_int_or_none(name: str, default: Optional[int]) -> Optional[int]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if value == "" or value.lower() in {"none", "null"}:
+        return None
+    return int(value)
+
+
+GENESIS_MIN_VOLUME = _env_int("GENESIS_MIN_VOLUME", 5_000)  # 100M in prod
+DAILY_MIN_VOLUME = _env_int("DAILY_MIN_VOLUME", 5_000)  # 5M in prod
 
 # Data lag configuration (in days)
 # How many days to wait before loading data (allows data to finalize)
@@ -71,14 +88,14 @@ DATA_LAG_DAYS = 4          # Redemptions/Positions/Leaderboard: 4 days after eve
 #   - 100 events for quick test (few minutes)
 #   - 1000 events for medium test (10-15 minutes)
 #   - None for full load (production)
-MAX_EVENTS_LIMIT = 3  # Change to number for testing, e.g., 1000
+MAX_EVENTS_LIMIT = _env_int_or_none("MAX_EVENTS_LIMIT", 3)
 
 # OPTIONAL: Maximum event volume filter (in USD) - for testing
 # Set this to exclude very large events that may take longer to process
 # Examples:
 #   - 150_000_000 (150M) to exclude events over 150M USD
 #   - None for no maximum limit (production)
-MAX_VOLUME_FILTER = 10_000  # Change to number for testing, e.g., 150_000_000
+MAX_VOLUME_FILTER = _env_int_or_none("MAX_VOLUME_FILTER", 10_000)
 
 
 class DataLoadingManager:

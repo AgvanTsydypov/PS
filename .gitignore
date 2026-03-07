@@ -71,3 +71,4 @@ data/logs/
 /output/
 
 my-keypair.json
+.env.prod

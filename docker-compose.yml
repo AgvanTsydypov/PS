@@ -140,7 +140,7 @@ services:
     container_name: polystars_web_backend
     restart: unless-stopped
     env_file:
-      - .env
+      - ${ENV_FILE:-.env}
     environment:
       DB_SSLMODE: ${DB_SSLMODE:-require}
       PYTHONUNBUFFERED: 1
