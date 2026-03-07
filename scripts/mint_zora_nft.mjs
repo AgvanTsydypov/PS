@@ -284,7 +284,17 @@ async function main() {
       const approveTxHash = await walletClient.writeContract(preparedMintToSigner.erc20Approval);
       await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
     }
-    const signerMintTxHash = await walletClient.writeContract(preparedMintToSigner.parameters);
+    const mintArgs = Array.isArray(preparedMintToSigner.parameters?.args)
+      ? [...preparedMintToSigner.parameters.args]
+      : [];
+    if (mintArgs.length > 0) {
+      // Enforce minter role check against signer wallet, not user wallet.
+      mintArgs[0] = account.address;
+    }
+    const signerMintTxHash = await walletClient.writeContract({
+      ...preparedMintToSigner.parameters,
+      args: mintArgs,
+    });
     await publicClient.waitForTransactionReceipt({ hash: signerMintTxHash });
     const transferTxHash = await walletClient.writeContract({
       address: contractAddress,
