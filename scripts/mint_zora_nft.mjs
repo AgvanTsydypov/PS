@@ -12,7 +12,6 @@ import { zoraCreator1155ImplABI } from "@zoralabs/protocol-deployments";
 
 const PINATA_JSON_API_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS";
 const PINATA_FILE_API_URL = "https://api.pinata.cloud/pinning/pinFileToIPFS";
-const PERMISSION_BIT_MINTER = 1n << 2n; // role=4
 
 function parseArgs(argv) {
   const args = {
@@ -176,6 +175,38 @@ async function main() {
     chain,
     transport: http(rpcUrl),
   });
+  let nextNonce = await publicClient.getTransactionCount({
+    address: account.address,
+    blockTag: "pending",
+  });
+
+  const writeContractWithNonce = async (params) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const nonceToUse = nextNonce;
+      try {
+        const txHash = await walletClient.writeContract({
+          ...params,
+          nonce: nonceToUse,
+        });
+        nextNonce = nonceToUse + 1;
+        return txHash;
+      } catch (error) {
+        const message = String(error?.message || error || "").toLowerCase();
+        const isNonceError =
+          message.includes("nonce too low") ||
+          message.includes("replacement transaction underpriced") ||
+          message.includes("already known");
+        if (!isNonceError || attempt === 2) {
+          throw error;
+        }
+        nextNonce = await publicClient.getTransactionCount({
+          address: account.address,
+          blockTag: "pending",
+        });
+      }
+    }
+    throw new Error("Failed to send transaction with managed nonce");
+  };
 
   const claimId = Number(payload.claim_id || 0);
   const seasonName = String(payload.season_name || "season");
@@ -272,69 +303,27 @@ async function main() {
     contractGetter: onchainContractGetter,
   });
 
-  const createTxHash = await walletClient.writeContract(tokenCreate.parameters);
+  const createTxHash = await writeContractWithNonce(tokenCreate.parameters);
   await publicClient.waitForTransactionReceipt({ hash: createTxHash });
 
-  // Ensure signer has minter permission for the newly created token.
-  // Some 1155 setups are role-gated and won't allow mint without this bit.
-  try {
-    const addPermissionTxHash = await walletClient.writeContract({
-      address: contractAddress,
-      abi: zoraCreator1155ImplABI,
-      functionName: "addPermission",
-      args: [tokenCreate.tokenId, account.address, PERMISSION_BIT_MINTER],
-    });
-    await publicClient.waitForTransactionReceipt({ hash: addPermissionTxHash });
-  } catch {
-    // Ignore if permission already exists or contract grants it automatically.
-  }
-
-  const mintForSignerThenTransfer = async () => {
-    const preparedMintToSigner = await tokenCreate.prepareMint({
-      minterAccount: account,
-      quantityToMint: 1n,
-      mintRecipient: account.address,
-    });
-    if (preparedMintToSigner.erc20Approval) {
-      const approveTxHash = await walletClient.writeContract(preparedMintToSigner.erc20Approval);
-      await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
-    }
-    const mintArgs = Array.isArray(preparedMintToSigner.parameters?.args)
-      ? [...preparedMintToSigner.parameters.args]
-      : [];
-    if (mintArgs.length > 0) {
-      // Enforce minter role check against signer wallet, not user wallet.
-      mintArgs[0] = account.address;
-    }
-    const signerMintTxHash = await walletClient.writeContract({
-      ...preparedMintToSigner.parameters,
-      args: mintArgs,
-    });
-    await publicClient.waitForTransactionReceipt({ hash: signerMintTxHash });
-    const transferTxHash = await walletClient.writeContract({
-      address: contractAddress,
-      abi: zoraCreator1155ImplABI,
-      functionName: "safeTransferFrom",
-      args: [account.address, recipient, tokenCreate.tokenId, 1n, "0x"],
-    });
-    await publicClient.waitForTransactionReceipt({ hash: transferTxHash });
-    return { signerMintTxHash, transferTxHash };
-  };
-
-  // Always mint to signer and transfer to the target wallet.
-  // This avoids recipient role-gating (UserMissingRoleForToken) on contracts
-  // where only privileged minters are allowed.
-  const { signerMintTxHash: mintTxHash, transferTxHash: fallbackTransferTxHash } =
-    await mintForSignerThenTransfer();
+  // Use adminMint directly (owner/admin path). This bypasses minter role and
+  // sale strategy restrictions that affect the regular mint() flow.
+  const mintTxHash = await writeContractWithNonce({
+    address: contractAddress,
+    abi: zoraCreator1155ImplABI,
+    functionName: "adminMint",
+    args: [recipient, tokenCreate.tokenId, 1n, "0x"],
+  });
+  await publicClient.waitForTransactionReceipt({ hash: mintTxHash });
 
   const tokenId = tokenCreate.tokenId.toString();
   const explorerBase = buildExplorerBase(chain);
   const output = {
     asset_address: `${contractAddress}:${tokenId}`,
-    tx_hash: fallbackTransferTxHash || mintTxHash,
+    tx_hash: mintTxHash,
     nft_name: nftName,
     metadata_uri: metadataUri,
-    explorer_tx_url: `${explorerBase}/tx/${fallbackTransferTxHash || mintTxHash}`,
+    explorer_tx_url: `${explorerBase}/tx/${mintTxHash}`,
     explorer_asset_url: `${explorerBase}/token/${contractAddress}?a=${tokenId}`,
   };
   process.stdout.write(JSON.stringify(output));
