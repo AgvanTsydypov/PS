@@ -1,0 +1,13 @@
+node_modules
+.next
+venv
+__pycache__
+*.pyc
+.git
+.gitignore
+logs
+output
+data/output
+data/json_output
+*.log
+.DS_Store
