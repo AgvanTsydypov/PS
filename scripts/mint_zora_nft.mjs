@@ -279,44 +279,54 @@ async function main() {
   const createTxHash = await walletClient.writeContract(tokenCreate.parameters);
   await publicClient.waitForTransactionReceipt({ hash: createTxHash });
 
-  const preparedMint = await tokenCreate.prepareMint({
-    minterAccount: account,
-    quantityToMint: 1n,
-    mintRecipient: recipient,
-  });
-
-  if (preparedMint.erc20Approval) {
-    const approveTxHash = await walletClient.writeContract(preparedMint.erc20Approval);
-    await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
-  }
-
-  let mintTxHash;
-  let fallbackTransferTxHash = "";
-  try {
-    mintTxHash = await walletClient.writeContract(preparedMint.parameters);
-    await publicClient.waitForTransactionReceipt({ hash: mintTxHash });
-  } catch (error) {
-    if (!isUserMissingRoleForTokenError(error)) {
-      throw error;
+  const mintForRecipient = async () => {
+    const preparedMint = await tokenCreate.prepareMint({
+      minterAccount: account,
+      quantityToMint: 1n,
+      mintRecipient: recipient,
+    });
+    if (preparedMint.erc20Approval) {
+      const approveTxHash = await walletClient.writeContract(preparedMint.erc20Approval);
+      await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
     }
+    const txHash = await walletClient.writeContract(preparedMint.parameters);
+    await publicClient.waitForTransactionReceipt({ hash: txHash });
+    return txHash;
+  };
 
-    // Fallback path for role-gated tokens:
-    // mint to signer (who is expected to have role), then transfer to user.
+  const mintForSignerThenTransfer = async () => {
     const preparedMintToSigner = await tokenCreate.prepareMint({
       minterAccount: account,
       quantityToMint: 1n,
       mintRecipient: account.address,
     });
-    mintTxHash = await walletClient.writeContract(preparedMintToSigner.parameters);
-    await publicClient.waitForTransactionReceipt({ hash: mintTxHash });
-
-    fallbackTransferTxHash = await walletClient.writeContract({
+    if (preparedMintToSigner.erc20Approval) {
+      const approveTxHash = await walletClient.writeContract(preparedMintToSigner.erc20Approval);
+      await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
+    }
+    const signerMintTxHash = await walletClient.writeContract(preparedMintToSigner.parameters);
+    await publicClient.waitForTransactionReceipt({ hash: signerMintTxHash });
+    const transferTxHash = await walletClient.writeContract({
       address: contractAddress,
       abi: zoraCreator1155ImplABI,
       functionName: "safeTransferFrom",
       args: [account.address, recipient, tokenCreate.tokenId, 1n, "0x"],
     });
-    await publicClient.waitForTransactionReceipt({ hash: fallbackTransferTxHash });
+    await publicClient.waitForTransactionReceipt({ hash: transferTxHash });
+    return { signerMintTxHash, transferTxHash };
+  };
+
+  let mintTxHash;
+  let fallbackTransferTxHash = "";
+  try {
+    mintTxHash = await mintForRecipient();
+  } catch (error) {
+    if (!isUserMissingRoleForTokenError(error)) {
+      throw error;
+    }
+    const fallback = await mintForSignerThenTransfer();
+    mintTxHash = fallback.signerMintTxHash;
+    fallbackTransferTxHash = fallback.transferTxHash;
   }
 
   const tokenId = tokenCreate.tokenId.toString();
