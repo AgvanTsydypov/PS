@@ -13,6 +13,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any, Dict, List, Optional
 
 import psycopg2.extras
@@ -123,8 +124,14 @@ class SeasonWorkbenchService:
         self.manager = DataLoadingManager(use_local_db=True)
         self.season_manager = SeasonManager(use_local_db=True)
         self.scheduler = SimplifiedScheduler(use_local_db=True, dry_run=False)
+        # Wallet list is mostly stable within a season. Cache for 10 days by default.
+        self.wallets_cache_ttl_seconds = int(os.getenv("WALLETS_CACHE_TTL_SECONDS", "864000"))
+        self._wallets_cache: Dict[tuple[int, str, bool, int], tuple[float, List[str]]] = {}
         self.ensure_claims_schema_for_mint()
         self.ensure_winners_schema_for_assignment()
+
+    def clear_wallets_cache(self) -> None:
+        self._wallets_cache.clear()
 
     @staticmethod
     def parse_iso_datetime_utc(value: str) -> datetime:
@@ -296,93 +303,189 @@ class SeasonWorkbenchService:
         finally:
             conn.close()
 
-    def get_wallets(self, season_id: int, wallet_filter: str = "all") -> List[str]:
+    def get_wallets(
+        self,
+        season_id: int,
+        wallet_filter: str = "all",
+        include_position_wallets: bool = True,
+        limit: int = 35,
+    ) -> List[str]:
         if wallet_filter not in {"all", "origin", "non_origin"}:
             wallet_filter = "all"
+        if limit <= 0:
+            limit = 35
+
+        cache_key = (season_id, wallet_filter, include_position_wallets, limit)
+        cached = self._wallets_cache.get(cache_key)
+        now = monotonic()
+        if cached and cached[0] > now:
+            return cached[1]
+
         conn = self.manager.get_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    WITH origin_wallets AS (
-                        SELECT lower(wallet_address) AS wallet
+                if wallet_filter == "origin":
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT lower(wallet_address) AS wallet
                         FROM winner_wallets_nft_to_claim
                         WHERE season_id = %s
-                    ),
-                    season_bounds AS (
-                        SELECT start_date, end_date
-                        FROM seasons
-                        WHERE id = %s
-                        LIMIT 1
-                    ),
-                    season_snapshot_window AS (
-                        SELECT MIN(window_start) AS window_start, MAX(window_end) AS window_end
-                        FROM winner_wallets_nft_to_claim
-                        WHERE season_id = %s
-                    ),
-                    position_wallets AS (
-                        SELECT DISTINCT lower(ucp.proxy_wallet) AS wallet
-                        FROM user_closed_positions ucp
-                        CROSS JOIN season_bounds sb
-                        CROSS JOIN season_snapshot_window ssw
-                        CROSS JOIN LATERAL (
-                            SELECT COALESCE(
-                                ucp.timestamp_human,
-                                CASE
-                                    WHEN ucp.timestamp_unix IS NULL THEN NULL
-                                    WHEN ucp.timestamp_unix > 1000000000000
-                                        THEN to_timestamp(ucp.timestamp_unix / 1000.0)
-                                    ELSE to_timestamp(ucp.timestamp_unix)
-                                END
-                            ) AS position_ts
-                        ) pts
-                        WHERE ucp.proxy_wallet IS NOT NULL
-                          AND lower(ucp.proxy_wallet) ~* '^0x[a-f0-9]{40}$'
-                          AND pts.position_ts IS NOT NULL
-                          AND pts.position_ts >= COALESCE(ssw.window_start, sb.start_date - INTERVAL '30 days')
-                          AND pts.position_ts < COALESCE(ssw.window_end, sb.start_date)
-                    ),
-                    claimed_wallets AS (
-                        SELECT lower(user_wallet) AS wallet
-                        FROM claims
-                        WHERE season_id = %s
-                    ),
-                    candidates AS (
-                        SELECT wallet FROM origin_wallets
-                        UNION
-                        SELECT wallet FROM position_wallets
-                        UNION
-                        SELECT wallet FROM claimed_wallets
-                    ),
-                    normalized AS (
-                        SELECT DISTINCT wallet FROM candidates WHERE wallet ~* '^0x[a-f0-9]{40}$'
-                    ),
-                    classified AS (
-                        SELECT n.wallet, (o.wallet IS NOT NULL) AS is_origin
-                        FROM normalized n
-                        LEFT JOIN origin_wallets o ON o.wallet = n.wallet
+                        ORDER BY wallet
+                        LIMIT %s
+                        """,
+                        (season_id, limit),
                     )
-                    SELECT wallet
-                    FROM classified
-                    WHERE (
-                        %s = 'all'
-                        OR (%s = 'origin' AND is_origin = TRUE)
-                        OR (%s = 'non_origin' AND is_origin = FALSE)
+                    wallets = [str(row[0]) for row in cursor.fetchall()]
+                    self._wallets_cache[cache_key] = (now + self.wallets_cache_ttl_seconds, wallets)
+                    return wallets
+
+                if include_position_wallets:
+                    cursor.execute(
+                        """
+                        WITH origin_wallets AS (
+                            SELECT lower(wallet_address) AS wallet
+                            FROM winner_wallets_nft_to_claim
+                            WHERE season_id = %s
+                        ),
+                        bounds AS (
+                            SELECT
+                                COALESCE(ssw.window_start, s.start_date - INTERVAL '30 days') AS lower_bound,
+                                COALESCE(ssw.window_end, s.start_date) AS upper_bound
+                            FROM seasons
+                            s
+                            LEFT JOIN (
+                                SELECT MIN(window_start) AS window_start, MAX(window_end) AS window_end
+                                FROM winner_wallets_nft_to_claim
+                                WHERE season_id = %s
+                            ) ssw ON TRUE
+                            WHERE s.id = %s
+                            LIMIT 1
+                        ),
+                        bounds_epoch AS (
+                            SELECT
+                                lower_bound,
+                                upper_bound,
+                                FLOOR(EXTRACT(EPOCH FROM lower_bound))::BIGINT AS lower_epoch_s,
+                                FLOOR(EXTRACT(EPOCH FROM upper_bound))::BIGINT AS upper_epoch_s,
+                                FLOOR(EXTRACT(EPOCH FROM lower_bound) * 1000)::BIGINT AS lower_epoch_ms,
+                                FLOOR(EXTRACT(EPOCH FROM upper_bound) * 1000)::BIGINT AS upper_epoch_ms
+                            FROM bounds
+                        ),
+                        position_wallets AS (
+                            SELECT DISTINCT wallet
+                            FROM (
+                                SELECT lower(ucp.proxy_wallet) AS wallet
+                                FROM user_closed_positions ucp
+                                CROSS JOIN bounds_epoch b
+                                WHERE ucp.proxy_wallet IS NOT NULL
+                                  AND lower(ucp.proxy_wallet) ~* '^0x[a-f0-9]{40}$'
+                                  AND ucp.timestamp_human IS NOT NULL
+                                  AND ucp.timestamp_human >= b.lower_bound
+                                  AND ucp.timestamp_human < b.upper_bound
+                                UNION
+                                SELECT lower(ucp.proxy_wallet) AS wallet
+                                FROM user_closed_positions ucp
+                                CROSS JOIN bounds_epoch b
+                                WHERE ucp.proxy_wallet IS NOT NULL
+                                  AND lower(ucp.proxy_wallet) ~* '^0x[a-f0-9]{40}$'
+                                  AND ucp.timestamp_human IS NULL
+                                  AND (
+                                      (ucp.timestamp_unix > 1000000000000 AND ucp.timestamp_unix >= b.lower_epoch_ms AND ucp.timestamp_unix < b.upper_epoch_ms)
+                                      OR
+                                      (ucp.timestamp_unix <= 1000000000000 AND ucp.timestamp_unix >= b.lower_epoch_s AND ucp.timestamp_unix < b.upper_epoch_s)
+                                  )
+                            ) w
+                        ),
+                        claimed_wallets AS (
+                            SELECT lower(user_wallet) AS wallet
+                            FROM claims
+                            WHERE season_id = %s
+                        ),
+                        candidates AS (
+                            SELECT wallet FROM origin_wallets
+                            UNION
+                            SELECT wallet FROM position_wallets
+                            UNION
+                            SELECT wallet FROM claimed_wallets
+                        ),
+                        normalized AS (
+                            SELECT DISTINCT wallet FROM candidates WHERE wallet ~* '^0x[a-f0-9]{40}$'
+                        ),
+                        classified AS (
+                            SELECT n.wallet, (o.wallet IS NOT NULL) AS is_origin
+                            FROM normalized n
+                            LEFT JOIN origin_wallets o ON o.wallet = n.wallet
+                        )
+                        SELECT wallet
+                        FROM classified
+                        WHERE (
+                            %s = 'all'
+                            OR (%s = 'origin' AND is_origin = TRUE)
+                            OR (%s = 'non_origin' AND is_origin = FALSE)
+                        )
+                        ORDER BY wallet
+                        LIMIT %s
+                        """,
+                        (
+                            season_id,
+                            season_id,
+                            season_id,
+                            season_id,
+                            wallet_filter,
+                            wallet_filter,
+                            wallet_filter,
+                            limit,
+                        ),
                     )
-                    ORDER BY wallet
-                    LIMIT 35
-                    """,
-                    (
-                        season_id,
-                        season_id,
-                        season_id,
-                        season_id,
-                        wallet_filter,
-                        wallet_filter,
-                        wallet_filter,
-                    ),
-                )
-                return [str(row[0]) for row in cursor.fetchall()]
+                else:
+                    # Fast path for UI dropdowns: use winners + claims only.
+                    cursor.execute(
+                        """
+                        WITH origin_wallets AS (
+                            SELECT lower(wallet_address) AS wallet
+                            FROM winner_wallets_nft_to_claim
+                            WHERE season_id = %s
+                        ),
+                        claimed_wallets AS (
+                            SELECT lower(user_wallet) AS wallet
+                            FROM claims
+                            WHERE season_id = %s
+                        ),
+                        candidates AS (
+                            SELECT wallet FROM origin_wallets
+                            UNION
+                            SELECT wallet FROM claimed_wallets
+                        ),
+                        normalized AS (
+                            SELECT DISTINCT wallet FROM candidates WHERE wallet ~* '^0x[a-f0-9]{40}$'
+                        ),
+                        classified AS (
+                            SELECT n.wallet, (o.wallet IS NOT NULL) AS is_origin
+                            FROM normalized n
+                            LEFT JOIN origin_wallets o ON o.wallet = n.wallet
+                        )
+                        SELECT wallet
+                        FROM classified
+                        WHERE (
+                            %s = 'all'
+                            OR (%s = 'origin' AND is_origin = TRUE)
+                            OR (%s = 'non_origin' AND is_origin = FALSE)
+                        )
+                        ORDER BY wallet
+                        LIMIT %s
+                        """,
+                        (
+                            season_id,
+                            season_id,
+                            wallet_filter,
+                            wallet_filter,
+                            wallet_filter,
+                            limit,
+                        ),
+                    )
+                wallets = [str(row[0]) for row in cursor.fetchall()]
+                self._wallets_cache[cache_key] = (now + self.wallets_cache_ttl_seconds, wallets)
+                return wallets
         finally:
             conn.close()
 
@@ -985,6 +1088,7 @@ class SeasonWorkbenchService:
                 phase=phase,
                 mint_chain=req.blockchain,
             )
+            self.clear_wallets_cache()
             return {
                 "status": "db_only_inserted",
                 "claim_id": claim_id,
@@ -1043,6 +1147,7 @@ class SeasonWorkbenchService:
             recipient_solana_wallet=recipient_address,
             mint_result=mint_result,
         )
+        self.clear_wallets_cache()
 
         return {
             "status": "mint_completed",
@@ -1060,6 +1165,7 @@ class SeasonWorkbenchService:
 
     def run_season_lifecycle_update(self) -> str:
         self.scheduler.run_standard_season_update()
+        self.clear_wallets_cache()
         return "run_standard_season_update finished"
 
     def load_scenario_season_params(self, season_id: int) -> Dict[str, Any]:
@@ -1197,6 +1303,7 @@ class SeasonWorkbenchService:
             raise
         finally:
             conn.close()
+        self.clear_wallets_cache()
 
 
 service = SeasonWorkbenchService()
@@ -1242,8 +1349,18 @@ def get_overview() -> Dict[str, Any]:
 
 
 @app.get("/api/wallets")
-def get_wallets(season_id: int, wallet_filter: str = "all") -> Dict[str, Any]:
-    wallets = service.get_wallets(season_id=season_id, wallet_filter=wallet_filter)
+def get_wallets(
+    season_id: int,
+    wallet_filter: str = "all",
+    include_position_wallets: bool = True,
+    limit: int = 35,
+) -> Dict[str, Any]:
+    wallets = service.get_wallets(
+        season_id=season_id,
+        wallet_filter=wallet_filter,
+        include_position_wallets=include_position_wallets,
+        limit=limit,
+    )
     return {"wallets": wallets}
 
 

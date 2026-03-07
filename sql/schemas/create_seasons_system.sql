@@ -327,6 +327,27 @@ COMMENT ON COLUMN winner_wallets_nft_to_claim.market_id IS 'Market id of the hig
 
 DO $$ BEGIN RAISE NOTICE '✅ winner_wallets_nft_to_claim table created'; END $$;
 
+-- Performance indexes for wallet lookup paths used by /api/wallets.
+CREATE INDEX IF NOT EXISTS idx_claims_season_user_wallet_lower
+    ON claims(season_id, LOWER(user_wallet));
+CREATE INDEX IF NOT EXISTS idx_winners_snapshot_season_wallet_lower
+    ON winner_wallets_nft_to_claim(season_id, LOWER(wallet_address));
+
+DO $$
+BEGIN
+    IF to_regclass('public.user_closed_positions') IS NOT NULL THEN
+        EXECUTE '
+            CREATE INDEX IF NOT EXISTS idx_ucp_timestamp_human_wallet_lower
+            ON user_closed_positions(timestamp_human, LOWER(proxy_wallet))
+            WHERE timestamp_human IS NOT NULL
+        ';
+        EXECUTE '
+            CREATE INDEX IF NOT EXISTS idx_ucp_timestamp_unix_wallet_lower
+            ON user_closed_positions(timestamp_unix, LOWER(proxy_wallet))
+        ';
+    END IF;
+END $$;
+
 -- Backfill snapshots for existing standard/genesis seasons (idempotent).
 DO $$
 DECLARE
