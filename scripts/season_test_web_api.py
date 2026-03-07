@@ -8,6 +8,7 @@ Run:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -32,6 +33,8 @@ from scripts.daily_scheduler_simple import SimplifiedScheduler
 from scripts.season_manager import SeasonManager
 from scripts.solana_service import MintedNftResult, SolanaClient
 from scripts.zora_service import ZoraClient
+
+logger = logging.getLogger(__name__)
 
 MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
 BLOCKCHAIN_SOLANA = "solana"
@@ -1410,6 +1413,12 @@ async def mint_claim(req: MintClaimRequest) -> Dict[str, Any]:
         await ws_hub.broadcast("mint_finished", {"status": "ok", "claim_id": result.get("claim_id")})
         return result
     except Exception as exc:
+        logger.exception(
+            "Mint failed for wallet=%s season_id=%s chain=%s",
+            req.wallet,
+            req.season_id,
+            req.blockchain,
+        )
         await ws_hub.broadcast("mint_finished", {"status": "error", "error": str(exc)})
         raise HTTPException(status_code=400, detail=str(exc))
 
