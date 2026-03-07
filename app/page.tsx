@@ -129,6 +129,8 @@ export default function HomePage() {
 
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetOutput, setResetOutput] = useState("");
+  const [seasonUpdateRunning, setSeasonUpdateRunning] = useState(false);
+  const [seasonUpdateOutput, setSeasonUpdateOutput] = useState("");
 
   const seasonOptions = useMemo(() => seasons.map((s) => ({ value: s.id, label: `id=${s.id} | ${s.type}#${s.season_number}` })), [seasons]);
   const claimSeasonInfoLines = useMemo(() => claimSeasonInfo.split("\n"), [claimSeasonInfo]);
@@ -337,6 +339,10 @@ export default function HomePage() {
         const payload = JSON.parse(event.data) as { event: string; payload: { status?: string; message?: string } };
         const msg = `[WS:${payload.event}] ${payload.payload?.status ?? ""} ${payload.payload?.message ?? ""}`.trim();
         setClaimOutput((prev) => `${prev}${msg}\n`);
+        if (payload.event === "season_update") {
+          setSeasonUpdateOutput((prev) => `${prev}${msg}\n`);
+          setSeasonUpdateRunning(false);
+        }
       } catch {
         // ignore parse errors
       }
@@ -377,15 +383,31 @@ export default function HomePage() {
             <button
               onClick={() =>
                 void run(async () => {
-                  const out = await fetchJSON<{ message: string }>("/api/actions/season-update", { method: "POST" });
-                  setOk(out.message);
-                  await refreshOverview();
+                  setSeasonUpdateRunning(true);
+                  setSeasonUpdateOutput((prev) => `${prev}[${new Date().toISOString()}] Season update started...\n`);
+                  try {
+                    const out = await fetchJSON<{ message: string }>("/api/actions/season-update", { method: "POST" });
+                    setSeasonUpdateOutput((prev) => `${prev}[${new Date().toISOString()}] Season update completed: ${out.message}\n`);
+                    setOk(out.message);
+                    await refreshOverview();
+                  } catch (e) {
+                    const message = e instanceof Error ? e.message : String(e);
+                    setSeasonUpdateOutput((prev) => `${prev}[${new Date().toISOString()}] Season update failed: ${message}\n`);
+                    throw e;
+                  } finally {
+                    setSeasonUpdateRunning(false);
+                  }
                 })
               }
-              disabled={busy}
+              disabled={busy || seasonUpdateRunning}
             >
-              Run --season-update
+              {seasonUpdateRunning ? "Running --season-update..." : "Run --season-update"}
             </button>
+            {seasonUpdateRunning ? <span className="muted">Season update in progress... this can take a while on large DB.</span> : null}
+          </div>
+          <div className="panel">
+            <div className="muted">Season update output</div>
+            <div className="mono">{seasonUpdateOutput || "No runs yet."}</div>
           </div>
           <table>
             <thead>
