@@ -147,6 +147,11 @@ function buildExplorerBase(chain) {
   return "https://sepolia.basescan.org";
 }
 
+function isUserMissingRoleForTokenError(error) {
+  const text = String(error?.message || error || "");
+  return text.includes("UserMissingRoleForToken");
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   const payloadRaw = fs.readFileSync(path.resolve(process.cwd(), args.payloadFile), "utf8");
@@ -285,17 +290,43 @@ async function main() {
     await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
   }
 
-  const mintTxHash = await walletClient.writeContract(preparedMint.parameters);
-  await publicClient.waitForTransactionReceipt({ hash: mintTxHash });
+  let mintTxHash;
+  let fallbackTransferTxHash = "";
+  try {
+    mintTxHash = await walletClient.writeContract(preparedMint.parameters);
+    await publicClient.waitForTransactionReceipt({ hash: mintTxHash });
+  } catch (error) {
+    if (!isUserMissingRoleForTokenError(error)) {
+      throw error;
+    }
+
+    // Fallback path for role-gated tokens:
+    // mint to signer (who is expected to have role), then transfer to user.
+    const preparedMintToSigner = await tokenCreate.prepareMint({
+      minterAccount: account,
+      quantityToMint: 1n,
+      mintRecipient: account.address,
+    });
+    mintTxHash = await walletClient.writeContract(preparedMintToSigner.parameters);
+    await publicClient.waitForTransactionReceipt({ hash: mintTxHash });
+
+    fallbackTransferTxHash = await walletClient.writeContract({
+      address: contractAddress,
+      abi: zoraCreator1155ImplABI,
+      functionName: "safeTransferFrom",
+      args: [account.address, recipient, tokenCreate.tokenId, 1n, "0x"],
+    });
+    await publicClient.waitForTransactionReceipt({ hash: fallbackTransferTxHash });
+  }
 
   const tokenId = tokenCreate.tokenId.toString();
   const explorerBase = buildExplorerBase(chain);
   const output = {
     asset_address: `${contractAddress}:${tokenId}`,
-    tx_hash: mintTxHash,
+    tx_hash: fallbackTransferTxHash || mintTxHash,
     nft_name: nftName,
     metadata_uri: metadataUri,
-    explorer_tx_url: `${explorerBase}/tx/${mintTxHash}`,
+    explorer_tx_url: `${explorerBase}/tx/${fallbackTransferTxHash || mintTxHash}`,
     explorer_asset_url: `${explorerBase}/token/${contractAddress}?a=${tokenId}`,
   };
   process.stdout.write(JSON.stringify(output));
