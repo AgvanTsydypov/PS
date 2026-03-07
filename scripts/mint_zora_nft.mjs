@@ -147,11 +147,6 @@ function buildExplorerBase(chain) {
   return "https://sepolia.basescan.org";
 }
 
-function isUserMissingRoleForTokenError(error) {
-  const text = String(error?.message || error || "");
-  return text.includes("UserMissingRoleForToken");
-}
-
 async function main() {
   const args = parseArgs(process.argv);
   const payloadRaw = fs.readFileSync(path.resolve(process.cwd(), args.payloadFile), "utf8");
@@ -279,21 +274,6 @@ async function main() {
   const createTxHash = await walletClient.writeContract(tokenCreate.parameters);
   await publicClient.waitForTransactionReceipt({ hash: createTxHash });
 
-  const mintForRecipient = async () => {
-    const preparedMint = await tokenCreate.prepareMint({
-      minterAccount: account,
-      quantityToMint: 1n,
-      mintRecipient: recipient,
-    });
-    if (preparedMint.erc20Approval) {
-      const approveTxHash = await walletClient.writeContract(preparedMint.erc20Approval);
-      await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
-    }
-    const txHash = await walletClient.writeContract(preparedMint.parameters);
-    await publicClient.waitForTransactionReceipt({ hash: txHash });
-    return txHash;
-  };
-
   const mintForSignerThenTransfer = async () => {
     const preparedMintToSigner = await tokenCreate.prepareMint({
       minterAccount: account,
@@ -316,18 +296,11 @@ async function main() {
     return { signerMintTxHash, transferTxHash };
   };
 
-  let mintTxHash;
-  let fallbackTransferTxHash = "";
-  try {
-    mintTxHash = await mintForRecipient();
-  } catch (error) {
-    if (!isUserMissingRoleForTokenError(error)) {
-      throw error;
-    }
-    const fallback = await mintForSignerThenTransfer();
-    mintTxHash = fallback.signerMintTxHash;
-    fallbackTransferTxHash = fallback.transferTxHash;
-  }
+  // Always mint to signer and transfer to the target wallet.
+  // This avoids recipient role-gating (UserMissingRoleForToken) on contracts
+  // where only privileged minters are allowed.
+  const { signerMintTxHash: mintTxHash, transferTxHash: fallbackTransferTxHash } =
+    await mintForSignerThenTransfer();
 
   const tokenId = tokenCreate.tokenId.toString();
   const explorerBase = buildExplorerBase(chain);
