@@ -12,6 +12,7 @@ import { zoraCreator1155ImplABI } from "@zoralabs/protocol-deployments";
 
 const PINATA_JSON_API_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS";
 const PINATA_FILE_API_URL = "https://api.pinata.cloud/pinning/pinFileToIPFS";
+const PERMISSION_BIT_MINTER = 1n << 2n; // role=4
 
 function parseArgs(argv) {
   const args = {
@@ -273,6 +274,20 @@ async function main() {
 
   const createTxHash = await walletClient.writeContract(tokenCreate.parameters);
   await publicClient.waitForTransactionReceipt({ hash: createTxHash });
+
+  // Ensure signer has minter permission for the newly created token.
+  // Some 1155 setups are role-gated and won't allow mint without this bit.
+  try {
+    const addPermissionTxHash = await walletClient.writeContract({
+      address: contractAddress,
+      abi: zoraCreator1155ImplABI,
+      functionName: "addPermission",
+      args: [tokenCreate.tokenId, account.address, PERMISSION_BIT_MINTER],
+    });
+    await publicClient.waitForTransactionReceipt({ hash: addPermissionTxHash });
+  } catch {
+    // Ignore if permission already exists or contract grants it automatically.
+  }
 
   const mintForSignerThenTransfer = async () => {
     const preparedMintToSigner = await tokenCreate.prepareMint({
