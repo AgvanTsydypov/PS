@@ -207,6 +207,10 @@ export default function HomePage() {
     setOk("");
   };
 
+  const appendScenarioLog = (message: string) => {
+    setScenarioOutput((prev) => `${prev}[${new Date().toISOString()}] ${message}\n`);
+  };
+
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
     setError("");
@@ -294,7 +298,7 @@ export default function HomePage() {
     setScenarioEndDateIso(String(row.end_date_iso ?? ""));
     setScenarioIsActive(Boolean(row.is_active) ? "true" : "false");
     setScenarioIsCompleted(Boolean(row.is_completed) ? "true" : "false");
-    setScenarioOutput((prev) => `${prev}Loaded params for season ${scenarioSeasonId}\n`);
+    appendScenarioLog(`Loaded params for season ${scenarioSeasonId}`);
   };
 
   useEffect(() => {
@@ -359,8 +363,12 @@ export default function HomePage() {
     const ws = new WebSocket(wsUrl);
     ws.onmessage = (event) => {
       try {
-        const payload = JSON.parse(event.data) as { event: string; payload: { status?: string; message?: string } };
-        const msg = `[WS:${payload.event}] ${payload.payload?.status ?? ""} ${payload.payload?.message ?? ""}`.trim();
+        const payload = JSON.parse(event.data) as {
+          event: string;
+          payload: { status?: string; message?: string; error?: string };
+        };
+        const wsDetails = payload.payload?.message || payload.payload?.error || "";
+        const msg = `[WS:${payload.event}] ${payload.payload?.status ?? ""} ${wsDetails}`.trim();
         setClaimOutput((prev) => `${prev}${msg}\n`);
         if (payload.event === "season_update") {
           setSeasonUpdateOutput((prev) => `${prev}${msg}\n`);
@@ -565,6 +573,10 @@ export default function HomePage() {
                     await refreshClaimSeasonInfo();
                     await refreshSeasonClaims();
                     await refreshOverview();
+                  } catch (e) {
+                    const message = e instanceof Error ? e.message : String(e);
+                    setClaimOutput((prev) => `${prev}[${new Date().toISOString()}] Mint failed: ${message}\n`);
+                    throw e;
                   } finally {
                     setClaimMinting(false);
                   }
@@ -654,10 +666,86 @@ export default function HomePage() {
             <button onClick={() => void run(loadScenarioParams)}>Load selected season params</button>
           </div>
           <div className="row">
-            <button onClick={() => void run(() => fetchJSON("/api/scenarios/quick-phase", { method: "POST", body: JSON.stringify({ season_id: scenarioSeasonId, days_since_start: 1 }) }).then(() => refreshOverview()))}>Set Breach (day 2)</button>
-            <button onClick={() => void run(() => fetchJSON("/api/scenarios/quick-phase", { method: "POST", body: JSON.stringify({ season_id: scenarioSeasonId, days_since_start: 4 }) }).then(() => refreshOverview()))}>Set Vault (day 5)</button>
-            <button onClick={() => void run(() => fetchJSON("/api/scenarios/quick-phase", { method: "POST", body: JSON.stringify({ season_id: scenarioSeasonId, days_since_start: 7 }) }).then(() => refreshOverview()))}>Set Scavenge (day 8)</button>
-            <button onClick={() => void run(() => fetchJSON("/api/scenarios/quick-phase", { method: "POST", body: JSON.stringify({ season_id: scenarioSeasonId, days_since_start: 9 }) }).then(() => refreshOverview()))}>Set Transmission (day 10)</button>
+            <button
+              onClick={() =>
+                void run(async () => {
+                  try {
+                    await fetchJSON("/api/scenarios/quick-phase", {
+                      method: "POST",
+                      body: JSON.stringify({ season_id: scenarioSeasonId, days_since_start: 1 }),
+                    });
+                    appendScenarioLog(`Quick phase: season=${scenarioSeasonId} -> Breach (day 2)`);
+                    await refreshOverview();
+                  } catch (e) {
+                    const message = e instanceof Error ? e.message : String(e);
+                    appendScenarioLog(`Quick phase failed (Breach/day2): ${message}`);
+                    throw e;
+                  }
+                })
+              }
+            >
+              Set Breach (day 2)
+            </button>
+            <button
+              onClick={() =>
+                void run(async () => {
+                  try {
+                    await fetchJSON("/api/scenarios/quick-phase", {
+                      method: "POST",
+                      body: JSON.stringify({ season_id: scenarioSeasonId, days_since_start: 4 }),
+                    });
+                    appendScenarioLog(`Quick phase: season=${scenarioSeasonId} -> Vault (day 5)`);
+                    await refreshOverview();
+                  } catch (e) {
+                    const message = e instanceof Error ? e.message : String(e);
+                    appendScenarioLog(`Quick phase failed (Vault/day5): ${message}`);
+                    throw e;
+                  }
+                })
+              }
+            >
+              Set Vault (day 5)
+            </button>
+            <button
+              onClick={() =>
+                void run(async () => {
+                  try {
+                    await fetchJSON("/api/scenarios/quick-phase", {
+                      method: "POST",
+                      body: JSON.stringify({ season_id: scenarioSeasonId, days_since_start: 7 }),
+                    });
+                    appendScenarioLog(`Quick phase: season=${scenarioSeasonId} -> Scavenge (day 8)`);
+                    await refreshOverview();
+                  } catch (e) {
+                    const message = e instanceof Error ? e.message : String(e);
+                    appendScenarioLog(`Quick phase failed (Scavenge/day8): ${message}`);
+                    throw e;
+                  }
+                })
+              }
+            >
+              Set Scavenge (day 8)
+            </button>
+            <button
+              onClick={() =>
+                void run(async () => {
+                  try {
+                    await fetchJSON("/api/scenarios/quick-phase", {
+                      method: "POST",
+                      body: JSON.stringify({ season_id: scenarioSeasonId, days_since_start: 9 }),
+                    });
+                    appendScenarioLog(`Quick phase: season=${scenarioSeasonId} -> Transmission (day 10)`);
+                    await refreshOverview();
+                  } catch (e) {
+                    const message = e instanceof Error ? e.message : String(e);
+                    appendScenarioLog(`Quick phase failed (Transmission/day10): ${message}`);
+                    throw e;
+                  }
+                })
+              }
+            >
+              Set Transmission (day 10)
+            </button>
           </div>
           <div className="row">
             <label>Shift start_date by days (from now)</label>
@@ -665,12 +753,18 @@ export default function HomePage() {
             <button
               onClick={() =>
                 void run(async () => {
-                  await fetchJSON("/api/scenarios/manual-date-shift", {
-                    method: "POST",
-                    body: JSON.stringify({ season_id: scenarioSeasonId, shift_days: Number(scenarioShiftDays) }),
-                  });
-                  setScenarioOutput((prev) => `${prev}Applied date shift\n`);
-                  await refreshOverview();
+                  try {
+                    await fetchJSON("/api/scenarios/manual-date-shift", {
+                      method: "POST",
+                      body: JSON.stringify({ season_id: scenarioSeasonId, shift_days: Number(scenarioShiftDays) }),
+                    });
+                    appendScenarioLog(`Applied date shift: season=${scenarioSeasonId}, shift_days=${Number(scenarioShiftDays)}`);
+                    await refreshOverview();
+                  } catch (e) {
+                    const message = e instanceof Error ? e.message : String(e);
+                    appendScenarioLog(`Date shift failed: ${message}`);
+                    throw e;
+                  }
                 })
               }
             >
@@ -683,12 +777,20 @@ export default function HomePage() {
             <button
               onClick={() =>
                 void run(async () => {
-                  await fetchJSON("/api/scenarios/remaining-supply", {
-                    method: "POST",
-                    body: JSON.stringify({ season_id: scenarioSeasonId, remaining_supply: Number(scenarioRemainingSupply) }),
-                  });
-                  setScenarioOutput((prev) => `${prev}Applied remaining_supply\n`);
-                  await refreshOverview();
+                  try {
+                    await fetchJSON("/api/scenarios/remaining-supply", {
+                      method: "POST",
+                      body: JSON.stringify({ season_id: scenarioSeasonId, remaining_supply: Number(scenarioRemainingSupply) }),
+                    });
+                    appendScenarioLog(
+                      `Applied remaining_supply: season=${scenarioSeasonId}, remaining_supply=${Number(scenarioRemainingSupply)}`
+                    );
+                    await refreshOverview();
+                  } catch (e) {
+                    const message = e instanceof Error ? e.message : String(e);
+                    appendScenarioLog(`Apply supply failed: ${message}`);
+                    throw e;
+                  }
                 })
               }
             >
@@ -719,21 +821,29 @@ export default function HomePage() {
               <button
                 onClick={() =>
                   void run(async () => {
-                    await fetchJSON("/api/scenarios/apply-advanced", {
-                      method: "POST",
-                      body: JSON.stringify({
-                        season_id: scenarioSeasonId,
-                        season_number: Number(scenarioSeasonNumber),
-                        total_supply: Number(scenarioTotalSupply),
-                        remaining_supply: Number(scenarioRemainingSupplyAdvanced),
-                        start_date_iso: scenarioStartDateIso,
-                        end_date_iso: scenarioEndDateIso,
-                        is_active: scenarioIsActive === "true",
-                        is_completed: scenarioIsCompleted === "true",
-                      }),
-                    });
-                    setScenarioOutput((prev) => `${prev}Applied advanced params\n`);
-                    await refreshOverview();
+                    try {
+                      await fetchJSON("/api/scenarios/apply-advanced", {
+                        method: "POST",
+                        body: JSON.stringify({
+                          season_id: scenarioSeasonId,
+                          season_number: Number(scenarioSeasonNumber),
+                          total_supply: Number(scenarioTotalSupply),
+                          remaining_supply: Number(scenarioRemainingSupplyAdvanced),
+                          start_date_iso: scenarioStartDateIso,
+                          end_date_iso: scenarioEndDateIso,
+                          is_active: scenarioIsActive === "true",
+                          is_completed: scenarioIsCompleted === "true",
+                        }),
+                      });
+                      appendScenarioLog(
+                        `Applied advanced params: season=${scenarioSeasonId}, season_number=${Number(scenarioSeasonNumber)}, total=${Number(scenarioTotalSupply)}, remaining=${Number(scenarioRemainingSupplyAdvanced)}, active=${scenarioIsActive}, completed=${scenarioIsCompleted}`
+                      );
+                      await refreshOverview();
+                    } catch (e) {
+                      const message = e instanceof Error ? e.message : String(e);
+                      appendScenarioLog(`Apply advanced params failed: ${message}`);
+                      throw e;
+                    }
                   })
                 }
               >

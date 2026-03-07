@@ -304,7 +304,22 @@ async function main() {
   });
 
   const createTxHash = await writeContractWithNonce(tokenCreate.parameters);
-  await publicClient.waitForTransactionReceipt({ hash: createTxHash });
+  const createReceipt = await publicClient.waitForTransactionReceipt({ hash: createTxHash });
+  if (createReceipt.status !== "success") {
+    throw new Error(`Token creation transaction reverted: ${createTxHash}`);
+  }
+
+  // Do not rely on predicted token id from SDK under contention.
+  // Resolve actual created token id from on-chain state after tx is mined.
+  const nextTokenIdAfterCreate = await publicClient.readContract({
+    address: contractAddress,
+    abi: zoraCreator1155ImplABI,
+    functionName: "nextTokenId",
+  });
+  const actualTokenId = BigInt(nextTokenIdAfterCreate) - 1n;
+  if (actualTokenId < 0n) {
+    throw new Error(`Resolved invalid token id after creation: ${String(nextTokenIdAfterCreate)}`);
+  }
 
   // Use adminMint directly (owner/admin path). This bypasses minter role and
   // sale strategy restrictions that affect the regular mint() flow.
@@ -312,11 +327,11 @@ async function main() {
     address: contractAddress,
     abi: zoraCreator1155ImplABI,
     functionName: "adminMint",
-    args: [recipient, tokenCreate.tokenId, 1n, "0x"],
+    args: [recipient, actualTokenId, 1n, "0x"],
   });
   await publicClient.waitForTransactionReceipt({ hash: mintTxHash });
 
-  const tokenId = tokenCreate.tokenId.toString();
+  const tokenId = actualTokenId.toString();
   const explorerBase = buildExplorerBase(chain);
   const output = {
     asset_address: `${contractAddress}:${tokenId}`,
