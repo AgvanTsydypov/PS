@@ -109,6 +109,12 @@ Optional:
 npm run setup:zora-collection -- --uri "https://gateway.pinata.cloud/ipfs/<COLLECTION_METADATA_HASH>" --name "PolyStars Base"
 ```
 
+Important behavior:
+
+- Setup creates only the Zora 1155 collection contract.
+- Setup does **not** create bootstrap `tokenId=1`.
+- First NFT appears only when mint is triggered from app flow (`/api/claims/mint`).
+
 3) Script writes new values to `.env`:
 
 - `ZORA_1155_CONTRACT_ADDRESS=<new_contract_address>`

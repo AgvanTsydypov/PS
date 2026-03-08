@@ -13,7 +13,10 @@ import process from "node:process";
 import { createPublicClient, createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base, baseSepolia } from "viem/chains";
-import { create1155, getContractAddressFromReceipt } from "@zoralabs/protocol-sdk";
+import {
+  getContractAddressFromReceipt,
+  makeCreateContractAndTokenCall,
+} from "@zoralabs/protocol-sdk";
 
 const DEFAULT_ENV_PATH = path.resolve(process.cwd(), ".env");
 const ZORA_CHAIN_ENV_KEY = "ZORA_CHAIN";
@@ -30,7 +33,6 @@ function parseArgs(argv) {
     rpcUrl: "",
     privateKey: "",
     uri: "",
-    tokenUri: "",
     name: "",
   };
 
@@ -53,9 +55,6 @@ function parseArgs(argv) {
     } else if (token === "--uri" && next) {
       args.uri = next.trim();
       i += 1;
-    } else if (token === "--token-uri" && next) {
-      args.tokenUri = next.trim();
-      i += 1;
     } else if (token === "--name" && next) {
       args.name = next.trim();
       i += 1;
@@ -77,13 +76,12 @@ Options:
   --rpc-url <url>        RPC URL (default: from .env or chain default)
   --private-key <key>    Minter private key (default: from .env)
   --uri <url>            Contract metadata URI
-  --token-uri <url>      First token metadata URI (default: same as --uri)
   --name <string>        Contract name (default: PolyStars Base)
   -h, --help             Show help
 
 Notes:
   - Zora 1155 contract is your collection-level container on Base.
-  - Script creates contract + first token setup transaction.
+  - Script creates contract only (no bootstrap token).
   - It saves ZORA_1155_CONTRACT_ADDRESS to .env.
 `);
   process.exit(code);
@@ -207,7 +205,6 @@ async function main() {
       "Provide a real contract metadata URI via --uri or ZORA_CONTRACT_METADATA_URI."
     );
   }
-  const tokenUri = args.tokenUri || contractUri;
   const contractName = args.name || DEFAULT_COLLECTION_NAME;
 
   console.log("Validating contract metadata URI...");
@@ -225,35 +222,29 @@ async function main() {
     transport: http(rpcUrl),
   });
 
-  console.log("Preparing Zora 1155 contract create transaction...");
-  const prepared = await create1155({
+  console.log("Preparing Zora 1155 contract create transaction (collection only, no token)...");
+  const createContractCall = makeCreateContractAndTokenCall({
     contract: {
       name: contractName,
       uri: contractUri,
     },
     account,
-    token: {
-      tokenMetadataURI: tokenUri,
-      maxSupply: 1n,
-      salesConfig: {
-        type: "fixedPrice",
-        pricePerToken: 0n,
-      },
-    },
-    publicClient,
+    chainId: chain.id,
+    tokenSetupActions: [],
   });
 
-  const predictedContractAddress = prepared.contractAddress;
-
   console.log("Sending transaction...");
-  const txHash = await walletClient.writeContract(prepared.parameters);
+  const txHash = await walletClient.writeContract(createContractCall);
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
-  let contractAddress = predictedContractAddress;
+  let contractAddress = "";
   try {
     contractAddress = getContractAddressFromReceipt(receipt);
   } catch {
-    // Fallback to predicted deterministic address from SDK.
+    // Keep explicit failure: contract address is required for app mint flow.
+  }
+  if (!contractAddress) {
+    throw new Error("Could not resolve new contract address from transaction receipt.");
   }
 
   const explorerBase = getExplorerBase(chain);
@@ -269,6 +260,7 @@ async function main() {
   console.log(`Transaction Explorer URL: ${txExplorerUrl}`);
   console.log(`Contract name: ${contractName}`);
   console.log(`Contract metadata name: ${metadata.name}`);
+  console.log("Bootstrap first token: disabled");
   console.log(`Saved to .env: ${ZORA_CONTRACT_ENV_KEY}=${contractAddress}`);
 }
 
