@@ -180,6 +180,52 @@ services:
     networks:
       - polystars_web_network
 
+  # User web stack (isolated from season test/workbench)
+  user_web_backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.user.web.backend
+    container_name: polystars_user_web_backend
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env}
+    environment:
+      DB_SSLMODE: ${DB_SSLMODE:-require}
+      PYTHONUNBUFFERED: 1
+    expose:
+      - "8011"
+    networks:
+      - polystars_user_web_network
+
+  user_web_frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.user.web.frontend
+      args:
+        NEXT_PUBLIC_USER_API_BASE_URL: "/"
+    container_name: polystars_user_web_frontend
+    restart: unless-stopped
+    depends_on:
+      - user_web_backend
+    expose:
+      - "3001"
+    networks:
+      - polystars_user_web_network
+
+  user_web_nginx:
+    image: nginx:1.27-alpine
+    container_name: polystars_user_web_nginx
+    restart: unless-stopped
+    depends_on:
+      - user_web_backend
+      - user_web_frontend
+    ports:
+      - "127.0.0.1:8089:80"
+    volumes:
+      - ./docker/nginx/user_web.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - polystars_user_web_network
+
 volumes:
   pgadmin_data:
     name: polystars_pgadmin_data
@@ -190,4 +236,7 @@ networks:
     driver: bridge
   polystars_web_network:
     name: polystars_web_network
+    driver: bridge
+  polystars_user_web_network:
+    name: polystars_user_web_network
     driver: bridge

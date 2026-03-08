@@ -1,0 +1,17 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY user_web_frontend/package.json /app/package.json
+RUN npm install --no-audit --no-fund
+
+COPY user_web_frontend /app
+
+ARG NEXT_PUBLIC_USER_API_BASE_URL=/
+ENV NEXT_PUBLIC_USER_API_BASE_URL=${NEXT_PUBLIC_USER_API_BASE_URL}
+
+RUN npm run build
+
+EXPOSE 3001
+
+CMD ["npm", "run", "start"]
