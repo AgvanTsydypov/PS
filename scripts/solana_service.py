@@ -268,6 +268,19 @@ class SolanaClient:
         if uploaded_uri:
             return uploaded_uri
 
+        allow_inline_fallback = (
+            os.environ.get("SOLANA_ALLOW_INLINE_METADATA_FALLBACK", "false")
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        )
+        if not allow_inline_fallback:
+            raise RuntimeError(
+                "Failed to upload NFT metadata to Pinata; aborting mint to avoid "
+                "non-indexable inline metadata. Set SOLANA_ALLOW_INLINE_METADATA_FALLBACK=true "
+                "only if you explicitly want data: URI fallback."
+            )
+
         # Fallback when Pinata is unavailable: keep URI minimal to stay below
         # transaction size limits. Full winner snapshot remains in DB records.
         compact_metadata = {
