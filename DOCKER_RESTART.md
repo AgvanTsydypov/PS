@@ -252,3 +252,23 @@ docker compose up -d
 - **Volumes не нужны** для данных (только для pgadmin_data)
 - **SSL всегда включен** для Managed DB
 - **host.docker.internal** для локальной БД на Windows
+
+
+docker compose up -d --build user_web_backend user_web_frontend user_web_nginx
+curl -sS http://127.0.0.1:8089/api/health
+curl -sS -X POST http://127.0.0.1:8089/api/auth/wallet/challenge -H "Content-Type: application/json" -d '{"wallet_address":"0x0000000000000000000000000000000000000001"}'
+
+Без Docker (локально backend + frontend)
+Терминал 1:
+
+cd /Users/agmac/Desktop/PolyStars
+ENV_FILE=.env uvicorn user_web_backend.main:app --host 0.0.0.0 --port 8011 --reload
+Терминал 2:
+
+cd /Users/agmac/Desktop/PolyStars/user_web_frontend
+npm install
+NEXT_PUBLIC_USER_API_BASE_URL=http://127.0.0.1:8011 npm run dev
+Проверка:
+
+curl -sS http://127.0.0.1:8011/api/health
+

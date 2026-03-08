@@ -14,9 +14,11 @@ build/
 
 # Node.js / Next.js
 /node_modules
+**/node_modules/
 /.pnp
 .pnp.js
 /.next/
+**/.next/
 /out/
 /build
 

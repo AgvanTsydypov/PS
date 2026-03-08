@@ -201,24 +201,6 @@ CREATE INDEX IF NOT EXISTS idx_markets_end_date ON markets(end_date);
 DO $$ BEGIN RAISE NOTICE '✅ Markets table created'; END $$;
 
 -- ============================================================================
--- 3. FETCH METADATA TABLE - Track data fetches
--- ============================================================================
-DO $$ BEGIN RAISE NOTICE '📝 Creating fetch_metadata table...'; END $$;
-
-CREATE TABLE IF NOT EXISTS fetch_metadata (
-    id BIGSERIAL PRIMARY KEY,
-    timestamp TIMESTAMPTZ NOT NULL,
-    total_events INTEGER,
-    fetch_method TEXT,
-    filters JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_fetch_metadata_timestamp ON fetch_metadata(timestamp DESC);
-
-DO $$ BEGIN RAISE NOTICE '✅ Fetch_metadata table created'; END $$;
-
--- ============================================================================
 -- 4. REDEMPTIONS TABLE - When users claim their winnings
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE '💰 Creating redemptions table...'; END $$;
@@ -460,6 +442,24 @@ ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS markets_count INTEGER DEFAULT 0;
 
 DO $$ BEGIN RAISE NOTICE '✅ data_loads table created'; END $$;
 
+-- ============================================================================
+-- 8. USER WALLET SIGN-INS TABLE - Auth logins for user site
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '🔐 Creating user_wallet_signins table...'; END $$;
+
+CREATE TABLE IF NOT EXISTS user_wallet_signins (
+    wallet_address TEXT PRIMARY KEY,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_signed_in_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sign_in_count INTEGER NOT NULL DEFAULT 1,
+    CONSTRAINT user_wallet_signins_wallet_check CHECK (wallet_address ~* '^0x[a-f0-9]{40}$')
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_wallet_signins_last_signed_in_at
+    ON user_wallet_signins(last_signed_in_at DESC);
+
+DO $$ BEGIN RAISE NOTICE '✅ user_wallet_signins table created'; END $$;
+
 -- Tracking views
 CREATE OR REPLACE VIEW recent_loads AS
 SELECT 
@@ -520,11 +520,11 @@ DO $$ BEGIN RAISE NOTICE ''; END $$;
 DO $$ BEGIN RAISE NOTICE '📊 Created tables:'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - events'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - markets'; END $$;
-DO $$ BEGIN RAISE NOTICE '   - fetch_metadata'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - redemptions'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - user_closed_positions'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - trader_leaderboard'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - data_loads (tracking)'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - user_wallet_signins'; END $$;
 DO $$ BEGIN RAISE NOTICE ''; END $$;
 DO $$ BEGIN RAISE NOTICE '📈 Created views:'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - events_summary'; END $$;
