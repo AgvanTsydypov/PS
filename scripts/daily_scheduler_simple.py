@@ -1663,13 +1663,9 @@ Examples:
     parser.add_argument('--auto-catchup', action='store_true', help='After --historical, automatically run --catch-up')
     parser.add_argument('--force', action='store_true', help='Force reload')
     parser.add_argument('--dry-run', action='store_true', help='Dry run (test)')
-    parser.add_argument('--local', action='store_true', default=True, help='Use local PostgreSQL')
-    parser.add_argument('--supabase', action='store_true', help='Use Supabase')
-    
     args = parser.parse_args()
-    
-    use_local_db = not args.supabase
-    scheduler = SimplifiedScheduler(use_local_db=use_local_db, dry_run=args.dry_run)
+
+    scheduler = SimplifiedScheduler(use_local_db=True, dry_run=args.dry_run)
     
     # Setup logging based on operation
     operation_name = None

@@ -17,6 +17,7 @@ COPY package.json package-lock.json /app/
 RUN npm ci --omit=dev
 
 COPY scripts /app/scripts
+COPY web_backend /app/web_backend
 COPY sql /app/sql
 COPY data /app/data
 
@@ -25,4 +26,4 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8001
 
-CMD ["uvicorn", "scripts.season_test_web_api:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["uvicorn", "web_backend.main:app", "--host", "0.0.0.0", "--port", "8001"]

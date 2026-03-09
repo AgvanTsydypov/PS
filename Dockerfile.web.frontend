@@ -5,7 +5,14 @@ WORKDIR /app
 COPY package.json package-lock.json /app/
 RUN npm ci
 
-COPY . /app
+COPY web_frontend/app /app/app
+COPY web_frontend/components /app/components
+COPY web_frontend/hooks /app/hooks
+COPY web_frontend/types /app/types
+COPY web_frontend/next.config.js /app/next.config.js
+COPY web_frontend/tailwind.config.js /app/tailwind.config.js
+COPY web_frontend/postcss.config.js /app/postcss.config.js
+COPY web_frontend/tsconfig.json /app/tsconfig.json
 
 ARG NEXT_PUBLIC_SEASON_API_BASE_URL=http://localhost:8001
 ENV NEXT_PUBLIC_SEASON_API_BASE_URL=${NEXT_PUBLIC_SEASON_API_BASE_URL}

@@ -43,4 +43,3 @@ CMD ["tail", "-f", "/dev/null"]
 # Примеры запуска конкретных скриптов:
 # CMD ["python", "scripts/fetch/fetch_events_parallel_optimized.py"]
 # CMD ["python", "scripts/fetch/fetch_redemptions.py", "--upload", "--local"]
-# CMD ["python", "scripts/analytics/count_markets.py"]

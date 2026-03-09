@@ -2,7 +2,7 @@
 FastAPI web API for season_test_gui functionality.
 
 Run:
-    uvicorn scripts.season_test_web_api:app --host 0.0.0.0 --port 8001 --reload
+    uvicorn web_backend.main:app --host 0.0.0.0 --port 8001 --reload
 """
 
 from __future__ import annotations

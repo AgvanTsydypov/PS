@@ -419,36 +419,34 @@ def load_failed_markets_file(filepath: str) -> List[Dict]:
     return markets
 
 
-def get_markets_from_db(use_local_db: bool = False, limit: Optional[int] = None) -> List[Dict]:
+def get_markets_from_db(use_local_db: bool = True, limit: Optional[int] = None) -> List[Dict]:
     """
-    Load markets data from database
-    
+    Load markets data from PostgreSQL database.
+
     Args:
-        use_local_db: Use local PostgreSQL instead of Supabase
+        use_local_db: kept for backwards compatibility — always PostgreSQL
         limit: Optional limit on number of markets
-    
+
     Returns:
         List of market dicts with condition_id, question, event info, volume, etc.
     """
     print("=" * 70)
     print("📊 QUERYING DATABASE FOR MARKETS")
     print("=" * 70)
-    
-    # Initialize database connection
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(script_dir)
     if parent_dir not in sys.path:
         sys.path.insert(0, parent_dir)
-    
-    from db.supabase_uploader import SupabaseUploader
-    uploader = SupabaseUploader(use_local_db=use_local_db)
-    
-    if use_local_db:
-        # Use local PostgreSQL
+
+    from db.db_uploader import DbUploader as SupabaseUploader
+    uploader = SupabaseUploader()
+
+    if True:
         import psycopg2
         import psycopg2.extras
-        
-        print(f"🟢 Connecting to local PostgreSQL...")
+
+        print(f"🟢 Connecting to PostgreSQL...")
         print(f"   Database: {uploader.connection_params['database']}")
         print(f"   Host: {uploader.connection_params['host']}:{uploader.connection_params['port']}")
         print()
@@ -549,75 +547,6 @@ def get_markets_from_db(use_local_db: bool = False, limit: Optional[int] = None)
         finally:
             cursor.close()
             conn.close()
-    
-    else:
-        # Supabase mode
-        print(f"🔵 Connecting to Supabase...")
-        print()
-        
-        try:
-            # Build query
-            query = uploader.client.table('markets').select(
-                'id, condition_id, question, event_id, events(title), closed, volume, volume_num'
-            )
-            
-            # Apply filters
-            if FILTER_CLOSED_ONLY:
-                query = query.eq('closed', True)
-                print(f"🔍 Filter: Closed markets only")
-            
-            # Filter out NULL condition_ids
-            query = query.not_.is_('condition_id', 'null')
-            
-            # Order by volume
-            query = query.order('volume', desc=True)
-            
-            if limit:
-                query = query.limit(limit)
-                print(f"🔍 Limit: {limit:,} markets")
-            
-            print()
-            print(f"🔍 Executing query...")
-            response = query.execute()
-            
-            rows = response.data
-            print(f"✅ Found {len(rows):,} markets in database")
-            print()
-            
-            # Convert to market format
-            markets = []
-            for row in rows:
-                # Get volume (handle different field names)
-                volume = float(row.get('volume') or row.get('volume_num') or 0)
-                
-                # Skip if below minimum volume
-                if MIN_VOLUME > 0 and volume < MIN_VOLUME:
-                    continue
-                
-                # Get event title from joined data
-                event_title = 'Unknown Event'
-                if row.get('events') and isinstance(row['events'], dict):
-                    event_title = row['events'].get('title', 'Unknown Event')
-                
-                market_info = {
-                    'market_id': row['id'],
-                    'condition_id': row['condition_id'],
-                    'question': row.get('question') or 'Unknown Question',
-                    'event_id': row['event_id'],
-                    'event_title': event_title,
-                    'closed': row.get('closed', False),
-                    'volume': volume,
-                    'start_date': row.get('start_date') or row.get('start_date_iso'),  # For temporal windowing
-                    'end_date': row.get('end_date') or row.get('end_date_iso'),      # For temporal windowing
-                }
-                markets.append(market_info)
-            
-            return markets
-            
-        except Exception as e:
-            print(f"❌ Error querying Supabase: {type(e).__name__}")
-            print(f"   {str(e)}")
-            raise
 
 
 def load_events_file(filepath: str) -> Dict:
@@ -700,7 +629,7 @@ async def fetch_redemptions_for_market_async(
     market_info: Dict,
     semaphore: asyncio.Semaphore,
     rate_limiter: GoldskyRateLimiter,
-    use_local_db: bool = False
+    use_local_db: bool = True
 ) -> tuple[List[Dict], Dict]:
     """
     Fetch all redemptions for a specific market (async version)
@@ -1744,7 +1673,7 @@ async def process_market_async(
     exclusive_market_active: Dict,
     active_markets_count: Dict,
     active_markets_condition: asyncio.Condition,
-    use_local_db: bool = False
+    use_local_db: bool = True
 ):
     """Process a single market: fetch and upload (with parallel upload support)"""
     import time
@@ -1858,7 +1787,7 @@ async def process_market_async(
             
             # Upload to database if enabled (with concurrency control)
             if uploader:
-                db_name = "local PostgreSQL" if use_local_db else "Supabase"
+                db_name = "PostgreSQL"
                 if len(redemptions) > 1000:
                     print(f"   📤 Uploading {len(redemptions)} redemptions to {db_name} (large batch)...", flush=True)
                 else:
@@ -1964,7 +1893,7 @@ async def process_market_async(
 # ==========================================
 # MAIN PROCESSING (ASYNC)
 # ==========================================
-async def process_all_markets_async(auto_upload: bool = False, use_local_db: bool = False):
+async def process_all_markets_async(auto_upload: bool = False, use_local_db: bool = True):
     """Main async function to process all markets in parallel"""
     import time
     script_start_time = time.time()
@@ -1991,10 +1920,7 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
         BATCH_SIZE = BATCH_SIZE_CLOUD
         BATCH_DELAY = BATCH_DELAY_CLOUD
         
-        if use_local_db:
-            perf_mode = "⚡ STANDARD MODE (Local PostgreSQL)"
-        else:
-            perf_mode = "⚡ STANDARD MODE (Supabase Cloud)"
+        perf_mode = "⚡ STANDARD MODE (PostgreSQL)"
     
     # Start timestamp
     start_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -2037,20 +1963,18 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     # Initialize database uploader if auto_upload is enabled
     uploader = None
     if auto_upload:
-        db_name = "LOCAL PostgreSQL" if use_local_db else "Supabase"
-        print(f"🔄 Auto-upload to {db_name} enabled")
+        print(f"🔄 Auto-upload to PostgreSQL enabled")
         try:
-            # Add parent directory to path for imports
             script_dir = os.path.dirname(os.path.abspath(__file__))
             parent_dir = os.path.dirname(script_dir)
             if parent_dir not in sys.path:
                 sys.path.insert(0, parent_dir)
-            
-            from db.supabase_uploader import SupabaseUploader
-            uploader = SupabaseUploader(use_local_db=use_local_db)
-            print(f"✅ Connected to {db_name}")
+
+            from db.db_uploader import DbUploader as SupabaseUploader
+            uploader = SupabaseUploader()
+            print(f"✅ Connected to PostgreSQL")
         except Exception as e:
-            print(f"❌ Failed to connect to {db_name}: {e}")
+            print(f"❌ Failed to connect to PostgreSQL: {e}")
             print("   Continuing without upload...")
             auto_upload = False
             uploader = None
@@ -2111,15 +2035,10 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     
     else:
         # New mode: load from database (DEFAULT)
-        print(f"📊 DATA SOURCE: Database (recommended)")
-        print(f"   Database: {'Local PostgreSQL' if use_local_db else 'Supabase'}")
+        print(f"📊 DATA SOURCE: PostgreSQL")
         print()
-        
-        # Get markets from database
-        markets = get_markets_from_db(
-            use_local_db=use_local_db,
-            limit=MAX_MARKETS
-        )
+
+        markets = get_markets_from_db(limit=MAX_MARKETS)
         
         if not markets:
             print("❌ No markets found in database")
@@ -2490,7 +2409,7 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             
             print(f"\n💾 Still-failed data saved to: {failed_file}")
             print(f"   Total records: {sum(len(item['redemptions']) for item in still_failed_items):,}")
-            print(f"   You can retry later using: python scripts/db/supabase_uploader.py {failed_file} --redemptions {'--local' if use_local_db else ''}")
+            print(f"   You can retry later using: python scripts/db/db_uploader.py {failed_file} --redemptions")
         
         # Update stats
         stats['upload_errors'] = retry_failed  # Update to reflect final count
@@ -2593,7 +2512,7 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
         print(f"   Redemptions/sec:        {redemptions_per_sec:.1f}")
         print(f"   Markets/sec:            {markets_per_sec:.2f}")
         if auto_upload and uploader:
-            db_name = "PostgreSQL" if use_local_db else "Supabase"
+            db_name = "PostgreSQL"
             print(f"   Database ({db_name}):   {uploader.stats['redemptions_inserted'] / total_elapsed:.1f} records/sec")
         
         print(f"\n🎯 API Rate Limiting Stats:")
@@ -2613,12 +2532,12 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     if stats['total_redemptions'] == 0:
         print("\n⚠️ No redemptions found for any market")
     elif auto_upload and uploader:
-        db_name = "local PostgreSQL" if use_local_db else "Supabase"
+        db_name = "PostgreSQL"
         print(f"\n✅ Successfully uploaded {uploader.stats['redemptions_inserted']:,} redemptions to {db_name}!")
     else:
         print(f"\n✅ Processed {stats['total_redemptions']:,} redemptions")
         print("   💡 Use --upload flag to automatically upload to database")
-        print("   💡 Use --local flag to upload to local PostgreSQL instead of Supabase")
+        print("   💡 Use --upload flag to automatically upload to PostgreSQL")
     
     print("\n🎉 Done!")
     print(f"\n📁 Full log saved to: {log_file}")
@@ -2627,7 +2546,7 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     cleanup_logging()
 
 
-def process_all_markets(auto_upload: bool = False, use_local_db: bool = False):
+def process_all_markets(auto_upload: bool = False, use_local_db: bool = True):
     """Synchronous wrapper for async processing"""
     try:
         asyncio.run(process_all_markets_async(auto_upload, use_local_db))
@@ -2659,44 +2578,21 @@ if __name__ == '__main__':
         print("Usage: python fetch_redemptions.py [OPTIONS]")
         print()
         print("Options:")
-        print("  --upload, -u       Upload redemptions to database")
-        print("  --local, -l        Use local PostgreSQL instead of Supabase (requires --upload)")
+        print("  --upload, -u       Upload redemptions to PostgreSQL")
         print("  --file FILE, -f    Use specific JSON events file (legacy mode)")
         print("  --from-json        Load markets from JSON file instead of database (legacy)")
         print("  --retry-failed     Retry processing failed markets from latest failed_markets_*.json")
         print("  --help, -h         Show this help message")
         print()
-        print("Data Sources:")
-        print("  DEFAULT: Database (recommended)")
-        print("    - Reads markets from database (events + markets tables)")
-        print("    - Faster, more reliable, always up-to-date")
-        print("    - Requires: fetch_events_parallel_optimized.py --upload --local")
-        print()
-        print("  LEGACY: JSON file (--file or --from-json)")
-        print("    - Reads from JSON file (data/json_output/)")
-        print("    - Useful for specific snapshots or offline work")
-        print()
         print("Examples:")
-        print("  python fetch_redemptions.py --upload --local")
+        print("  python fetch_redemptions.py --upload")
         print("      Fetch from DATABASE and upload to PostgreSQL (RECOMMENDED)")
         print()
-        print("  python fetch_redemptions.py --upload")
-        print("      Fetch from DATABASE and upload to Supabase")
-        print()
-        print("  python fetch_redemptions.py --file data/json_output/events.json --upload --local")
+        print("  python fetch_redemptions.py --file data/json_output/events.json --upload")
         print("      Fetch from JSON FILE (legacy) and upload to PostgreSQL")
         print()
-        print("  python fetch_redemptions.py --retry-failed --upload --local")
+        print("  python fetch_redemptions.py --retry-failed --upload")
         print("      Retry failed markets and upload to PostgreSQL")
         sys.exit(0)
 
-    if use_local_db and not auto_upload:
-        print("⚠️  Warning: --local flag requires --upload flag")
-        print("   Use: python fetch_redemptions.py --upload --local")
-        sys.exit(1)
-
-    if auto_upload:
-        db_name = "local PostgreSQL" if use_local_db else "Supabase"
-        print(f"🔄 Auto-upload to {db_name} enabled")
-
-    process_all_markets(auto_upload=auto_upload, use_local_db=use_local_db)
+    process_all_markets(auto_upload=auto_upload)
