@@ -1,3 +1,8 @@
+URL	Что это
+http://localhost:8088	web стек (Next.js + FastAPI через nginx)
+http://localhost:8089	user web стек (то же, второй стек)
+http://localhost:5050	pgAdmin (UI для PostgreSQL)
+
 # Перезапуск Docker и работа с внешней БД
 
 ## 🔄 Быстрый перезапуск

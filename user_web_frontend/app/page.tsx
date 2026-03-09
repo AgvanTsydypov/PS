@@ -306,7 +306,7 @@ export default function HomePage() {
       )}
 
       <main>
-        <h1>PolyStars User Sign-in</h1>
+        <h1>PS DEVTEST User Sign-in</h1>
         <p>
           Connect an EVM wallet, sign a challenge, and verify on backend.
         </p>
