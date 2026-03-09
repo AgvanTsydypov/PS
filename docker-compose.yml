@@ -28,13 +28,6 @@ services:
       LOCAL_DB_USER: ${DB_USER}
       LOCAL_DB_PASSWORD: ${DB_PASSWORD}
       
-      # Supabase (опционально)
-      SUPABASE_URL: ${SUPABASE_URL}
-      SUPABASE_KEY: ${SUPABASE_KEY}
-      
-      # Alchemy API
-      ALCHEMY_API_KEY: ${ALCHEMY_API_KEY}
-      
       # Python settings
       PYTHONUNBUFFERED: 1
     volumes:
@@ -77,13 +70,6 @@ services:
       LOCAL_DB_NAME: ${DB_NAME}
       LOCAL_DB_USER: ${DB_USER}
       LOCAL_DB_PASSWORD: ${DB_PASSWORD}
-      
-      # Supabase (опционально)
-      SUPABASE_URL: ${SUPABASE_URL}
-      SUPABASE_KEY: ${SUPABASE_KEY}
-      
-      # Alchemy API
-      ALCHEMY_API_KEY: ${ALCHEMY_API_KEY}
       
       # Python settings
       PYTHONUNBUFFERED: 1

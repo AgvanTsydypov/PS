@@ -803,8 +803,7 @@ def main():
         print("Usage: python fetch_events_parallel_optimized.py [OPTIONS]")
         print()
         print("Options:")
-        print("  --upload, -u       Upload events and markets to database")
-        print("  --local, -l        Use local PostgreSQL instead of Supabase (requires --upload)")
+        print("  --upload, -u       Upload events and markets to PostgreSQL")
         print("  --help, -h         Show this help message")
         print()
         print("Examples:")
@@ -812,15 +811,7 @@ def main():
         print("      Fetch only, save to JSON file")
         print()
         print("  python fetch_events_parallel_optimized.py --upload")
-        print("      Fetch and upload to Supabase + save to JSON")
-        print()
-        print("  python fetch_events_parallel_optimized.py --upload --local")
-        print("      Fetch and upload to local PostgreSQL + save to JSON")
-        return
-    
-    if use_local_db and not auto_upload:
-        print("⚠️  Warning: --local flag requires --upload flag")
-        print("   Use: python fetch_events_parallel_optimized.py --upload --local")
+        print("      Fetch and upload to PostgreSQL + save to JSON")
         return
     
     print("🔬 Testing optimal worker count...")
@@ -829,21 +820,19 @@ def main():
     # Initialize database uploader if auto_upload is enabled
     uploader = None
     if auto_upload:
-        db_name = "LOCAL PostgreSQL" if use_local_db else "Supabase"
-        print(f"🔄 Auto-upload to {db_name} enabled")
+        print(f"🔄 Auto-upload to PostgreSQL enabled")
         try:
-            # Add parent directory to path for imports
             script_dir = os.path.dirname(os.path.abspath(__file__))
             parent_dir = os.path.dirname(script_dir)
             if parent_dir not in sys.path:
                 sys.path.insert(0, parent_dir)
-            
-            from db.supabase_uploader import SupabaseUploader
-            uploader = SupabaseUploader(use_local_db=use_local_db)
-            print(f"✅ Connected to {db_name}")
+
+            from db.db_uploader import DbUploader as SupabaseUploader
+            uploader = SupabaseUploader()
+            print(f"✅ Connected to PostgreSQL")
             print()
         except Exception as e:
-            print(f"❌ Failed to connect to {db_name}: {e}")
+            print(f"❌ Failed to connect to PostgreSQL: {e}")
             print("   Continuing without upload...")
             auto_upload = False
             uploader = None
@@ -868,37 +857,10 @@ def main():
                 print("📤 UPLOADING TO DATABASE")
                 print("=" * 70)
                 
-                # Upload events
                 uploader.upload_events(events)
-                
-                # Upload markets
                 uploader.upload_markets(events)
-                
-                # Upload metadata (Supabase only)
-                if not use_local_db:
-                    metadata = {
-                        'timestamp': datetime.now().isoformat(),
-                        'total_events': len(events),
-                        'fetch_method': 'parallel_optimized',
-                        'filters': {
-                            'closed': config.CLOSED_ONLY,
-                            'min_event_volume': config.MIN_VOLUME,
-                            'max_event_volume': config.MAX_VOLUME,
-                            'min_market_volume': config.MIN_MARKET_VOLUME,
-                            'resolution_status': config.RESOLUTION_STATUS,
-                            'date_range': {
-                                'start': config.START_DATE.isoformat() if config.START_DATE else None,
-                                'end': config.END_DATE.isoformat() if config.END_DATE else None
-                            }
-                        }
-                    }
-                    uploader.upload_metadata(metadata)
-                
-                # Print upload summary
                 uploader.print_summary()
-                
-                db_name = "local PostgreSQL" if use_local_db else "Supabase"
-                print(f"\n✅ Successfully uploaded to {db_name}!")
+                print(f"\n✅ Successfully uploaded to PostgreSQL!")
                 
             except Exception as upload_error:
                 print(f"\n❌ Upload failed: {type(upload_error).__name__}")

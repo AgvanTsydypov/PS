@@ -86,7 +86,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 # Import the existing database uploader
-from scripts.db.supabase_uploader import SupabaseUploader
+from scripts.db.db_uploader import DbUploader as SupabaseUploader
 
 
 # ==========================================
@@ -437,7 +437,7 @@ def transform_closed_position(position: Dict) -> Dict:
 # DATABASE FUNCTIONS
 # ==========================================
 
-def get_redeemers_from_db_generator(use_local_db: bool = False, limit: Optional[int] = None, batch_size: int = DB_FETCH_BATCH_SIZE):
+def get_redeemers_from_db_generator(use_local_db: bool = True, limit: Optional[int] = None, batch_size: int = DB_FETCH_BATCH_SIZE):
     """
     Generator that yields batches of redeemer records from database
     Memory-efficient: uses server-side cursor to avoid loading all data at once
@@ -466,7 +466,7 @@ def get_redeemers_from_db_generator(use_local_db: bool = False, limit: Optional[
     print(f"🧠 Memory optimization: Fetching in batches of {batch_size:,} records")
     
     # Get database connection parameters
-    uploader = SupabaseUploader(use_local_db=use_local_db)
+    uploader = SupabaseUploader()
     
     if use_local_db:
         # Use local PostgreSQL with server-side cursor
@@ -579,69 +579,47 @@ def upload_closed_positions_batch(uploader: SupabaseUploader, positions: List[Di
     Upload a batch of closed positions to the database
     """
     try:
-        if uploader.use_local_db:
-            # Use local PostgreSQL
-            import psycopg2
-            
-            conn = psycopg2.connect(**uploader.connection_params)
-            cursor = conn.cursor()
-            
-            try:
-                # Prepare bulk insert
-                insert_query = """
-                    INSERT INTO public.user_closed_positions (
-                        proxy_wallet, event_id, market_id, condition_id, asset,
-                        avg_price, total_bought, realized_pnl, cur_price,
-                        timestamp_unix, timestamp_human,
-                        title, slug, icon, event_slug,
-                        outcome, outcome_index, opposite_outcome, opposite_asset,
-                        end_date, end_date_parsed
-                    ) VALUES (
-                        %(proxy_wallet)s, %(event_id)s, %(market_id)s, %(condition_id)s, %(asset)s,
-                        %(avg_price)s, %(total_bought)s, %(realized_pnl)s, %(cur_price)s,
-                        %(timestamp_unix)s, %(timestamp_human)s,
-                        %(title)s, %(slug)s, %(icon)s, %(event_slug)s,
-                        %(outcome)s, %(outcome_index)s, %(opposite_outcome)s, %(opposite_asset)s,
-                        %(end_date)s, %(end_date_parsed)s
-                    )
-                    ON CONFLICT (proxy_wallet, condition_id, asset, timestamp_unix) 
-                    DO UPDATE SET
-                        event_id = EXCLUDED.event_id,
-                        market_id = EXCLUDED.market_id,
-                        avg_price = EXCLUDED.avg_price,
-                        total_bought = EXCLUDED.total_bought,
-                        realized_pnl = EXCLUDED.realized_pnl,
-                        cur_price = EXCLUDED.cur_price,
-                        updated_at = NOW()
-                """
-                
-                cursor.executemany(insert_query, positions)
-                conn.commit()
-                
-                return True
-                
-            except Exception as e:
-                conn.rollback()
-                print(f"   ❌ Database error: {str(e)}")
-                return False
-            finally:
-                cursor.close()
-                conn.close()
-        
-        else:
-            # Use Supabase
-            from supabase import create_client
-            
-            client = create_client(uploader.supabase_url, uploader.supabase_key)
-            
-            # Supabase upsert
-            response = client.table('user_closed_positions').upsert(
-                positions,
-                on_conflict='proxy_wallet,condition_id,asset,timestamp_unix'
-            ).execute()
-            
+        import psycopg2
+
+        conn = psycopg2.connect(**uploader.connection_params)
+        cursor = conn.cursor()
+        try:
+            insert_query = """
+                INSERT INTO public.user_closed_positions (
+                    proxy_wallet, event_id, market_id, condition_id, asset,
+                    avg_price, total_bought, realized_pnl, cur_price,
+                    timestamp_unix, timestamp_human,
+                    title, slug, icon, event_slug,
+                    outcome, outcome_index, opposite_outcome, opposite_asset,
+                    end_date, end_date_parsed
+                ) VALUES (
+                    %(proxy_wallet)s, %(event_id)s, %(market_id)s, %(condition_id)s, %(asset)s,
+                    %(avg_price)s, %(total_bought)s, %(realized_pnl)s, %(cur_price)s,
+                    %(timestamp_unix)s, %(timestamp_human)s,
+                    %(title)s, %(slug)s, %(icon)s, %(event_slug)s,
+                    %(outcome)s, %(outcome_index)s, %(opposite_outcome)s, %(opposite_asset)s,
+                    %(end_date)s, %(end_date_parsed)s
+                )
+                ON CONFLICT (proxy_wallet, condition_id, asset, timestamp_unix)
+                DO UPDATE SET
+                    event_id = EXCLUDED.event_id,
+                    market_id = EXCLUDED.market_id,
+                    avg_price = EXCLUDED.avg_price,
+                    total_bought = EXCLUDED.total_bought,
+                    realized_pnl = EXCLUDED.realized_pnl,
+                    cur_price = EXCLUDED.cur_price,
+                    updated_at = NOW()
+            """
+            cursor.executemany(insert_query, positions)
+            conn.commit()
             return True
-            
+        except Exception as e:
+            conn.rollback()
+            print(f"   ❌ Database error: {str(e)}")
+            return False
+        finally:
+            cursor.close()
+            conn.close()
     except Exception as e:
         print(f"   ❌ Upload error: {str(e)}")
         return False
@@ -658,7 +636,7 @@ class ParallelPositionsFetcher:
                  max_workers: int = DEFAULT_WORKERS,
                  positions_per_user: int = DEFAULT_POSITIONS_PER_USER,
                  upload: bool = False,
-                 use_local_db: bool = False,
+                 use_local_db: bool = True,
                  verbose: bool = False,
                  market_filter: Optional[List[str]] = None,
                  title_filter: Optional[str] = None,
@@ -695,7 +673,7 @@ class ParallelPositionsFetcher:
         )
         
         # Database uploader
-        self.uploader = SupabaseUploader(use_local_db=use_local_db) if upload else None
+        self.uploader = SupabaseUploader() if upload else None
         
         # Thread-safe state
         self.lock = Lock()

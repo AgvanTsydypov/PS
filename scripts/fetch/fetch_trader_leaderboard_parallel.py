@@ -90,7 +90,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 # Import the existing database uploader
-from scripts.db.supabase_uploader import SupabaseUploader
+from scripts.db.db_uploader import DbUploader as SupabaseUploader
 
 
 # ==========================================
@@ -419,72 +419,50 @@ def upload_leaderboard_batch(uploader: SupabaseUploader, entries: List[Dict]) ->
     Upload a batch of leaderboard entries to the database
     """
     try:
-        if uploader.use_local_db:
-            # Use local PostgreSQL
-            import psycopg2
-            
-            conn = psycopg2.connect(**uploader.connection_params)
-            cursor = conn.cursor()
-            
-            try:
-                # Prepare bulk insert
-                insert_query = """
-                    INSERT INTO public.trader_leaderboard (
-                        rank, proxy_wallet, user_name, vol, pnl,
-                        profile_image, x_username, verified_badge,
-                        category, time_period, order_by, fetched_at, fetched_date
-                    ) VALUES (
-                        %(rank)s, %(proxy_wallet)s, %(user_name)s, %(vol)s, %(pnl)s,
-                        %(profile_image)s, %(x_username)s, %(verified_badge)s,
-                        %(category)s, %(time_period)s, %(order_by)s, %(fetched_at)s, %(fetched_date)s
-                    )
-                    ON CONFLICT (proxy_wallet, category, time_period, order_by, fetched_date) 
-                    DO UPDATE SET
-                        rank = EXCLUDED.rank,
-                        user_name = EXCLUDED.user_name,
-                        vol = EXCLUDED.vol,
-                        pnl = EXCLUDED.pnl,
-                        profile_image = EXCLUDED.profile_image,
-                        x_username = EXCLUDED.x_username,
-                        verified_badge = EXCLUDED.verified_badge,
-                        fetched_at = EXCLUDED.fetched_at,
-                        updated_at = NOW()
-                """
-                
-                cursor.executemany(insert_query, entries)
-                conn.commit()
-                
-                return True
-                
-            except Exception as e:
-                conn.rollback()
-                print(f"   ❌ Database error: {str(e)}")
-                return False
-            finally:
-                cursor.close()
-                conn.close()
-        
-        else:
-            # Use Supabase
-            from supabase import create_client
-            
-            client = create_client(uploader.supabase_url, uploader.supabase_key)
-            
-            # Supabase upsert
-            response = client.table('trader_leaderboard').upsert(
-                entries,
-                on_conflict='proxy_wallet,category,time_period,order_by,fetched_at'
-            ).execute()
-            
+        import psycopg2
+
+        conn = psycopg2.connect(**uploader.connection_params)
+        cursor = conn.cursor()
+        try:
+            insert_query = """
+                INSERT INTO public.trader_leaderboard (
+                    rank, proxy_wallet, user_name, vol, pnl,
+                    profile_image, x_username, verified_badge,
+                    category, time_period, order_by, fetched_at, fetched_date
+                ) VALUES (
+                    %(rank)s, %(proxy_wallet)s, %(user_name)s, %(vol)s, %(pnl)s,
+                    %(profile_image)s, %(x_username)s, %(verified_badge)s,
+                    %(category)s, %(time_period)s, %(order_by)s, %(fetched_at)s, %(fetched_date)s
+                )
+                ON CONFLICT (proxy_wallet, category, time_period, order_by, fetched_date)
+                DO UPDATE SET
+                    rank = EXCLUDED.rank,
+                    user_name = EXCLUDED.user_name,
+                    vol = EXCLUDED.vol,
+                    pnl = EXCLUDED.pnl,
+                    profile_image = EXCLUDED.profile_image,
+                    x_username = EXCLUDED.x_username,
+                    verified_badge = EXCLUDED.verified_badge,
+                    fetched_at = EXCLUDED.fetched_at,
+                    updated_at = NOW()
+            """
+            cursor.executemany(insert_query, entries)
+            conn.commit()
             return True
-            
+        except Exception as e:
+            conn.rollback()
+            print(f"   ❌ Database error: {str(e)}")
+            return False
+        finally:
+            cursor.close()
+            conn.close()
     except Exception as e:
         print(f"   ❌ Upload error: {str(e)}")
         return False
 
 
 def get_unique_wallets_from_db_generator(
-    use_local_db: bool = False,
+    use_local_db: bool = True,
     limit: Optional[int] = None,
     batch_size: int = DB_FETCH_BATCH_SIZE
 ):
@@ -523,7 +501,7 @@ def get_unique_wallets_from_db_generator(
     print(f"🧠 Memory optimization: Fetching in batches of {batch_size:,} wallets")
     
     # Get database connection parameters
-    uploader = SupabaseUploader(use_local_db=use_local_db)
+    uploader = SupabaseUploader()
     
     if use_local_db:
         # Use local PostgreSQL with server-side cursor
@@ -642,7 +620,7 @@ class ParallelLeaderboardFetcher:
                  max_workers: int = DEFAULT_WORKERS,
                  limit_per_request: int = DEFAULT_LIMIT_PER_REQUEST,
                  upload: bool = False,
-                 use_local_db: bool = False,
+                 use_local_db: bool = True,
                  verbose: bool = False):
         """
         Initialize parallel fetcher
@@ -670,7 +648,7 @@ class ParallelLeaderboardFetcher:
         )
         
         # Database uploader
-        self.uploader = SupabaseUploader(use_local_db=use_local_db) if upload else None
+        self.uploader = SupabaseUploader() if upload else None
         
         # Thread-safe state
         self.lock = Lock()
@@ -1049,7 +1027,7 @@ class ParallelLeaderboardFetcher:
     
     def process_wallets_from_db(
         self,
-        use_local_db: bool = False,
+        use_local_db: bool = True,
         wallet_limit: Optional[int] = None,
         category: str = "OVERALL",
         time_period: str = "DAY",
