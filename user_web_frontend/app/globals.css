@@ -57,3 +57,86 @@ button:disabled {
   border: 1px solid #2b3242;
   word-break: break-word;
 }
+
+/* ── Wallet picker modal ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal {
+  background: #151a23;
+  border: 1px solid #2b3242;
+  border-radius: 16px;
+  padding: 28px 24px 20px;
+  width: 340px;
+  max-width: 94vw;
+}
+
+.modal h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+
+.modal p {
+  margin: 0 0 20px;
+  font-size: 13px;
+  color: #8b95a6;
+}
+
+.wallet-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wallet-btn {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  background: #1b2130;
+  border: 1px solid #2b3242;
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 15px;
+  color: #e6e9ef;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  text-align: left;
+}
+
+.wallet-btn:hover:not(:disabled) {
+  border-color: #3a86ff;
+  background: #1f2d4a;
+}
+
+.wallet-btn img {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.wallet-btn span {
+  font-weight: 500;
+}
+
+.modal-cancel {
+  margin-top: 14px;
+  width: 100%;
+  background: transparent;
+  border-color: #2b3242;
+  color: #8b95a6;
+  font-size: 14px;
+}
+
+.modal-cancel:hover:not(:disabled) {
+  border-color: #4a5568;
+  color: #e6e9ef;
+}
