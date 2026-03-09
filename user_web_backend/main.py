@@ -88,6 +88,19 @@ _challenge_lock = threading.Lock()
 CHALLENGE_TTL_SECONDS = int(os.getenv("USER_WEB_CHALLENGE_TTL_SECONDS", "300"))
 
 
+def _cleanup_expired_challenges() -> None:
+    while True:
+        threading.Event().wait(60)
+        now = datetime.now(timezone.utc)
+        with _challenge_lock:
+            expired = [cid for cid, rec in _challenge_store.items() if rec.expires_at < now]
+            for cid in expired:
+                del _challenge_store[cid]
+
+
+threading.Thread(target=_cleanup_expired_challenges, daemon=True).start()
+
+
 def _normalize_evm_address(value: str) -> str:
     if not Web3.is_address(value):
         raise HTTPException(status_code=400, detail="Invalid wallet address")
@@ -148,7 +161,7 @@ def wallet_verify(payload: VerifyRequest):
     try:
         recovered_address = Account.recover_message(encoded, signature=payload.signature)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid signature: {exc}") from exc
+        raise HTTPException(status_code=400, detail="Invalid signature") from exc
 
     if recovered_address.lower() != wallet_address.lower():
         raise HTTPException(status_code=401, detail="Signature verification failed")
