@@ -8,7 +8,6 @@ RUN npm ci
 COPY web_frontend/app /app/app
 COPY web_frontend/components /app/components
 COPY web_frontend/hooks /app/hooks
-COPY web_frontend/types /app/types
 COPY web_frontend/next.config.js /app/next.config.js
 COPY web_frontend/tailwind.config.js /app/tailwind.config.js
 COPY web_frontend/postcss.config.js /app/postcss.config.js
