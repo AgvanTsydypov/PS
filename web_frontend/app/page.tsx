@@ -103,7 +103,6 @@ export default function HomePage() {
   const [claimPhase, setClaimPhase] = useState("breach");
   const [claimAutoPhase, setClaimAutoPhase] = useState(true);
   const [claimDbOnly, setClaimDbOnly] = useState(false);
-  const [claimForceInsert, setClaimForceInsert] = useState(false);
   const [claimBlockchain, setClaimBlockchain] = useState("solana");
   const [claimRecipient, setClaimRecipient] = useState("");
   const [claimSeasonInfo, setClaimSeasonInfo] = useState<string>("");
@@ -548,7 +547,6 @@ export default function HomePage() {
           <div className="row">
             <label><input type="checkbox" checked={claimAutoPhase} onChange={(e) => setClaimAutoPhase(e.target.checked)} /> Auto phase</label>
             <label><input type="checkbox" checked={claimDbOnly} onChange={(e) => setClaimDbOnly(e.target.checked)} /> DB only</label>
-            <label><input type="checkbox" checked={claimForceInsert} onChange={(e) => setClaimForceInsert(e.target.checked)} /> Force insert</label>
             <button
               disabled={claimMinting || !claimWallet || !claimSeasonId || !claimRecipient.trim()}
               onClick={() =>
@@ -565,7 +563,6 @@ export default function HomePage() {
                         phase: claimPhase,
                         auto_phase: claimAutoPhase,
                         db_only: claimDbOnly,
-                        force_insert: claimForceInsert,
                         blockchain: claimBlockchain,
                       }),
                     });

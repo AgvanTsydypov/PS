@@ -4,11 +4,10 @@ Season manager for NFT minting phases.
 State machine:
 - Breach (days 1-3): open for all, capped at 20% of total supply.
 - Vault (days 4-6): open only for Origins from season start snapshot.
-- Scavenge (days 7-9): open for all (hard stop at day 9 end).
-- Transmission (day 10): claims closed.
-
-Genesis season has no time windows:
-- Scavenge stays active until remaining_supply reaches 0.
+- Scavenge:
+  - standard: days 7-9 (hard stop at day 9 end)
+  - genesis: day 7+ until remaining_supply reaches 0
+- Transmission (standard only, day 10): claims closed.
 """
 
 from __future__ import annotations
@@ -255,18 +254,6 @@ class SeasonManager:
                 supply_total=total_supply,
             ).to_dict()
 
-        # Genesis: no time windows, phase 3 until supply reaches zero.
-        if season_type == "genesis":
-            return PhaseResult(
-                phase="scavenge",
-                is_claim_open=True,
-                requires_origin=False,
-                reason="Genesis season: no time limits, open until supply reaches zero",
-                season_type=season_type,
-                supply_remaining=remaining_supply,
-                supply_total=total_supply,
-            ).to_dict()
-
         now = datetime.now(timezone.utc)
         start_date = season["start_date"]
 
@@ -289,6 +276,45 @@ class SeasonManager:
                 is_claim_open=False,
                 requires_origin=False,
                 reason="Season has not started yet",
+                season_type=season_type,
+                supply_remaining=remaining_supply,
+                supply_total=total_supply,
+            ).to_dict()
+
+        # Genesis uses the same phase windows as standard for days 1-6,
+        # then stays in scavenge until supply is exhausted.
+        if season_type == "genesis":
+            if now < breach_end and not breach_cap_reached:
+                return PhaseResult(
+                    phase="breach",
+                    is_claim_open=True,
+                    requires_origin=False,
+                    reason="Genesis breach active: within days 1-3 and cap not reached",
+                    season_type=season_type,
+                    supply_remaining=remaining_supply,
+                    supply_total=total_supply,
+                ).to_dict()
+
+            if now < vault_end:
+                if breach_cap_reached and now < breach_end:
+                    reason = "Genesis breach cap reached early, moved to Vault"
+                else:
+                    reason = "Genesis vault active: days 4-6"
+                return PhaseResult(
+                    phase="vault",
+                    is_claim_open=True,
+                    requires_origin=True,
+                    reason=reason,
+                    season_type=season_type,
+                    supply_remaining=remaining_supply,
+                    supply_total=total_supply,
+                ).to_dict()
+
+            return PhaseResult(
+                phase="scavenge",
+                is_claim_open=True,
+                requires_origin=False,
+                reason="Genesis scavenge active: day 7+ until supply exhausted",
                 season_type=season_type,
                 supply_remaining=remaining_supply,
                 supply_total=total_supply,
