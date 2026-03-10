@@ -55,6 +55,7 @@ class WinnerClaimAllocation:
 
 class EligibilityRequest(BaseModel):
     wallet: str
+    season_id: Optional[int] = None
 
 
 class MintClaimRequest(BaseModel):
@@ -576,12 +577,19 @@ class SeasonWorkbenchService:
         ]
 
         if season["type"] == "genesis":
+            breach_end = start_date + timedelta(days=3)
+            vault_end = start_date + timedelta(days=6)
             lines.extend(
                 [
                     "Transition rules (Genesis):",
-                    "- Claims are open in Scavenge while remaining_supply > 0.",
-                    "- Transition to Transmission happens when remaining_supply reaches 0.",
-                    "- No day-based windows are used.",
+                    "- Breach: day 1-3, open for all, cap 20% of total supply.",
+                    "- Vault: day 4-6, Origins only.",
+                    "- Scavenge: day 7+, open for all until remaining_supply reaches 0.",
+                    "- Transmission phase is not used for Genesis.",
+                    "",
+                    "Timing checkpoints:",
+                    f"- breach_end: {self.fmt_dt(breach_end)}",
+                    f"- vault_end: {self.fmt_dt(vault_end)}",
                 ]
             )
         else:
@@ -625,17 +633,33 @@ class SeasonWorkbenchService:
         if wallet_normalized:
             try:
                 eligibility = self.season_manager.check_user_eligibility(wallet_normalized)
-                stream = self._resolve_stream_for_season_id(eligibility, season_id)
+                selected_season_eligibility = self.season_manager.check_user_eligibility_for_season(
+                    wallet_address=wallet_normalized,
+                    season_id=season_id,
+                )
                 lines.extend(["", "Checklist before insert:", f"- wallet: {wallet_normalized}", f"- blockchain: {blockchain}"])
-                lines.append(f"- is_origin_wallet: {bool(eligibility.get('is_origin_wallet'))}")
-                if stream:
-                    lines.append(f"- stream_phase: {stream.get('phase')} | is_claim_open={bool(stream.get('is_claim_open'))}")
-                    lines.append(f"- already_claimed_in_this_season: {bool(stream.get('already_claimed'))}")
-                    lines.append(f"- eligible_now: {bool(stream.get('eligible_now'))}")
-                    if stream.get("ineligible_reason"):
-                        lines.append(f"- ineligible_reason: {stream.get('ineligible_reason')}")
-                else:
-                    lines.append("- stream_phase: season is not current active genesis/standard stream")
+                lines.append(
+                    f"- is_origin_wallet_selected_season: {bool(selected_season_eligibility.get('is_origin_wallet'))}"
+                )
+                lines.append(
+                    f"- is_origin_wallet_active_standard: {bool(eligibility.get('is_origin_wallet'))}"
+                )
+                lines.append(
+                    "- stream_phase: "
+                    f"{selected_season_eligibility.get('phase')} | "
+                    f"is_claim_open={bool(selected_season_eligibility.get('is_claim_open'))}"
+                )
+                lines.append(
+                    "- already_claimed_in_this_season: "
+                    f"{bool(selected_season_eligibility.get('already_claimed'))}"
+                )
+                lines.append(
+                    f"- eligible_now: {bool(selected_season_eligibility.get('eligible_now'))}"
+                )
+                if selected_season_eligibility.get("ineligible_reason"):
+                    lines.append(
+                        f"- ineligible_reason: {selected_season_eligibility.get('ineligible_reason')}"
+                    )
             except Exception as exc:
                 lines.extend(["", "Checklist before insert:", f"- eligibility_check_error: {exc}"])
         else:
@@ -1373,7 +1397,17 @@ def check_eligibility(req: EligibilityRequest) -> Dict[str, Any]:
     if not wallet:
         raise HTTPException(status_code=400, detail="Wallet is required")
     try:
-        return service.season_manager.check_user_eligibility(wallet)
+        payload = service.season_manager.check_user_eligibility(wallet)
+        if req.season_id is not None:
+            selected = service.season_manager.check_user_eligibility_for_season(
+                wallet_address=wallet,
+                season_id=req.season_id,
+            )
+            payload["selected_season_id"] = req.season_id
+            payload["is_origin_wallet_active_standard"] = payload.get("is_origin_wallet")
+            payload["is_origin_wallet"] = bool(selected.get("is_origin_wallet"))
+            payload["selected_season"] = selected
+        return payload
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

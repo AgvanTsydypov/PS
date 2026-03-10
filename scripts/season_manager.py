@@ -409,61 +409,10 @@ class SeasonManager:
                     "eligible_now": False,
                     "ineligible_reason": "No active season",
                 }
-
-            season_id = int(stream_season["id"])
-            phase_info = self.get_current_phase(season_id)
-            already_claimed = self._has_claimed_in_season(normalized_wallet, season_id)
-            is_origin_for_stream = self.is_origin_wallet_for_season(normalized_wallet, season_id)
-            origin_snapshot_status = (
-                self._get_origin_snapshot_mint_status(normalized_wallet, season_id)
-                if is_origin_for_stream
-                else None
+            return self.check_user_eligibility_for_season(
+                wallet_address=normalized_wallet,
+                season_id=int(stream_season["id"]),
             )
-            origin_snapshot_is_minted = bool(
-                origin_snapshot_status and origin_snapshot_status.get("is_minted")
-            )
-
-            if already_claimed:
-                eligible_now = False
-                ineligible_reason = "User already claimed (or has active claim) in current season"
-            elif not phase_info["is_claim_open"]:
-                eligible_now = False
-                ineligible_reason = f"Claims closed in current phase: {phase_info['phase']}"
-            elif phase_info["requires_origin"] and not is_origin_for_stream:
-                eligible_now = False
-                ineligible_reason = "Current phase requires Origin wallet (Vault)"
-            elif is_origin_for_stream and origin_snapshot_is_minted:
-                minted_to = origin_snapshot_status.get("minted_to_wallet")
-                if minted_to and minted_to.lower() != normalized_wallet:
-                    ineligible_reason = (
-                        "Origin allocation already minted "
-                        f"by another wallet: {minted_to}"
-                    )
-                else:
-                    ineligible_reason = "Origin allocation already minted"
-                eligible_now = False
-            else:
-                eligible_now = True
-                ineligible_reason = None
-
-            return {
-                "season_id": season_id,
-                "season_type": phase_info["season_type"],
-                "phase": phase_info["phase"],
-                "phase_reason": phase_info["reason"],
-                "already_claimed": already_claimed,
-                "eligible_now": eligible_now,
-                "ineligible_reason": ineligible_reason,
-                "requires_origin": phase_info["requires_origin"],
-                "is_claim_open": phase_info["is_claim_open"],
-                "is_origin_wallet": is_origin_for_stream,
-                "origin_snapshot_is_minted": origin_snapshot_is_minted,
-                "origin_snapshot_minted_to_wallet": (
-                    origin_snapshot_status.get("minted_to_wallet")
-                    if origin_snapshot_status
-                    else None
-                ),
-            }
 
         genesis_status = build_stream_status(genesis_season)
         standard_status = build_stream_status(standard_season)
@@ -481,5 +430,64 @@ class SeasonManager:
                 "can_claim_standard": can_claim_standard,
                 "can_claim_both_now": can_claim_genesis and can_claim_standard,
             },
+        }
+
+    def check_user_eligibility_for_season(
+        self, wallet_address: str, season_id: int
+    ) -> Dict[str, Any]:
+        """Check eligibility for a specific season id."""
+        normalized_wallet = wallet_address.lower()
+        phase_info = self.get_current_phase(season_id)
+        already_claimed = self._has_claimed_in_season(normalized_wallet, season_id)
+        is_origin_for_stream = self.is_origin_wallet_for_season(normalized_wallet, season_id)
+        origin_snapshot_status = (
+            self._get_origin_snapshot_mint_status(normalized_wallet, season_id)
+            if is_origin_for_stream
+            else None
+        )
+        origin_snapshot_is_minted = bool(
+            origin_snapshot_status and origin_snapshot_status.get("is_minted")
+        )
+
+        if already_claimed:
+            eligible_now = False
+            ineligible_reason = "User already claimed (or has active claim) in current season"
+        elif not phase_info["is_claim_open"]:
+            eligible_now = False
+            ineligible_reason = f"Claims closed in current phase: {phase_info['phase']}"
+        elif phase_info["requires_origin"] and not is_origin_for_stream:
+            eligible_now = False
+            ineligible_reason = "Current phase requires Origin wallet (Vault)"
+        elif is_origin_for_stream and origin_snapshot_is_minted:
+            minted_to = origin_snapshot_status.get("minted_to_wallet")
+            if minted_to and minted_to.lower() != normalized_wallet:
+                ineligible_reason = (
+                    "Origin allocation already minted "
+                    f"by another wallet: {minted_to}"
+                )
+            else:
+                ineligible_reason = "Origin allocation already minted"
+            eligible_now = False
+        else:
+            eligible_now = True
+            ineligible_reason = None
+
+        return {
+            "season_id": season_id,
+            "season_type": phase_info["season_type"],
+            "phase": phase_info["phase"],
+            "phase_reason": phase_info["reason"],
+            "already_claimed": already_claimed,
+            "eligible_now": eligible_now,
+            "ineligible_reason": ineligible_reason,
+            "requires_origin": phase_info["requires_origin"],
+            "is_claim_open": phase_info["is_claim_open"],
+            "is_origin_wallet": is_origin_for_stream,
+            "origin_snapshot_is_minted": origin_snapshot_is_minted,
+            "origin_snapshot_minted_to_wallet": (
+                origin_snapshot_status.get("minted_to_wallet")
+                if origin_snapshot_status
+                else None
+            ),
         }
 
