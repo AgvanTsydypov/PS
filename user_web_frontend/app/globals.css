@@ -23,6 +23,190 @@ main {
   background: #151a23;
 }
 
+.season-board {
+  margin-top: 22px;
+}
+
+.season-board-standalone {
+  max-width: 680px;
+  margin: 0 auto 48px;
+  padding: 20px 24px 24px;
+  border: 1px solid #2b3242;
+  border-radius: 12px;
+  background: #151a23;
+}
+
+.season-board-title {
+  margin-bottom: 10px;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #8b95a6;
+}
+
+.season-board-muted {
+  color: #8b95a6;
+  font-size: 14px;
+}
+
+.season-board-note {
+  margin: 14px 0 0;
+  color: #aeb7c6;
+  font-size: 14px;
+}
+
+.season-board-actions {
+  margin-top: 14px;
+}
+
+.eligibility-output {
+  margin: 10px 0 0;
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #d9e2f0;
+  background: #0f1420;
+  border: 1px solid #2b3242;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.season-list {
+  display: grid;
+  gap: 10px;
+}
+
+.season-card {
+  position: relative;
+  border: 1px solid #2b3242;
+  border-radius: 10px;
+  background: #0f1420;
+  padding: 10px 12px;
+}
+
+.season-card-top,
+.season-card-phase,
+.season-card-bottom {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.season-card-top {
+  margin-bottom: 8px;
+}
+
+.season-card-phase {
+  margin-bottom: 8px;
+}
+
+.season-card-top span,
+.season-card-phase span,
+.season-card-bottom span {
+  color: #8b95a6;
+  font-size: 13px;
+}
+
+.season-card-phase strong {
+  text-transform: capitalize;
+  font-size: 13px;
+}
+
+.season-card-bottom strong {
+  font-size: 13px;
+}
+
+.season-tooltip {
+  position: absolute;
+  left: 12px;
+  top: calc(100% + 8px);
+  z-index: 3;
+  width: min(320px, calc(100vw - 80px));
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #2b3242;
+  background: #0b1018;
+  color: #cfd6e3;
+  font-size: 12px;
+  line-height: 1.35;
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.season-card:hover .season-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.auth-info-panel {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  width: min(360px, calc(100vw - 24px));
+  z-index: 20;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid #2b3242;
+  background: rgba(15, 20, 32, 0.96);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.auth-info-title {
+  margin-bottom: 10px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8b95a6;
+}
+
+.auth-connect-btn {
+  width: 100%;
+  margin-bottom: 10px;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-weight: 600;
+}
+
+.auth-connect-btn.connected {
+  border-color: #2fb171;
+  background: #1f5e45;
+}
+
+.auth-info-hint {
+  margin: 0 0 8px;
+  color: #8b95a6;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.auth-info-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-top: 1px solid rgba(139, 149, 166, 0.2);
+  font-size: 13px;
+}
+
+.auth-info-row:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.auth-info-row span {
+  color: #8b95a6;
+}
+
+.auth-info-row strong {
+  text-align: right;
+  word-break: break-word;
+}
+
 h1 {
   margin-top: 0;
 }
@@ -47,15 +231,6 @@ button:disabled {
   gap: 12px;
   flex-wrap: wrap;
   margin: 16px 0;
-}
-
-.card {
-  margin-top: 16px;
-  padding: 14px;
-  border-radius: 10px;
-  background: #0f1420;
-  border: 1px solid #2b3242;
-  word-break: break-word;
 }
 
 /* ── Wallet picker modal ── */
@@ -139,4 +314,21 @@ button:disabled {
 .modal-cancel:hover:not(:disabled) {
   border-color: #4a5568;
   color: #e6e9ef;
+}
+
+@media (max-width: 900px) {
+  .auth-info-panel {
+    position: static;
+    width: auto;
+    margin: 16px 16px 0;
+  }
+
+  main {
+    margin-top: 16px;
+  }
+
+  .season-board-standalone {
+    margin: 16px;
+    padding: 16px;
+  }
 }

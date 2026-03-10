@@ -44,9 +44,48 @@ type VerifyResponse = {
   signed_in: boolean;
   wallet_address: string;
   sign_in_count: number;
+  access_token?: string;
+  token_type?: string;
+  expires_in?: number;
 };
 
-const apiBase = process.env.NEXT_PUBLIC_USER_API_BASE_URL ?? "/";
+type SeasonResponse = {
+  id: number;
+  type: string;
+  season_number: number;
+  title: string;
+  short_description: string;
+  total_supply: number;
+  remaining_supply: number;
+  end_date: string | null;
+  is_active: boolean;
+  phase: string;
+  phase_reason: string;
+};
+
+type EligibilityStream = {
+  season_id: number | null;
+  phase: string | null;
+  eligible_now: boolean;
+  ineligible_reason: string | null;
+};
+
+type EligibilityResponse = {
+  wallet_address: string;
+  is_origin_wallet: boolean;
+  genesis: EligibilityStream;
+  standard: EligibilityStream;
+  double_mint: {
+    can_claim_genesis: boolean;
+    can_claim_standard: boolean;
+    can_claim_both_now: boolean;
+  };
+};
+
+const apiBase =
+  process.env.NEXT_PUBLIC_USER_API_BASE_URL ??
+  (process.env.NODE_ENV === "development" ? "http://localhost:8011" : "/");
+const AUTH_TOKEN_STORAGE_KEY = "polystars_user_access_token";
 
 function buildApiUrl(path: string): string {
   if (apiBase === "/") return path;
@@ -77,6 +116,14 @@ export default function HomePage() {
   const [isSignedIn, setIsSignedIn] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [signInCount, setSignInCount] = useState<number | null>(null);
+  const [activeSeasons, setActiveSeasons] = useState<SeasonResponse[]>([]);
+  const [seasonError, setSeasonError] = useState("");
+  const [serverNowBaseMs, setServerNowBaseMs] = useState<number | null>(null);
+  const [clientNowAtSyncMs, setClientNowAtSyncMs] = useState<number | null>(null);
+  const [syncedNowMs, setSyncedNowMs] = useState<number>(() => Date.now());
+  const [eligibilityLoading, setEligibilityLoading] = useState(false);
+  const [eligibilitySummary, setEligibilitySummary] = useState("");
+  const [accessToken, setAccessToken] = useState("");
 
   // Wallet that was selected by the user in the picker — used for sign-in
   const selectedProviderRef = useRef<EthProvider | null>(null);
@@ -109,6 +156,49 @@ export default function HomePage() {
     };
   }, []);
 
+  useEffect(() => {
+    const token = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) ?? "";
+    if (token) setAccessToken(token);
+  }, []);
+
+  useEffect(() => {
+    async function loadSeasons() {
+      try {
+        setSeasonError("");
+        const timeRes = await fetch(buildApiUrl("/api/server-time"));
+        if (timeRes.ok) {
+          const timePayload = (await timeRes.json()) as { now_utc_iso?: string };
+          const parsedMs = Date.parse(String(timePayload.now_utc_iso ?? ""));
+          if (!Number.isNaN(parsedMs)) {
+            setServerNowBaseMs(parsedMs);
+            setClientNowAtSyncMs(Date.now());
+            setSyncedNowMs(parsedMs);
+          }
+        }
+
+        const res = await fetch(buildApiUrl("/api/seasons/active"));
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || "Failed to load seasons");
+        }
+        const allSeasons = (await res.json()) as SeasonResponse[];
+        setActiveSeasons(allSeasons);
+      } catch (error) {
+        setSeasonError(extractErrorMessage(error));
+      }
+    }
+
+    void loadSeasons();
+  }, []);
+
+  useEffect(() => {
+    if (serverNowBaseMs == null || clientNowAtSyncMs == null) return;
+    const tick = window.setInterval(() => {
+      setSyncedNowMs(serverNowBaseMs + (Date.now() - clientNowAtSyncMs));
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, [serverNowBaseMs, clientNowAtSyncMs]);
+
   // Build the list of wallet options shown in the picker.
   const walletOptions = useMemo<WalletOption[]>(() => {
     const options: WalletOption[] = eip6963Ref.current.map((d) => ({
@@ -127,6 +217,54 @@ export default function HomePage() {
     if (!walletAddress) return "";
     return `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
   }, [walletAddress]);
+  const walletButtonLabel = useMemo(() => {
+    if (isBusy) return "Connecting...";
+    if (isSignedIn && shortAddress) return shortAddress;
+    return "Connect wallet";
+  }, [isBusy, isSignedIn, shortAddress]);
+  const authHintText = useMemo(() => {
+    if (isBusy) return "Approve wallet connection and signature in your wallet.";
+    if (isSignedIn) return "Wallet connected. Click to switch wallet.";
+    const lowered = statusText.toLowerCase();
+    if (lowered.includes("failed") || lowered.includes("cancelled")) return statusText;
+    return "Connect wallet to sign in and continue.";
+  }, [isBusy, isSignedIn, statusText]);
+  const seasonCards = useMemo(() => {
+    return activeSeasons.map((season) => {
+      const seasonName = season.title;
+      const description = season.short_description || "Active season.";
+      const total = Number(season.total_supply) || 0;
+      const remaining = Number(season.remaining_supply) || 0;
+
+      let timeLeft = "No end date";
+      if (season.type !== "genesis" && season.end_date) {
+        const endMs = Date.parse(season.end_date);
+        if (!Number.isNaN(endMs)) {
+          const diffSec = Math.floor((endMs - syncedNowMs) / 1000);
+          if (diffSec <= 0) {
+            timeLeft = "Ended";
+          } else {
+            const days = Math.floor(diffSec / 86400);
+            const hours = Math.floor((diffSec % 86400) / 3600);
+            const mins = Math.floor((diffSec % 3600) / 60);
+            const secs = diffSec % 60;
+            timeLeft = days > 0 ? `${days}d ${hours}h ${mins}m` : `${hours}h ${mins}m ${secs}s`;
+          }
+        }
+      }
+
+      return {
+        id: season.id,
+        name: seasonName,
+        description,
+        timeLeft,
+        remaining,
+        total,
+        phase: season.phase || "unknown",
+        phaseReason: season.phase_reason || "",
+      };
+    });
+  }, [activeSeasons, syncedNowMs]);
 
   function extractErrorMessage(error: unknown): string {
     if (error instanceof Error) return error.message;
@@ -134,6 +272,70 @@ export default function HomePage() {
       return String((error as { message: unknown }).message);
     }
     return JSON.stringify(error);
+  }
+
+  async function signInWith(provider: EthProvider, address: string) {
+    if (!provider || !address) {
+      setStatusText("Connect wallet first");
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      const challengeRes = await fetch(
+        buildApiUrl("/api/auth/wallet/challenge"),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ wallet_address: address }),
+        },
+      );
+      if (!challengeRes.ok) {
+        const challengeErr = await challengeRes.text();
+        throw new Error(`Challenge failed: ${challengeErr}`);
+      }
+      const challenge = (await challengeRes.json()) as ChallengeResponse;
+      setChallengeId(challenge.challenge_id);
+
+      const signature = (await provider.request({
+        method: "personal_sign",
+        params: [challenge.message, address],
+      })) as string;
+
+      const verifyRes = await fetch(buildApiUrl("/api/auth/wallet/verify"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challenge_id: challenge.challenge_id,
+          wallet_address: address,
+          signature,
+        }),
+      });
+      if (!verifyRes.ok) {
+        const verifyErr = await verifyRes.text();
+        throw new Error(`Verify failed: ${verifyErr}`);
+      }
+      const verify = (await verifyRes.json()) as VerifyResponse;
+      setIsSignedIn(Boolean(verify.signed_in));
+      setSignInCount(verify.sign_in_count);
+      setStatusText(verify.signed_in ? "Signed in" : "Not signed in");
+      setEligibilitySummary("");
+      const token = String(verify.access_token ?? "");
+      if (verify.signed_in && token) {
+        setAccessToken(token);
+        window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+      } else {
+        setAccessToken("");
+        window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      }
+    } catch (error) {
+      setIsSignedIn(false);
+      setStatusText(extractErrorMessage(error));
+      setAccessToken("");
+      window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    } finally {
+      setIsBusy(false);
+    }
   }
 
   // Called when user picks a wallet in the modal.
@@ -155,13 +357,16 @@ export default function HomePage() {
         setStatusText("Wallet connection cancelled (no accounts returned)");
         return;
       }
+      const address = accounts[0];
       selectedProviderRef.current = provider;
       setSelectedWalletName(name);
-      setWalletAddress(accounts[0]);
-      setStatusText("Wallet connected");
+      setWalletAddress(address);
       setIsSignedIn(false);
       setChallengeId("");
       setSignInCount(null);
+      setAccessToken("");
+      window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      await signInWith(provider, address);
     } catch (error) {
       const raw = extractErrorMessage(error);
       const code =
@@ -178,61 +383,41 @@ export default function HomePage() {
     }
   }
 
-  async function signIn() {
-    const provider = selectedProviderRef.current;
-    if (!provider) {
-      setStatusText("Connect wallet first");
+  async function checkMintEligibility() {
+    if (!walletAddress) return;
+    if (!accessToken) {
+      setEligibilitySummary("Please sign in again to refresh your secure session.");
       return;
     }
-    if (!walletAddress) {
-      setStatusText("Connect wallet first");
-      return;
-    }
-
-    setIsBusy(true);
+    setEligibilityLoading(true);
     try {
-      const challengeRes = await fetch(
-        buildApiUrl("/api/auth/wallet/challenge"),
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ wallet_address: walletAddress }),
-        },
-      );
-      if (!challengeRes.ok) {
-        const challengeErr = await challengeRes.text();
-        throw new Error(`Challenge failed: ${challengeErr}`);
-      }
-      const challenge = (await challengeRes.json()) as ChallengeResponse;
-      setChallengeId(challenge.challenge_id);
-
-      const signature = (await provider.request({
-        method: "personal_sign",
-        params: [challenge.message, walletAddress],
-      })) as string;
-
-      const verifyRes = await fetch(buildApiUrl("/api/auth/wallet/verify"), {
+      const res = await fetch(buildApiUrl("/api/eligibility"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          challenge_id: challenge.challenge_id,
-          wallet_address: walletAddress,
-          signature,
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ wallet: walletAddress }),
       });
-      if (!verifyRes.ok) {
-        const verifyErr = await verifyRes.text();
-        throw new Error(`Verify failed: ${verifyErr}`);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || "Eligibility request failed");
       }
-      const verify = (await verifyRes.json()) as VerifyResponse;
-      setIsSignedIn(Boolean(verify.signed_in));
-      setSignInCount(verify.sign_in_count);
-      setStatusText(verify.signed_in ? "Signed in" : "Not signed in");
+      const payload = (await res.json()) as EligibilityResponse;
+      const canMintAny =
+        Boolean(payload.double_mint?.can_claim_genesis) ||
+        Boolean(payload.double_mint?.can_claim_standard);
+
+      const details = [
+        `Can mint now: ${canMintAny ? "YES" : "NO"}`,
+        `Genesis: ${payload.genesis?.eligible_now ? "eligible" : `not eligible${payload.genesis?.ineligible_reason ? ` (${payload.genesis.ineligible_reason})` : ""}`}`,
+        `Standard: ${payload.standard?.eligible_now ? "eligible" : `not eligible${payload.standard?.ineligible_reason ? ` (${payload.standard.ineligible_reason})` : ""}`}`,
+      ];
+      setEligibilitySummary(details.join("\n"));
     } catch (error) {
-      setIsSignedIn(false);
-      setStatusText(String(error));
+      setEligibilitySummary(`Eligibility check failed: ${extractErrorMessage(error)}`);
     } finally {
-      setIsBusy(false);
+      setEligibilityLoading(false);
     }
   }
 
@@ -305,50 +490,91 @@ export default function HomePage() {
         </div>
       )}
 
+      <aside className="auth-info-panel" aria-live="polite">
+        <div className="auth-info-title">Wallet</div>
+        <button
+          className={`auth-connect-btn ${isSignedIn ? "connected" : ""}`}
+          onClick={() => setShowPicker(true)}
+          disabled={isBusy}
+        >
+          {walletButtonLabel}
+        </button>
+        <p className="auth-info-hint">{authHintText}</p>
+        <div className="auth-info-row">
+          <span>Address</span>
+          <strong>{walletAddress ? shortAddress : "Not connected"}</strong>
+        </div>
+        {isSignedIn ? (
+          <>
+            <div className="auth-info-row">
+              <span>Provider</span>
+              <strong>{selectedWalletName ?? "N/A"}</strong>
+            </div>
+            <div className="auth-info-row">
+              <span>Sign-ins</span>
+              <strong>{signInCount ?? "N/A"}</strong>
+            </div>
+            <div className="auth-info-row">
+              <span>Challenge</span>
+              <strong>{challengeId ? `${challengeId.slice(0, 10)}...` : "N/A"}</strong>
+            </div>
+          </>
+        ) : null}
+      </aside>
+
       <main>
         <h1>PS DEVTEST User Sign-in</h1>
         <p>
           Connect an EVM wallet, sign a challenge, and verify on backend.
         </p>
+      </main>
 
-        {selectedWalletName && walletAddress && (
-          <div className="card">
-            <strong>Connected via:</strong> {selectedWalletName}
+      <section className="season-board season-board-standalone">
+        <div className="season-board-title">Active seasons</div>
+        {seasonError ? (
+          <div className="season-board-muted">Unable to load seasons right now.</div>
+        ) : null}
+        {seasonCards.length === 0 && !seasonError ? (
+          <div className="season-board-muted">No active seasons right now.</div>
+        ) : (
+          <div className="season-list">
+            {seasonCards.map((season) => (
+              <article key={season.id} className="season-card">
+                <div className="season-card-top">
+                  <strong>{season.name}</strong>
+                  <span>{season.timeLeft}</span>
+                </div>
+                  <div className="season-card-phase">
+                    <span>Phase</span>
+                    <strong>{season.phase}</strong>
+                  </div>
+                <div className="season-card-bottom">
+                  <span>NFT left</span>
+                  <strong>{season.remaining} / {season.total}</strong>
+                </div>
+                  <div className="season-tooltip">
+                    {season.description}
+                    {season.phaseReason ? ` ${season.phaseReason}` : ""}
+                  </div>
+              </article>
+            ))}
           </div>
         )}
-
-        <div className="stack">
-          <button onClick={() => setShowPicker(true)} disabled={isBusy}>
-            Connect wallet
-          </button>
-          <button onClick={signIn} disabled={isBusy || !walletAddress}>
-            Sign in
-          </button>
-        </div>
-
-        <div className="card">
-          <strong>Status:</strong> {statusText}
-        </div>
-
-        <div className="card">
-          <strong>Wallet address:</strong> {walletAddress || "Not connected"}
-          {walletAddress ? <div>Short: {shortAddress}</div> : null}
-        </div>
-
-        <div className="card">
-          <strong>Challenge ID:</strong> {challengeId || "No active challenge"}
-        </div>
-
-        <div className="card">
-          <strong>Sign-in count:</strong> {signInCount ?? "N/A"}
-        </div>
-
-        {isSignedIn ? (
-          <div className="card">
-            <strong>Signed in</strong>
+        {!isSignedIn ? (
+          <p className="season-board-note">
+            To receive NFT, you need to connect your wallet.
+          </p>
+        ) : (
+          <div className="season-board-actions">
+            <button onClick={() => void checkMintEligibility()} disabled={eligibilityLoading}>
+              {eligibilityLoading ? "Checking..." : "Check mint eligibility"}
+            </button>
+            {eligibilitySummary ? (
+              <pre className="eligibility-output">{eligibilitySummary}</pre>
+            ) : null}
           </div>
-        ) : null}
-      </main>
+        )}
+      </section>
     </>
   );
 }
