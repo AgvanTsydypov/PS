@@ -664,6 +664,7 @@ class SimplifiedScheduler:
         """
         Manage standard season lifecycle:
         - Auto-create first season if none exists
+        - First standard season starts at genesis_start + 10 days
         - Hard Stop burn at day 9 if supply remains
         - Ghost State wait if sold out early
         - Start next season exactly at day 10 boundary
@@ -732,8 +733,35 @@ class SimplifiedScheduler:
 
                 # Bootstrap: create first standard season if table has no standard seasons.
                 if not latest:
+                    cursor.execute(
+                        """
+                        SELECT start_date
+                        FROM seasons
+                        WHERE id = %s
+                        """,
+                        (genesis_id,),
+                    )
+                    genesis_row = cursor.fetchone()
+                    if not genesis_row:
+                        raise RuntimeError(
+                            f"Genesis season {genesis_id} not found while bootstrapping standard season"
+                        )
+                    genesis_start = genesis_row["start_date"]
+                    if genesis_start.tzinfo is None:
+                        genesis_start = genesis_start.replace(tzinfo=timezone.utc)
+                    season_start = genesis_start + timedelta(days=STANDARD_SEASON_CYCLE_DAYS)
+
+                    if now < season_start:
+                        print(
+                            "\nℹ️ No standard season found yet. "
+                            "Waiting for genesis+10d boundary to start Standard #1..."
+                        )
+                        print(f"   genesis_start={genesis_start.isoformat()}")
+                        print(f"   standard_start_at={season_start.isoformat()}")
+                        print("=" * 70)
+                        return
+
                     print("\nℹ️ No standard season found. Bootstrapping Standard #1...")
-                    season_start = datetime.combine(date.today(), datetime.min.time(), tzinfo=timezone.utc)
                     new_season_id = self._create_standard_season(cursor, season_start, 1)
                     origins_count = self._snapshot_origin_wallets_for_season(cursor, new_season_id, season_start)
                     conn.commit()
