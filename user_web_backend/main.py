@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import logging
 import os
 import secrets
+import sys
 import threading
 import uuid
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict
+from time import monotonic
+from typing import Any, Dict, List, Optional
 
+import jwt
 import psycopg2
 from dotenv import load_dotenv
 from eth_account import Account
 from eth_account.messages import encode_defunct
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from web3 import Web3
 
@@ -29,6 +35,14 @@ def _load_environment() -> None:
 
 
 _load_environment()
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from scripts.season_manager import SeasonManager
+
+logger = logging.getLogger(__name__)
 
 
 def _is_running_in_docker() -> bool:
@@ -74,10 +88,31 @@ class VerifyRequest(BaseModel):
     signature: str
 
 
+class EligibilityRequest(BaseModel):
+    wallet: str
+    season_id: Optional[int] = None
+
+
+class RateLimitConfig(BaseModel):
+    window_seconds: int
+    max_requests: int
+
+
 app = FastAPI(title="PolyStars User Web API", version="1.0.0")
+
+
+def _allowed_origins() -> List[str]:
+    raw = os.getenv("USER_WEB_CORS_ORIGINS", "").strip()
+    if raw:
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    if os.getenv("NODE_ENV", "development") == "development":
+        return ["http://localhost:3001", "http://127.0.0.1:3001"]
+    return []
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in os.getenv("USER_WEB_CORS_ORIGINS", "*").split(",") if origin.strip()],
+    allow_origins=_allowed_origins(),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -86,6 +121,27 @@ app.add_middleware(
 _challenge_store: Dict[str, ChallengeRecord] = {}
 _challenge_lock = threading.Lock()
 CHALLENGE_TTL_SECONDS = int(os.getenv("USER_WEB_CHALLENGE_TTL_SECONDS", "300"))
+season_manager = SeasonManager(use_local_db=True)
+JWT_ALG = "HS256"
+JWT_TTL_SECONDS = int(os.getenv("USER_WEB_JWT_TTL_SECONDS", "3600"))
+JWT_ISSUER = os.getenv("USER_WEB_JWT_ISSUER", "polystars-user-web-backend")
+JWT_AUDIENCE = os.getenv("USER_WEB_JWT_AUDIENCE", "polystars-user-web")
+RATE_LIMITS: Dict[str, RateLimitConfig] = {
+    "/api/auth/wallet/challenge": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_CHALLENGE_MAX", "20")),
+    ),
+    "/api/auth/wallet/verify": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_VERIFY_MAX", "20")),
+    ),
+    "/api/eligibility": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_ELIGIBILITY_MAX", "30")),
+    ),
+}
+_rate_limit_lock = threading.Lock()
+_rate_limit_store: Dict[str, deque[float]] = defaultdict(deque)
 
 
 def _cleanup_expired_challenges() -> None:
@@ -117,9 +173,173 @@ def _build_challenge_message(wallet_address: str, nonce: str) -> str:
     )
 
 
+def _jwt_secret() -> str:
+    secret = os.getenv("USER_WEB_JWT_SECRET", "").strip()
+    if secret:
+        return secret
+    if os.getenv("NODE_ENV", "development") == "development":
+        return "dev-only-insecure-secret-change-me"
+    raise RuntimeError("USER_WEB_JWT_SECRET is required in non-development mode")
+
+
+def _issue_access_token(wallet_address: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": wallet_address.lower(),
+        "type": "access",
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(seconds=JWT_TTL_SECONDS)).timestamp()),
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+    }
+    return jwt.encode(payload, _jwt_secret(), algorithm=JWT_ALG)
+
+
+def _extract_wallet_from_request(request: Request) -> str:
+    auth_header = request.headers.get("authorization", "").strip()
+    if not auth_header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        decoded = jwt.decode(
+            token,
+            _jwt_secret(),
+            algorithms=[JWT_ALG],
+            audience=JWT_AUDIENCE,
+            issuer=JWT_ISSUER,
+        )
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    token_type = str(decoded.get("type", ""))
+    subject = str(decoded.get("sub", "")).strip().lower()
+    if token_type != "access" or not subject:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return subject
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    cfg = RATE_LIMITS.get(request.url.path)
+    if cfg is not None:
+        client_ip = request.client.host if request.client else "unknown"
+        bucket_key = f"{request.url.path}:{client_ip}"
+        now = monotonic()
+        with _rate_limit_lock:
+            bucket = _rate_limit_store[bucket_key]
+            while bucket and now - bucket[0] > cfg.window_seconds:
+                bucket.popleft()
+            if len(bucket) >= cfg.max_requests:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Too many requests. Please retry shortly."},
+                )
+            bucket.append(now)
+    return await call_next(request)
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "service": "user_web_backend"}
+
+
+@app.get("/api/server-time")
+def server_time() -> Dict[str, str]:
+    return {"now_utc_iso": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/api/seasons/active")
+def active_seasons() -> List[Dict[str, Any]]:
+    try:
+        conn = _get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, type, season_number, total_supply, remaining_supply, end_date, is_active
+                    FROM seasons
+                    WHERE is_active = TRUE
+                    ORDER BY
+                        CASE WHEN type = 'genesis' THEN 0 ELSE 1 END,
+                        season_number DESC,
+                        id DESC
+                    """
+                )
+                rows = cursor.fetchall()
+        finally:
+            conn.close()
+
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            season_type = str(row[1])
+            season_number = int(row[2])
+            if season_type == "genesis":
+                title = "Genesis"
+                short_description = "Genesis season: launch season with no fixed end date."
+            else:
+                title = f"{season_type.capitalize()} #{season_number}"
+                short_description = "Standard season: regular cycle with a scheduled finish."
+
+            end_date = row[5]
+            phase = "unknown"
+            phase_reason = "Phase unavailable"
+            try:
+                phase_info = season_manager.get_current_phase(int(row[0]))
+                phase = str(phase_info.get("phase", "unknown"))
+                phase_reason = str(phase_info.get("reason", ""))
+            except Exception:
+                # Keep endpoint resilient even if phase resolution fails for a row.
+                pass
+
+            result.append(
+                {
+                    "id": int(row[0]),
+                    "type": season_type,
+                    "season_number": season_number,
+                    "title": title,
+                    "short_description": short_description,
+                    "total_supply": int(row[3]),
+                    "remaining_supply": int(row[4]),
+                    "end_date": end_date.isoformat() if end_date else None,
+                    "is_active": bool(row[6]),
+                    "phase": phase,
+                    "phase_reason": phase_reason,
+                }
+            )
+        return result
+    except Exception:
+        logger.exception("Failed to load active seasons")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+
+
+@app.post("/api/eligibility")
+def check_eligibility(payload: EligibilityRequest, request: Request) -> Dict[str, Any]:
+    wallet = payload.wallet.strip().lower()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="Wallet is required")
+    token_wallet = _extract_wallet_from_request(request)
+    if wallet != token_wallet:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        result = season_manager.check_user_eligibility(wallet)
+        if payload.season_id is not None:
+            selected = season_manager.check_user_eligibility_for_season(
+                wallet_address=wallet,
+                season_id=payload.season_id,
+            )
+            result["selected_season_id"] = payload.season_id
+            result["is_origin_wallet_active_standard"] = result.get("is_origin_wallet")
+            result["is_origin_wallet"] = bool(selected.get("is_origin_wallet"))
+            result["selected_season"] = selected
+        return result
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Eligibility check failed for wallet=%s", wallet)
+        raise HTTPException(status_code=400, detail="Eligibility check failed")
 
 
 @app.post("/api/auth/wallet/challenge")
@@ -185,6 +405,7 @@ def wallet_verify(payload: VerifyRequest):
         conn.commit()
     except Exception:
         conn.rollback()
+        logger.exception("Failed to persist wallet sign-in")
         raise
     finally:
         conn.close()
@@ -192,10 +413,14 @@ def wallet_verify(payload: VerifyRequest):
     with _challenge_lock:
         _challenge_store.pop(payload.challenge_id, None)
 
+    access_token = _issue_access_token(wallet_address)
     return {
         "signed_in": True,
         "wallet_address": row[0],
         "first_seen_at": row[1].isoformat(),
         "last_signed_in_at": row[2].isoformat(),
         "sign_in_count": row[3],
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": JWT_TTL_SECONDS,
     }
