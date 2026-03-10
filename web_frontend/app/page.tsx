@@ -490,7 +490,7 @@ export default function HomePage() {
                 void run(async () => {
                   const data = await fetchJSON<Record<string, unknown>>("/api/eligibility", {
                     method: "POST",
-                    body: JSON.stringify({ wallet: eligWallet }),
+                    body: JSON.stringify({ wallet: eligWallet, season_id: claimSeasonId }),
                   });
                   setEligibility(JSON.stringify(data, null, 2));
                 })
