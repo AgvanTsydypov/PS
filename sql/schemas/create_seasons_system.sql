@@ -161,6 +161,9 @@ CREATE INDEX IF NOT EXISTS idx_claims_status ON claims(status);
 CREATE INDEX IF NOT EXISTS idx_claims_tx_hash ON claims(tx_hash) WHERE tx_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_claims_asset_address ON claims(asset_address) WHERE asset_address IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_claims_season_phase ON claims(season_id, phase_type);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_active_season_user_wallet_lower
+    ON claims(season_id, LOWER(user_wallet))
+    WHERE status IN ('PENDING', 'PROCESSING', 'COMPLETED');
 
 -- Add comments
 COMMENT ON TABLE claims IS 'NFT claims for each season - tracks all mint requests';

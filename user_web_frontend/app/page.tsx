@@ -44,6 +44,7 @@ type VerifyResponse = {
   signed_in: boolean;
   wallet_address: string;
   sign_in_count: number;
+  proxy_wallet?: string;
   access_token?: string;
   token_type?: string;
   expires_in?: number;
@@ -72,6 +73,9 @@ type EligibilityStream = {
 
 type EligibilityResponse = {
   wallet_address: string;
+  proxy_wallet?: string;
+  eligibility_wallet?: string;
+  eligibility_mode?: string;
   is_origin_wallet: boolean;
   genesis: EligibilityStream;
   standard: EligibilityStream;
@@ -123,7 +127,12 @@ export default function HomePage() {
   const [syncedNowMs, setSyncedNowMs] = useState<number>(() => Date.now());
   const [eligibilityLoading, setEligibilityLoading] = useState(false);
   const [eligibilitySummary, setEligibilitySummary] = useState("");
+  const [eligibilityChecked, setEligibilityChecked] = useState(false);
+  const [canMintNow, setCanMintNow] = useState(false);
+  const [mintLoading, setMintLoading] = useState(false);
+  const [mintResultText, setMintResultText] = useState("");
   const [accessToken, setAccessToken] = useState("");
+  const [proxyWallet, setProxyWallet] = useState<string | null>(null);
 
   // Wallet that was selected by the user in the picker — used for sign-in
   const selectedProviderRef = useRef<EthProvider | null>(null);
@@ -320,18 +329,28 @@ export default function HomePage() {
       setSignInCount(verify.sign_in_count);
       setStatusText(verify.signed_in ? "Signed in" : "Not signed in");
       setEligibilitySummary("");
+      setEligibilityChecked(false);
+      setCanMintNow(false);
+      setMintResultText("");
+      setProxyWallet(null);
       const token = String(verify.access_token ?? "");
       if (verify.signed_in && token) {
         setAccessToken(token);
         window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+        setProxyWallet(String(verify.proxy_wallet ?? "").trim() || null);
       } else {
         setAccessToken("");
         window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+        setProxyWallet(null);
       }
     } catch (error) {
       setIsSignedIn(false);
       setStatusText(extractErrorMessage(error));
       setAccessToken("");
+      setProxyWallet(null);
+      setEligibilityChecked(false);
+      setCanMintNow(false);
+      setMintResultText("");
       window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
     } finally {
       setIsBusy(false);
@@ -365,6 +384,10 @@ export default function HomePage() {
       setChallengeId("");
       setSignInCount(null);
       setAccessToken("");
+      setProxyWallet(null);
+      setEligibilityChecked(false);
+      setCanMintNow(false);
+      setMintResultText("");
       window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
       await signInWith(provider, address);
     } catch (error) {
@@ -387,9 +410,12 @@ export default function HomePage() {
     if (!walletAddress) return;
     if (!accessToken) {
       setEligibilitySummary("Please sign in again to refresh your secure session.");
+      setEligibilityChecked(true);
+      setCanMintNow(false);
       return;
     }
     setEligibilityLoading(true);
+    setMintResultText("");
     try {
       const res = await fetch(buildApiUrl("/api/eligibility"), {
         method: "POST",
@@ -407,8 +433,17 @@ export default function HomePage() {
       const canMintAny =
         Boolean(payload.double_mint?.can_claim_genesis) ||
         Boolean(payload.double_mint?.can_claim_standard);
+      setCanMintNow(canMintAny);
+      setEligibilityChecked(true);
+      setProxyWallet(String(payload.proxy_wallet ?? "").trim() || proxyWallet);
 
       const details = [
+        `Connected wallet: ${walletAddress}`,
+        `Proxy wallet (PM): ${String(payload.proxy_wallet ?? "Not found")}`,
+        `Eligibility wallet: ${String(payload.eligibility_wallet ?? walletAddress)}`,
+        payload.eligibility_mode === "connected_wallet_fallback"
+          ? "Eligibility mode: fallback to connected wallet (PM proxy missing)"
+          : "Eligibility mode: proxy wallet",
         `Can mint now: ${canMintAny ? "YES" : "NO"}`,
         `Genesis: ${payload.genesis?.eligible_now ? "eligible" : `not eligible${payload.genesis?.ineligible_reason ? ` (${payload.genesis.ineligible_reason})` : ""}`}`,
         `Standard: ${payload.standard?.eligible_now ? "eligible" : `not eligible${payload.standard?.ineligible_reason ? ` (${payload.standard.ineligible_reason})` : ""}`}`,
@@ -416,8 +451,70 @@ export default function HomePage() {
       setEligibilitySummary(details.join("\n"));
     } catch (error) {
       setEligibilitySummary(`Eligibility check failed: ${extractErrorMessage(error)}`);
+      setEligibilityChecked(true);
+      setCanMintNow(false);
     } finally {
       setEligibilityLoading(false);
+    }
+  }
+
+  async function mintOnBaseSepolia() {
+    if (!accessToken) {
+      setMintResultText("Mint failed: Please sign in again.");
+      return;
+    }
+    setMintLoading(true);
+    try {
+      const res = await fetch(buildApiUrl("/api/mint/base-sepolia"), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || "Mint failed");
+      }
+      const payload = (await res.json()) as {
+        status: string;
+        message: string;
+        minted_count: number;
+        minted_claims: Array<{
+          stream: string;
+          claim_id: number;
+          chain: string;
+          tx_hash: string;
+          asset_address: string;
+          season_id: number;
+          phase: string;
+        }>;
+        failed_claims?: Array<{
+          stream: string;
+          season_id: number;
+          reason: string;
+        }>;
+      };
+      const successLines = payload.minted_claims.flatMap((claim) => [
+        `- [${claim.stream}] claim_id=${claim.claim_id} season_id=${claim.season_id} phase=${claim.phase}`,
+        `  chain=${claim.chain}`,
+        `  tx_hash=${claim.tx_hash}`,
+        `  asset_address=${claim.asset_address}`,
+      ]);
+      const failedLines = (payload.failed_claims ?? []).map(
+        (item) => `- [${item.stream}] season_id=${item.season_id}: ${item.reason}`
+      );
+      setMintResultText(
+        [
+          payload.message || "Mint completed",
+          `minted_count: ${payload.minted_count}`,
+          "Minted claims:",
+          ...successLines,
+          ...(failedLines.length > 0 ? ["Failed claims:", ...failedLines] : []),
+        ].join("\n")
+      );
+      await checkMintEligibility();
+    } catch (error) {
+      setMintResultText(`Mint failed: ${extractErrorMessage(error)}`);
+    } finally {
+      setMintLoading(false);
     }
   }
 
@@ -518,6 +615,12 @@ export default function HomePage() {
               <span>Challenge</span>
               <strong>{challengeId ? `${challengeId.slice(0, 10)}...` : "N/A"}</strong>
             </div>
+            <div className="auth-info-row">
+              <span>Polymarket proxy</span>
+              <strong>
+                {proxyWallet ?? "Not found"}
+              </strong>
+            </div>
           </>
         ) : null}
       </aside>
@@ -569,8 +672,16 @@ export default function HomePage() {
             <button onClick={() => void checkMintEligibility()} disabled={eligibilityLoading}>
               {eligibilityLoading ? "Checking..." : "Check mint eligibility"}
             </button>
+            {eligibilityChecked ? (
+              <button onClick={() => void mintOnBaseSepolia()} disabled={!canMintNow || mintLoading}>
+                {mintLoading ? "Minting on Base Sepolia..." : "Mint on Base Sepolia"}
+              </button>
+            ) : null}
             {eligibilitySummary ? (
               <pre className="eligibility-output">{eligibilitySummary}</pre>
+            ) : null}
+            {mintResultText ? (
+              <pre className="eligibility-output">{mintResultText}</pre>
             ) : null}
           </div>
         )}
