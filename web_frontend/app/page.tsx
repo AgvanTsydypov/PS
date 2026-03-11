@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const RAW_API_BASE = process.env.NEXT_PUBLIC_SEASON_API_BASE_URL ?? "http://localhost:8001";
 const API_BASE = RAW_API_BASE === "/" ? "" : RAW_API_BASE.replace(/\/$/, "");
 
-type TabKey = "overview" | "eligibility" | "claims" | "seasonClaims" | "scenarios" | "reset";
+type TabKey = "overview" | "eligibility" | "claims" | "seasonClaims" | "winners" | "scenarios" | "reset";
 
 type Season = {
   id: number;
@@ -31,6 +31,54 @@ type ClaimRow = {
   created_at?: string;
 };
 
+type WinnerWalletRow = {
+  id: number;
+  season_id: number;
+  wallet_address: string;
+  source: string;
+  total_pnl_window?: number | null;
+  pnl_rank?: number | null;
+  window_start: string;
+  window_end: string;
+  snapshot_at: string;
+  created_at?: string;
+  event_id?: string | null;
+  market_id?: string | null;
+  condition_id?: string | null;
+  event_slug?: string | null;
+  event_title?: string | null;
+  is_minted: boolean;
+  minted_at?: string | null;
+  minted_to_wallet?: string | null;
+  minted_to_solana_wallet?: string | null;
+  minted_claim_id?: number | null;
+  minted_tx_hash?: string | null;
+  minted_asset_address?: string | null;
+};
+
+type WinnerWalletForm = {
+  season_id: string;
+  wallet_address: string;
+  source: string;
+  total_pnl_window: string;
+  pnl_rank: string;
+  window_start_iso: string;
+  window_end_iso: string;
+  snapshot_at_iso: string;
+  event_id: string;
+  market_id: string;
+  condition_id: string;
+  event_slug: string;
+  event_title: string;
+  is_minted: boolean;
+  minted_at_iso: string;
+  minted_to_wallet: string;
+  minted_to_solana_wallet: string;
+  minted_claim_id: string;
+  minted_tx_hash: string;
+  minted_asset_address: string;
+};
+
 type LocalCountdownItem = { label: string; value: string };
 
 const tabs: Array<{ key: TabKey; label: string }> = [
@@ -38,6 +86,7 @@ const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "eligibility", label: "Eligibility" },
   { key: "claims", label: "Claims Mint" },
   { key: "seasonClaims", label: "Season Claims" },
+  { key: "winners", label: "Winner Wallets" },
   { key: "scenarios", label: "Scenarios" },
   { key: "reset", label: "Reset" },
 ];
@@ -132,6 +181,31 @@ export default function HomePage() {
   const [resetOutput, setResetOutput] = useState("");
   const [seasonUpdateRunning, setSeasonUpdateRunning] = useState(false);
   const [seasonUpdateOutput, setSeasonUpdateOutput] = useState("");
+  const [winnerRows, setWinnerRows] = useState<WinnerWalletRow[]>([]);
+  const [winnerSeasonFilterId, setWinnerSeasonFilterId] = useState<number>(0);
+  const [winnerFormRowId, setWinnerFormRowId] = useState<number | null>(null);
+  const [winnerForm, setWinnerForm] = useState<WinnerWalletForm>({
+    season_id: "",
+    wallet_address: "",
+    source: "manual_admin",
+    total_pnl_window: "",
+    pnl_rank: "",
+    window_start_iso: "",
+    window_end_iso: "",
+    snapshot_at_iso: "",
+    event_id: "",
+    market_id: "",
+    condition_id: "",
+    event_slug: "",
+    event_title: "",
+    is_minted: false,
+    minted_at_iso: "",
+    minted_to_wallet: "",
+    minted_to_solana_wallet: "",
+    minted_claim_id: "",
+    minted_tx_hash: "",
+    minted_asset_address: "",
+  });
 
   const seasonOptions = useMemo(() => seasons.map((s) => ({ value: s.id, label: `id=${s.id} | ${s.type}#${s.season_number}` })), [seasons]);
   const claimSeasonInfoLines = useMemo(() => claimSeasonInfo.split("\n"), [claimSeasonInfo]);
@@ -179,6 +253,52 @@ export default function HomePage() {
     if (latestAnyStandard) return latestAnyStandard.id;
     return items[0].id;
   };
+
+  const buildEmptyWinnerForm = (seasonId: number): WinnerWalletForm => ({
+    season_id: seasonId ? String(seasonId) : "",
+    wallet_address: "",
+    source: "manual_admin",
+    total_pnl_window: "",
+    pnl_rank: "",
+    window_start_iso: "",
+    window_end_iso: "",
+    snapshot_at_iso: "",
+    event_id: "",
+    market_id: "",
+    condition_id: "",
+    event_slug: "",
+    event_title: "",
+    is_minted: false,
+    minted_at_iso: "",
+    minted_to_wallet: "",
+    minted_to_solana_wallet: "",
+    minted_claim_id: "",
+    minted_tx_hash: "",
+    minted_asset_address: "",
+  });
+
+  const mapWinnerRowToForm = (row: WinnerWalletRow): WinnerWalletForm => ({
+    season_id: String(row.season_id),
+    wallet_address: row.wallet_address ?? "",
+    source: row.source ?? "manual_admin",
+    total_pnl_window: row.total_pnl_window == null ? "" : String(row.total_pnl_window),
+    pnl_rank: row.pnl_rank == null ? "" : String(row.pnl_rank),
+    window_start_iso: row.window_start ?? "",
+    window_end_iso: row.window_end ?? "",
+    snapshot_at_iso: row.snapshot_at ?? "",
+    event_id: row.event_id ?? "",
+    market_id: row.market_id ?? "",
+    condition_id: row.condition_id ?? "",
+    event_slug: row.event_slug ?? "",
+    event_title: row.event_title ?? "",
+    is_minted: Boolean(row.is_minted),
+    minted_at_iso: row.minted_at ?? "",
+    minted_to_wallet: row.minted_to_wallet ?? "",
+    minted_to_solana_wallet: row.minted_to_solana_wallet ?? "",
+    minted_claim_id: row.minted_claim_id == null ? "" : String(row.minted_claim_id),
+    minted_tx_hash: row.minted_tx_hash ?? "",
+    minted_asset_address: row.minted_asset_address ?? "",
+  });
 
   const seasonInfoLineClass = (line: string): string => {
     const trimmed = line.trim();
@@ -234,6 +354,10 @@ export default function HomePage() {
       if (!claimSeasonId || !knownIds.has(claimSeasonId)) setClaimSeasonId(preferredId);
       if (!seasonClaimsSeasonId || !knownIds.has(seasonClaimsSeasonId)) setSeasonClaimsSeasonId(preferredId);
       if (!scenarioSeasonId || !knownIds.has(scenarioSeasonId)) setScenarioSeasonId(preferredId);
+      if (!winnerSeasonFilterId || !knownIds.has(winnerSeasonFilterId)) {
+        setWinnerSeasonFilterId(preferredId);
+        if (!winnerForm.season_id) setWinnerForm((prev) => ({ ...prev, season_id: String(preferredId) }));
+      }
     }
   };
 
@@ -300,6 +424,12 @@ export default function HomePage() {
     appendScenarioLog(`Loaded params for season ${scenarioSeasonId}`);
   };
 
+  const refreshWinnerRows = async () => {
+    const query = winnerSeasonFilterId ? `?season_id=${winnerSeasonFilterId}&limit=400` : "?limit=400";
+    const data = await fetchJSON<{ rows: WinnerWalletRow[] }>(`/api/winners${query}`);
+    setWinnerRows(data.rows);
+  };
+
   useEffect(() => {
     void run(async () => {
       const cfg = await fetchJSON<{ default_solana_recipient: string }>("/api/config");
@@ -356,6 +486,17 @@ export default function HomePage() {
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seasonClaimsSeasonId, tab]);
+
+  useEffect(() => {
+    if (tab !== "winners") return;
+    void run(async () => {
+      if (!winnerForm.season_id && winnerSeasonFilterId) {
+        setWinnerForm((prev) => ({ ...prev, season_id: String(winnerSeasonFilterId) }));
+      }
+      await refreshWinnerRows();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, winnerSeasonFilterId]);
 
   useEffect(() => {
     const wsUrl = API_BASE.replace(/^http/, "ws") + "/ws/events";
@@ -646,6 +787,196 @@ export default function HomePage() {
                 <tr key={r.id}>
                   <td>{r.id}</td><td>{r.user_wallet}</td><td>{r.recipient_solana_wallet}</td><td>{r.phase_type}</td>
                   <td>{r.status}</td><td>{r.tx_hash}</td><td>{r.asset_address}</td><td>{r.timestamp}</td><td>{r.created_at}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      ) : null}
+
+      {tab === "winners" ? (
+        <section className="panel">
+          <div className="row">
+            <label>Season filter</label>
+            <select value={winnerSeasonFilterId} onChange={(e) => setWinnerSeasonFilterId(Number(e.target.value))}>
+              {seasonOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <button onClick={() => void run(refreshWinnerRows)}>Refresh rows</button>
+            <button
+              onClick={() => {
+                const seedSeasonId = winnerSeasonFilterId || claimSeasonId || 0;
+                setWinnerFormRowId(null);
+                setWinnerForm(buildEmptyWinnerForm(seedSeasonId));
+              }}
+            >
+              Clear form
+            </button>
+          </div>
+
+          <div className="panel">
+            <div className="muted">{winnerFormRowId ? `Edit row #${winnerFormRowId}` : "Create new winner row"}</div>
+            <div className="row">
+              <label>season_id</label>
+              <input
+                value={winnerForm.season_id}
+                onChange={(e) => setWinnerForm((prev) => ({ ...prev, season_id: e.target.value }))}
+              />
+              <label>wallet_address</label>
+              <input
+                value={winnerForm.wallet_address}
+                onChange={(e) => setWinnerForm((prev) => ({ ...prev, wallet_address: e.target.value }))}
+                style={{ minWidth: 300 }}
+              />
+              <label>source</label>
+              <input value={winnerForm.source} onChange={(e) => setWinnerForm((prev) => ({ ...prev, source: e.target.value }))} />
+              <label>is_minted</label>
+              <input
+                type="checkbox"
+                checked={winnerForm.is_minted}
+                onChange={(e) => setWinnerForm((prev) => ({ ...prev, is_minted: e.target.checked }))}
+              />
+            </div>
+            <div className="row">
+              <label>total_pnl_window</label>
+              <input value={winnerForm.total_pnl_window} onChange={(e) => setWinnerForm((prev) => ({ ...prev, total_pnl_window: e.target.value }))} />
+              <label>pnl_rank</label>
+              <input value={winnerForm.pnl_rank} onChange={(e) => setWinnerForm((prev) => ({ ...prev, pnl_rank: e.target.value }))} />
+              <label>window_start_iso</label>
+              <input value={winnerForm.window_start_iso} onChange={(e) => setWinnerForm((prev) => ({ ...prev, window_start_iso: e.target.value }))} style={{ minWidth: 280 }} />
+              <label>window_end_iso</label>
+              <input value={winnerForm.window_end_iso} onChange={(e) => setWinnerForm((prev) => ({ ...prev, window_end_iso: e.target.value }))} style={{ minWidth: 280 }} />
+              <label>snapshot_at_iso</label>
+              <input value={winnerForm.snapshot_at_iso} onChange={(e) => setWinnerForm((prev) => ({ ...prev, snapshot_at_iso: e.target.value }))} style={{ minWidth: 280 }} />
+            </div>
+            <div className="row">
+              <label>event_id</label>
+              <input value={winnerForm.event_id} onChange={(e) => setWinnerForm((prev) => ({ ...prev, event_id: e.target.value }))} />
+              <label>market_id</label>
+              <input value={winnerForm.market_id} onChange={(e) => setWinnerForm((prev) => ({ ...prev, market_id: e.target.value }))} />
+              <label>condition_id</label>
+              <input value={winnerForm.condition_id} onChange={(e) => setWinnerForm((prev) => ({ ...prev, condition_id: e.target.value }))} />
+              <label>event_slug</label>
+              <input value={winnerForm.event_slug} onChange={(e) => setWinnerForm((prev) => ({ ...prev, event_slug: e.target.value }))} />
+              <label>event_title</label>
+              <input value={winnerForm.event_title} onChange={(e) => setWinnerForm((prev) => ({ ...prev, event_title: e.target.value }))} />
+            </div>
+            <div className="row">
+              <label>minted_at_iso</label>
+              <input value={winnerForm.minted_at_iso} onChange={(e) => setWinnerForm((prev) => ({ ...prev, minted_at_iso: e.target.value }))} style={{ minWidth: 280 }} />
+              <label>minted_to_wallet</label>
+              <input value={winnerForm.minted_to_wallet} onChange={(e) => setWinnerForm((prev) => ({ ...prev, minted_to_wallet: e.target.value }))} style={{ minWidth: 220 }} />
+              <label>minted_to_solana_wallet</label>
+              <input value={winnerForm.minted_to_solana_wallet} onChange={(e) => setWinnerForm((prev) => ({ ...prev, minted_to_solana_wallet: e.target.value }))} style={{ minWidth: 260 }} />
+              <label>minted_claim_id</label>
+              <input value={winnerForm.minted_claim_id} onChange={(e) => setWinnerForm((prev) => ({ ...prev, minted_claim_id: e.target.value }))} />
+              <label>minted_tx_hash</label>
+              <input value={winnerForm.minted_tx_hash} onChange={(e) => setWinnerForm((prev) => ({ ...prev, minted_tx_hash: e.target.value }))} style={{ minWidth: 220 }} />
+              <label>minted_asset_address</label>
+              <input value={winnerForm.minted_asset_address} onChange={(e) => setWinnerForm((prev) => ({ ...prev, minted_asset_address: e.target.value }))} style={{ minWidth: 220 }} />
+            </div>
+            <div className="row">
+              <button
+                onClick={() =>
+                  void run(async () => {
+                    const payload = {
+                      season_id: Number(winnerForm.season_id),
+                      wallet_address: winnerForm.wallet_address.trim(),
+                      source: winnerForm.source.trim() || "manual_admin",
+                      total_pnl_window: winnerForm.total_pnl_window.trim() ? Number(winnerForm.total_pnl_window) : null,
+                      pnl_rank: winnerForm.pnl_rank.trim() ? Number(winnerForm.pnl_rank) : null,
+                      window_start_iso: winnerForm.window_start_iso.trim(),
+                      window_end_iso: winnerForm.window_end_iso.trim(),
+                      snapshot_at_iso: winnerForm.snapshot_at_iso.trim() || null,
+                      event_id: winnerForm.event_id.trim() || null,
+                      market_id: winnerForm.market_id.trim() || null,
+                      condition_id: winnerForm.condition_id.trim() || null,
+                      event_slug: winnerForm.event_slug.trim() || null,
+                      event_title: winnerForm.event_title.trim() || null,
+                      is_minted: winnerForm.is_minted,
+                      minted_at_iso: winnerForm.minted_at_iso.trim() || null,
+                      minted_to_wallet: winnerForm.minted_to_wallet.trim() || null,
+                      minted_to_solana_wallet: winnerForm.minted_to_solana_wallet.trim() || null,
+                      minted_claim_id: winnerForm.minted_claim_id.trim() ? Number(winnerForm.minted_claim_id) : null,
+                      minted_tx_hash: winnerForm.minted_tx_hash.trim() || null,
+                      minted_asset_address: winnerForm.minted_asset_address.trim() || null,
+                    };
+                    if (!payload.season_id || !payload.wallet_address || !payload.window_start_iso || !payload.window_end_iso) {
+                      throw new Error("season_id, wallet_address, window_start_iso and window_end_iso are required");
+                    }
+                    if (winnerFormRowId == null) {
+                      await fetchJSON<{ row: WinnerWalletRow }>("/api/winners", {
+                        method: "POST",
+                        body: JSON.stringify(payload),
+                      });
+                      setOk("Winner row created");
+                    } else {
+                      await fetchJSON<{ row: WinnerWalletRow }>(`/api/winners/${winnerFormRowId}`, {
+                        method: "PUT",
+                        body: JSON.stringify(payload),
+                      });
+                      setOk(`Winner row ${winnerFormRowId} updated`);
+                    }
+                    await refreshWinnerRows();
+                    setWinnerFormRowId(null);
+                    setWinnerForm(buildEmptyWinnerForm(payload.season_id));
+                  })
+                }
+              >
+                {winnerFormRowId == null ? "Create row" : "Update row"}
+              </button>
+              {winnerFormRowId != null ? (
+                <button
+                  onClick={() => {
+                    const seedSeasonId = winnerSeasonFilterId || claimSeasonId || 0;
+                    setWinnerFormRowId(null);
+                    setWinnerForm(buildEmptyWinnerForm(seedSeasonId));
+                  }}
+                >
+                  Cancel edit
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th>id</th><th>season</th><th>wallet</th><th>rank</th><th>total_pnl</th><th>window_start</th><th>window_end</th><th>minted</th><th>actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {winnerRows.map((row) => (
+                <tr key={row.id}>
+                  <td>{row.id}</td>
+                  <td>{row.season_id}</td>
+                  <td>{row.wallet_address}</td>
+                  <td>{row.pnl_rank}</td>
+                  <td>{row.total_pnl_window}</td>
+                  <td>{row.window_start}</td>
+                  <td>{row.window_end}</td>
+                  <td>{String(row.is_minted)}</td>
+                  <td>
+                    <button onClick={() => {
+                      setWinnerFormRowId(row.id);
+                      setWinnerForm(mapWinnerRowToForm(row));
+                    }}>Edit</button>
+                    <button
+                      onClick={() =>
+                        void run(async () => {
+                          await fetchJSON<{ status: string }>(`/api/winners/${row.id}`, { method: "DELETE" });
+                          if (winnerFormRowId === row.id) {
+                            const seedSeasonId = winnerSeasonFilterId || claimSeasonId || 0;
+                            setWinnerFormRowId(null);
+                            setWinnerForm(buildEmptyWinnerForm(seedSeasonId));
+                          }
+                          setOk(`Winner row ${row.id} deleted`);
+                          await refreshWinnerRows();
+                        })
+                      }
+                    >
+                      Delete
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>

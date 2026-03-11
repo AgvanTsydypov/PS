@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -99,6 +100,29 @@ class ResetRequest(BaseModel):
     confirm: bool
 
 
+class WinnerWalletsUpsertRequest(BaseModel):
+    season_id: int
+    wallet_address: str
+    source: str = "manual_admin"
+    total_pnl_window: Optional[float] = None
+    pnl_rank: Optional[int] = None
+    window_start_iso: str
+    window_end_iso: str
+    snapshot_at_iso: Optional[str] = None
+    event_id: Optional[str] = None
+    market_id: Optional[str] = None
+    condition_id: Optional[str] = None
+    event_slug: Optional[str] = None
+    event_title: Optional[str] = None
+    is_minted: bool = False
+    minted_at_iso: Optional[str] = None
+    minted_to_wallet: Optional[str] = None
+    minted_to_solana_wallet: Optional[str] = None
+    minted_claim_id: Optional[int] = None
+    minted_tx_hash: Optional[str] = None
+    minted_asset_address: Optional[str] = None
+
+
 class WsHub:
     def __init__(self) -> None:
         self._connections: List[WebSocket] = []
@@ -124,6 +148,8 @@ class WsHub:
 
 
 class SeasonWorkbenchService:
+    EVM_WALLET_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+
     def __init__(self) -> None:
         self.manager = DataLoadingManager(use_local_db=True)
         self.season_manager = SeasonManager(use_local_db=True)
@@ -1332,6 +1358,246 @@ class SeasonWorkbenchService:
             conn.close()
         self.clear_wallets_cache()
 
+    @staticmethod
+    def _normalize_optional_text(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @staticmethod
+    def _format_winner_row(row: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(row)
+        for key in ("window_start", "window_end", "snapshot_at", "created_at", "minted_at"):
+            value = payload.get(key)
+            if isinstance(value, datetime):
+                payload[key] = value.astimezone(timezone.utc).isoformat()
+        return payload
+
+    def list_winner_wallet_rows(self, season_id: Optional[int], limit: int) -> List[Dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 1000)
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                if season_id is None:
+                    cursor.execute(
+                        """
+                        SELECT
+                            id, season_id, wallet_address, source, total_pnl_window, pnl_rank,
+                            window_start, window_end, snapshot_at, created_at, event_id, market_id,
+                            condition_id, event_slug, event_title, is_minted, minted_at,
+                            minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
+                            minted_tx_hash, minted_asset_address
+                        FROM winner_wallets_nft_to_claim
+                        ORDER BY season_id DESC, pnl_rank ASC NULLS LAST, id DESC
+                        LIMIT %s
+                        """,
+                        (safe_limit,),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT
+                            id, season_id, wallet_address, source, total_pnl_window, pnl_rank,
+                            window_start, window_end, snapshot_at, created_at, event_id, market_id,
+                            condition_id, event_slug, event_title, is_minted, minted_at,
+                            minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
+                            minted_tx_hash, minted_asset_address
+                        FROM winner_wallets_nft_to_claim
+                        WHERE season_id = %s
+                        ORDER BY pnl_rank ASC NULLS LAST, id DESC
+                        LIMIT %s
+                        """,
+                        (season_id, safe_limit),
+                    )
+                return [self._format_winner_row(dict(row)) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def create_winner_wallet_row(self, req: WinnerWalletsUpsertRequest) -> Dict[str, Any]:
+        wallet = req.wallet_address.strip()
+        if not self.EVM_WALLET_RE.fullmatch(wallet):
+            raise ValueError("wallet_address must be a valid EVM address (0x + 40 hex chars)")
+        source = req.source.strip() or "manual_admin"
+        window_start = self.parse_iso_datetime_utc(req.window_start_iso)
+        window_end = self.parse_iso_datetime_utc(req.window_end_iso)
+        if window_end <= window_start:
+            raise ValueError("window_end must be later than window_start")
+        snapshot_at = (
+            self.parse_iso_datetime_utc(req.snapshot_at_iso)
+            if req.snapshot_at_iso and req.snapshot_at_iso.strip()
+            else datetime.now(timezone.utc)
+        )
+        minted_at = (
+            self.parse_iso_datetime_utc(req.minted_at_iso)
+            if req.minted_at_iso and req.minted_at_iso.strip()
+            else None
+        )
+
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO winner_wallets_nft_to_claim (
+                        season_id, wallet_address, source, total_pnl_window, pnl_rank,
+                        window_start, window_end, snapshot_at, event_id, market_id, condition_id,
+                        event_slug, event_title, is_minted, minted_at, minted_to_wallet,
+                        minted_to_solana_wallet, minted_claim_id, minted_tx_hash, minted_asset_address
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s
+                    )
+                    RETURNING
+                        id, season_id, wallet_address, source, total_pnl_window, pnl_rank,
+                        window_start, window_end, snapshot_at, created_at, event_id, market_id,
+                        condition_id, event_slug, event_title, is_minted, minted_at,
+                        minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
+                        minted_tx_hash, minted_asset_address
+                    """,
+                    (
+                        req.season_id,
+                        wallet.lower(),
+                        source,
+                        req.total_pnl_window,
+                        req.pnl_rank,
+                        window_start,
+                        window_end,
+                        snapshot_at,
+                        self._normalize_optional_text(req.event_id),
+                        self._normalize_optional_text(req.market_id),
+                        self._normalize_optional_text(req.condition_id),
+                        self._normalize_optional_text(req.event_slug),
+                        self._normalize_optional_text(req.event_title),
+                        req.is_minted,
+                        minted_at,
+                        self._normalize_optional_text(req.minted_to_wallet),
+                        self._normalize_optional_text(req.minted_to_solana_wallet),
+                        req.minted_claim_id,
+                        self._normalize_optional_text(req.minted_tx_hash),
+                        self._normalize_optional_text(req.minted_asset_address),
+                    ),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    raise RuntimeError("Failed to create winner wallet row")
+            conn.commit()
+            self.clear_wallets_cache()
+            return self._format_winner_row(dict(row))
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def update_winner_wallet_row(self, row_id: int, req: WinnerWalletsUpsertRequest) -> Dict[str, Any]:
+        wallet = req.wallet_address.strip()
+        if not self.EVM_WALLET_RE.fullmatch(wallet):
+            raise ValueError("wallet_address must be a valid EVM address (0x + 40 hex chars)")
+        source = req.source.strip() or "manual_admin"
+        window_start = self.parse_iso_datetime_utc(req.window_start_iso)
+        window_end = self.parse_iso_datetime_utc(req.window_end_iso)
+        if window_end <= window_start:
+            raise ValueError("window_end must be later than window_start")
+        snapshot_at = (
+            self.parse_iso_datetime_utc(req.snapshot_at_iso)
+            if req.snapshot_at_iso and req.snapshot_at_iso.strip()
+            else datetime.now(timezone.utc)
+        )
+        minted_at = (
+            self.parse_iso_datetime_utc(req.minted_at_iso)
+            if req.minted_at_iso and req.minted_at_iso.strip()
+            else None
+        )
+
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(
+                    """
+                    UPDATE winner_wallets_nft_to_claim
+                    SET
+                        season_id = %s,
+                        wallet_address = %s,
+                        source = %s,
+                        total_pnl_window = %s,
+                        pnl_rank = %s,
+                        window_start = %s,
+                        window_end = %s,
+                        snapshot_at = %s,
+                        event_id = %s,
+                        market_id = %s,
+                        condition_id = %s,
+                        event_slug = %s,
+                        event_title = %s,
+                        is_minted = %s,
+                        minted_at = %s,
+                        minted_to_wallet = %s,
+                        minted_to_solana_wallet = %s,
+                        minted_claim_id = %s,
+                        minted_tx_hash = %s,
+                        minted_asset_address = %s
+                    WHERE id = %s
+                    RETURNING
+                        id, season_id, wallet_address, source, total_pnl_window, pnl_rank,
+                        window_start, window_end, snapshot_at, created_at, event_id, market_id,
+                        condition_id, event_slug, event_title, is_minted, minted_at,
+                        minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
+                        minted_tx_hash, minted_asset_address
+                    """,
+                    (
+                        req.season_id,
+                        wallet.lower(),
+                        source,
+                        req.total_pnl_window,
+                        req.pnl_rank,
+                        window_start,
+                        window_end,
+                        snapshot_at,
+                        self._normalize_optional_text(req.event_id),
+                        self._normalize_optional_text(req.market_id),
+                        self._normalize_optional_text(req.condition_id),
+                        self._normalize_optional_text(req.event_slug),
+                        self._normalize_optional_text(req.event_title),
+                        req.is_minted,
+                        minted_at,
+                        self._normalize_optional_text(req.minted_to_wallet),
+                        self._normalize_optional_text(req.minted_to_solana_wallet),
+                        req.minted_claim_id,
+                        self._normalize_optional_text(req.minted_tx_hash),
+                        self._normalize_optional_text(req.minted_asset_address),
+                        row_id,
+                    ),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    raise ValueError(f"Winner wallet row {row_id} not found")
+            conn.commit()
+            self.clear_wallets_cache()
+            return self._format_winner_row(dict(row))
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def delete_winner_wallet_row(self, row_id: int) -> None:
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM winner_wallets_nft_to_claim WHERE id = %s", (row_id,))
+                if cursor.rowcount != 1:
+                    raise ValueError(f"Winner wallet row {row_id} not found")
+            conn.commit()
+            self.clear_wallets_cache()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
 
 service = SeasonWorkbenchService()
 ws_hub = WsHub()
@@ -1544,6 +1810,42 @@ async def run_reset(req: ResetRequest) -> Dict[str, str]:
 def master_collection() -> Dict[str, str]:
     address = service.get_master_collection_address()
     return {"address": address}
+
+
+@app.get("/api/winners")
+def get_winners(season_id: Optional[int] = None, limit: int = 300) -> Dict[str, Any]:
+    try:
+        rows = service.list_winner_wallet_rows(season_id=season_id, limit=limit)
+        return {"rows": rows}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/winners")
+def create_winner(req: WinnerWalletsUpsertRequest) -> Dict[str, Any]:
+    try:
+        row = service.create_winner_wallet_row(req)
+        return {"row": row}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.put("/api/winners/{row_id}")
+def update_winner(row_id: int, req: WinnerWalletsUpsertRequest) -> Dict[str, Any]:
+    try:
+        row = service.update_winner_wallet_row(row_id=row_id, req=req)
+        return {"row": row}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/winners/{row_id}")
+def delete_winner(row_id: int) -> Dict[str, Any]:
+    try:
+        service.delete_winner_wallet_row(row_id=row_id)
+        return {"status": "ok", "message": f"Winner wallet row {row_id} deleted"}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.websocket("/ws/events")
