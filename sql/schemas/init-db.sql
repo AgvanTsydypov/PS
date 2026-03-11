@@ -452,8 +452,13 @@ CREATE TABLE IF NOT EXISTS user_wallet_signins (
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_signed_in_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     sign_in_count INTEGER NOT NULL DEFAULT 1,
+    proxy_wallet TEXT NOT NULL DEFAULT 'Not registered in PM',
     CONSTRAINT user_wallet_signins_wallet_check CHECK (wallet_address ~* '^0x[a-f0-9]{40}$')
 );
+
+-- Ensure proxy_wallet exists for upgraded databases.
+ALTER TABLE user_wallet_signins
+    ADD COLUMN IF NOT EXISTS proxy_wallet TEXT NOT NULL DEFAULT 'Not registered in PM';
 
 CREATE INDEX IF NOT EXISTS idx_user_wallet_signins_last_signed_in_at
     ON user_wallet_signins(last_signed_in_at DESC);

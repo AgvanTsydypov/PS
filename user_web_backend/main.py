@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
 import sys
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -41,6 +45,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from scripts.season_manager import SeasonManager
+from web_backend.main import BLOCKCHAIN_BASE_ZORA, MintClaimRequest, SeasonWorkbenchService
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +98,16 @@ class EligibilityRequest(BaseModel):
     season_id: Optional[int] = None
 
 
+class UserMintResponse(BaseModel):
+    status: str
+    message: str
+    wallet_address: str
+    proxy_wallet: str
+    minted_count: int
+    minted_claims: List[Dict[str, Any]]
+    failed_claims: List[Dict[str, Any]]
+
+
 class RateLimitConfig(BaseModel):
     window_seconds: int
     max_requests: int
@@ -122,6 +137,7 @@ _challenge_store: Dict[str, ChallengeRecord] = {}
 _challenge_lock = threading.Lock()
 CHALLENGE_TTL_SECONDS = int(os.getenv("USER_WEB_CHALLENGE_TTL_SECONDS", "300"))
 season_manager = SeasonManager(use_local_db=True)
+mint_service = SeasonWorkbenchService()
 JWT_ALG = "HS256"
 JWT_TTL_SECONDS = int(os.getenv("USER_WEB_JWT_TTL_SECONDS", "3600"))
 JWT_ISSUER = os.getenv("USER_WEB_JWT_ISSUER", "polystars-user-web-backend")
@@ -139,9 +155,16 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
         max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_ELIGIBILITY_MAX", "30")),
     ),
+    "/api/mint/base-sepolia": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_MINT_MAX", "12")),
+    ),
 }
 _rate_limit_lock = threading.Lock()
 _rate_limit_store: Dict[str, deque[float]] = defaultdict(deque)
+POLYMARKET_GAMMA_API_BASE = os.getenv("POLYMARKET_GAMMA_API_BASE", "https://gamma-api.polymarket.com").rstrip("/")
+POLYMARKET_REQUEST_TIMEOUT_SECONDS = float(os.getenv("POLYMARKET_REQUEST_TIMEOUT_SECONDS", "8"))
+PM_NOT_REGISTERED_VALUE = "Not registered in PM"
 
 
 def _cleanup_expired_challenges() -> None:
@@ -218,6 +241,249 @@ def _extract_wallet_from_request(request: Request) -> str:
     if token_type != "access" or not subject:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return subject
+
+
+def _ensure_user_wallet_signins_schema() -> None:
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                ALTER TABLE user_wallet_signins
+                ADD COLUMN IF NOT EXISTS proxy_wallet TEXT NOT NULL DEFAULT %s
+                """,
+                (PM_NOT_REGISTERED_VALUE,),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+_ensure_user_wallet_signins_schema()
+
+
+def _ensure_claims_uniqueness_index() -> None:
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_active_season_user_wallet_lower
+                ON claims(season_id, LOWER(user_wallet))
+                WHERE status IN ('PENDING', 'PROCESSING', 'COMPLETED')
+                """
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+_ensure_claims_uniqueness_index()
+
+
+def _fetch_polymarket_public_profile(wallet_address: str) -> Dict[str, Any]:
+    query = urllib.parse.urlencode({"address": wallet_address})
+    url = f"{POLYMARKET_GAMMA_API_BASE}/public-profile?{query}"
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={
+            "Accept": "application/json",
+            # Avoid default Python-urllib UA that is often blocked by WAF/CDN.
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=POLYMARKET_REQUEST_TIMEOUT_SECONDS) as response:
+            status_code = int(getattr(response, "status", 200))
+            raw_body = response.read().decode("utf-8", errors="replace")
+            if status_code < 200 or status_code >= 300:
+                raise HTTPException(status_code=502, detail="Polymarket profile request failed")
+            payload = json.loads(raw_body or "{}")
+            if not isinstance(payload, dict):
+                raise HTTPException(status_code=502, detail="Invalid Polymarket profile response")
+            return payload
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        if exc.code in {403, 404}:
+            logger.warning(
+                "Polymarket profile unavailable code=%s wallet=%s; using fallback proxy marker",
+                exc.code,
+                wallet_address,
+            )
+            return {}
+        logger.warning(
+            "Polymarket profile HTTP error code=%s wallet=%s body=%s",
+            exc.code,
+            wallet_address,
+            body[:300],
+        )
+        raise HTTPException(status_code=502, detail="Polymarket profile request failed")
+    except urllib.error.URLError:
+        logger.exception("Polymarket profile request failed wallet=%s", wallet_address)
+        raise HTTPException(status_code=502, detail="Polymarket profile request failed")
+    except TimeoutError:
+        logger.exception("Polymarket profile request timeout wallet=%s", wallet_address)
+        raise HTTPException(status_code=504, detail="Polymarket profile request timeout")
+    except json.JSONDecodeError:
+        logger.exception("Polymarket profile response parse failed wallet=%s", wallet_address)
+        raise HTTPException(status_code=502, detail="Invalid Polymarket profile response")
+
+
+def _proxy_wallet_from_profile(profile: Dict[str, Any]) -> Optional[str]:
+    value = str(profile.get("proxyWallet") or "").strip()
+    return value or None
+
+
+def _load_proxy_wallet_for_user_wallet(user_wallet_address: str) -> str:
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT proxy_wallet
+                FROM user_wallet_signins
+                WHERE lower(wallet_address) = lower(%s)
+                LIMIT 1
+                """,
+                (user_wallet_address,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return PM_NOT_REGISTERED_VALUE
+            value = str(row[0] or "").strip()
+            return value or PM_NOT_REGISTERED_VALUE
+    finally:
+        conn.close()
+
+
+def _build_eligibility_failure_message(payload: Dict[str, Any]) -> str:
+    reasons: List[str] = []
+    for stream_name in ("genesis", "standard"):
+        stream = payload.get(stream_name)
+        if not isinstance(stream, dict):
+            continue
+        if bool(stream.get("eligible_now")):
+            continue
+        reason = str(stream.get("ineligible_reason") or "not eligible")
+        reasons.append(f"{stream_name}: {reason}")
+    if reasons:
+        return "Mint eligibility failed: " + "; ".join(reasons)
+    return "Mint eligibility failed"
+
+
+def _select_eligible_stream(payload: Dict[str, Any]) -> Dict[str, Any]:
+    standard = payload.get("standard")
+    if isinstance(standard, dict) and bool(standard.get("eligible_now")):
+        return standard
+    genesis = payload.get("genesis")
+    if isinstance(genesis, dict) and bool(genesis.get("eligible_now")):
+        return genesis
+    raise ValueError(_build_eligibility_failure_message(payload))
+
+
+def _collect_eligible_streams(payload: Dict[str, Any]) -> List[tuple[str, Dict[str, Any]]]:
+    selected: List[tuple[str, Dict[str, Any]]] = []
+    # Prefer standard first, then genesis.
+    for stream_name in ("standard", "genesis"):
+        stream = payload.get(stream_name)
+        if not isinstance(stream, dict):
+            continue
+        if bool(stream.get("eligible_now")):
+            selected.append((stream_name, stream))
+    return selected
+
+
+def _resolve_eligibility_wallet(token_wallet: str, proxy_wallet: str) -> str:
+    # If user has no PM proxy wallet, fallback to connected wallet.
+    # This allows minting in open public phases (breach/scavenge),
+    # while vault still stays blocked by SeasonManager origin checks.
+    if proxy_wallet == PM_NOT_REGISTERED_VALUE:
+        return token_wallet.lower()
+    return proxy_wallet.lower()
+
+
+def _addresses_for_claim_uniqueness(token_wallet: str, proxy_wallet: str) -> List[str]:
+    addresses = {token_wallet.lower()}
+    proxy = proxy_wallet.strip().lower()
+    if proxy and proxy != PM_NOT_REGISTERED_VALUE.lower():
+        addresses.add(proxy)
+    return sorted(addresses)
+
+
+def _has_claim_in_season_any_address(season_id: int, addresses: List[str]) -> bool:
+    if not addresses:
+        return False
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM claims
+                    WHERE season_id = %s
+                      AND lower(user_wallet) = ANY(%s)
+                      AND status IN ('PENDING', 'PROCESSING', 'COMPLETED')
+                )
+                """,
+                (season_id, addresses),
+            )
+            row = cursor.fetchone()
+            return bool(row and row[0])
+    finally:
+        conn.close()
+
+
+def _try_acquire_mint_lock(season_id: int, eligibility_wallet: str):
+    lock_key = f"mint:{season_id}:{eligibility_wallet.lower()}"
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (lock_key,))
+            row = cursor.fetchone()
+            locked = bool(row and row[0])
+        if not locked:
+            conn.close()
+            return None
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+def _release_mint_lock(conn, season_id: int, eligibility_wallet: str) -> None:
+    lock_key = f"mint:{season_id}:{eligibility_wallet.lower()}"
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_unlock(hashtext(%s))", (lock_key,))
+    finally:
+        conn.close()
+
+
+def _apply_claim_uniqueness_guard(
+    eligibility_payload: Dict[str, Any],
+    season_id: int,
+    addresses: List[str],
+) -> Dict[str, Any]:
+    if not _has_claim_in_season_any_address(season_id=season_id, addresses=addresses):
+        return eligibility_payload
+    payload = dict(eligibility_payload)
+    reason = "Already claimed in this season by connected/proxy wallet linkage"
+    payload["already_claimed_via_linked_wallet"] = True
+    payload["eligible_now"] = False
+    payload["ineligible_reason"] = reason
+    return payload
 
 
 @app.middleware("http")
@@ -316,19 +582,49 @@ def active_seasons() -> List[Dict[str, Any]]:
 
 @app.post("/api/eligibility")
 def check_eligibility(payload: EligibilityRequest, request: Request) -> Dict[str, Any]:
-    wallet = payload.wallet.strip().lower()
-    if not wallet:
-        raise HTTPException(status_code=400, detail="Wallet is required")
-    token_wallet = _extract_wallet_from_request(request)
-    if wallet != token_wallet:
-        raise HTTPException(status_code=403, detail="Forbidden")
-
+    token_wallet = _extract_wallet_from_request(request).lower()
+    proxy_wallet = _load_proxy_wallet_for_user_wallet(token_wallet)
+    eligibility_wallet = _resolve_eligibility_wallet(token_wallet, proxy_wallet)
+    linked_addresses = _addresses_for_claim_uniqueness(token_wallet, proxy_wallet)
     try:
-        result = season_manager.check_user_eligibility(wallet)
+        result = season_manager.check_user_eligibility(eligibility_wallet)
+        if isinstance(result.get("genesis"), dict):
+            genesis_season_id = int(result["genesis"].get("season_id") or 0)
+            if genesis_season_id > 0:
+                result["genesis"] = _apply_claim_uniqueness_guard(
+                    eligibility_payload=result["genesis"],
+                    season_id=genesis_season_id,
+                    addresses=linked_addresses,
+                )
+        if isinstance(result.get("standard"), dict):
+            standard_season_id = int(result["standard"].get("season_id") or 0)
+            if standard_season_id > 0:
+                result["standard"] = _apply_claim_uniqueness_guard(
+                    eligibility_payload=result["standard"],
+                    season_id=standard_season_id,
+                    addresses=linked_addresses,
+                )
+        genesis_ok = bool((result.get("genesis") or {}).get("eligible_now"))
+        standard_ok = bool((result.get("standard") or {}).get("eligible_now"))
+        result["double_mint"] = {
+            "can_claim_genesis": genesis_ok,
+            "can_claim_standard": standard_ok,
+            "can_claim_both_now": genesis_ok and standard_ok,
+        }
+        result["wallet_address"] = token_wallet
+        result["proxy_wallet"] = proxy_wallet
+        result["eligibility_wallet"] = eligibility_wallet
+        if proxy_wallet == PM_NOT_REGISTERED_VALUE:
+            result["eligibility_mode"] = "connected_wallet_fallback"
         if payload.season_id is not None:
             selected = season_manager.check_user_eligibility_for_season(
-                wallet_address=wallet,
+                wallet_address=eligibility_wallet,
                 season_id=payload.season_id,
+            )
+            selected = _apply_claim_uniqueness_guard(
+                eligibility_payload=selected,
+                season_id=payload.season_id,
+                addresses=linked_addresses,
             )
             result["selected_season_id"] = payload.season_id
             result["is_origin_wallet_active_standard"] = result.get("is_origin_wallet")
@@ -338,7 +634,12 @@ def check_eligibility(payload: EligibilityRequest, request: Request) -> Dict[str
     except HTTPException:
         raise
     except Exception:
-        logger.exception("Eligibility check failed for wallet=%s", wallet)
+        logger.exception(
+            "Eligibility check failed for wallet=%s proxy=%s eligibility_wallet=%s",
+            token_wallet,
+            proxy_wallet,
+            eligibility_wallet,
+        )
         raise HTTPException(status_code=400, detail="Eligibility check failed")
 
 
@@ -386,20 +687,33 @@ def wallet_verify(payload: VerifyRequest):
     if recovered_address.lower() != wallet_address.lower():
         raise HTTPException(status_code=401, detail="Signature verification failed")
 
+    proxy_wallet = PM_NOT_REGISTERED_VALUE
+    try:
+        profile = _fetch_polymarket_public_profile(wallet_address)
+        proxy_wallet = _proxy_wallet_from_profile(profile) or PM_NOT_REGISTERED_VALUE
+    except Exception as exc:
+        # Sign-in should stay resilient even if Polymarket is temporarily unavailable.
+        logger.warning(
+            "Could not resolve Polymarket proxy wallet for sign-in wallet=%s: %s",
+            wallet_address,
+            str(exc),
+        )
+
     conn = _get_connection()
     try:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO user_wallet_signins (wallet_address, first_seen_at, last_signed_in_at, sign_in_count)
-                VALUES (%s, NOW(), NOW(), 1)
+                INSERT INTO user_wallet_signins (wallet_address, first_seen_at, last_signed_in_at, sign_in_count, proxy_wallet)
+                VALUES (%s, NOW(), NOW(), 1, %s)
                 ON CONFLICT (wallet_address)
                 DO UPDATE SET
                     last_signed_in_at = NOW(),
-                    sign_in_count = user_wallet_signins.sign_in_count + 1
-                RETURNING wallet_address, first_seen_at, last_signed_in_at, sign_in_count
+                    sign_in_count = user_wallet_signins.sign_in_count + 1,
+                    proxy_wallet = EXCLUDED.proxy_wallet
+                RETURNING wallet_address, first_seen_at, last_signed_in_at, sign_in_count, proxy_wallet
                 """,
-                (wallet_address,),
+                (wallet_address, proxy_wallet),
             )
             row = cursor.fetchone()
         conn.commit()
@@ -420,7 +734,164 @@ def wallet_verify(payload: VerifyRequest):
         "first_seen_at": row[1].isoformat(),
         "last_signed_in_at": row[2].isoformat(),
         "sign_in_count": row[3],
+        "proxy_wallet": row[4],
         "access_token": access_token,
         "token_type": "Bearer",
         "expires_in": JWT_TTL_SECONDS,
     }
+
+
+@app.get("/api/polymarket/public-profile")
+def polymarket_public_profile(request: Request) -> Dict[str, Any]:
+    wallet = _extract_wallet_from_request(request)
+    profile = _fetch_polymarket_public_profile(wallet)
+    proxy_wallet = _proxy_wallet_from_profile(profile) or PM_NOT_REGISTERED_VALUE
+    return {
+        "wallet_address": wallet,
+        "proxy_wallet": proxy_wallet,
+        "profile": profile,
+    }
+
+
+@app.post("/api/mint/base-sepolia")
+def mint_base_sepolia(request: Request) -> UserMintResponse:
+    wallet = _extract_wallet_from_request(request).lower()
+    proxy_wallet = _load_proxy_wallet_for_user_wallet(wallet)
+    eligibility_wallet = _resolve_eligibility_wallet(wallet, proxy_wallet)
+    linked_addresses = _addresses_for_claim_uniqueness(wallet, proxy_wallet)
+    if not Web3.is_address(eligibility_wallet):
+        raise HTTPException(status_code=400, detail=f"Invalid eligibility wallet format: {eligibility_wallet}")
+
+    try:
+        eligibility = season_manager.check_user_eligibility(eligibility_wallet)
+        # Apply linked-wallet uniqueness guard for each stream before minting.
+        for stream_key in ("genesis", "standard"):
+            stream_payload = eligibility.get(stream_key)
+            if not isinstance(stream_payload, dict):
+                continue
+            stream_season_id = int(stream_payload.get("season_id") or 0)
+            if stream_season_id <= 0:
+                continue
+            eligibility[stream_key] = _apply_claim_uniqueness_guard(
+                eligibility_payload=stream_payload,
+                season_id=stream_season_id,
+                addresses=linked_addresses,
+            )
+
+        eligible_streams = _collect_eligible_streams(eligibility)
+        if not eligible_streams:
+            raise ValueError(_build_eligibility_failure_message(eligibility))
+
+        minted_claims: List[Dict[str, Any]] = []
+        failed_claims: List[Dict[str, Any]] = []
+        for stream_name, stream in eligible_streams:
+            season_id = int(stream.get("season_id") or 0)
+            if season_id <= 0:
+                failed_claims.append(
+                    {
+                        "stream": stream_name,
+                        "season_id": season_id,
+                        "reason": "Invalid season id",
+                    }
+                )
+                continue
+            if _has_claim_in_season_any_address(season_id=season_id, addresses=linked_addresses):
+                failed_claims.append(
+                    {
+                        "stream": stream_name,
+                        "season_id": season_id,
+                        "reason": "Already claimed in this season by connected/proxy wallet linkage",
+                    }
+                )
+                continue
+            lock_conn = _try_acquire_mint_lock(season_id=season_id, eligibility_wallet=eligibility_wallet)
+            if lock_conn is None:
+                failed_claims.append(
+                    {
+                        "stream": stream_name,
+                        "season_id": season_id,
+                        "reason": "Mint already in progress for this wallet/season. Retry in a few seconds.",
+                    }
+                )
+                continue
+
+            # Recipient is the connected wallet; eligibility/winner allocation use eligibility wallet.
+            try:
+                if _has_claim_in_season_any_address(season_id=season_id, addresses=linked_addresses):
+                    failed_claims.append(
+                        {
+                            "stream": stream_name,
+                            "season_id": season_id,
+                            "reason": "Already claimed in this season by connected/proxy wallet linkage",
+                        }
+                    )
+                    continue
+                mint_result = mint_service.run_mint_claim(
+                    MintClaimRequest(
+                        wallet=eligibility_wallet,
+                        recipient_address=wallet,
+                        season_id=season_id,
+                        phase=str(stream.get("phase") or "breach"),
+                        auto_phase=True,
+                        db_only=False,
+                        blockchain=BLOCKCHAIN_BASE_ZORA,
+                    )
+                )
+            except Exception as exc:
+                text = str(exc)
+                failed_claims.append(
+                    {
+                        "stream": stream_name,
+                        "season_id": season_id,
+                        "reason": (
+                            "Already claimed in this season by connected/proxy wallet linkage"
+                            if "duplicate" in text.lower() or "unique" in text.lower()
+                            else text
+                        ),
+                    }
+                )
+                continue
+            finally:
+                _release_mint_lock(lock_conn, season_id=season_id, eligibility_wallet=eligibility_wallet)
+
+            minted_claims.append(
+                {
+                    "stream": stream_name,
+                    "season_id": int(mint_result.get("season_id") or season_id),
+                    "phase": str(mint_result.get("phase") or stream.get("phase") or ""),
+                    "claim_id": int(mint_result.get("claim_id") or 0),
+                    "chain": str(mint_result.get("chain") or "base_zora"),
+                    "tx_hash": str((mint_result.get("mint_result") or {}).get("tx_hash") or ""),
+                    "asset_address": str((mint_result.get("mint_result") or {}).get("asset_address") or ""),
+                }
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        detail = str(exc)
+        if "Mint eligibility failed:" not in detail and "eligible" not in detail.lower():
+            detail = _build_eligibility_failure_message(
+                season_manager.check_user_eligibility(eligibility_wallet)
+            )
+        raise HTTPException(status_code=400, detail=detail)
+
+    if not minted_claims:
+        reasons = "; ".join(str(item.get("reason") or "Mint failed") for item in failed_claims) or "Mint failed"
+        raise HTTPException(status_code=400, detail=reasons)
+
+    status = "ok" if not failed_claims else "partial_success"
+    message = (
+        "Mint completed on Base Sepolia"
+        if not failed_claims
+        else f"Mint completed partially on Base Sepolia ({len(minted_claims)} success, {len(failed_claims)} failed)"
+    )
+
+    return UserMintResponse(
+        status=status,
+        message=message,
+        wallet_address=wallet,
+        proxy_wallet=proxy_wallet,
+        minted_count=len(minted_claims),
+        minted_claims=minted_claims,
+        failed_claims=failed_claims,
+    )

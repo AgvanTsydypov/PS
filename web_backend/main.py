@@ -66,7 +66,6 @@ class MintClaimRequest(BaseModel):
     phase: str = "breach"
     auto_phase: bool = True
     db_only: bool = False
-    force_insert: bool = False
     blockchain: str = BLOCKCHAIN_SOLANA
 
 
@@ -1100,8 +1099,7 @@ class SeasonWorkbenchService:
                 phase = detected_phase
             elif phase_error:
                 warnings.append(phase_error)
-                if not req.force_insert:
-                    raise ValueError(phase_error)
+                raise ValueError(phase_error)
 
         try:
             eligibility = self.season_manager.check_user_eligibility(wallet)
@@ -1117,12 +1115,9 @@ class SeasonWorkbenchService:
                 warning_reason = "Wallet is non-origin but phase='vault'"
             if warning_reason:
                 warnings.append(warning_reason)
-                if not req.force_insert:
-                    raise ValueError(warning_reason)
+                raise ValueError(warning_reason)
         except Exception as exc:
-            if not req.force_insert:
-                raise
-            warnings.append(f"Eligibility check warning: {exc}")
+            raise
 
         supported_phases = set(self.get_claim_phase_enum_values())
         if phase not in supported_phases:
