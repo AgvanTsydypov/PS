@@ -163,6 +163,10 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
         max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_NFTS_MAX", "30")),
     ),
+    "/api/wallet-ticker": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_TICKER_MAX", "30")),
+    ),
 }
 _rate_limit_lock = threading.Lock()
 _rate_limit_store: Dict[str, deque[float]] = defaultdict(deque)
@@ -899,6 +903,40 @@ def active_seasons() -> List[Dict[str, Any]]:
     except Exception:
         logger.exception("Failed to load active seasons")
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+
+
+@app.get("/api/wallet-ticker")
+def wallet_ticker(limit: int = 100) -> Dict[str, Any]:
+    safe_limit = max(1, min(int(limit), 200))
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT wallet_address
+                FROM (
+                    SELECT DISTINCT lower(wallet_address) AS wallet_address
+                    FROM winner_wallets_nft_to_claim
+                    WHERE wallet_address IS NOT NULL
+                ) t
+                ORDER BY random()
+                LIMIT %s
+                """,
+                (safe_limit,),
+            )
+            rows = cursor.fetchall()
+    except Exception:
+        logger.exception("Failed to load wallet ticker addresses")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    finally:
+        conn.close()
+
+    wallets = [str(row[0]) for row in rows if row and row[0]]
+    return {
+        "wallets": wallets,
+        "total": len(wallets),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.post("/api/eligibility")
