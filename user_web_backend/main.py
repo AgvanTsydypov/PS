@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import jwt
 import psycopg2
@@ -163,8 +163,11 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
 _rate_limit_lock = threading.Lock()
 _rate_limit_store: Dict[str, deque[float]] = defaultdict(deque)
 POLYMARKET_GAMMA_API_BASE = os.getenv("POLYMARKET_GAMMA_API_BASE", "https://gamma-api.polymarket.com").rstrip("/")
+POLYMARKET_DATA_API_BASE = os.getenv("POLYMARKET_DATA_API_BASE", "https://data-api.polymarket.com").rstrip("/")
 POLYMARKET_REQUEST_TIMEOUT_SECONDS = float(os.getenv("POLYMARKET_REQUEST_TIMEOUT_SECONDS", "8"))
 PM_NOT_REGISTERED_VALUE = "Not registered in PM"
+NO_TRADES_YET_VALUE = "No trades yet"
+CLAIMS_UNIQUENESS_INDEX_NAME = "ux_claims_active_season_user_wallet_lower"
 
 
 def _cleanup_expired_challenges() -> None:
@@ -243,48 +246,46 @@ def _extract_wallet_from_request(request: Request) -> str:
     return subject
 
 
-def _ensure_user_wallet_signins_schema() -> None:
+def _try_extract_wallet_from_auth_header(request: Request) -> Optional[str]:
+    auth_header = request.headers.get("authorization", "").strip()
+    if not auth_header.lower().startswith("bearer "):
+        return None
+    token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        return None
+    try:
+        decoded = jwt.decode(
+            token,
+            _jwt_secret(),
+            algorithms=[JWT_ALG],
+            audience=JWT_AUDIENCE,
+            issuer=JWT_ISSUER,
+        )
+    except Exception:
+        return None
+    token_type = str(decoded.get("type", ""))
+    subject = str(decoded.get("sub", "")).strip().lower()
+    if token_type != "access" or not subject:
+        return None
+    return subject
+
+
+def _warn_if_claims_uniqueness_index_missing() -> None:
     conn = _get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                ALTER TABLE user_wallet_signins
-                ADD COLUMN IF NOT EXISTS proxy_wallet TEXT NOT NULL DEFAULT %s
-                """,
-                (PM_NOT_REGISTERED_VALUE,),
+            cursor.execute("SELECT to_regclass(%s)", (f"public.{CLAIMS_UNIQUENESS_INDEX_NAME}",))
+            row = cursor.fetchone()
+            exists = bool(row and row[0])
+        if not exists:
+            logger.warning(
+                "Critical DB index %s is missing. Mint duplicate protection is weaker without it.",
+                CLAIMS_UNIQUENESS_INDEX_NAME,
             )
-        conn.commit()
     except Exception:
-        conn.rollback()
-        raise
+        logger.exception("Could not verify presence of index %s", CLAIMS_UNIQUENESS_INDEX_NAME)
     finally:
         conn.close()
-
-
-_ensure_user_wallet_signins_schema()
-
-
-def _ensure_claims_uniqueness_index() -> None:
-    conn = _get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_active_season_user_wallet_lower
-                ON claims(season_id, LOWER(user_wallet))
-                WHERE status IN ('PENDING', 'PROCESSING', 'COMPLETED')
-                """
-            )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-_ensure_claims_uniqueness_index()
 
 
 def _fetch_polymarket_public_profile(wallet_address: str) -> Dict[str, Any]:
@@ -367,6 +368,152 @@ def _load_proxy_wallet_for_user_wallet(user_wallet_address: str) -> str:
         conn.close()
 
 
+def _load_wallet_signin_snapshot(user_wallet_address: str) -> Tuple[str, str]:
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT proxy_wallet, trader_rank
+                FROM user_wallet_signins
+                WHERE lower(wallet_address) = lower(%s)
+                LIMIT 1
+                """,
+                (user_wallet_address,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return PM_NOT_REGISTERED_VALUE, NO_TRADES_YET_VALUE
+            proxy_wallet = str(row[0] or "").strip() or PM_NOT_REGISTERED_VALUE
+            trader_rank = str(row[1] or "").strip() or NO_TRADES_YET_VALUE
+            return proxy_wallet, trader_rank
+    finally:
+        conn.close()
+
+
+def _load_trader_rank_for_user_wallet(user_wallet_address: str) -> str:
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT trader_rank
+                FROM user_wallet_signins
+                WHERE lower(wallet_address) = lower(%s)
+                LIMIT 1
+                """,
+                (user_wallet_address,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return NO_TRADES_YET_VALUE
+            value = str(row[0] or "").strip()
+            return value or NO_TRADES_YET_VALUE
+    finally:
+        conn.close()
+
+
+def _fetch_polymarket_trader_rank(proxy_wallet: str) -> Tuple[Optional[str], bool]:
+    if not Web3.is_address(proxy_wallet):
+        return None, True
+    query = urllib.parse.urlencode(
+        {
+            "category": "OVERALL",
+            "timePeriod": "ALL",
+            "orderBy": "PNL",
+            "user": Web3.to_checksum_address(proxy_wallet),
+            "limit": "1",
+            "offset": "0",
+        }
+    )
+    url = f"{POLYMARKET_DATA_API_BASE}/v1/leaderboard?{query}"
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=POLYMARKET_REQUEST_TIMEOUT_SECONDS) as response:
+            status_code = int(getattr(response, "status", 200))
+            raw_body = response.read().decode("utf-8", errors="replace")
+            if status_code < 200 or status_code >= 300:
+                logger.warning(
+                    "Polymarket leaderboard non-2xx status=%s proxy_wallet=%s",
+                    status_code,
+                    proxy_wallet,
+                )
+                return None, False
+            payload = json.loads(raw_body or "[]")
+            if not isinstance(payload, list) or len(payload) == 0:
+                return None, True
+            first_entry = payload[0]
+            if not isinstance(first_entry, dict):
+                return None, False
+            rank = str(first_entry.get("rank") or "").strip()
+            return (rank or None), True
+    except urllib.error.HTTPError as exc:
+        logger.warning(
+            "Polymarket leaderboard HTTP error code=%s proxy_wallet=%s",
+            exc.code,
+            proxy_wallet,
+        )
+        return None, False
+    except urllib.error.URLError:
+        logger.warning("Polymarket leaderboard network error proxy_wallet=%s", proxy_wallet)
+        return None, False
+    except TimeoutError:
+        logger.warning("Polymarket leaderboard timeout proxy_wallet=%s", proxy_wallet)
+        return None, False
+    except json.JSONDecodeError:
+        logger.warning("Polymarket leaderboard invalid JSON proxy_wallet=%s", proxy_wallet)
+        return None, False
+    except Exception:
+        logger.warning("Polymarket leaderboard request failed for proxy wallet=%s", proxy_wallet)
+        return None, False
+
+
+def _mint_block_reason(proxy_wallet: str, trader_rank: str) -> Optional[str]:
+    if proxy_wallet == PM_NOT_REGISTERED_VALUE:
+        return "Mint blocked: user has no Polymarket proxy wallet (not registered on Polymarket)."
+    rank_value = str(trader_rank or "").strip()
+    if not rank_value or rank_value.lower() == NO_TRADES_YET_VALUE.lower():
+        return "Mint blocked: user has no trades on Polymarket leaderboard."
+    return None
+
+
+def _blocked_eligibility_payload(
+    token_wallet: str,
+    proxy_wallet: str,
+    trader_rank: str,
+    reason: str,
+) -> Dict[str, Any]:
+    stream_payload = {
+        "season_id": None,
+        "phase": None,
+        "eligible_now": False,
+        "ineligible_reason": reason,
+    }
+    return {
+        "wallet_address": token_wallet,
+        "proxy_wallet": proxy_wallet,
+        "trader_rank": trader_rank,
+        "eligibility_wallet": proxy_wallet.lower() if Web3.is_address(proxy_wallet) else proxy_wallet,
+        "is_origin_wallet": False,
+        "genesis": dict(stream_payload),
+        "standard": dict(stream_payload),
+        "double_mint": {
+            "can_claim_genesis": False,
+            "can_claim_standard": False,
+            "can_claim_both_now": False,
+        },
+        "mint_blocked": True,
+        "mint_block_reason": reason,
+    }
+
+
 def _build_eligibility_failure_message(payload: Dict[str, Any]) -> str:
     reasons: List[str] = []
     for stream_name in ("genesis", "standard"):
@@ -405,11 +552,7 @@ def _collect_eligible_streams(payload: Dict[str, Any]) -> List[tuple[str, Dict[s
 
 
 def _resolve_eligibility_wallet(token_wallet: str, proxy_wallet: str) -> str:
-    # If user has no PM proxy wallet, fallback to connected wallet.
-    # This allows minting in open public phases (breach/scavenge),
-    # while vault still stays blocked by SeasonManager origin checks.
-    if proxy_wallet == PM_NOT_REGISTERED_VALUE:
-        return token_wallet.lower()
+    del token_wallet
     return proxy_wallet.lower()
 
 
@@ -491,7 +634,11 @@ async def rate_limit_middleware(request: Request, call_next):
     cfg = RATE_LIMITS.get(request.url.path)
     if cfg is not None:
         client_ip = request.client.host if request.client else "unknown"
-        bucket_key = f"{request.url.path}:{client_ip}"
+        wallet_scope = ""
+        if request.url.path == "/api/mint/base-sepolia":
+            wallet_sub = _try_extract_wallet_from_auth_header(request)
+            wallet_scope = wallet_sub or "anon"
+        bucket_key = f"{request.url.path}:{client_ip}:{wallet_scope}"
         now = monotonic()
         with _rate_limit_lock:
             bucket = _rate_limit_store[bucket_key]
@@ -504,6 +651,11 @@ async def rate_limit_middleware(request: Request, call_next):
                 )
             bucket.append(now)
     return await call_next(request)
+
+
+@app.on_event("startup")
+def startup_checks() -> None:
+    _warn_if_claims_uniqueness_index_missing()
 
 
 @app.get("/api/health")
@@ -584,8 +736,24 @@ def active_seasons() -> List[Dict[str, Any]]:
 def check_eligibility(payload: EligibilityRequest, request: Request) -> Dict[str, Any]:
     token_wallet = _extract_wallet_from_request(request).lower()
     proxy_wallet = _load_proxy_wallet_for_user_wallet(token_wallet)
+    trader_rank = _load_trader_rank_for_user_wallet(token_wallet)
+    block_reason = _mint_block_reason(proxy_wallet, trader_rank)
+    if block_reason is not None:
+        return _blocked_eligibility_payload(
+            token_wallet=token_wallet,
+            proxy_wallet=proxy_wallet,
+            trader_rank=trader_rank,
+            reason=block_reason,
+        )
     eligibility_wallet = _resolve_eligibility_wallet(token_wallet, proxy_wallet)
     linked_addresses = _addresses_for_claim_uniqueness(token_wallet, proxy_wallet)
+    if not Web3.is_address(eligibility_wallet):
+        return _blocked_eligibility_payload(
+            token_wallet=token_wallet,
+            proxy_wallet=proxy_wallet,
+            trader_rank=trader_rank,
+            reason="Mint blocked: invalid Polymarket proxy wallet format.",
+        )
     try:
         result = season_manager.check_user_eligibility(eligibility_wallet)
         if isinstance(result.get("genesis"), dict):
@@ -613,9 +781,8 @@ def check_eligibility(payload: EligibilityRequest, request: Request) -> Dict[str
         }
         result["wallet_address"] = token_wallet
         result["proxy_wallet"] = proxy_wallet
+        result["trader_rank"] = trader_rank
         result["eligibility_wallet"] = eligibility_wallet
-        if proxy_wallet == PM_NOT_REGISTERED_VALUE:
-            result["eligibility_mode"] = "connected_wallet_fallback"
         if payload.season_id is not None:
             selected = season_manager.check_user_eligibility_for_season(
                 wallet_address=eligibility_wallet,
@@ -687,33 +854,47 @@ def wallet_verify(payload: VerifyRequest):
     if recovered_address.lower() != wallet_address.lower():
         raise HTTPException(status_code=401, detail="Signature verification failed")
 
-    proxy_wallet = PM_NOT_REGISTERED_VALUE
+    stored_proxy_wallet, stored_trader_rank = _load_wallet_signin_snapshot(wallet_address)
+    proxy_wallet = stored_proxy_wallet
+    trader_rank = stored_trader_rank
+    profile_freshly_resolved = False
     try:
         profile = _fetch_polymarket_public_profile(wallet_address)
+        profile_freshly_resolved = True
         proxy_wallet = _proxy_wallet_from_profile(profile) or PM_NOT_REGISTERED_VALUE
     except Exception as exc:
-        # Sign-in should stay resilient even if Polymarket is temporarily unavailable.
+        # Keep the last known DB snapshot when PM profile API is unavailable.
         logger.warning(
             "Could not resolve Polymarket proxy wallet for sign-in wallet=%s: %s",
             wallet_address,
             str(exc),
         )
+    if profile_freshly_resolved and proxy_wallet == PM_NOT_REGISTERED_VALUE:
+        trader_rank = NO_TRADES_YET_VALUE
+    elif proxy_wallet != PM_NOT_REGISTERED_VALUE:
+        leaderboard_rank, leaderboard_api_available = _fetch_polymarket_trader_rank(proxy_wallet)
+        if leaderboard_api_available:
+            trader_rank = leaderboard_rank or NO_TRADES_YET_VALUE
+        else:
+            # Keep last known rank from DB when leaderboard API is unavailable.
+            trader_rank = stored_trader_rank
 
     conn = _get_connection()
     try:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO user_wallet_signins (wallet_address, first_seen_at, last_signed_in_at, sign_in_count, proxy_wallet)
-                VALUES (%s, NOW(), NOW(), 1, %s)
+                INSERT INTO user_wallet_signins (wallet_address, first_seen_at, last_signed_in_at, sign_in_count, proxy_wallet, trader_rank)
+                VALUES (%s, NOW(), NOW(), 1, %s, %s)
                 ON CONFLICT (wallet_address)
                 DO UPDATE SET
                     last_signed_in_at = NOW(),
                     sign_in_count = user_wallet_signins.sign_in_count + 1,
-                    proxy_wallet = EXCLUDED.proxy_wallet
-                RETURNING wallet_address, first_seen_at, last_signed_in_at, sign_in_count, proxy_wallet
+                    proxy_wallet = EXCLUDED.proxy_wallet,
+                    trader_rank = EXCLUDED.trader_rank
+                RETURNING wallet_address, first_seen_at, last_signed_in_at, sign_in_count, proxy_wallet, trader_rank
                 """,
-                (wallet_address, proxy_wallet),
+                (wallet_address, proxy_wallet, trader_rank),
             )
             row = cursor.fetchone()
         conn.commit()
@@ -735,6 +916,7 @@ def wallet_verify(payload: VerifyRequest):
         "last_signed_in_at": row[2].isoformat(),
         "sign_in_count": row[3],
         "proxy_wallet": row[4],
+        "trader_rank": row[5],
         "access_token": access_token,
         "token_type": "Bearer",
         "expires_in": JWT_TTL_SECONDS,
@@ -757,10 +939,14 @@ def polymarket_public_profile(request: Request) -> Dict[str, Any]:
 def mint_base_sepolia(request: Request) -> UserMintResponse:
     wallet = _extract_wallet_from_request(request).lower()
     proxy_wallet = _load_proxy_wallet_for_user_wallet(wallet)
+    trader_rank = _load_trader_rank_for_user_wallet(wallet)
+    block_reason = _mint_block_reason(proxy_wallet, trader_rank)
+    if block_reason is not None:
+        raise HTTPException(status_code=400, detail=block_reason)
     eligibility_wallet = _resolve_eligibility_wallet(wallet, proxy_wallet)
     linked_addresses = _addresses_for_claim_uniqueness(wallet, proxy_wallet)
     if not Web3.is_address(eligibility_wallet):
-        raise HTTPException(status_code=400, detail=f"Invalid eligibility wallet format: {eligibility_wallet}")
+        raise HTTPException(status_code=400, detail="Mint blocked: invalid Polymarket proxy wallet format.")
 
     try:
         eligibility = season_manager.check_user_eligibility(eligibility_wallet)
@@ -838,6 +1024,13 @@ def mint_base_sepolia(request: Request) -> UserMintResponse:
                     )
                 )
             except Exception as exc:
+                logger.exception(
+                    "Mint stream failed stream=%s season_id=%s wallet=%s eligibility_wallet=%s",
+                    stream_name,
+                    season_id,
+                    wallet,
+                    eligibility_wallet,
+                )
                 text = str(exc)
                 failed_claims.append(
                     {
@@ -846,7 +1039,7 @@ def mint_base_sepolia(request: Request) -> UserMintResponse:
                         "reason": (
                             "Already claimed in this season by connected/proxy wallet linkage"
                             if "duplicate" in text.lower() or "unique" in text.lower()
-                            else text
+                            else "Mint processing failed. Please retry shortly."
                         ),
                     }
                 )

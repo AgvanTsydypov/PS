@@ -45,9 +45,24 @@ type VerifyResponse = {
   wallet_address: string;
   sign_in_count: number;
   proxy_wallet?: string;
+  trader_rank?: string;
   access_token?: string;
   token_type?: string;
   expires_in?: number;
+};
+
+type JwtPayload = {
+  sub?: string;
+  exp?: number;
+};
+
+type StoredSessionMeta = {
+  walletAddress?: string;
+  selectedWalletName?: string | null;
+  signInCount?: number | null;
+  proxyWallet?: string | null;
+  traderRank?: string | null;
+  challengeId?: string;
 };
 
 type SeasonResponse = {
@@ -74,9 +89,11 @@ type EligibilityStream = {
 type EligibilityResponse = {
   wallet_address: string;
   proxy_wallet?: string;
+  trader_rank?: string;
   eligibility_wallet?: string;
-  eligibility_mode?: string;
   is_origin_wallet: boolean;
+  mint_blocked?: boolean;
+  mint_block_reason?: string;
   genesis: EligibilityStream;
   standard: EligibilityStream;
   double_mint: {
@@ -90,10 +107,50 @@ const apiBase =
   process.env.NEXT_PUBLIC_USER_API_BASE_URL ??
   (process.env.NODE_ENV === "development" ? "http://localhost:8011" : "/");
 const AUTH_TOKEN_STORAGE_KEY = "polystars_user_access_token";
+const AUTH_SESSION_META_STORAGE_KEY = "polystars_user_session_meta";
 
 function buildApiUrl(path: string): string {
   if (apiBase === "/") return path;
   return `${apiBase.replace(/\/$/, "")}${path}`;
+}
+
+function parseJwtPayload(token: string): JwtPayload | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length < 2) return null;
+    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+    const json = window.atob(padded);
+    return JSON.parse(json) as JwtPayload;
+  } catch {
+    return null;
+  }
+}
+
+function isJwtExpired(payload: JwtPayload | null): boolean {
+  const exp = Number(payload?.exp ?? 0);
+  if (!exp) return true;
+  return Date.now() >= exp * 1000;
+}
+
+function loadStoredSessionMeta(): StoredSessionMeta | null {
+  try {
+    const raw = window.localStorage.getItem(AUTH_SESSION_META_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredSessionMeta;
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredSessionMeta(meta: StoredSessionMeta): void {
+  window.localStorage.setItem(AUTH_SESSION_META_STORAGE_KEY, JSON.stringify(meta));
+}
+
+function clearStoredSessionMeta(): void {
+  window.localStorage.removeItem(AUTH_SESSION_META_STORAGE_KEY);
 }
 
 // ── Legacy fallback: walk window.ethereum ─────────────────────────────────────
@@ -133,6 +190,7 @@ export default function HomePage() {
   const [mintResultText, setMintResultText] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [proxyWallet, setProxyWallet] = useState<string | null>(null);
+  const [traderRank, setTraderRank] = useState<string | null>(null);
 
   // Wallet that was selected by the user in the picker — used for sign-in
   const selectedProviderRef = useRef<EthProvider | null>(null);
@@ -144,6 +202,32 @@ export default function HomePage() {
 
   // Picker modal visibility
   const [showPicker, setShowPicker] = useState(false);
+
+  async function refreshSeasonsFromApi() {
+    try {
+      setSeasonError("");
+      const timeRes = await fetch(buildApiUrl("/api/server-time"));
+      if (timeRes.ok) {
+        const timePayload = (await timeRes.json()) as { now_utc_iso?: string };
+        const parsedMs = Date.parse(String(timePayload.now_utc_iso ?? ""));
+        if (!Number.isNaN(parsedMs)) {
+          setServerNowBaseMs(parsedMs);
+          setClientNowAtSyncMs(Date.now());
+          setSyncedNowMs(parsedMs);
+        }
+      }
+
+      const res = await fetch(buildApiUrl("/api/seasons/active"));
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || "Failed to load seasons");
+      }
+      const allSeasons = (await res.json()) as SeasonResponse[];
+      setActiveSeasons(allSeasons);
+    } catch (error) {
+      setSeasonError(extractErrorMessage(error));
+    }
+  }
 
   // Listen for EIP-6963 announcements and trigger discovery.
   useEffect(() => {
@@ -167,37 +251,46 @@ export default function HomePage() {
 
   useEffect(() => {
     const token = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) ?? "";
-    if (token) setAccessToken(token);
+    if (!token) return;
+    const payload = parseJwtPayload(token);
+    if (!payload || isJwtExpired(payload)) {
+      window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      clearStoredSessionMeta();
+      return;
+    }
+
+    setAccessToken(token);
+    setIsSignedIn(true);
+    setStatusText("Signed in");
+
+    const meta = loadStoredSessionMeta();
+    if (meta?.walletAddress) {
+      setWalletAddress(String(meta.walletAddress));
+    }
+    if (typeof meta?.selectedWalletName === "string" && meta.selectedWalletName.trim()) {
+      setSelectedWalletName(meta.selectedWalletName);
+    }
+    if (typeof meta?.signInCount === "number") {
+      setSignInCount(meta.signInCount);
+    }
+    if (meta?.proxyWallet !== undefined) {
+      setProxyWallet(meta.proxyWallet ?? null);
+    }
+    if (meta?.traderRank !== undefined) {
+      setTraderRank(meta.traderRank ?? null);
+    }
+    if (typeof meta?.challengeId === "string" && meta.challengeId.trim()) {
+      setChallengeId(meta.challengeId);
+    }
+
+    const subjectWallet = String(payload.sub ?? "").trim();
+    if (subjectWallet && !meta?.walletAddress) {
+      setWalletAddress(subjectWallet);
+    }
   }, []);
 
   useEffect(() => {
-    async function loadSeasons() {
-      try {
-        setSeasonError("");
-        const timeRes = await fetch(buildApiUrl("/api/server-time"));
-        if (timeRes.ok) {
-          const timePayload = (await timeRes.json()) as { now_utc_iso?: string };
-          const parsedMs = Date.parse(String(timePayload.now_utc_iso ?? ""));
-          if (!Number.isNaN(parsedMs)) {
-            setServerNowBaseMs(parsedMs);
-            setClientNowAtSyncMs(Date.now());
-            setSyncedNowMs(parsedMs);
-          }
-        }
-
-        const res = await fetch(buildApiUrl("/api/seasons/active"));
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || "Failed to load seasons");
-        }
-        const allSeasons = (await res.json()) as SeasonResponse[];
-        setActiveSeasons(allSeasons);
-      } catch (error) {
-        setSeasonError(extractErrorMessage(error));
-      }
-    }
-
-    void loadSeasons();
+    void refreshSeasonsFromApi();
   }, []);
 
   useEffect(() => {
@@ -283,7 +376,7 @@ export default function HomePage() {
     return JSON.stringify(error);
   }
 
-  async function signInWith(provider: EthProvider, address: string) {
+  async function signInWith(provider: EthProvider, address: string, providerName: string | null) {
     if (!provider || !address) {
       setStatusText("Connect wallet first");
       return;
@@ -332,26 +425,42 @@ export default function HomePage() {
       setEligibilityChecked(false);
       setCanMintNow(false);
       setMintResultText("");
+      const resolvedProxyWallet = String(verify.proxy_wallet ?? "").trim() || null;
+      const resolvedTraderRank = String(verify.trader_rank ?? "").trim() || null;
       setProxyWallet(null);
+      setTraderRank(null);
       const token = String(verify.access_token ?? "");
       if (verify.signed_in && token) {
         setAccessToken(token);
         window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
-        setProxyWallet(String(verify.proxy_wallet ?? "").trim() || null);
+        setProxyWallet(resolvedProxyWallet);
+        setTraderRank(resolvedTraderRank);
+        saveStoredSessionMeta({
+          walletAddress: String(verify.wallet_address ?? address),
+          selectedWalletName: providerName,
+          signInCount: verify.sign_in_count,
+          proxyWallet: resolvedProxyWallet,
+          traderRank: resolvedTraderRank,
+          challengeId: challenge.challenge_id,
+        });
       } else {
         setAccessToken("");
         window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
         setProxyWallet(null);
+        setTraderRank(null);
+        clearStoredSessionMeta();
       }
     } catch (error) {
       setIsSignedIn(false);
       setStatusText(extractErrorMessage(error));
       setAccessToken("");
       setProxyWallet(null);
+      setTraderRank(null);
       setEligibilityChecked(false);
       setCanMintNow(false);
       setMintResultText("");
       window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      clearStoredSessionMeta();
     } finally {
       setIsBusy(false);
     }
@@ -385,11 +494,13 @@ export default function HomePage() {
       setSignInCount(null);
       setAccessToken("");
       setProxyWallet(null);
+      setTraderRank(null);
       setEligibilityChecked(false);
       setCanMintNow(false);
       setMintResultText("");
       window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-      await signInWith(provider, address);
+      clearStoredSessionMeta();
+      await signInWith(provider, address, name);
     } catch (error) {
       const raw = extractErrorMessage(error);
       const code =
@@ -426,6 +537,15 @@ export default function HomePage() {
         body: JSON.stringify({ wallet: walletAddress }),
       });
       if (!res.ok) {
+        if (res.status === 401) {
+          setIsSignedIn(false);
+          setAccessToken("");
+          setProxyWallet(null);
+          setTraderRank(null);
+          setStatusText("Session expired. Please connect wallet again.");
+          window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+          clearStoredSessionMeta();
+        }
         const text = await res.text();
         throw new Error(text || "Eligibility request failed");
       }
@@ -435,16 +555,26 @@ export default function HomePage() {
         Boolean(payload.double_mint?.can_claim_standard);
       setCanMintNow(canMintAny);
       setEligibilityChecked(true);
-      setProxyWallet(String(payload.proxy_wallet ?? "").trim() || proxyWallet);
+      const resolvedProxyWallet = String(payload.proxy_wallet ?? "").trim() || proxyWallet;
+      const resolvedTraderRank = String(payload.trader_rank ?? "").trim() || traderRank;
+      setProxyWallet(resolvedProxyWallet);
+      setTraderRank(resolvedTraderRank);
+      saveStoredSessionMeta({
+        walletAddress,
+        selectedWalletName,
+        signInCount,
+        proxyWallet: resolvedProxyWallet ?? null,
+        traderRank: resolvedTraderRank ?? null,
+        challengeId,
+      });
 
       const details = [
         `Connected wallet: ${walletAddress}`,
         `Proxy wallet (PM): ${String(payload.proxy_wallet ?? "Not found")}`,
+        `Trader rank (overall/all by pnl): ${String(payload.trader_rank ?? "No trades yet")}`,
         `Eligibility wallet: ${String(payload.eligibility_wallet ?? walletAddress)}`,
-        payload.eligibility_mode === "connected_wallet_fallback"
-          ? "Eligibility mode: fallback to connected wallet (PM proxy missing)"
-          : "Eligibility mode: proxy wallet",
         `Can mint now: ${canMintAny ? "YES" : "NO"}`,
+        ...(payload.mint_block_reason ? [`Mint block reason: ${payload.mint_block_reason}`] : []),
         `Genesis: ${payload.genesis?.eligible_now ? "eligible" : `not eligible${payload.genesis?.ineligible_reason ? ` (${payload.genesis.ineligible_reason})` : ""}`}`,
         `Standard: ${payload.standard?.eligible_now ? "eligible" : `not eligible${payload.standard?.ineligible_reason ? ` (${payload.standard.ineligible_reason})` : ""}`}`,
       ];
@@ -470,6 +600,15 @@ export default function HomePage() {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (!res.ok) {
+        if (res.status === 401) {
+          setIsSignedIn(false);
+          setAccessToken("");
+          setProxyWallet(null);
+          setTraderRank(null);
+          setStatusText("Session expired. Please connect wallet again.");
+          window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+          clearStoredSessionMeta();
+        }
         const text = await res.text();
         throw new Error(text || "Mint failed");
       }
@@ -511,6 +650,7 @@ export default function HomePage() {
         ].join("\n")
       );
       await checkMintEligibility();
+      await refreshSeasonsFromApi();
     } catch (error) {
       setMintResultText(`Mint failed: ${extractErrorMessage(error)}`);
     } finally {
@@ -620,6 +760,10 @@ export default function HomePage() {
               <strong>
                 {proxyWallet ?? "Not found"}
               </strong>
+            </div>
+            <div className="auth-info-row">
+              <span>Trader rank</span>
+              <strong>{traderRank ?? "No trades yet"}</strong>
             </div>
           </>
         ) : null}
