@@ -229,6 +229,7 @@ export default function HomePage() {
   const [myNftsError, setMyNftsError] = useState("");
   const [myNftsFetchedAt, setMyNftsFetchedAt] = useState<string | null>(null);
   const [tickerWallets, setTickerWallets] = useState<string[]>([]);
+  const [isWalletButtonHovered, setIsWalletButtonHovered] = useState(false);
 
   // Wallet that was selected by the user in the picker — used for sign-in
   const selectedProviderRef = useRef<EthProvider | null>(null);
@@ -373,16 +374,18 @@ export default function HomePage() {
   }, [walletAddress]);
   const walletButtonLabel = useMemo(() => {
     if (isBusy) return "Connecting...";
+    if (isSignedIn && isWalletButtonHovered) return "Log out";
     if (isSignedIn && shortAddress) return shortAddress;
     return "Connect wallet";
-  }, [isBusy, isSignedIn, shortAddress]);
+  }, [isBusy, isSignedIn, isWalletButtonHovered, shortAddress]);
   const authHintText = useMemo(() => {
     if (isBusy) return "Approve wallet connection and signature in your wallet.";
-    if (isSignedIn) return "Wallet connected. Click to switch wallet.";
+    if (isSignedIn && isWalletButtonHovered) return "Click to log out.";
+    if (isSignedIn) return "Wallet connected.";
     const lowered = statusText.toLowerCase();
     if (lowered.includes("failed") || lowered.includes("cancelled")) return statusText;
     return "Connect wallet to sign in and continue.";
-  }, [isBusy, isSignedIn, statusText]);
+  }, [isBusy, isSignedIn, isWalletButtonHovered, statusText]);
   const seasonCards = useMemo(() => {
     return activeSeasons.map((season) => {
       const seasonName = season.title;
@@ -481,6 +484,35 @@ export default function HomePage() {
     } catch {
       setTickerWallets([]);
     }
+  }
+
+  function handleSignOut() {
+    setIsSignedIn(false);
+    setAccessToken("");
+    setProxyWallet(null);
+    setTraderRank(null);
+    setChallengeId("");
+    setSignInCount(null);
+    setMyNfts([]);
+    setMyNftsError("");
+    setMyNftsFetchedAt(null);
+    setEligibilitySummary("");
+    setEligibilityChecked(false);
+    setCanMintNow(false);
+    setMintResultText("");
+    setStatusText("Logged out");
+    setIsWalletButtonHovered(false);
+    selectedProviderRef.current = null;
+    window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    clearStoredSessionMeta();
+  }
+
+  function handleAuthButtonClick() {
+    if (isSignedIn && isWalletButtonHovered) {
+      handleSignOut();
+      return;
+    }
+    setShowPicker(true);
   }
 
   async function signInWith(provider: EthProvider, address: string, providerName: string | null) {
@@ -854,7 +886,9 @@ export default function HomePage() {
         <div className="auth-info-title">Wallet</div>
         <button
           className={`auth-connect-btn ${isSignedIn ? "connected" : ""}`}
-          onClick={() => setShowPicker(true)}
+          onMouseEnter={() => setIsWalletButtonHovered(true)}
+          onMouseLeave={() => setIsWalletButtonHovered(false)}
+          onClick={handleAuthButtonClick}
           disabled={isBusy}
         >
           {walletButtonLabel}

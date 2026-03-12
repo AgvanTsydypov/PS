@@ -332,13 +332,41 @@ main {
   width: 100%;
   margin-bottom: 10px;
   border-radius: 10px;
-  padding: 10px 12px;
+  padding: 11px 12px;
   font-weight: 600;
+  letter-spacing: 0.01em;
+  border-color: #4c6fb4;
+  background: linear-gradient(180deg, #2a5fc8 0%, #1f4aa8 100%);
+  box-shadow: 0 6px 16px rgba(19, 43, 95, 0.35);
+  transition:
+    background 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .auth-connect-btn.connected {
-  border-color: #2fb171;
-  background: #1f5e45;
+  border-color: #2f8f68;
+  background: linear-gradient(180deg, #2a7d5a 0%, #215e46 100%);
+  box-shadow: 0 6px 16px rgba(24, 84, 61, 0.3);
+}
+
+.auth-connect-btn:hover:not(:disabled) {
+  border-color: #d26a3e;
+  background: linear-gradient(180deg, #f0622c 0%, #d83f2d 100%);
+  box-shadow: 0 10px 24px rgba(126, 41, 22, 0.38);
+  transform: translateY(-1px);
+}
+
+.auth-connect-btn.connected:hover:not(:disabled) {
+  border-color: #d26a3e;
+  background: linear-gradient(180deg, #f0622c 0%, #d83f2d 100%);
+  box-shadow: 0 10px 24px rgba(126, 41, 22, 0.38);
+}
+
+.auth-connect-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 4px 10px rgba(19, 43, 95, 0.28);
 }
 
 .auth-info-hint {
