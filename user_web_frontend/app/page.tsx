@@ -130,6 +130,12 @@ type UserNftsResponse = {
   fetched_at: string;
 };
 
+type WalletTickerResponse = {
+  wallets: string[];
+  total: number;
+  fetched_at: string;
+};
+
 const apiBase =
   process.env.NEXT_PUBLIC_USER_API_BASE_URL ??
   (process.env.NODE_ENV === "development" ? "http://localhost:8011" : "/");
@@ -222,6 +228,7 @@ export default function HomePage() {
   const [myNftsLoading, setMyNftsLoading] = useState(false);
   const [myNftsError, setMyNftsError] = useState("");
   const [myNftsFetchedAt, setMyNftsFetchedAt] = useState<string | null>(null);
+  const [tickerWallets, setTickerWallets] = useState<string[]>([]);
 
   // Wallet that was selected by the user in the picker — used for sign-in
   const selectedProviderRef = useRef<EthProvider | null>(null);
@@ -331,6 +338,10 @@ export default function HomePage() {
     }, 1000);
     return () => window.clearInterval(tick);
   }, [serverNowBaseMs, clientNowAtSyncMs]);
+
+  useEffect(() => {
+    void refreshWalletTicker();
+  }, []);
 
   useEffect(() => {
     if (!isSignedIn || !accessToken) {
@@ -457,6 +468,18 @@ export default function HomePage() {
       setMyNftsFetchedAt(null);
     } finally {
       setMyNftsLoading(false);
+    }
+  }
+
+  async function refreshWalletTicker() {
+    try {
+      const res = await fetch(buildApiUrl("/api/wallet-ticker?limit=100"));
+      if (!res.ok) return;
+      const payload = (await res.json()) as WalletTickerResponse;
+      const wallets = Array.isArray(payload.wallets) ? payload.wallets : [];
+      setTickerWallets(wallets);
+    } catch {
+      setTickerWallets([]);
     }
   }
 
@@ -930,6 +953,22 @@ export default function HomePage() {
           </div>
         )}
       </section>
+
+      {tickerWallets.length > 0 ? (
+        <section className="wallet-ticker-strip" aria-label="Winner wallets ticker">
+          <div className="wallet-ticker-label">origins wallets:</div>
+          <div className="wallet-ticker-left-fade" />
+          <div className="wallet-ticker-viewport">
+            <div className="wallet-ticker-track">
+              {[...tickerWallets, ...tickerWallets].map((wallet, index) => (
+                <span className="wallet-ticker-item" key={`${wallet}-${index}`}>
+                  {wallet}
+                </span>
+              ))}
+            </div>
+          </div>
+        </section>
+      ) : null}
 
       <section className="season-board season-board-standalone nft-board-horizontal">
         <div className="season-board-title">My NFT Collection (on-chain)</div>
