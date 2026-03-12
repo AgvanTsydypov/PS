@@ -103,6 +103,33 @@ type EligibilityResponse = {
   };
 };
 
+type UserNftItem = {
+  token_id: string;
+  name: string;
+  description: string;
+  image_url: string;
+  owner_address: string;
+  collection_name: string;
+  token_type: string;
+  amount: string;
+  explorer_url: string;
+  metadata?: {
+    attributes?: Array<{
+      trait_type?: string;
+      value?: string | number | boolean | null;
+    }>;
+  };
+};
+
+type UserNftsResponse = {
+  wallet_address: string;
+  contract_address: string;
+  items: UserNftItem[];
+  total: number;
+  source: string;
+  fetched_at: string;
+};
+
 const apiBase =
   process.env.NEXT_PUBLIC_USER_API_BASE_URL ??
   (process.env.NODE_ENV === "development" ? "http://localhost:8011" : "/");
@@ -191,6 +218,10 @@ export default function HomePage() {
   const [accessToken, setAccessToken] = useState("");
   const [proxyWallet, setProxyWallet] = useState<string | null>(null);
   const [traderRank, setTraderRank] = useState<string | null>(null);
+  const [myNfts, setMyNfts] = useState<UserNftItem[]>([]);
+  const [myNftsLoading, setMyNftsLoading] = useState(false);
+  const [myNftsError, setMyNftsError] = useState("");
+  const [myNftsFetchedAt, setMyNftsFetchedAt] = useState<string | null>(null);
 
   // Wallet that was selected by the user in the picker — used for sign-in
   const selectedProviderRef = useRef<EthProvider | null>(null);
@@ -301,6 +332,16 @@ export default function HomePage() {
     return () => window.clearInterval(tick);
   }, [serverNowBaseMs, clientNowAtSyncMs]);
 
+  useEffect(() => {
+    if (!isSignedIn || !accessToken) {
+      setMyNfts([]);
+      setMyNftsError("");
+      setMyNftsFetchedAt(null);
+      return;
+    }
+    void refreshMyNfts();
+  }, [isSignedIn, accessToken, walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Build the list of wallet options shown in the picker.
   const walletOptions = useMemo<WalletOption[]>(() => {
     const options: WalletOption[] = eip6963Ref.current.map((d) => ({
@@ -376,6 +417,49 @@ export default function HomePage() {
     return JSON.stringify(error);
   }
 
+  async function refreshMyNfts() {
+    if (!accessToken || !isSignedIn) {
+      setMyNfts([]);
+      setMyNftsError("");
+      setMyNftsFetchedAt(null);
+      return;
+    }
+
+    setMyNftsLoading(true);
+    setMyNftsError("");
+    try {
+      const res = await fetch(buildApiUrl("/api/me/nfts"), {
+        method: "GET",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        if (res.status === 401) {
+          setIsSignedIn(false);
+          setAccessToken("");
+          setProxyWallet(null);
+          setTraderRank(null);
+          setStatusText("Session expired. Please connect wallet again.");
+          setMyNfts([]);
+          setMyNftsFetchedAt(null);
+          window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+          clearStoredSessionMeta();
+        }
+        const text = await res.text();
+        throw new Error(text || "Failed to load NFT collection");
+      }
+      const payload = (await res.json()) as UserNftsResponse;
+      setMyNfts(Array.isArray(payload.items) ? payload.items : []);
+      setMyNftsFetchedAt(String(payload.fetched_at ?? ""));
+      setMyNftsError("");
+    } catch (error) {
+      setMyNftsError(extractErrorMessage(error));
+      setMyNfts([]);
+      setMyNftsFetchedAt(null);
+    } finally {
+      setMyNftsLoading(false);
+    }
+  }
+
   async function signInWith(provider: EthProvider, address: string, providerName: string | null) {
     if (!provider || !address) {
       setStatusText("Connect wallet first");
@@ -448,6 +532,9 @@ export default function HomePage() {
         window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
         setProxyWallet(null);
         setTraderRank(null);
+        setMyNfts([]);
+        setMyNftsError("");
+        setMyNftsFetchedAt(null);
         clearStoredSessionMeta();
       }
     } catch (error) {
@@ -456,6 +543,9 @@ export default function HomePage() {
       setAccessToken("");
       setProxyWallet(null);
       setTraderRank(null);
+      setMyNfts([]);
+      setMyNftsError("");
+      setMyNftsFetchedAt(null);
       setEligibilityChecked(false);
       setCanMintNow(false);
       setMintResultText("");
@@ -495,6 +585,9 @@ export default function HomePage() {
       setAccessToken("");
       setProxyWallet(null);
       setTraderRank(null);
+      setMyNfts([]);
+      setMyNftsError("");
+      setMyNftsFetchedAt(null);
       setEligibilityChecked(false);
       setCanMintNow(false);
       setMintResultText("");
@@ -542,6 +635,9 @@ export default function HomePage() {
           setAccessToken("");
           setProxyWallet(null);
           setTraderRank(null);
+          setMyNfts([]);
+          setMyNftsError("");
+          setMyNftsFetchedAt(null);
           setStatusText("Session expired. Please connect wallet again.");
           window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
@@ -605,6 +701,9 @@ export default function HomePage() {
           setAccessToken("");
           setProxyWallet(null);
           setTraderRank(null);
+          setMyNfts([]);
+          setMyNftsError("");
+          setMyNftsFetchedAt(null);
           setStatusText("Session expired. Please connect wallet again.");
           window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
@@ -650,6 +749,7 @@ export default function HomePage() {
         ].join("\n")
       );
       await checkMintEligibility();
+      await refreshMyNfts();
       await refreshSeasonsFromApi();
     } catch (error) {
       setMintResultText(`Mint failed: ${extractErrorMessage(error)}`);
@@ -828,6 +928,70 @@ export default function HomePage() {
               <pre className="eligibility-output">{mintResultText}</pre>
             ) : null}
           </div>
+        )}
+      </section>
+
+      <section className="season-board season-board-standalone nft-board-horizontal">
+        <div className="season-board-title">My NFT Collection (on-chain)</div>
+        {!isSignedIn ? (
+          <div className="season-board-muted">Sign in to load your collection.</div>
+        ) : (
+          <>
+            <div className="nft-actions">
+              <button onClick={() => void refreshMyNfts()} disabled={myNftsLoading}>
+                {myNftsLoading ? "Loading NFT..." : "Reload my NFT"}
+              </button>
+              {myNftsFetchedAt ? (
+                <span className="nft-fetched-at">
+                  Updated: {new Date(myNftsFetchedAt).toLocaleString()}
+                </span>
+              ) : null}
+            </div>
+            {myNftsError ? (
+              <pre className="eligibility-output">NFT load failed: {myNftsError}</pre>
+            ) : null}
+            {!myNftsLoading && !myNftsError && myNfts.length === 0 ? (
+              <div className="season-board-muted">No NFT in this wallet yet.</div>
+            ) : null}
+            <div className="nft-grid">
+              {myNfts.map((item) => (
+                <article key={item.token_id} className="nft-card">
+                  {item.image_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img className="nft-image" src={item.image_url} alt={item.name || `NFT ${item.token_id}`} />
+                  ) : (
+                    <div className="nft-image nft-image-empty">No preview</div>
+                  )}
+                  <div className="nft-card-body">
+                    <strong>{item.name || `Token #${item.token_id}`}</strong>
+                    <span>Token ID: {item.token_id}</span>
+                    {Array.isArray(item.metadata?.attributes) && item.metadata!.attributes.length > 0 ? (
+                      <div className="nft-attributes">
+                        {item.metadata!.attributes.slice(0, 6).map((attr, index) => {
+                          const trait = String(attr?.trait_type ?? "").trim() || "Attribute";
+                          const valueRaw = attr?.value;
+                          const value =
+                            valueRaw === null || valueRaw === undefined
+                              ? "N/A"
+                              : String(valueRaw);
+                          return (
+                            <span className="nft-attr" key={`${item.token_id}:${trait}:${index}`}>
+                              {trait}: {value}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                    {item.explorer_url ? (
+                      <a href={item.explorer_url} target="_blank" rel="noreferrer">
+                        Open in Blockscout
+                      </a>
+                    ) : null}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </>
         )}
       </section>
     </>

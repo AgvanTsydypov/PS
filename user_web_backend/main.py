@@ -159,6 +159,10 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
         max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_MINT_MAX", "12")),
     ),
+    "/api/me/nfts": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_NFTS_MAX", "30")),
+    ),
 }
 _rate_limit_lock = threading.Lock()
 _rate_limit_store: Dict[str, deque[float]] = defaultdict(deque)
@@ -168,6 +172,28 @@ POLYMARKET_REQUEST_TIMEOUT_SECONDS = float(os.getenv("POLYMARKET_REQUEST_TIMEOUT
 PM_NOT_REGISTERED_VALUE = "Not registered in PM"
 NO_TRADES_YET_VALUE = "No trades yet"
 CLAIMS_UNIQUENESS_INDEX_NAME = "ux_claims_active_season_user_wallet_lower"
+BLOCKSCOUT_TIMEOUT_SECONDS = float(os.getenv("USER_WEB_BLOCKSCOUT_TIMEOUT_SECONDS", "12"))
+BLOCKSCOUT_RETRY_ATTEMPTS = max(1, int(os.getenv("USER_WEB_BLOCKSCOUT_RETRY_ATTEMPTS", "2")))
+BLOCKSCOUT_NFT_CACHE_TTL_SECONDS = int(os.getenv("USER_WEB_BLOCKSCOUT_NFT_CACHE_TTL_SECONDS", "20"))
+BLOCKSCOUT_CHAIN_API_BASES: Dict[str, str] = {
+    "base-sepolia": "https://base-sepolia.blockscout.com/api/v2",
+    "base": "https://base.blockscout.com/api/v2",
+}
+BLOCKSCOUT_CHAIN_EXPLORER_BASES: Dict[str, str] = {
+    "base-sepolia": "https://base-sepolia.blockscout.com",
+    "base": "https://base.blockscout.com",
+}
+BLOCKSCOUT_REQUEST_HEADERS: Dict[str, str] = {
+    "accept": "application/json,text/plain,*/*",
+    # Blockscout sometimes rejects default Python urllib user-agent with 403.
+    "user-agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+}
+_nft_cache_lock = threading.Lock()
+_nft_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 
 def _cleanup_expired_challenges() -> None:
@@ -482,6 +508,149 @@ def _mint_block_reason(proxy_wallet: str, trader_rank: str) -> Optional[str]:
     if not rank_value or rank_value.lower() == NO_TRADES_YET_VALUE.lower():
         return "Mint blocked: user has no trades on Polymarket leaderboard."
     return None
+
+
+def _blockscout_api_base_url() -> str:
+    raw_override = os.getenv("USER_WEB_BLOCKSCOUT_API_BASE", "").strip().rstrip("/")
+    if raw_override:
+        return raw_override
+    chain_name = str(os.getenv("ZORA_CHAIN", "base-sepolia")).strip().lower()
+    return BLOCKSCOUT_CHAIN_API_BASES.get(chain_name, BLOCKSCOUT_CHAIN_API_BASES["base-sepolia"])
+
+
+def _blockscout_explorer_base_url() -> str:
+    chain_name = str(os.getenv("ZORA_CHAIN", "base-sepolia")).strip().lower()
+    return BLOCKSCOUT_CHAIN_EXPLORER_BASES.get(chain_name, BLOCKSCOUT_CHAIN_EXPLORER_BASES["base-sepolia"])
+
+
+def _collection_contract_address() -> str:
+    address = str(os.getenv("ZORA_1155_CONTRACT_ADDRESS", "")).strip()
+    if not address:
+        raise HTTPException(status_code=503, detail="Collection contract is not configured")
+    if not Web3.is_address(address):
+        raise HTTPException(status_code=503, detail="Collection contract address is invalid")
+    return Web3.to_checksum_address(address)
+
+
+def _normalize_nft_item(raw_item: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = raw_item.get("metadata") if isinstance(raw_item.get("metadata"), dict) else {}
+    token = raw_item.get("token") if isinstance(raw_item.get("token"), dict) else {}
+    owner = raw_item.get("owner") if isinstance(raw_item.get("owner"), dict) else {}
+    token_id = str(raw_item.get("id") or "")
+    contract_address = str(token.get("address_hash") or "")
+    instance_url = ""
+    if contract_address and token_id:
+        instance_url = f"{_blockscout_explorer_base_url()}/token/{contract_address}/instance/{token_id}"
+
+    return {
+        "token_id": token_id,
+        "name": str(metadata.get("name") or f"Token #{token_id}"),
+        "description": str(metadata.get("description") or ""),
+        "image_url": str(raw_item.get("image_url") or raw_item.get("media_url") or metadata.get("image") or ""),
+        "owner_address": str(owner.get("hash") or ""),
+        "collection_name": str(token.get("name") or ""),
+        "token_type": str(raw_item.get("token_type") or token.get("type") or ""),
+        "amount": str(raw_item.get("value") or "1"),
+        "explorer_url": instance_url,
+        "metadata": metadata,
+    }
+
+
+def _fetch_blockscout_json(url: str, connected_wallet: str, contract_address: str) -> Dict[str, Any]:
+    headers = dict(BLOCKSCOUT_REQUEST_HEADERS)
+    base = _blockscout_explorer_base_url().rstrip("/")
+    headers["origin"] = base
+    headers["referer"] = f"{base}/"
+    request_obj = urllib.request.Request(url, headers=headers)
+    last_error: Optional[Exception] = None
+    for attempt in range(1, BLOCKSCOUT_RETRY_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request_obj, timeout=BLOCKSCOUT_TIMEOUT_SECONDS) as response:
+                payload = json.load(response)
+                if isinstance(payload, dict):
+                    return payload
+                return {}
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code == 404:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Collection contract is not indexed on explorer yet",
+                ) from exc
+            logger.warning(
+                "Blockscout NFT HTTP error code=%s attempt=%s/%s wallet=%s contract=%s",
+                exc.code,
+                attempt,
+                BLOCKSCOUT_RETRY_ATTEMPTS,
+                connected_wallet,
+                contract_address,
+            )
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Blockscout NFT request failed attempt=%s/%s wallet=%s contract=%s",
+                attempt,
+                BLOCKSCOUT_RETRY_ATTEMPTS,
+                connected_wallet,
+                contract_address,
+                exc_info=True,
+            )
+        if attempt < BLOCKSCOUT_RETRY_ATTEMPTS:
+            threading.Event().wait(0.5 * attempt)
+
+    raise HTTPException(status_code=502, detail="Failed to load NFTs from explorer") from last_error
+
+
+def _fetch_user_nfts_onchain(connected_wallet: str) -> Dict[str, Any]:
+    contract_address = _collection_contract_address()
+    checksum_wallet = Web3.to_checksum_address(connected_wallet)
+    blockscout_api_base = _blockscout_api_base_url()
+    query = urllib.parse.urlencode({"holder_address_hash": checksum_wallet})
+    url = f"{blockscout_api_base}/tokens/{contract_address}/instances?{query}"
+    payload = _fetch_blockscout_json(
+        url=url,
+        connected_wallet=checksum_wallet,
+        contract_address=contract_address,
+    )
+
+    raw_items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(raw_items, list):
+        raw_items = []
+
+    items = [_normalize_nft_item(item) for item in raw_items if isinstance(item, dict)]
+    items.sort(key=lambda item: int(item["token_id"]) if str(item.get("token_id", "")).isdigit() else -1, reverse=True)
+    return {
+        "wallet_address": connected_wallet,
+        "contract_address": contract_address,
+        "items": items,
+        "total": len(items),
+        "source": "blockscout_onchain",
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _get_user_nfts_cached(connected_wallet: str) -> Dict[str, Any]:
+    cache_key = connected_wallet.lower()
+    now = monotonic()
+    cached: Optional[Tuple[float, Dict[str, Any]]] = None
+    with _nft_cache_lock:
+        cached = _nft_cache.get(cache_key)
+        if cached and now - cached[0] <= BLOCKSCOUT_NFT_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    try:
+        payload = _fetch_user_nfts_onchain(connected_wallet)
+    except HTTPException:
+        if cached is not None:
+            stale_payload = dict(cached[1])
+            stale_payload["source"] = f"{str(stale_payload.get('source') or 'blockscout_onchain')}:stale_cache"
+            stale_payload["stale"] = True
+            return stale_payload
+        raise
+
+    with _nft_cache_lock:
+        _nft_cache[cache_key] = (now, payload)
+    return payload
 
 
 def _blocked_eligibility_payload(
@@ -933,6 +1102,14 @@ def polymarket_public_profile(request: Request) -> Dict[str, Any]:
         "proxy_wallet": proxy_wallet,
         "profile": profile,
     }
+
+
+@app.get("/api/me/nfts")
+def me_nfts(request: Request) -> Dict[str, Any]:
+    connected_wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(connected_wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+    return _get_user_nfts_cached(connected_wallet)
 
 
 @app.post("/api/mint/base-sepolia")
