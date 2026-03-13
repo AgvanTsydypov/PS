@@ -56,7 +56,7 @@ fi
 # Export environment variables for cron
 # Cron doesn't inherit environment variables, so we need to add them explicitly
 echo "🔧 Setting up cron environment..."
-printenv | grep -E '^(DB_|LOCAL_DB_|POSTGRES_|PYTHON|SUPABASE_|ALCHEMY_)' | sed 's/^\(.*\)$/export \1/g' > /app/cron_env.sh
+printenv | grep -E '^(DB_|LOCAL_DB_|POSTGRES_|PYTHON|SUPABASE_|ALCHEMY_|GENESIS_|DAILY_|MAX_)' | sed 's/^\(.*\)$/export \1/g' > /app/cron_env.sh
 chmod +x /app/cron_env.sh
 
 # Setup cron jobs with current environment

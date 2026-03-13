@@ -49,6 +49,8 @@ services:
       dockerfile: Dockerfile.scheduler
     container_name: polystars_scheduler
     restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env}
     logging:
       driver: "json-file"
       options:

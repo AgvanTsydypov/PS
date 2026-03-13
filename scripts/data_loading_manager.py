@@ -80,7 +80,7 @@ DAILY_MIN_VOLUME = _env_int("DAILY_MIN_VOLUME", 5_000)  # 5M in prod
 # Data lag configuration (in days)
 # How many days to wait before loading data (allows data to finalize)
 EVENTS_LAG_DAYS = 1        # Events: 1 days ago
-DATA_LAG_DAYS = 4          # Redemptions/Positions/Leaderboard: 4 days after events
+DATA_LAG_DAYS = 10          # Redemptions/Positions/Leaderboard: 10 days after events
 
 # OPTIONAL: Limit number of events for testing (None = unlimited)
 # Set this to speed up testing with smaller datasets
