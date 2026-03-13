@@ -408,6 +408,117 @@ class DataLoadingManager:
         finally:
             cursor.close()
             conn.close()
+
+    def get_events_count_for_date(self, load_date: date) -> int:
+        """
+        Get total number of events for a specific UTC date.
+
+        Args:
+            load_date: Target event date
+
+        Returns:
+            Number of events matching the date
+        """
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM events
+                WHERE (end_date AT TIME ZONE 'UTC')::date = %s
+                """,
+                (load_date,),
+            )
+            return cursor.fetchone()[0]
+        finally:
+            cursor.close()
+            conn.close()
+
+    def get_markets_count_for_event_date(self, load_date: date) -> int:
+        """
+        Get total number of markets linked to events for a specific UTC date.
+
+        Args:
+            load_date: Target event date
+
+        Returns:
+            Number of markets for events on that date
+        """
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM markets m
+                JOIN events e ON e.id = m.event_id
+                WHERE (e.end_date AT TIME ZONE 'UTC')::date = %s
+                """,
+                (load_date,),
+            )
+            return cursor.fetchone()[0]
+        finally:
+            cursor.close()
+            conn.close()
+
+    def get_redemptions_count_for_event_date(self, load_date: date) -> int:
+        """
+        Get total number of redemptions linked to events for a specific UTC date.
+
+        Args:
+            load_date: Target event date
+
+        Returns:
+            Number of redemptions for events on that date
+        """
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM redemptions r
+                JOIN events e ON e.id = r.event_id
+                WHERE (e.end_date AT TIME ZONE 'UTC')::date = %s
+                """,
+                (load_date,),
+            )
+            return cursor.fetchone()[0]
+        finally:
+            cursor.close()
+            conn.close()
+
+    def get_positions_count_for_event_date(self, load_date: date) -> int:
+        """
+        Get total number of user closed positions linked to events for a specific UTC date.
+
+        Args:
+            load_date: Target event date
+
+        Returns:
+            Number of positions for events on that date
+        """
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM user_closed_positions p
+                JOIN events e ON e.id = p.event_id
+                WHERE (e.end_date AT TIME ZONE 'UTC')::date = %s
+                """,
+                (load_date,),
+            )
+            return cursor.fetchone()[0]
+        finally:
+            cursor.close()
+            conn.close()
     
     def get_missing_dates(self, start_from: date = None, up_to: date = None) -> list:
         """
