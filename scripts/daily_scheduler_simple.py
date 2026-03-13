@@ -44,7 +44,7 @@ import time
 import argparse
 import tempfile
 from datetime import datetime, date, timedelta, timezone
-from typing import Dict
+from typing import Dict, Optional
 from pathlib import Path
 import psycopg2.extras
 
@@ -1053,7 +1053,7 @@ class SimplifiedScheduler:
         except Exception as e:
             print(f"⚠️  Could not configure: {e}")
     
-    def run_script(self, script_key: str) -> Dict:
+    def run_script(self, script_key: str, target_date: Optional[date] = None) -> Dict:
         """Run a data fetching script and track record counts"""
         script_config = self.scripts[script_key]
         
@@ -1077,6 +1077,17 @@ class SimplifiedScheduler:
         table_name = table_map.get(script_key)
         count_before = self.manager.get_table_count(table_name) if table_name else 0
         markets_before = self.manager.get_table_count('markets') if script_key == 'events' else 0
+        events_for_date_before = 0
+        markets_for_date_before = 0
+        redemptions_for_date_before = 0
+        positions_for_date_before = 0
+        if script_key == 'events' and target_date:
+            events_for_date_before = self.manager.get_events_count_for_date(target_date)
+            markets_for_date_before = self.manager.get_markets_count_for_event_date(target_date)
+        elif script_key == 'redemptions' and target_date:
+            redemptions_for_date_before = self.manager.get_redemptions_count_for_event_date(target_date)
+        elif script_key == 'positions' and target_date:
+            positions_for_date_before = self.manager.get_positions_count_for_event_date(target_date)
         
         start_time = time.time()
         
@@ -1094,9 +1105,46 @@ class SimplifiedScheduler:
             # Calculate actual loaded records
             records = count_after - count_before
             markets = markets_after - markets_before
+
+            # For daily/catch-up events, use absolute date-scoped counts.
+            # This stays correct even if data_loads is reset but tables already contain rows.
+            if script_key == 'events' and target_date:
+                events_for_date_after = self.manager.get_events_count_for_date(target_date)
+                markets_for_date_after = self.manager.get_markets_count_for_event_date(target_date)
+                events_delta = events_for_date_after - events_for_date_before
+                markets_delta = markets_for_date_after - markets_for_date_before
+                records = events_for_date_after
+                markets = markets_for_date_after
+            elif script_key == 'redemptions' and target_date:
+                redemptions_for_date_after = self.manager.get_redemptions_count_for_event_date(target_date)
+                redemptions_delta = redemptions_for_date_after - redemptions_for_date_before
+                records = redemptions_for_date_after
+            elif script_key == 'positions' and target_date:
+                positions_for_date_after = self.manager.get_positions_count_for_event_date(target_date)
+                positions_delta = positions_for_date_after - positions_for_date_before
+                records = positions_for_date_after
             
             if script_key == 'events':
-                print(f"\n✅ Completed ({duration:.1f}s) - {records:,} events, {markets:,} markets")
+                if target_date:
+                    print(
+                        f"\n✅ Completed ({duration:.1f}s) - "
+                        f"{records:,} events, {markets:,} markets for {target_date} "
+                        f"(Δ{events_delta:+,} events, Δ{markets_delta:+,} markets this run)"
+                    )
+                else:
+                    print(f"\n✅ Completed ({duration:.1f}s) - {records:,} events, {markets:,} markets")
+            elif script_key == 'redemptions' and target_date:
+                print(
+                    f"\n✅ Completed ({duration:.1f}s) - "
+                    f"{records:,} redemptions for {target_date} "
+                    f"(Δ{redemptions_delta:+,} this run)"
+                )
+            elif script_key == 'positions' and target_date:
+                print(
+                    f"\n✅ Completed ({duration:.1f}s) - "
+                    f"{records:,} positions for {target_date} "
+                    f"(Δ{positions_delta:+,} this run)"
+                )
             else:
                 print(f"\n✅ Completed ({duration:.1f}s) - {records:,} records")
             
@@ -1193,7 +1241,7 @@ class SimplifiedScheduler:
             results['events'] = {'success': True, 'skipped': True}
         else:
             self.configure_for_date(events_date, is_genesis=False)
-            results['events'] = self.run_script('events')
+            results['events'] = self.run_script('events', target_date=events_date)
             if results['events']['success'] and not self.dry_run:
                 self.manager.mark_data_loaded('events', events_date, 
                                             record_count=results['events']['records'],
@@ -1225,7 +1273,7 @@ class SimplifiedScheduler:
                     if script_key == 'redemptions':
                         self.configure_for_date(redemptions_date, is_genesis=False)
                     
-                    results[script_key] = self.run_script(script_key)
+                    results[script_key] = self.run_script(script_key, target_date=redemptions_date)
                     if results[script_key]['success'] and not self.dry_run:
                         self.manager.mark_data_loaded(script_key, redemptions_date,
                                                     record_count=results[script_key]['records'],
@@ -1269,7 +1317,7 @@ class SimplifiedScheduler:
                 self.configure_for_date(incomplete_date, is_genesis=False)
                 
                 for script_key in missing_types:
-                    result = self.run_script(script_key)
+                    result = self.run_script(script_key, target_date=incomplete_date)
                     if result['success'] and not self.dry_run:
                         # For events, also pass markets_count
                         if script_key == 'events':
@@ -1466,7 +1514,7 @@ class SimplifiedScheduler:
             # STEP 1: Events for this date
             print(f"\n1️⃣ Events for {missing_date}")
             self.configure_for_date(missing_date, is_genesis=False)
-            result_events = self.run_script('events')
+            result_events = self.run_script('events', target_date=missing_date)
             
             if result_events['success']:
                 self.manager.mark_data_loaded('events', missing_date,
@@ -1509,7 +1557,7 @@ class SimplifiedScheduler:
                         print(f"  ⏭️  {self.scripts[script_key]['name']}: Already loaded")
                         continue
                     
-                    result = self.run_script(script_key)
+                    result = self.run_script(script_key, target_date=missing_date)
                     if result['success']:
                         self.manager.mark_data_loaded(script_key, missing_date,
                                                     record_count=result['records'],
