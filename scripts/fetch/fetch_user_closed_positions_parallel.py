@@ -780,7 +780,7 @@ class ParallelPositionsFetcher:
         
         return (all_positions[:self.positions_per_user], None)
     
-n    def process_single_user(
+    def process_single_user(
         self,
         user_address: str,
         user_index: int,
