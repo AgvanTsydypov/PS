@@ -584,6 +584,41 @@ def upload_closed_positions_batch(uploader: SupabaseUploader, positions: List[Di
         conn = psycopg2.connect(**uploader.connection_params)
         cursor = conn.cursor()
         try:
+            # Enrich missing event_id/market_id from markets table by condition_id.
+            # This keeps IDs stable even when API payload doesn't provide them.
+            condition_ids = sorted(
+                {p.get('condition_id') for p in positions if p.get('condition_id')}
+            )
+            if condition_ids:
+                cursor.execute(
+                    """
+                    SELECT DISTINCT ON (condition_id)
+                        condition_id,
+                        id AS market_id,
+                        event_id
+                    FROM public.markets
+                    WHERE condition_id = ANY(%s)
+                    ORDER BY condition_id, id
+                    """,
+                    (condition_ids,),
+                )
+                market_map = {
+                    row[0]: {'market_id': row[1], 'event_id': row[2]}
+                    for row in cursor.fetchall()
+                }
+
+                for pos in positions:
+                    cond_id = pos.get('condition_id')
+                    if not cond_id:
+                        continue
+                    ids = market_map.get(cond_id)
+                    if not ids:
+                        continue
+                    if not pos.get('market_id'):
+                        pos['market_id'] = ids['market_id']
+                    if not pos.get('event_id'):
+                        pos['event_id'] = ids['event_id']
+
             insert_query = """
                 INSERT INTO public.user_closed_positions (
                     proxy_wallet, event_id, market_id, condition_id, asset,
@@ -745,7 +780,14 @@ class ParallelPositionsFetcher:
         
         return (all_positions[:self.positions_per_user], None)
     
-    def process_single_user(self, user_address: str, user_index: int, total_users: int, market_override: Optional[str] = None) -> tuple[int, bool]:
+n    def process_single_user(
+        self,
+        user_address: str,
+        user_index: int,
+        total_users: int,
+        market_override: Optional[str] = None,
+        event_id_override: Optional[str] = None,
+    ) -> tuple[int, bool]:
         """
         Process a single user (fetch and optionally upload)
         
@@ -754,6 +796,7 @@ class ParallelPositionsFetcher:
             user_index: Index for tracking
             total_users: Total number to process
             market_override: Specific market conditionId for this user (overrides global filter)
+            event_id_override: Specific event_id for this user-market pair from SQL source
         
         Returns:
             tuple: (positions_count, is_error)
@@ -776,7 +819,7 @@ class ParallelPositionsFetcher:
                 # Failed request
                 with self.lock:
                     self.stats['errors'] += 1
-                    self.failed_users.append((user_address, market_override))
+                    self.failed_users.append((user_address, market_override, event_id_override))
                 return (0, True)
             
             if not positions or len(positions) == 0:
@@ -785,6 +828,13 @@ class ParallelPositionsFetcher:
             
             # Transform data
             transformed = [transform_closed_position(p) for p in positions]
+
+            # Fill IDs from SQL source when available.
+            # This keeps user_closed_positions.event_id populated and enables exact date-scoped counting.
+            if event_id_override:
+                for row in transformed:
+                    if not row.get('event_id'):
+                        row['event_id'] = event_id_override
             
             # Store or upload
             with self.lock:
@@ -808,7 +858,7 @@ class ParallelPositionsFetcher:
         except Exception as e:
             with self.lock:
                 self.stats['errors'] += 1
-                self.failed_users.append((user_address, market_override))
+                self.failed_users.append((user_address, market_override, event_id_override))
             return (0, True)
     
     def process_all_users(self, user_records: List[Dict], show_header: bool = True):
@@ -896,19 +946,21 @@ class ParallelPositionsFetcher:
             for i, record in enumerate(user_records, 1):
                 user_address = record['redeemer_address']
                 market_id = record.get('condition_id')  # May be None
+                event_id = record.get('event_id')  # May be None
                 
                 future = executor.submit(
                     self.process_single_user, 
                     user_address, 
                     i, 
                     len(user_records),
-                    market_id
+                    market_id,
+                    event_id,
                 )
-                future_to_user[future] = (user_address, market_id)
+                future_to_user[future] = (user_address, market_id, event_id)
             
             # Process results as they complete
             for future in as_completed(future_to_user):
-                user_address, market_id = future_to_user[future]
+                user_address, market_id, event_id = future_to_user[future]
                 
                 try:
                     positions_count, is_error = future.result()
@@ -920,7 +972,7 @@ class ParallelPositionsFetcher:
                     with self.lock:
                         self.stats['users_processed'] += 1
                         self.stats['errors'] += 1
-                        self.failed_users.append((user_address, market_id))
+                        self.failed_users.append((user_address, market_id, event_id))
                 
                 # Progress update
                 current_time = time.time()
@@ -994,18 +1046,19 @@ class ParallelPositionsFetcher:
             
             with ThreadPoolExecutor(max_workers=retry_workers) as executor:
                 future_to_user = {}
-                for i, (user_addr, market_id) in enumerate(users_to_retry, 1):
+                for i, (user_addr, market_id, event_id) in enumerate(users_to_retry, 1):
                     future = executor.submit(
                         self.process_single_user, 
                         user_addr, 
                         i, 
                         len(users_to_retry),
-                        market_id
+                        market_id,
+                        event_id,
                     )
-                    future_to_user[future] = (user_addr, market_id)
+                    future_to_user[future] = (user_addr, market_id, event_id)
                 
                 for future in as_completed(future_to_user):
-                    user_address, market_id = future_to_user[future]
+                    user_address, market_id, event_id = future_to_user[future]
                     
                     try:
                         positions_count, is_error = future.result()
@@ -1021,7 +1074,7 @@ class ParallelPositionsFetcher:
                     except Exception as e:
                         with self.lock:
                             self.stats['retried_users'] += 1
-                            self.failed_users.append((user_address, market_id))
+                            self.failed_users.append((user_address, market_id, event_id))
             
             print(f"   ✓ Retry {retry_attempt} completed: {retry_successes} recovered")
             retry_attempt += 1

@@ -510,10 +510,17 @@ class DataLoadingManager:
                 """
                 SELECT COUNT(*)
                 FROM user_closed_positions p
-                JOIN events e ON e.id = p.event_id
-                WHERE (e.end_date AT TIME ZONE 'UTC')::date = %s
+                LEFT JOIN events e ON e.id = p.event_id
+                WHERE (
+                    (e.id IS NOT NULL AND (e.end_date AT TIME ZONE 'UTC')::date = %s)
+                    OR (
+                        e.id IS NULL
+                        AND p.end_date_parsed IS NOT NULL
+                        AND (p.end_date_parsed AT TIME ZONE 'UTC')::date = %s
+                    )
+                )
                 """,
-                (load_date,),
+                (load_date, load_date),
             )
             return cursor.fetchone()[0]
         finally:
