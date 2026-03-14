@@ -84,6 +84,9 @@ DATA_LAG_DAYS = _env_int("POLYSTARS_DATA_LAG_DAYS", 10)      # Redemptions/Posit
 # For closed-time pipeline readiness:
 # resolution_ready_at = closed_time + (DATA_LAG_DAYS - EVENTS_LAG_DAYS)
 RESOLUTION_READY_OFFSET_DAYS = DATA_LAG_DAYS - EVENTS_LAG_DAYS
+# Seasons snapshot offset should be tied to season design (previous cycle),
+# not to ingestion lag math.
+ORIGIN_SNAPSHOT_OFFSET_DAYS = _env_int("POLYSTARS_ORIGIN_SNAPSHOT_OFFSET_DAYS", 10)
 
 # OPTIONAL: Limit number of events for testing (None = unlimited)
 # Set this to speed up testing with smaller datasets
