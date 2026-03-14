@@ -15,6 +15,7 @@ You can also configure manually for testing.
 
 import os
 from datetime import datetime, timedelta
+from typing import Optional
 
 # ============================================================================
 # AUTO-CONFIG MODE
@@ -48,11 +49,28 @@ else:
 # Minimum market volume (in USD) - markets below this will be filtered out
 MIN_MARKET_VOLUME = 100  # Minimum volume for individual markets
 
-# Fetch only closed events
-CLOSED_ONLY = True
+def _env_bool_optional(name: str, default: Optional[bool]) -> Optional[bool]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"", "none", "null", "any", "all"}:
+        return None
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
-# Resolution status filter
-RESOLUTION_STATUS = 'resolved'  # Only resolved events (lowercase!)
+
+# Fetch filter for closed status:
+#   True  -> only closed events
+#   False -> only open events
+#   None  -> no closed/open filter
+CLOSED_ONLY = _env_bool_optional("POLYSTARS_EVENTS_CLOSED_ONLY", True)
+
+# Resolution status filter (empty value disables status filtering)
+RESOLUTION_STATUS = os.getenv("POLYSTARS_RESOLUTION_STATUS", "resolved").strip().lower()
 
 # ============================================================================
 # DATE RANGE FILTERING

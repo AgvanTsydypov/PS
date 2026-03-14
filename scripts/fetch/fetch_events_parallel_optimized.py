@@ -644,6 +644,9 @@ class OptimizedParallelEventFetcher:
     
     def _check_resolution_status(self, event: Dict, required_status: str) -> bool:
         """Check if event or its markets have required resolution status"""
+        if not required_status:
+            return True
+
         uma_status = event.get('umaResolutionStatus', '')
         if uma_status == required_status:
             return True

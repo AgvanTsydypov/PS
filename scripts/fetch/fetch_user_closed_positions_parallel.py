@@ -202,6 +202,16 @@ DEFAULT_POSITIONS_PER_USER = 50
 BATCH_SIZE = 100  # How many records to upload to DB at once
 DB_FETCH_BATCH_SIZE = 10000  # How many redeemer records to fetch from DB at once (memory optimization)
 
+
+def _env_int_or_none(name: str, default: Optional[int]) -> Optional[int]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if value == "" or value.lower() in {"none", "null"}:
+        return None
+    return int(value)
+
 # Rate limiting: 150 req/10s, use 145 req/10s for higher speed
 RATE_LIMIT_MAX = 150
 RATE_LIMIT_WINDOW = 10
@@ -507,13 +517,22 @@ def get_redeemers_from_db_generator(use_local_db: bool = True, limit: Optional[i
                     print(f"🔍 Filter: MIN_VOLUME = ${config.MIN_VOLUME:,}")
                 else:
                     query_params['min_volume'] = 5_000_000  # Fallback значение
+
+                # Optional explicit event scope (used by closed_time pipeline).
+                event_ids_raw = os.getenv("POLYSTARS_EVENT_IDS", "").strip()
+                if event_ids_raw:
+                    event_ids = [item.strip() for item in event_ids_raw.split(",") if item.strip()]
+                    if event_ids:
+                        date_filters.append("e.id = ANY(%(event_ids)s)")
+                        query_params['event_ids'] = event_ids
+                        print(f"🔍 Filter: Explicit events list ({len(event_ids):,} IDs)")
                 
-                if hasattr(config, 'START_DATE') and config.START_DATE:
+                if not event_ids_raw and hasattr(config, 'START_DATE') and config.START_DATE:
                     date_filters.append("e.end_date::date >= %(date_from)s")
                     query_params['date_from'] = config.START_DATE.date()
                     print(f"🔍 Filter: Events from {config.START_DATE.date()}")
                 
-                if hasattr(config, 'END_DATE') and config.END_DATE:
+                if not event_ids_raw and hasattr(config, 'END_DATE') and config.END_DATE:
                     date_filters.append("e.end_date::date <= %(date_to)s")
                     query_params['date_to'] = config.END_DATE.date()
                     print(f"🔍 Filter: Events until {config.END_DATE.date()}")
@@ -1184,14 +1203,14 @@ Examples:
     parser.add_argument(
         '--limit',
         type=int,
-        default=None,
+        default=_env_int_or_none("POLYSTARS_TEST_MAX_CLOSED_POSITIONS_USERS", None),
         help='Limit number of redeemers to process (for testing)'
     )
     
     parser.add_argument(
         '--positions',
         type=int,
-        default=DEFAULT_POSITIONS_PER_USER,
+        default=_env_int_or_none("POLYSTARS_TEST_MAX_CLOSED_POSITIONS_PER_USER", DEFAULT_POSITIONS_PER_USER),
         help=f'Max positions to fetch per user (default: {DEFAULT_POSITIONS_PER_USER})'
     )
     

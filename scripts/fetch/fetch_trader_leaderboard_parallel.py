@@ -206,6 +206,16 @@ DEFAULT_LIMIT_PER_REQUEST = 50  # API max is 50
 BATCH_SIZE = 100  # How many records to upload to DB at once
 DB_FETCH_BATCH_SIZE = 2500  # How many wallet addresses to fetch from DB at once
 
+
+def _env_int_or_none(name: str, default: Optional[int]) -> Optional[int]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if value == "" or value.lower() in {"none", "null"}:
+        return None
+    return int(value)
+
 # Rate limiting: 1000 req/10s, use 950 req/10s for higher speed
 RATE_LIMIT_MAX = 1000
 RATE_LIMIT_WINDOW = 10
@@ -542,13 +552,22 @@ def get_unique_wallets_from_db_generator(
                     print(f"🔍 Filter: MIN_VOLUME = ${config.MIN_VOLUME:,}")
                 else:
                     query_params['min_volume'] = 5_000_000  # Fallback значение
+
+                # Optional explicit event scope (used by closed_time pipeline).
+                event_ids_raw = os.getenv("POLYSTARS_EVENT_IDS", "").strip()
+                if event_ids_raw:
+                    event_ids = [item.strip() for item in event_ids_raw.split(",") if item.strip()]
+                    if event_ids:
+                        date_filters.append("e.id = ANY(%(event_ids)s)")
+                        query_params['event_ids'] = event_ids
+                        print(f"🔍 Filter: Explicit events list ({len(event_ids):,} IDs)")
                 
-                if hasattr(config, 'START_DATE') and config.START_DATE:
+                if not event_ids_raw and hasattr(config, 'START_DATE') and config.START_DATE:
                     date_filters.append("e.end_date::date >= %(date_from)s")
                     query_params['date_from'] = config.START_DATE.date()
                     print(f"🔍 Filter: Events from {config.START_DATE.date()}")
                 
-                if hasattr(config, 'END_DATE') and config.END_DATE:
+                if not event_ids_raw and hasattr(config, 'END_DATE') and config.END_DATE:
                     date_filters.append("e.end_date::date <= %(date_to)s")
                     query_params['date_to'] = config.END_DATE.date()
                     print(f"🔍 Filter: Events until {config.END_DATE.date()}")
@@ -1391,7 +1410,7 @@ Examples:
     parser.add_argument(
         '--limit-wallets',
         type=int,
-        default=None,
+        default=_env_int_or_none("POLYSTARS_TEST_MAX_LEADERBOARD_WALLETS", None),
         help='Limit number of wallets to process from database (for testing)'
     )
     

@@ -42,8 +42,8 @@ Usage:
 
 import psycopg2
 import psycopg2.extras
-from datetime import date, timedelta
-from typing import Dict, Optional
+from datetime import date, timedelta, datetime
+from typing import Dict, Optional, List
 import os
 from dotenv import load_dotenv
 
@@ -200,6 +200,33 @@ class DataLoadingManager:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_season_events_log_season_id
                 ON season_events_log(season_id)
+            """)
+
+            # Track event resolution lifecycle for closed_time-based processing.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS event_resolution_queue (
+                    event_id TEXT PRIMARY KEY,
+                    end_date TIMESTAMPTZ,
+                    closed BOOLEAN NOT NULL DEFAULT FALSE,
+                    closed_time TIMESTAMPTZ,
+                    resolution_ready_at TIMESTAMPTZ,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'ready_for_redemptions', 'processed', 'error')),
+                    last_checked_at TIMESTAMPTZ,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    processed_at TIMESTAMPTZ,
+                    error_text TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_status_ready
+                ON event_resolution_queue(status, resolution_ready_at)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_end_date
+                ON event_resolution_queue(end_date)
             """)
             conn.commit()
             
@@ -650,6 +677,200 @@ class DataLoadingManager:
             result = cursor.fetchone()
             return result[0] if result[0] else None
             
+        finally:
+            cursor.close()
+            conn.close()
+
+    # ── Closed-time resolution queue ────────────────────────────────────────
+
+    def sync_resolution_queue_for_event_date(self, load_date: date, min_volume: int = 0) -> int:
+        """
+        Upsert events of a specific end_date into event_resolution_queue.
+
+        Returns:
+            Number of queue rows affected (inserted/updated).
+        """
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                INSERT INTO event_resolution_queue (
+                    event_id,
+                    end_date,
+                    closed,
+                    closed_time,
+                    resolution_ready_at,
+                    status,
+                    updated_at
+                )
+                SELECT
+                    e.id,
+                    e.end_date,
+                    COALESCE(e.closed, FALSE),
+                    e.closed_time,
+                    CASE
+                        WHEN COALESCE(e.closed, FALSE) = TRUE AND e.closed_time IS NOT NULL
+                            THEN e.closed_time + (%s * INTERVAL '1 day')
+                        ELSE NULL
+                    END AS resolution_ready_at,
+                    CASE
+                        WHEN COALESCE(e.closed, FALSE) = TRUE AND e.closed_time IS NOT NULL
+                            THEN 'ready_for_redemptions'
+                        ELSE 'pending'
+                    END AS status,
+                    NOW()
+                FROM events e
+                WHERE (e.end_date AT TIME ZONE 'UTC')::date = %s
+                  AND COALESCE(e.volume, 0) >= %s
+                ON CONFLICT (event_id) DO UPDATE SET
+                    end_date = EXCLUDED.end_date,
+                    closed = EXCLUDED.closed,
+                    closed_time = EXCLUDED.closed_time,
+                    resolution_ready_at = EXCLUDED.resolution_ready_at,
+                    status = CASE
+                        WHEN event_resolution_queue.status = 'processed' THEN 'processed'
+                        ELSE EXCLUDED.status
+                    END,
+                    updated_at = NOW()
+                """,
+                (DATA_LAG_DAYS, load_date, min_volume),
+            )
+            affected = cursor.rowcount if cursor.rowcount is not None else 0
+            conn.commit()
+            return affected
+        finally:
+            cursor.close()
+            conn.close()
+
+    def get_pending_resolution_event_ids(self, limit: Optional[int] = None) -> List[str]:
+        """Return pending event IDs for status polling."""
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        try:
+            sql = """
+                SELECT event_id
+                FROM event_resolution_queue
+                WHERE status = 'pending'
+                ORDER BY created_at ASC
+            """
+            params = []
+            if limit:
+                sql += " LIMIT %s"
+                params.append(limit)
+            cursor.execute(sql, params)
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            cursor.close()
+            conn.close()
+
+    def update_resolution_from_api(
+        self,
+        event_id: str,
+        closed: bool,
+        closed_time: Optional[datetime],
+        error_text: Optional[str] = None,
+    ) -> None:
+        """Update queue row after API status check."""
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE event_resolution_queue
+                SET
+                    closed = CASE WHEN %s IS NOT NULL THEN closed ELSE %s END,
+                    closed_time = CASE WHEN %s IS NOT NULL THEN closed_time ELSE %s END,
+                    resolution_ready_at = CASE
+                        WHEN %s IS NULL THEN resolution_ready_at
+                        WHEN %s = TRUE AND %s IS NOT NULL
+                            THEN (%s::timestamptz + (%s * INTERVAL '1 day'))
+                        ELSE resolution_ready_at
+                    END,
+                    status = CASE
+                        WHEN status = 'processed' THEN 'processed'
+                        WHEN %s IS NOT NULL THEN 'pending'
+                        WHEN %s = TRUE AND %s IS NOT NULL THEN 'ready_for_redemptions'
+                        ELSE 'pending'
+                    END,
+                    attempts = attempts + 1,
+                    last_checked_at = NOW(),
+                    error_text = %s,
+                    updated_at = NOW()
+                WHERE event_id = %s
+                """,
+                (
+                    error_text,
+                    closed,
+                    error_text,
+                    closed_time,
+                    error_text,
+                    closed,
+                    closed_time,
+                    closed_time,
+                    DATA_LAG_DAYS,
+                    error_text,
+                    closed,
+                    closed_time,
+                    error_text,
+                    event_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
+
+    def get_ready_resolution_event_ids(self, as_of: Optional[datetime] = None, limit: Optional[int] = None) -> List[str]:
+        """
+        Return event IDs ready for redemptions:
+        closed_time + DATA_LAG_DAYS <= as_of.
+        """
+        as_of = as_of or datetime.utcnow()
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        try:
+            sql = """
+                SELECT event_id
+                FROM event_resolution_queue
+                WHERE status = 'ready_for_redemptions'
+                  AND resolution_ready_at IS NOT NULL
+                  AND resolution_ready_at <= %s
+                ORDER BY resolution_ready_at ASC
+            """
+            params = [as_of]
+            if limit:
+                sql += " LIMIT %s"
+                params.append(limit)
+            cursor.execute(sql, params)
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            cursor.close()
+            conn.close()
+
+    def mark_resolution_events_processed(self, event_ids: List[str]) -> int:
+        """Mark queue rows as processed after successful downstream loading."""
+        if not event_ids:
+            return 0
+
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE event_resolution_queue
+                SET status = 'processed',
+                    processed_at = NOW(),
+                    updated_at = NOW(),
+                    error_text = NULL
+                WHERE event_id = ANY(%s)
+                """,
+                (event_ids,),
+            )
+            affected = cursor.rowcount if cursor.rowcount is not None else 0
+            conn.commit()
+            return affected
         finally:
             cursor.close()
             conn.close()

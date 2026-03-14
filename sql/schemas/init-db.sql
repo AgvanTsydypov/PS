@@ -443,6 +443,34 @@ ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS markets_count INTEGER DEFAULT 0;
 DO $$ BEGIN RAISE NOTICE '✅ data_loads table created'; END $$;
 
 -- ============================================================================
+-- EVENT RESOLUTION QUEUE (closed_time based processing)
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '🧩 Creating event_resolution_queue table...'; END $$;
+
+CREATE TABLE IF NOT EXISTS event_resolution_queue (
+    event_id TEXT PRIMARY KEY,
+    end_date TIMESTAMPTZ,
+    closed BOOLEAN NOT NULL DEFAULT FALSE,
+    closed_time TIMESTAMPTZ,
+    resolution_ready_at TIMESTAMPTZ,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'ready_for_redemptions', 'processed', 'error')),
+    last_checked_at TIMESTAMPTZ,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    processed_at TIMESTAMPTZ,
+    error_text TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_status_ready
+    ON event_resolution_queue(status, resolution_ready_at);
+CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_end_date
+    ON event_resolution_queue(end_date);
+
+DO $$ BEGIN RAISE NOTICE '✅ event_resolution_queue table created'; END $$;
+
+-- ============================================================================
 -- 8. USER WALLET SIGN-INS TABLE - Auth logins for user site
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE '🔐 Creating user_wallet_signins table...'; END $$;
@@ -547,6 +575,7 @@ DO $$ BEGIN RAISE NOTICE '   - redemptions'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - user_closed_positions'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - trader_leaderboard'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - data_loads (tracking)'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - event_resolution_queue'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - user_wallet_signins'; END $$;
 DO $$ BEGIN RAISE NOTICE ''; END $$;
 DO $$ BEGIN RAISE NOTICE '📈 Created views:'; END $$;
