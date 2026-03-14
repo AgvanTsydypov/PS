@@ -855,6 +855,40 @@ class DataLoadingManager:
             cursor.close()
             conn.close()
 
+    def get_ready_resolution_event_ids_for_event_date(
+        self,
+        load_date: date,
+        as_of: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> List[str]:
+        """
+        Return ready event IDs scoped to a specific events.end_date (UTC date).
+        Useful for catch-up where downstream runs date-by-date.
+        """
+        as_of = as_of or datetime.utcnow()
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        try:
+            sql = """
+                SELECT q.event_id
+                FROM event_resolution_queue q
+                JOIN events e ON e.id = q.event_id
+                WHERE q.status = 'ready_for_redemptions'
+                  AND q.resolution_ready_at IS NOT NULL
+                  AND q.resolution_ready_at <= %s
+                  AND (e.end_date AT TIME ZONE 'UTC')::date = %s
+                ORDER BY q.resolution_ready_at ASC
+            """
+            params = [as_of, load_date]
+            if limit:
+                sql += " LIMIT %s"
+                params.append(limit)
+            cursor.execute(sql, params)
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            cursor.close()
+            conn.close()
+
     def mark_resolution_events_processed(self, event_ids: List[str]) -> int:
         """Mark queue rows as processed after successful downstream loading."""
         if not event_ids:

@@ -1870,6 +1870,7 @@ class SimplifiedScheduler:
                 
                 # Configure for this date
                 self.configure_for_date(missing_date, is_genesis=False)
+                downstream_success = True
                 
                 for script_key in ['redemptions', 'positions', 'leaderboard']:
                     # Check if already loaded
@@ -1886,6 +1887,19 @@ class SimplifiedScheduler:
                         error_msg = result.get('error', 'Script execution failed')
                         self.manager.mark_data_error(script_key, missing_date, error_msg)
                         print(f"  ⚠️  {self.scripts[script_key]['name']} failed (continuing...)")
+                        downstream_success = False
+
+                # In closed-time mode, keep queue statuses consistent during catch-up too.
+                if self.use_closed_time_pipeline and downstream_success:
+                    ready_for_day = self.manager.get_ready_resolution_event_ids_for_event_date(
+                        load_date=missing_date,
+                        as_of=datetime.utcnow(),
+                    )
+                    if ready_for_day:
+                        processed = self.manager.mark_resolution_events_processed(ready_for_day)
+                        print(
+                            f"✅ Marked {processed:,} ready event(s) as processed for {missing_date}"
+                        )
             
             results[str(missing_date)] = {'success': True}
             
