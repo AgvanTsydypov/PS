@@ -688,7 +688,7 @@ class ParallelPositionsFetcher:
     
     def __init__(self, 
                  max_workers: int = DEFAULT_WORKERS,
-                 positions_per_user: int = DEFAULT_POSITIONS_PER_USER,
+                 positions_per_user: Optional[int] = DEFAULT_POSITIONS_PER_USER,
                  upload: bool = False,
                  use_local_db: bool = True,
                  verbose: bool = False,
@@ -700,7 +700,7 @@ class ParallelPositionsFetcher:
         
         Args:
             max_workers: Number of parallel threads
-            positions_per_user: Max positions to fetch per user
+            positions_per_user: Max positions to fetch per user (None = no limit)
             upload: Whether to upload to database
             use_local_db: Use local PostgreSQL instead of Supabase
             verbose: Show detailed output
@@ -772,7 +772,10 @@ class ParallelPositionsFetcher:
         offset = 0
         batch_size = 50  # API max per request
         
-        while len(all_positions) < self.positions_per_user:
+        while True:
+            if self.positions_per_user is not None and len(all_positions) >= self.positions_per_user:
+                break
+
             positions, error = self.client.fetch_closed_positions(
                 user_address,
                 limit=batch_size,
@@ -915,7 +918,8 @@ class ParallelPositionsFetcher:
             print(f"   • Unique users: {unique_users:,}")
         
         if show_header:
-            print(f"   • Positions per query: {self.positions_per_user}")
+            positions_label = "unlimited" if self.positions_per_user is None else f"{self.positions_per_user}"
+            print(f"   • Positions per query: {positions_label}")
             print(f"   • Parallel workers: {self.max_workers}")
             print(f"   • Upload to DB: {'YES' if self.upload else 'NO (preview only)'}")
             if self.upload:
@@ -936,7 +940,7 @@ class ParallelPositionsFetcher:
                     print(f"   • Event IDs: {', '.join(map(str, self.event_id_filter))}")
             
             # Estimate time
-            if self.positions_per_user > 100:
+            if self.positions_per_user is not None and self.positions_per_user > 100:
                 requests_per_user = (self.positions_per_user // 50) + 1
                 # Rate limiter allows ~14.5 req/s (145/10s)
                 req_per_second = RATE_LIMIT_SAFE / RATE_LIMIT_WINDOW
