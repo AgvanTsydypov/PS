@@ -61,6 +61,7 @@ from scripts.data_loading_manager import (
     DATA_LAG_DAYS,
     EVENTS_LAG_DAYS,
     RESOLUTION_READY_OFFSET_DAYS,
+    ORIGIN_SNAPSHOT_OFFSET_DAYS,
 )
 
 STANDARD_SEASON_TOTAL_SUPPLY_TEST = 10
@@ -365,6 +366,15 @@ class SimplifiedScheduler:
         }
 
     @staticmethod
+    def _utc_day_start(ts: datetime) -> datetime:
+        """Normalize timestamp to 00:00:00 UTC."""
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        else:
+            ts = ts.astimezone(timezone.utc)
+        return datetime(ts.year, ts.month, ts.day, tzinfo=timezone.utc)
+
+    @staticmethod
     def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         if not value:
             return None
@@ -451,6 +461,7 @@ class SimplifiedScheduler:
 
     def _create_standard_season(self, cursor, start_date: datetime, season_number: int) -> int:
         """Create a new standard season and return its id."""
+        start_date = self._utc_day_start(start_date)
         end_date = start_date + timedelta(days=STANDARD_SEASON_CYCLE_DAYS)
         cursor.execute("""
             INSERT INTO seasons (
@@ -492,6 +503,7 @@ class SimplifiedScheduler:
 
     def _create_genesis_season(self, cursor, start_date: datetime, season_number: int) -> int:
         """Create a new genesis season and return its id."""
+        start_date = self._utc_day_start(start_date)
         cursor.execute("""
             INSERT INTO seasons (
                 type,
@@ -535,14 +547,14 @@ class SimplifiedScheduler:
         Freeze Origins list at season start and persist it into winner_wallets_nft_to_claim.
 
         Rules:
-        - standard: [season_start - DATA_LAG_DAYS - 10d, season_start - DATA_LAG_DAYS)
+        - standard: [season_start - ORIGIN_SNAPSHOT_OFFSET_DAYS - 10d, season_start - ORIGIN_SNAPSHOT_OFFSET_DAYS)
+                    bound by event resolution anchor (resolution_ready_at/closed_time), not end_date
         - genesis: [GENESIS_START_DATE, GENESIS_END_DATE + 1 day)
         - include only wallets with positive realized PnL sum
         - standard keeps top-10, genesis keeps top-20
         - require at least N eligible wallets, otherwise save none
         """
-        if season_start_date.tzinfo is None:
-            season_start_date = season_start_date.replace(tzinfo=timezone.utc)
+        season_start_date = self._utc_day_start(season_start_date)
 
         cursor.execute(
             """
@@ -556,10 +568,12 @@ class SimplifiedScheduler:
         season_type = (season_row or {}).get("type") if isinstance(season_row, dict) else (season_row[0] if season_row else None)
 
         if season_type == "standard":
-            window_end = season_start_date - timedelta(days=DATA_LAG_DAYS)
+            # Snapshot window is season-driven: previous cycle boundary.
+            window_end = season_start_date - timedelta(days=ORIGIN_SNAPSHOT_OFFSET_DAYS)
             window_start = window_end - timedelta(days=ORIGIN_LOOKBACK_DAYS_STANDARD)
-            source = "top_pnl_10d_lagged_standard"
+            source = "top_pnl_10d_resolution_ready_standard"
             rank_limit = ORIGIN_TOP_WALLETS_STANDARD
+            use_resolution_anchor = True
         else:
             window_start = datetime.combine(GENESIS_START_DATE, datetime.min.time(), tzinfo=timezone.utc)
             # Exclusive upper bound includes all rows of GENESIS_END_DATE.
@@ -570,6 +584,7 @@ class SimplifiedScheduler:
             )
             source = "top_pnl_genesis_window"
             rank_limit = ORIGIN_TOP_WALLETS_GENESIS
+            use_resolution_anchor = False
 
         # Idempotent re-snapshot in case of retries / manual re-initialization.
         cursor.execute(
@@ -581,35 +596,22 @@ class SimplifiedScheduler:
         )
         cursor.execute(
             """
-            WITH pnl_window AS (
+            WITH position_base AS (
                 SELECT
-                    LOWER(proxy_wallet) AS wallet_address,
-                    SUM(realized_pnl) AS total_pnl_window
-                FROM user_closed_positions
-                WHERE proxy_wallet IS NOT NULL
-                  AND COALESCE(
-                        end_date_parsed,
-                        timestamp_human,
-                        TO_TIMESTAMP(timestamp_unix)
-                      ) >= %s
-                  AND COALESCE(
-                        end_date_parsed,
-                        timestamp_human,
-                        TO_TIMESTAMP(timestamp_unix)
-                      ) < %s
-                GROUP BY LOWER(proxy_wallet)
-                HAVING SUM(realized_pnl) > 0
-            ),
-            qualifying_position AS (
-                SELECT DISTINCT ON (LOWER(ucp.proxy_wallet))
                     LOWER(ucp.proxy_wallet) AS wallet_address,
+                    ucp.realized_pnl,
+                    COALESCE(
+                        ucp.end_date_parsed,
+                        ucp.timestamp_human,
+                        TO_TIMESTAMP(ucp.timestamp_unix)
+                    ) AS position_time,
                     COALESCE(
                         ucp.event_id,
                         m_by_id.event_id,
                         m_by_condition.event_id,
                         e_by_slug.id,
                         e_by_title.id
-                    ) AS event_id,
+                    ) AS derived_event_id,
                     COALESCE(ucp.market_id, m_by_id.id, m_by_condition.id) AS market_id,
                     COALESCE(ucp.condition_id, m_by_id.condition_id, m_by_condition.condition_id) AS condition_id,
                     COALESCE(ucp.event_slug, e_by_id.slug, e_by_slug.slug, e_by_title.slug) AS event_slug,
@@ -642,24 +644,58 @@ class SimplifiedScheduler:
                     ON e_by_id.id IS NULL
                    AND e_by_slug.id IS NULL
                 WHERE ucp.proxy_wallet IS NOT NULL
-                  AND COALESCE(
-                        ucp.end_date_parsed,
-                        ucp.timestamp_human,
-                        TO_TIMESTAMP(ucp.timestamp_unix)
-                      ) >= %s
-                  AND COALESCE(
-                        ucp.end_date_parsed,
-                        ucp.timestamp_human,
-                        TO_TIMESTAMP(ucp.timestamp_unix)
-                      ) < %s
+            ),
+            resolved_positions AS (
+                SELECT
+                    pb.wallet_address,
+                    pb.realized_pnl,
+                    pb.derived_event_id AS event_id,
+                    pb.market_id,
+                    pb.condition_id,
+                    pb.event_slug,
+                    pb.title,
+                    CASE
+                        WHEN %s = TRUE THEN COALESCE(erq.resolution_ready_at, erq.closed_time)
+                        ELSE pb.position_time
+                    END AS season_anchor_at
+                FROM position_base pb
+                LEFT JOIN event_resolution_queue erq
+                  ON erq.event_id = pb.derived_event_id
+                WHERE (
+                    %s = TRUE
+                    AND pb.derived_event_id IS NOT NULL
+                    AND COALESCE(erq.closed, FALSE) = TRUE
+                    AND COALESCE(erq.resolution_ready_at, erq.closed_time) IS NOT NULL
+                    AND COALESCE(erq.resolution_ready_at, erq.closed_time) >= %s
+                    AND COALESCE(erq.resolution_ready_at, erq.closed_time) < %s
+                ) OR (
+                    %s = FALSE
+                    AND pb.position_time IS NOT NULL
+                    AND pb.position_time >= %s
+                    AND pb.position_time < %s
+                )
+            ),
+            pnl_window AS (
+                SELECT
+                    wallet_address,
+                    SUM(realized_pnl) AS total_pnl_window
+                FROM resolved_positions
+                GROUP BY wallet_address
+                HAVING SUM(realized_pnl) > 0
+            ),
+            qualifying_position AS (
+                SELECT DISTINCT ON (rp.wallet_address)
+                    rp.wallet_address,
+                    rp.event_id,
+                    rp.market_id,
+                    rp.condition_id,
+                    rp.event_slug,
+                    rp.title
+                FROM resolved_positions rp
                 ORDER BY
-                    LOWER(ucp.proxy_wallet),
-                    ucp.realized_pnl DESC,
-                    COALESCE(
-                        ucp.end_date_parsed,
-                        ucp.timestamp_human,
-                        TO_TIMESTAMP(ucp.timestamp_unix)
-                    ) DESC
+                    rp.wallet_address,
+                    rp.realized_pnl DESC,
+                    rp.season_anchor_at DESC
             ),
             ranked AS (
                 SELECT
@@ -667,10 +703,6 @@ class SimplifiedScheduler:
                     total_pnl_window,
                     ROW_NUMBER() OVER (ORDER BY total_pnl_window DESC, wallet_address ASC) AS pnl_rank
                 FROM pnl_window
-            ),
-            enough_data AS (
-                SELECT COUNT(*) AS wallet_count
-                FROM ranked
             )
             INSERT INTO winner_wallets_nft_to_claim (
                 season_id,
@@ -704,21 +736,21 @@ class SimplifiedScheduler:
             FROM ranked r
             LEFT JOIN qualifying_position qp
                 ON qp.wallet_address = r.wallet_address
-            CROSS JOIN enough_data d
-            WHERE d.wallet_count >= %s
-              AND r.pnl_rank <= %s
+            WHERE r.pnl_rank <= %s
             ORDER BY r.pnl_rank
             """,
             (
+                use_resolution_anchor,
+                use_resolution_anchor,
                 window_start,
                 window_end,
+                use_resolution_anchor,
                 window_start,
                 window_end,
                 season_id,
                 source,
                 window_start,
                 window_end,
-                rank_limit,
                 rank_limit,
             ),
         )
@@ -752,7 +784,7 @@ class SimplifiedScheduler:
 
         new_genesis_id = self._create_genesis_season(
             cursor,
-            start_date=now,
+            start_date=self._utc_day_start(now),
             season_number=next_season_number,
         )
         return new_genesis_id, True
@@ -771,8 +803,18 @@ class SimplifiedScheduler:
             return
 
         conn = self.manager.get_connection()
+        advisory_lock_key = 90421017
+        advisory_lock_acquired = False
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                # Prevent duplicate season transitions when multiple scheduler runs overlap.
+                cursor.execute("SELECT pg_try_advisory_lock(%s) AS locked", (advisory_lock_key,))
+                lock_row = cursor.fetchone() or {}
+                advisory_lock_acquired = bool(lock_row.get("locked")) if isinstance(lock_row, dict) else bool(lock_row[0])
+                if not advisory_lock_acquired:
+                    print("\n⏭️ Season update skipped: another process is already running season rotation")
+                    return
+
                 now = datetime.now(timezone.utc)
                 print("\n" + "=" * 70)
                 print("🎮 SEASON LIFECYCLE UPDATE")
@@ -781,7 +823,11 @@ class SimplifiedScheduler:
 
                 genesis_id, created_genesis = self.ensure_genesis_season(cursor, now)
                 if created_genesis:
-                    origins_count = self._snapshot_origin_wallets_for_season(cursor, genesis_id, now)
+                    origins_count = self._snapshot_origin_wallets_for_season(
+                        cursor,
+                        genesis_id,
+                        self._utc_day_start(now),
+                    )
                     conn.commit()
                     self.manager.log_season_update(
                         event_name="genesis_created",
@@ -808,6 +854,40 @@ class SimplifiedScheduler:
                             f"season_number={genesis['season_number']} "
                             f"supply={genesis['remaining_supply']}/{genesis['total_supply']} "
                             f"active={genesis['is_active']}"
+                        )
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM winner_wallets_nft_to_claim
+                        WHERE season_id = %s
+                        """,
+                        (genesis_id,),
+                    )
+                    snapshot_row = cursor.fetchone() or {}
+                    if isinstance(snapshot_row, dict):
+                        genesis_snapshot_count = int(snapshot_row.get("count", 0))
+                    else:
+                        genesis_snapshot_count = int(snapshot_row[0] if snapshot_row else 0)
+                    if genesis_snapshot_count == 0:
+                        snapshot_ref = self._utc_day_start(
+                            genesis["start_date"] if genesis and genesis.get("start_date") else now
+                        )
+                        origins_count = self._snapshot_origin_wallets_for_season(
+                            cursor,
+                            genesis_id,
+                            snapshot_ref,
+                        )
+                        conn.commit()
+                        self.manager.log_season_update(
+                            event_name="genesis_snapshot_backfilled",
+                            season_id=genesis_id,
+                            details=(
+                                f"reason=missing_snapshot "
+                                f"origin_snapshot_count={origins_count}"
+                            ),
+                        )
+                        print(
+                            f"   🏛️  Genesis snapshot backfilled: {origins_count} wallets"
                         )
 
                 cursor.execute("""
@@ -843,9 +923,7 @@ class SimplifiedScheduler:
                         raise RuntimeError(
                             f"Genesis season {genesis_id} not found while bootstrapping standard season"
                         )
-                    genesis_start = genesis_row["start_date"]
-                    if genesis_start.tzinfo is None:
-                        genesis_start = genesis_start.replace(tzinfo=timezone.utc)
+                    genesis_start = self._utc_day_start(genesis_row["start_date"])
                     season_start = genesis_start + timedelta(days=STANDARD_SEASON_CYCLE_DAYS)
 
                     if now < season_start:
@@ -859,29 +937,58 @@ class SimplifiedScheduler:
                         return
 
                     print("\nℹ️ No standard season found. Bootstrapping Standard #1...")
-                    new_season_id = self._create_standard_season(cursor, season_start, 1)
+                    cursor.execute(
+                        """
+                        SELECT id, season_number
+                        FROM seasons
+                        WHERE type = 'standard'
+                          AND (start_date = %s OR season_number = 1)
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (season_start,),
+                    )
+                    existing_for_start = cursor.fetchone()
+                    if existing_for_start:
+                        new_season_id = int(existing_for_start["id"])
+                        new_season_number = int(existing_for_start["season_number"])
+                        cursor.execute(
+                            """
+                            UPDATE seasons
+                            SET is_active = TRUE,
+                                is_completed = FALSE,
+                                updated_at = NOW()
+                            WHERE id = %s
+                            """,
+                            (new_season_id,),
+                        )
+                        print(
+                            f"\n♻️ Reusing existing Standard Season "
+                            f"#{new_season_number} (id={new_season_id}) for start={season_start.isoformat()}"
+                        )
+                    else:
+                        new_season_id = self._create_standard_season(cursor, season_start, 1)
+                        new_season_number = 1
                     origins_count = self._snapshot_origin_wallets_for_season(cursor, new_season_id, season_start)
                     conn.commit()
                     self.manager.log_season_update(
                         event_name="new_standard_season_started",
                         season_id=new_season_id,
                         details=(
-                            f"season_number=1 "
+                            f"season_number={new_season_number} "
                             f"start_date={season_start.isoformat()} "
                             f"supply={STANDARD_SEASON_TOTAL_SUPPLY_TEST} "
                             f"origin_snapshot_count={origins_count}"
                         ),
                     )
-                    print(f"\n🎮 Created Standard Season #1 (id={new_season_id})")
+                    print(f"\n🎮 Created/ensured Standard Season #{new_season_number} (id={new_season_id})")
                     print(f"   🏛️  Origin snapshot saved: {origins_count} wallets")
                     print("=" * 70)
                     return
 
                 season_id = int(latest["id"])
                 season_number = int(latest["season_number"])
-                start_date = latest["start_date"]
-                if start_date.tzinfo is None:
-                    start_date = start_date.replace(tzinfo=timezone.utc)
+                start_date = self._utc_day_start(latest["start_date"])
                 total_supply = int(latest["total_supply"])
                 remaining_supply = int(latest["remaining_supply"])
                 is_active = bool(latest["is_active"])
@@ -986,11 +1093,41 @@ class SimplifiedScheduler:
                         return
 
                     new_season_number = season_number + 1
-                    new_season_id = self._create_standard_season(
-                        cursor,
-                        start_date=next_cycle_at,
-                        season_number=new_season_number,
+                    cursor.execute(
+                        """
+                        SELECT id, season_number
+                        FROM seasons
+                        WHERE type = 'standard'
+                          AND (start_date = %s OR season_number = %s)
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (next_cycle_at, new_season_number),
                     )
+                    existing_for_cycle = cursor.fetchone()
+                    if existing_for_cycle:
+                        new_season_id = int(existing_for_cycle["id"])
+                        new_season_number = int(existing_for_cycle["season_number"])
+                        cursor.execute(
+                            """
+                            UPDATE seasons
+                            SET is_active = TRUE,
+                                is_completed = FALSE,
+                                updated_at = NOW()
+                            WHERE id = %s
+                            """,
+                            (new_season_id,),
+                        )
+                        print(
+                            f"\n♻️ Reusing existing Standard Season "
+                            f"#{new_season_number} (id={new_season_id}) for start={next_cycle_at.isoformat()}"
+                        )
+                    else:
+                        new_season_id = self._create_standard_season(
+                            cursor,
+                            start_date=next_cycle_at,
+                            season_number=new_season_number,
+                        )
                     origins_count = self._snapshot_origin_wallets_for_season(cursor, new_season_id, next_cycle_at)
                     conn.commit()
                     self.manager.log_season_update(
@@ -1028,6 +1165,12 @@ class SimplifiedScheduler:
                 print("\n✅ No season state transition required")
                 print("=" * 70)
         finally:
+            if advisory_lock_acquired:
+                try:
+                    with conn.cursor() as unlock_cursor:
+                        unlock_cursor.execute("SELECT pg_advisory_unlock(%s)", (advisory_lock_key,))
+                except Exception:
+                    pass
             conn.close()
     
     def check_system_state(self):
