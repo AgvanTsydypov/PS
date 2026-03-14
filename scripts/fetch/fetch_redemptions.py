@@ -522,14 +522,14 @@ def get_markets_from_db(use_local_db: bool = True, limit: Optional[int] = None) 
                 import fetch_events_config as config
                 
                 if not event_ids_raw and hasattr(config, 'START_DATE') and config.START_DATE:
-                    filters.append("e.end_date >= %s")
-                    params.append(config.START_DATE)
-                    print(f"🔍 Filter: Events from {config.START_DATE.date()}")
+                    filters.append("(e.end_date AT TIME ZONE 'UTC')::date >= %s")
+                    params.append(config.START_DATE.date())
+                    print(f"🔍 Filter (UTC date): Events from {config.START_DATE.date()}")
                 
                 if not event_ids_raw and hasattr(config, 'END_DATE') and config.END_DATE:
-                    filters.append("e.end_date <= %s")
-                    params.append(config.END_DATE)
-                    print(f"🔍 Filter: Events until {config.END_DATE.date()}")
+                    filters.append("(e.end_date AT TIME ZONE 'UTC')::date <= %s")
+                    params.append(config.END_DATE.date())
+                    print(f"🔍 Filter (UTC date): Events until {config.END_DATE.date()}")
             except ImportError:
                 print("⚠️  Warning: Could not import fetch_events_config, skipping date filters")
             
@@ -653,6 +653,8 @@ async def fetch_redemptions_for_market_async(
     market_info: Dict,
     semaphore: asyncio.Semaphore,
     rate_limiter: GoldskyRateLimiter,
+    cap_state: Optional[Dict] = None,
+    cap_lock: Optional[asyncio.Lock] = None,
     use_local_db: bool = True
 ) -> tuple[List[Dict], Dict]:
     """
@@ -670,6 +672,7 @@ async def fetch_redemptions_for_market_async(
     """
     async with semaphore:  # Limit concurrent market processing (memory/resource control)
         # NO initial delay - rate limiter will handle API throttling automatically!
+        cap_event = cap_state.get('stop_event') if cap_state else None
         
         all_redemptions = []
         last_timestamp = 0  # Timestamp-based pagination
@@ -894,6 +897,9 @@ async def fetch_redemptions_for_market_async(
         next_redemption_timestamp = None  # Timestamp of next redemption (from smart skip probe)
         
         for window_idx, (window_start, window_end) in enumerate(time_windows, 1):
+            if cap_event and cap_event.is_set():
+                break
+
             # Show window info
             if use_temporal_windows and len(time_windows) > 1:
                 from datetime import datetime as dt
@@ -945,6 +951,9 @@ async def fetch_redemptions_for_market_async(
             window_complete = False  # Track if window reached its end
             
             while True:
+                if cap_event and cap_event.is_set():
+                    break
+
                 request_count += 1
             
                 # 🎯 IMPORTANT: Apply delay BEFORE making request (not after)
@@ -1406,6 +1415,37 @@ async def fetch_redemptions_for_market_async(
                                 break
                         
                             # Process batch
+                            truncated_by_global_cap = False
+                            if cap_state and cap_lock and MAX_REDEMPTIONS is not None:
+                                if cap_event and cap_event.is_set():
+                                    batch = []
+                                else:
+                                    async with cap_lock:
+                                        remaining_global = cap_state['max_total'] - cap_state['accepted_total']
+                                        if remaining_global <= 0:
+                                            batch = []
+                                            cap_state['stop_event'].set()
+                                        elif len(batch) > remaining_global:
+                                            batch = batch[:remaining_global]
+                                            cap_state['accepted_total'] += len(batch)
+                                            cap_state['stop_event'].set()
+                                            truncated_by_global_cap = True
+                                        else:
+                                            cap_state['accepted_total'] += len(batch)
+                                            if cap_state['accepted_total'] >= cap_state['max_total']:
+                                                cap_state['stop_event'].set()
+
+                            if not batch:
+                                if cap_event and cap_event.is_set():
+                                    print("      ⏹️ Global cap reached, stopping fetch for this market", flush=True)
+                                break
+
+                            if truncated_by_global_cap:
+                                print(
+                                    f"      ⚠️ Global cap truncation inside fetch: taking {len(batch):,} record(s)",
+                                    flush=True
+                                )
+
                             for redemption in batch:
                                 raw_id = redemption.get('id', "")
                                 tx_hash = raw_id.split('-')[0] if '-' in raw_id else raw_id
@@ -1676,6 +1716,8 @@ async def fetch_redemptions_for_market_async(
             # If critical error, don't continue to next window
             if not status['complete'] or not status['success']:
                 break
+            if cap_event and cap_event.is_set():
+                break
         
         # Set final request count
         status['requests_made'] = request_count
@@ -1697,7 +1739,8 @@ async def process_market_async(
     exclusive_market_active: Dict,
     active_markets_count: Dict,
     active_markets_condition: asyncio.Condition,
-    redemptions_cap_lock: Optional[asyncio.Lock],
+    cap_state: Optional[Dict],
+    cap_lock: Optional[asyncio.Lock],
     use_local_db: bool = True
 ):
     """Process a single market: fetch and upload (with parallel upload support)"""
@@ -1715,6 +1758,11 @@ async def process_market_async(
         print(f"   Condition ID: {condition_id[:20]}...")
         print(f"   Event ID: {market['event_id']}")
         print(f"   Volume: ${market['volume']:,.2f}")
+
+        if cap_state and cap_state['stop_event'].is_set():
+            print(f"   ⏹️ Skipped immediately: global redemptions cap reached", flush=True)
+            stats['markets_processed'] += 1
+            return
         
         # Check if this is a very large market that needs exclusive API access
         market_volume = float(market.get('volume', 0) or 0)
@@ -1749,7 +1797,16 @@ async def process_market_async(
                 # Fetch redemptions with exclusive API access
                 # Requests are made SEQUENTIALLY with adaptive delays (see fetch function)
                 fetch_start = time.time()
-                redemptions, fetch_status = await fetch_redemptions_for_market_async(session, condition_id, market, semaphore, rate_limiter, use_local_db)
+                redemptions, fetch_status = await fetch_redemptions_for_market_async(
+                    session,
+                    condition_id,
+                    market,
+                    semaphore,
+                    rate_limiter,
+                    cap_state=cap_state,
+                    cap_lock=cap_lock,
+                    use_local_db=use_local_db,
+                )
                 
                 exclusive_market_active['active'] = False
                 exclusive_market_active['market_name'] = None
@@ -1771,7 +1828,16 @@ async def process_market_async(
             try:
                 # Normal fetch without exclusive access
                 fetch_start = time.time()
-                redemptions, fetch_status = await fetch_redemptions_for_market_async(session, condition_id, market, semaphore, rate_limiter, use_local_db)
+                redemptions, fetch_status = await fetch_redemptions_for_market_async(
+                    session,
+                    condition_id,
+                    market,
+                    semaphore,
+                    rate_limiter,
+                    cap_state=cap_state,
+                    cap_lock=cap_lock,
+                    use_local_db=use_local_db,
+                )
             finally:
                 # Always decrement counter and notify waiting large markets
                 async with active_markets_condition:
@@ -1787,9 +1853,9 @@ async def process_market_async(
         
         if redemptions:
             truncated_by_global_cap = False
-            if MAX_REDEMPTIONS is not None:
+            if MAX_REDEMPTIONS is not None and cap_state is None:
                 # Reserve available redemption slots atomically across concurrent tasks.
-                async with redemptions_cap_lock:
+                async with cap_lock:
                     remaining = MAX_REDEMPTIONS - stats['total_redemptions']
                     if remaining <= 0:
                         redemptions = []
@@ -2148,7 +2214,14 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
     exclusive_market_active = {'active': False, 'market_name': None}  # Shared state
     active_markets_count = {'count': 0}  # Track how many markets are currently processing
     active_markets_condition = asyncio.Condition()  # To wait for all markets to finish
-    redemptions_cap_lock = asyncio.Lock()
+    cap_lock = asyncio.Lock() if MAX_REDEMPTIONS is not None else None
+    cap_state = None
+    if MAX_REDEMPTIONS is not None:
+        cap_state = {
+            'max_total': MAX_REDEMPTIONS,
+            'accepted_total': 0,
+            'stop_event': asyncio.Event(),
+        }
     
     # Create aiohttp session
     async with aiohttp.ClientSession() as session:
@@ -2156,9 +2229,9 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
         total_batches = (len(markets) + BATCH_SIZE - 1) // BATCH_SIZE
         
         for batch_num in range(0, len(markets), BATCH_SIZE):
-            if MAX_REDEMPTIONS is not None and stats['total_redemptions'] >= MAX_REDEMPTIONS:
+            if cap_state and cap_state['stop_event'].is_set():
                 print(
-                    f"\n⏹️ Global redemptions cap reached: {stats['total_redemptions']:,}/{MAX_REDEMPTIONS:,}. "
+                    f"\n⏹️ Global redemptions cap reached: {cap_state['accepted_total']:,}/{MAX_REDEMPTIONS:,}. "
                     f"Stopping further market processing."
                 )
                 break
@@ -2196,7 +2269,8 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
                     exclusive_market_active,
                     active_markets_count,
                     active_markets_condition,
-                    redemptions_cap_lock,
+                    cap_state,
+                    cap_lock,
                     use_local_db
                 )
                 tasks.append(task)
@@ -2223,9 +2297,17 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             
             # NO delay between batches! Rate limiter handles everything
             # Immediately proceed to next batch
+            if cap_state and cap_state['stop_event'].is_set():
+                print(
+                    f"\n⏹️ Global redemptions cap reached during current batch: "
+                    f"{cap_state['accepted_total']:,}/{MAX_REDEMPTIONS:,}"
+                )
+                break
     
     # 4. Retry failed/incomplete market fetches
-    if MAX_REDEMPTIONS is not None and stats['total_redemptions'] >= MAX_REDEMPTIONS:
+    if MAX_REDEMPTIONS is not None and (
+        (cap_state and cap_state['stop_event'].is_set()) or stats['total_redemptions'] >= MAX_REDEMPTIONS
+    ):
         print(
             f"\n⏭️ Skipping failed-market retries: global cap reached "
             f"({stats['total_redemptions']:,}/{MAX_REDEMPTIONS:,})"
@@ -2270,7 +2352,14 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             try:
                 # Retry with same function but one at a time
                 redemptions_retry, fetch_status_retry = await fetch_redemptions_for_market_async(
-                    session, condition_id, market, retry_semaphore, rate_limiter, use_local_db
+                    session,
+                    condition_id,
+                    market,
+                    retry_semaphore,
+                    rate_limiter,
+                    cap_state=cap_state,
+                    cap_lock=cap_lock,
+                    use_local_db=use_local_db,
                 )
                 retry_item_elapsed = time.time() - retry_item_start
                 
@@ -2390,7 +2479,9 @@ async def process_all_markets_async(auto_upload: bool = False, use_local_db: boo
             print(f"   You can review these markets later")
     
     # 5. Retry failed uploads
-    if MAX_REDEMPTIONS is not None and stats['total_redemptions'] >= MAX_REDEMPTIONS:
+    if MAX_REDEMPTIONS is not None and (
+        (cap_state and cap_state['stop_event'].is_set()) or stats['total_redemptions'] >= MAX_REDEMPTIONS
+    ):
         print(
             f"\n⏭️ Skipping failed-upload retries: global cap reached "
             f"({stats['total_redemptions']:,}/{MAX_REDEMPTIONS:,})"

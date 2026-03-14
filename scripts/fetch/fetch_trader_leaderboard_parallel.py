@@ -563,14 +563,14 @@ def get_unique_wallets_from_db_generator(
                         print(f"🔍 Filter: Explicit events list ({len(event_ids):,} IDs)")
                 
                 if not event_ids_raw and hasattr(config, 'START_DATE') and config.START_DATE:
-                    date_filters.append("e.end_date::date >= %(date_from)s")
+                    date_filters.append("(e.end_date AT TIME ZONE 'UTC')::date >= %(date_from)s")
                     query_params['date_from'] = config.START_DATE.date()
-                    print(f"🔍 Filter: Events from {config.START_DATE.date()}")
+                    print(f"🔍 Filter (UTC date): Events from {config.START_DATE.date()}")
                 
                 if not event_ids_raw and hasattr(config, 'END_DATE') and config.END_DATE:
-                    date_filters.append("e.end_date::date <= %(date_to)s")
+                    date_filters.append("(e.end_date AT TIME ZONE 'UTC')::date <= %(date_to)s")
                     query_params['date_to'] = config.END_DATE.date()
-                    print(f"🔍 Filter: Events until {config.END_DATE.date()}")
+                    print(f"🔍 Filter (UTC date): Events until {config.END_DATE.date()}")
                 
                 if date_filters:
                     # Вставляем фильтры ПЕРЕД ORDER BY

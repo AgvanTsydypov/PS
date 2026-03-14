@@ -54,7 +54,14 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE, GENESIS_END_DATE, DATA_LAG_DAYS, EVENTS_LAG_DAYS
+from scripts.data_loading_manager import (
+    DataLoadingManager,
+    GENESIS_START_DATE,
+    GENESIS_END_DATE,
+    DATA_LAG_DAYS,
+    EVENTS_LAG_DAYS,
+    RESOLUTION_READY_OFFSET_DAYS,
+)
 
 STANDARD_SEASON_TOTAL_SUPPLY_TEST = 10
 STANDARD_SEASON_ACTIVE_DAYS = 9
@@ -1330,7 +1337,10 @@ class SimplifiedScheduler:
         print(f"\nLoading Dates:")
         print(f"  • Events: {events_date} ({EVENTS_LAG_DAYS} day{'s' if EVENTS_LAG_DAYS > 1 else ''} ago)")
         if self.use_closed_time_pipeline:
-            print(f"  • Redemptions trigger: closed_time + {DATA_LAG_DAYS} days")
+            print(
+                f"  • Redemptions trigger: closed_time + "
+                f"(DATA_LAG_DAYS - EVENTS_LAG_DAYS) = {RESOLUTION_READY_OFFSET_DAYS} days"
+            )
         else:
             print(f"  • Redemptions: {redemptions_date} ({DATA_LAG_DAYS} days ago)")
         print("="*70)
@@ -1362,7 +1372,7 @@ class SimplifiedScheduler:
             )
             print(f"\n🧩 Resolution queue sync: {synced:,} row(s) upserted for {events_date}")
 
-        # STEP 2-4: closed_time + DATA_LAG_DAYS pipeline (feature-flagged)
+        # STEP 2-4: closed_time + (DATA_LAG_DAYS - EVENTS_LAG_DAYS) pipeline (feature-flagged)
         if self.use_closed_time_pipeline:
             if not self.dry_run:
                 poll_stats = self.poll_pending_event_resolutions()
@@ -1378,7 +1388,8 @@ class SimplifiedScheduler:
             if ready_event_ids:
                 print(
                     f"\n📅 Redemptions/Positions/Leaderboard: "
-                    f"{len(ready_event_ids):,} ready event(s) by closed_time + {DATA_LAG_DAYS}d"
+                    f"{len(ready_event_ids):,} ready event(s) by "
+                    f"closed_time + {RESOLUTION_READY_OFFSET_DAYS}d"
                 )
                 os.environ['POLYSTARS_EVENT_IDS'] = ",".join(ready_event_ids)
                 try:
@@ -1400,7 +1411,7 @@ class SimplifiedScheduler:
             else:
                 print(
                     f"\n⏳ No events ready for downstream processing "
-                    f"(rule: closed_time + {DATA_LAG_DAYS} days)"
+                    f"(rule: closed_time + {RESOLUTION_READY_OFFSET_DAYS} days)"
                 )
                 for script_key in ['redemptions', 'positions', 'leaderboard']:
                     results[script_key] = {'success': True, 'skipped': True, 'reason': 'no_ready_events'}
