@@ -14,6 +14,6 @@ WHERE r.event_id IS NOT NULL
   AND e.volume >= %(min_volume)s  -- Динамический параметр из конфигурации
   AND r.payout_usdc > 0
   -- Фильтры добавляются динамически из Python:
-  -- AND e.end_date::date >= %(date_from)s
-  -- AND e.end_date::date <= %(date_to)s
+  -- AND e.end_date::date >= :date_from
+  -- AND e.end_date::date <= :date_to
 ORDER BY r.event_id, r.condition_id, r.redeemer_address;

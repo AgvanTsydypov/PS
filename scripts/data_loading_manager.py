@@ -79,8 +79,11 @@ DAILY_MIN_VOLUME = _env_int("DAILY_MIN_VOLUME", 5_000)  # 5M in prod
 
 # Data lag configuration (in days)
 # How many days to wait before loading data (allows data to finalize)
-EVENTS_LAG_DAYS = 1        # Events: 1 days ago
-DATA_LAG_DAYS = 10          # Redemptions/Positions/Leaderboard: 10 days after events
+EVENTS_LAG_DAYS = _env_int("POLYSTARS_EVENTS_LAG_DAYS", 1)   # Events: N days ago
+DATA_LAG_DAYS = _env_int("POLYSTARS_DATA_LAG_DAYS", 10)      # Redemptions/Positions/Leaderboard base lag
+# For closed-time pipeline readiness:
+# resolution_ready_at = closed_time + (DATA_LAG_DAYS - EVENTS_LAG_DAYS)
+RESOLUTION_READY_OFFSET_DAYS = DATA_LAG_DAYS - EVENTS_LAG_DAYS
 
 # OPTIONAL: Limit number of events for testing (None = unlimited)
 # Set this to speed up testing with smaller datasets
@@ -735,7 +738,7 @@ class DataLoadingManager:
                     END,
                     updated_at = NOW()
                 """,
-                (DATA_LAG_DAYS, load_date, min_volume),
+                (RESOLUTION_READY_OFFSET_DAYS, load_date, min_volume),
             )
             affected = cursor.rowcount if cursor.rowcount is not None else 0
             conn.commit()
@@ -809,7 +812,7 @@ class DataLoadingManager:
                     closed,
                     closed_time,
                     closed_time,
-                    DATA_LAG_DAYS,
+                    RESOLUTION_READY_OFFSET_DAYS,
                     error_text,
                     closed,
                     closed_time,
@@ -825,7 +828,7 @@ class DataLoadingManager:
     def get_ready_resolution_event_ids(self, as_of: Optional[datetime] = None, limit: Optional[int] = None) -> List[str]:
         """
         Return event IDs ready for redemptions:
-        closed_time + DATA_LAG_DAYS <= as_of.
+        closed_time + (DATA_LAG_DAYS - EVENTS_LAG_DAYS) <= as_of.
         """
         as_of = as_of or datetime.utcnow()
         conn = psycopg2.connect(**self.connection_params)
