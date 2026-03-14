@@ -43,6 +43,7 @@ import subprocess
 import time
 import argparse
 import tempfile
+import requests
 from datetime import datetime, date, timedelta, timezone
 from typing import Dict, Optional
 from pathlib import Path
@@ -63,6 +64,7 @@ ORIGIN_TOP_WALLETS_STANDARD = 10
 ORIGIN_TOP_WALLETS_GENESIS = 20
 GENESIS_SEASON_TOTAL_SUPPLY_TEST = 15
 GENESIS_SEASON_FAR_FUTURE_END = datetime(9999, 12, 31, tzinfo=timezone.utc)
+GAMMA_API_BASE_URL = "https://gamma-api.polymarket.com"
 
 
 # ==========================================
@@ -327,6 +329,9 @@ class SimplifiedScheduler:
         self.manager = DataLoadingManager(use_local_db=use_local_db)
         self.use_local_db = use_local_db
         self.dry_run = dry_run
+        self.use_closed_time_pipeline = os.getenv("POLYSTARS_USE_CLOSED_TIME_PIPELINE", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self.pending_poll_limit = int(os.getenv("POLYSTARS_PENDING_POLL_LIMIT", "1000"))
+        self.ready_batch_limit = int(os.getenv("POLYSTARS_READY_BATCH_LIMIT", "1000"))
         
         # Script configurations
         self.scripts = {
@@ -351,6 +356,91 @@ class SimplifiedScheduler:
                 'args': ['--upload', '--local', '--from-db'] if use_local_db else ['--upload', '--from-db']
             }
         }
+
+    @staticmethod
+    def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except Exception:
+            return None
+
+    def _fetch_event_status_from_api(self, event_id: str) -> Dict[str, Optional[object]]:
+        """
+        Fetch event status from Gamma API.
+        Returns: {'ok': bool, 'closed': bool|None, 'closed_time': datetime|None, 'error': str|None}
+        """
+        try:
+            url = f"{GAMMA_API_BASE_URL}/events/{event_id}"
+            response = requests.get(url, timeout=20)
+
+            # Fallback in case direct endpoint is unavailable.
+            if response.status_code == 404:
+                list_url = f"{GAMMA_API_BASE_URL}/events"
+                response = requests.get(list_url, params={"id": event_id, "limit": 1}, timeout=20)
+
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, list):
+                event = payload[0] if payload else {}
+            else:
+                event = payload or {}
+
+            closed = bool(event.get("closed", False))
+            closed_time_raw = event.get("closedTime") or event.get("closed_time")
+            closed_time = self._parse_iso_datetime(closed_time_raw)
+
+            return {"ok": True, "closed": closed, "closed_time": closed_time, "error": None}
+        except Exception as exc:
+            return {"ok": False, "closed": None, "closed_time": None, "error": str(exc)}
+
+    def poll_pending_event_resolutions(self) -> Dict[str, int]:
+        """Poll all pending events and update resolution queue."""
+        pending_ids = self.manager.get_pending_resolution_event_ids(limit=self.pending_poll_limit)
+        if not pending_ids:
+            print("\n🟢 Resolution polling: no pending events")
+            return {"checked": 0, "ready": 0, "pending": 0, "errors": 0}
+
+        print(f"\n🔄 Resolution polling: checking {len(pending_ids):,} pending event(s)")
+        checked = 0
+        moved_to_ready = 0
+        still_pending = 0
+        errors = 0
+
+        for event_id in pending_ids:
+            status = self._fetch_event_status_from_api(event_id)
+            checked += 1
+
+            if not status["ok"]:
+                errors += 1
+                self.manager.update_resolution_from_api(
+                    event_id=event_id,
+                    closed=False,
+                    closed_time=None,
+                    error_text=status["error"],
+                )
+                continue
+
+            closed = bool(status["closed"])
+            closed_time = status["closed_time"]
+            self.manager.update_resolution_from_api(
+                event_id=event_id,
+                closed=closed,
+                closed_time=closed_time,
+                error_text=None,
+            )
+
+            if closed and closed_time is not None:
+                moved_to_ready += 1
+            else:
+                still_pending += 1
+
+        print(
+            f"   ✅ checked={checked:,}, ready={moved_to_ready:,}, "
+            f"pending={still_pending:,}, errors={errors:,}"
+        )
+        return {"checked": checked, "ready": moved_to_ready, "pending": still_pending, "errors": errors}
 
     def _create_standard_season(self, cursor, start_date: datetime, season_number: int) -> int:
         """Create a new standard season and return its id."""
@@ -1019,6 +1109,15 @@ class SimplifiedScheduler:
             os.environ['POLYSTARS_END_DATE'] = end_date.strftime('%Y-%m-%d')
             os.environ['POLYSTARS_MIN_VOLUME'] = str(self.manager.get_volume_filter(is_genesis=is_genesis))
             os.environ['POLYSTARS_IS_GENESIS'] = 'true' if is_genesis else 'false'
+
+            # In closed_time pipeline, events ingestion must not require closed=true.
+            if self.use_closed_time_pipeline and not is_genesis:
+                # 'none' means "omit closed filter" (fetch both open and closed).
+                os.environ['POLYSTARS_EVENTS_CLOSED_ONLY'] = 'none'
+                os.environ['POLYSTARS_RESOLUTION_STATUS'] = ''
+            else:
+                os.environ.pop('POLYSTARS_EVENTS_CLOSED_ONLY', None)
+                os.environ.pop('POLYSTARS_RESOLUTION_STATUS', None)
             
             # Set MAX_EVENTS if specified (for testing)
             events_limit = self.manager.get_events_limit()
@@ -1163,6 +1262,7 @@ class SimplifiedScheduler:
         print("="*70)
         print(f"Mode: {'DRY RUN' if self.dry_run else 'PRODUCTION'}")
         print(f"Database: {'Local PostgreSQL' if self.use_local_db else 'Supabase'}")
+        print(f"Closed-time pipeline: {'ENABLED' if self.use_closed_time_pipeline else 'DISABLED (legacy date-based)'}")
 
         # Update standard season lifecycle before daily ETL tasks.
         self.run_standard_season_update()
@@ -1229,7 +1329,10 @@ class SimplifiedScheduler:
         
         print(f"\nLoading Dates:")
         print(f"  • Events: {events_date} ({EVENTS_LAG_DAYS} day{'s' if EVENTS_LAG_DAYS > 1 else ''} ago)")
-        print(f"  • Redemptions: {redemptions_date} ({DATA_LAG_DAYS} days ago)")
+        if self.use_closed_time_pipeline:
+            print(f"  • Redemptions trigger: closed_time + {DATA_LAG_DAYS} days")
+        else:
+            print(f"  • Redemptions: {redemptions_date} ({DATA_LAG_DAYS} days ago)")
         print("="*70)
         
         results = {}
@@ -1250,48 +1353,103 @@ class SimplifiedScheduler:
             elif not results['events']['success'] and not self.dry_run:
                 error_msg = results['events'].get('error', 'Script execution failed')
                 self.manager.mark_data_error('events', events_date, error_msg)
-        
-        # STEP 2-4: Redemptions, Positions, Leaderboard (DATA_LAG_DAYS ago)
-        # ℹ️ For DAILY pipeline: lag allows data to finalize
-        # (For CATCH-UP of historical data, see run_catch_up - no lag needed there)
-        print(f"\n📅 Redemptions/Positions/Leaderboard: Loading for {redemptions_date}")
-        
-        # ⚠️ ВАЖНО: Проверка на Genesis период (защита от дублей)
-        if redemptions_date <= GENESIS_END_DATE:
-            print(f"\n⏭️  Skipping redemptions/positions/leaderboard for {redemptions_date}")
-            print(f"   Reason: Date is within Genesis period (already loaded)")
-            print(f"   Genesis end: {GENESIS_END_DATE}")
-            for script_key in ['redemptions', 'positions', 'leaderboard']:
-                results[script_key] = {'success': True, 'skipped': True, 'reason': 'genesis_period'}
+
+        # Sync queue from freshly ingested events and poll pending statuses.
+        if not self.dry_run and results['events'].get('success'):
+            synced = self.manager.sync_resolution_queue_for_event_date(
+                load_date=events_date,
+                min_volume=self.manager.get_volume_filter(is_genesis=False),
+            )
+            print(f"\n🧩 Resolution queue sync: {synced:,} row(s) upserted for {events_date}")
+
+        # STEP 2-4: closed_time + DATA_LAG_DAYS pipeline (feature-flagged)
+        if self.use_closed_time_pipeline:
+            if not self.dry_run:
+                poll_stats = self.poll_pending_event_resolutions()
+                results['resolution_polling'] = {'success': True, **poll_stats}
+            else:
+                print("\n🔍 DRY RUN: skipping resolution polling")
+                results['resolution_polling'] = {'success': True, 'skipped': True}
+
+            ready_event_ids = [] if self.dry_run else self.manager.get_ready_resolution_event_ids(
+                as_of=datetime.utcnow(),
+                limit=self.ready_batch_limit,
+            )
+            if ready_event_ids:
+                print(
+                    f"\n📅 Redemptions/Positions/Leaderboard: "
+                    f"{len(ready_event_ids):,} ready event(s) by closed_time + {DATA_LAG_DAYS}d"
+                )
+                os.environ['POLYSTARS_EVENT_IDS'] = ",".join(ready_event_ids)
+                try:
+                    # Keep date config for compatibility with existing scripts, but event_ids are authoritative.
+                    self.configure_for_date(events_date, is_genesis=False)
+                    step_success = True
+                    for script_key in ['redemptions', 'positions', 'leaderboard']:
+                        results[script_key] = self.run_script(script_key, target_date=events_date)
+                        if not results[script_key].get('success'):
+                            step_success = False
+
+                    if step_success and not self.dry_run:
+                        processed = self.manager.mark_resolution_events_processed(ready_event_ids)
+                        print(f"✅ Marked {processed:,} event(s) as processed in resolution queue")
+                    elif not self.dry_run:
+                        print("⚠️  Some downstream scripts failed; ready events remain unprocessed for retry")
+                finally:
+                    os.environ.pop('POLYSTARS_EVENT_IDS', None)
+            else:
+                print(
+                    f"\n⏳ No events ready for downstream processing "
+                    f"(rule: closed_time + {DATA_LAG_DAYS} days)"
+                )
+                for script_key in ['redemptions', 'positions', 'leaderboard']:
+                    results[script_key] = {'success': True, 'skipped': True, 'reason': 'no_ready_events'}
         else:
-            for script_key in ['redemptions', 'positions', 'leaderboard']:
-                if not force and self.manager.is_data_loaded_for_date(redemptions_date, script_key):
-                    print(f"⏭️  {self.scripts[script_key]['name']}: Already loaded")
-                    results[script_key] = {'success': True, 'skipped': True}
-                else:
-                    # Configure for redemptions date
-                    if script_key == 'redemptions':
-                        self.configure_for_date(redemptions_date, is_genesis=False)
-                    
-                    results[script_key] = self.run_script(script_key, target_date=redemptions_date)
-                    if results[script_key]['success'] and not self.dry_run:
-                        self.manager.mark_data_loaded(script_key, redemptions_date,
-                                                    record_count=results[script_key]['records'],
-                                                    load_type='daily')
-                    elif not results[script_key]['success'] and not self.dry_run:
-                        error_msg = results[script_key].get('error', 'Script execution failed')
-                        self.manager.mark_data_error(script_key, redemptions_date, error_msg)
+            # Legacy date-based pipeline
+            print(f"\n📅 Redemptions/Positions/Leaderboard: Loading for {redemptions_date}")
+
+            # ⚠️ ВАЖНО: Проверка на Genesis период (защита от дублей)
+            if redemptions_date <= GENESIS_END_DATE:
+                print(f"\n⏭️  Skipping redemptions/positions/leaderboard for {redemptions_date}")
+                print(f"   Reason: Date is within Genesis period (already loaded)")
+                print(f"   Genesis end: {GENESIS_END_DATE}")
+                for script_key in ['redemptions', 'positions', 'leaderboard']:
+                    results[script_key] = {'success': True, 'skipped': True, 'reason': 'genesis_period'}
+            else:
+                for script_key in ['redemptions', 'positions', 'leaderboard']:
+                    if not force and self.manager.is_data_loaded_for_date(redemptions_date, script_key):
+                        print(f"⏭️  {self.scripts[script_key]['name']}: Already loaded")
+                        results[script_key] = {'success': True, 'skipped': True}
+                    else:
+                        # Configure for redemptions date
+                        if script_key == 'redemptions':
+                            self.configure_for_date(redemptions_date, is_genesis=False)
+
+                        results[script_key] = self.run_script(script_key, target_date=redemptions_date)
+                        if results[script_key]['success'] and not self.dry_run:
+                            self.manager.mark_data_loaded(script_key, redemptions_date,
+                                                        record_count=results[script_key]['records'],
+                                                        load_type='daily')
+                        elif not results[script_key]['success'] and not self.dry_run:
+                            error_msg = results[script_key].get('error', 'Script execution failed')
+                            self.manager.mark_data_error(script_key, redemptions_date, error_msg)
         
         # STEP 5: Auto-fix incomplete days (events loaded but redemptions missing)
-        # This handles the first DATA_LAG_DAYS days after Genesis where daily pipeline skipped redemptions
-        print(f"\n🔍 Checking for incomplete days...")
-        incomplete = self.manager.get_incomplete_dates(
-            start_from=GENESIS_END_DATE + timedelta(days=1),
-            up_to=date.today() - timedelta(days=1)
-        )
-        
-        fixed_count = 0
-        skipped_count = 0
+        # Disabled for closed-time pipeline (event-based readiness is tracked in event_resolution_queue).
+        if self.use_closed_time_pipeline:
+            incomplete = []
+            fixed_count = 0
+            skipped_count = 0
+        else:
+            # This handles the first DATA_LAG_DAYS days after Genesis where daily pipeline skipped redemptions
+            print(f"\n🔍 Checking for incomplete days...")
+            incomplete = self.manager.get_incomplete_dates(
+                start_from=GENESIS_END_DATE + timedelta(days=1),
+                up_to=date.today() - timedelta(days=1)
+            )
+
+            fixed_count = 0
+            skipped_count = 0
         
         if incomplete:
             print(f"\n⚠️  Found {len(incomplete)} day(s) with incomplete data!")
@@ -1522,6 +1680,14 @@ class SimplifiedScheduler:
                                             markets_count=result_events['markets'],
                                             load_type='daily')
                 print(f"✅ Events loaded for {missing_date} ({result_events['records']:,} events, {result_events['markets']:,} markets)")
+
+                # Keep resolution queue complete during catch-up as well.
+                if self.use_closed_time_pipeline:
+                    synced = self.manager.sync_resolution_queue_for_event_date(
+                        load_date=missing_date,
+                        min_volume=self.manager.get_volume_filter(is_genesis=False),
+                    )
+                    print(f"🧩 Resolution queue sync: {synced:,} row(s) upserted for {missing_date}")
             else:
                 error_msg = result_events.get('error', 'Script execution failed')
                 self.manager.mark_data_error('events', missing_date, error_msg)
