@@ -55,7 +55,7 @@ load_dotenv()
 
 # For testing - use shorter period:
 GENESIS_START_DATE = date(2024, 6, 1)
-GENESIS_END_DATE = date(2026, 2, 6)
+GENESIS_END_DATE = date(2026, 3, 1)
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)

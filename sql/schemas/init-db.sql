@@ -407,13 +407,51 @@ DO $$ BEGIN RAISE NOTICE '📊 Creating analytics views...'; END $$;
 -- Events with market count and total volume
 CREATE OR REPLACE VIEW events_summary AS
 SELECT 
-    e.*,
+    e.id,
+    e.ticker,
+    e.slug,
+    e.title,
+    e.description,
+    e.start_date,
+    e.creation_date,
+    e.end_date,
+    e.closed_time,
+    e.created_at,
+    e.updated_at,
+    e.image,
+    e.icon,
+    e.active,
+    e.closed,
+    e.archived,
+    e.new,
+    e.featured,
+    e.restricted,
+    e.neg_risk,
+    e.enable_order_book,
+    e.volume,
+    e.volume24hr,
+    e.volume1wk,
+    e.volume1mo,
+    e.volume1yr,
+    e.liquidity,
+    e.open_interest,
+    e.liquidity_amm,
+    e.liquidity_clob,
+    e.competitive,
+    e.comment_count,
     COUNT(m.id) as market_count,
     SUM(m.volume_num) as total_market_volume,
     AVG(m.volume_num) as avg_market_volume
 FROM events e
 LEFT JOIN markets m ON e.id = m.event_id
-GROUP BY e.id;
+GROUP BY
+    e.id, e.ticker, e.slug, e.title, e.description,
+    e.start_date, e.creation_date, e.end_date, e.closed_time, e.created_at, e.updated_at,
+    e.image, e.icon,
+    e.active, e.closed, e.archived, e.new, e.featured, e.restricted, e.neg_risk, e.enable_order_book,
+    e.volume, e.volume24hr, e.volume1wk, e.volume1mo, e.volume1yr,
+    e.liquidity, e.open_interest, e.liquidity_amm, e.liquidity_clob,
+    e.competitive, e.comment_count;
 
 -- Top volume events
 CREATE OR REPLACE VIEW top_volume_events AS
@@ -428,21 +466,20 @@ ORDER BY volume DESC
 LIMIT 100;
 
 -- Flattened events data for analytics (one row per event-tag relation)
-CREATE OR REPLACE VIEW events_flat_analytics AS
+DROP VIEW IF EXISTS events_flat_analytics;
+CREATE VIEW events_flat_analytics AS
 SELECT
     e.id,
     e.title,
-    e.start_date,
-    e.end_date,
-    e.active,
-    e.closed,
-    e.volume,
-    e.liquidity,
+    e.slug,
+    t.id AS tag_id,
+    t.label AS tag_label,
     s.id AS series_id,
+    s.ticker AS series_ticker,
+    s.slug AS series_slug,
     s.title AS series_title,
     s.series_type,
-    t.id AS tag_id,
-    t.label AS tag_label
+    s.subtitle AS series_subtitle
 FROM events e
 LEFT JOIN series s
     ON s.id = e.series_id

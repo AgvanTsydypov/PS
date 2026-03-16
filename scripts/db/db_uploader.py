@@ -42,6 +42,9 @@ class DbUploader:
     """Handles uploading Polymarket data to PostgreSQL"""
 
     TABLE_EVENTS = "events"
+    TABLE_SERIES = "series"
+    TABLE_TAGS = "tags"
+    TABLE_EVENT_TAGS = "event_tags"
     TABLE_MARKETS = "markets"
     TABLE_REDEMPTIONS = "redemptions"
 
@@ -59,6 +62,9 @@ class DbUploader:
         self.use_local_db = True  # always PostgreSQL
         self.stats = {
             "events_inserted": 0,
+            "series_upserted": 0,
+            "tags_upserted": 0,
+            "event_tags_upserted": 0,
             "markets_inserted": 0,
             "redemptions_inserted": 0,
             "errors": [],
@@ -95,6 +101,22 @@ class DbUploader:
         print(f"[OK] Loaded {len(data.get('events', []))} events")
         return data
 
+    def _extract_series_object(self, event: Dict) -> Optional[Dict]:
+        """
+        Normalize event['series'] payload to a single dict.
+        Polymarket can return either:
+        - {"series": {...}}
+        - {"series": [{...}]}
+        """
+        series_raw = event.get("series")
+        if isinstance(series_raw, dict):
+            return series_raw
+        if isinstance(series_raw, list) and series_raw:
+            first = series_raw[0]
+            if isinstance(first, dict):
+                return first
+        return None
+
     def prepare_event_data(self, event: Dict) -> Dict:
         import re
 
@@ -109,7 +131,7 @@ class DbUploader:
             "active", "closed", "archived", "new", "featured", "restricted", "neg_risk", "enable_order_book",
             "volume", "volume24hr", "volume1wk", "volume1mo", "volume1yr",
             "liquidity", "open_interest", "liquidity_amm", "liquidity_clob",
-            "competitive", "comment_count",
+            "competitive", "comment_count", "series_id",
         }
 
         event_data = {}
@@ -119,6 +141,15 @@ class DbUploader:
             snake_key = camel_to_snake(k)
             if snake_key in allowed_fields:
                 event_data[snake_key] = v
+
+        # Normalize relation to series table.
+        # Prefer explicit series_id if provided; otherwise derive from nested series object.
+        if not event_data.get("series_id"):
+            series_obj = self._extract_series_object(event)
+            if series_obj:
+                series_id = series_obj.get("id")
+                if series_id is not None:
+                    event_data["series_id"] = str(series_id)
 
         for date_field in ["start_date", "creation_date", "end_date", "created_at", "updated_at", "closed_time"]:
             if date_field in event_data and event_data[date_field]:
@@ -141,6 +172,41 @@ class DbUploader:
                     event_data[field] = 0
 
         return event_data
+
+    def prepare_series_data(self, event: Dict) -> Optional[Dict]:
+        """Extract normalized series payload from event."""
+        series = self._extract_series_object(event)
+        if not series:
+            return None
+
+        series_id = series.get("id")
+        if not series_id:
+            return None
+
+        return {
+            "id": str(series_id),
+            "ticker": series.get("ticker"),
+            "slug": series.get("slug"),
+            "title": series.get("title"),
+            "subtitle": series.get("subtitle"),
+            "series_type": series.get("seriesType") if "seriesType" in series else series.get("series_type"),
+            "recurrence": series.get("recurrence"),
+            "description": series.get("description"),
+        }
+
+    def prepare_tag_data(self, tag: Dict) -> Optional[Dict]:
+        """Normalize a tag object from Polymarket payload."""
+        if not isinstance(tag, dict):
+            return None
+
+        tag_id = tag.get("id") or tag.get("slug") or tag.get("label")
+        if not tag_id:
+            return None
+
+        return {
+            "id": str(tag_id),
+            "label": tag.get("label"),
+        }
 
     def prepare_market_data(self, market: Dict, event_id: str) -> Dict:
         import re
@@ -226,7 +292,31 @@ class DbUploader:
         conn = psycopg2.connect(**self.connection_params)
         cursor = conn.cursor()
         try:
-            insert_sql = f"""
+            upsert_series_sql = f"""
+                INSERT INTO {self.TABLE_SERIES} (
+                    id, ticker, slug, title, subtitle, series_type, recurrence, description
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    ticker = EXCLUDED.ticker,
+                    slug = EXCLUDED.slug,
+                    title = EXCLUDED.title,
+                    subtitle = EXCLUDED.subtitle,
+                    series_type = EXCLUDED.series_type,
+                    recurrence = EXCLUDED.recurrence,
+                    description = EXCLUDED.description
+            """
+
+            # Keep latest label in case API metadata changes over time.
+            upsert_tags_sql = f"""
+                INSERT INTO {self.TABLE_TAGS} (id, label)
+                VALUES (%s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    label = EXCLUDED.label
+            """
+
+            insert_events_sql = f"""
                 INSERT INTO {self.TABLE_EVENTS} (
                     id, ticker, slug, title, description,
                     start_date, creation_date, end_date, closed_time, created_at, updated_at,
@@ -234,7 +324,7 @@ class DbUploader:
                     active, closed, archived, new, featured, restricted, neg_risk, enable_order_book,
                     volume, volume24hr, volume1wk, volume1mo, volume1yr,
                     liquidity, open_interest, liquidity_amm, liquidity_clob,
-                    competitive, comment_count
+                    competitive, comment_count, series_id
                 ) VALUES (
                     %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s,
@@ -242,7 +332,7 @@ class DbUploader:
                     %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s,
                     %s, %s, %s, %s,
-                    %s, %s
+                    %s, %s, %s
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     ticker = EXCLUDED.ticker, slug = EXCLUDED.slug, title = EXCLUDED.title,
@@ -258,14 +348,61 @@ class DbUploader:
                     volume1yr = EXCLUDED.volume1yr, liquidity = EXCLUDED.liquidity,
                     open_interest = EXCLUDED.open_interest, liquidity_amm = EXCLUDED.liquidity_amm,
                     liquidity_clob = EXCLUDED.liquidity_clob, competitive = EXCLUDED.competitive,
-                    comment_count = EXCLUDED.comment_count
+                    comment_count = EXCLUDED.comment_count,
+                    series_id = EXCLUDED.series_id
             """
+
+            upsert_event_tags_sql = f"""
+                INSERT INTO {self.TABLE_EVENT_TAGS} (event_id, tag_id)
+                VALUES (%s, %s)
+                ON CONFLICT (event_id, tag_id) DO NOTHING
+            """
+
             for i in range(0, len(events), batch_size):
                 batch = events[i : i + batch_size]
-                rows = []
+                series_rows = []
+                tags_rows = []
+                event_rows = []
+                event_tag_rows = []
+                unique_series_ids = set()
+                unique_tag_ids = set()
+                unique_event_tag_pairs = set()
+
                 for event in batch:
+                    # 1) Series (dimension) first
+                    series_data = self.prepare_series_data(event)
+                    if series_data and series_data["id"] not in unique_series_ids:
+                        unique_series_ids.add(series_data["id"])
+                        series_rows.append((
+                            series_data.get("id"),
+                            series_data.get("ticker"),
+                            series_data.get("slug"),
+                            series_data.get("title"),
+                            series_data.get("subtitle"),
+                            series_data.get("series_type"),
+                            series_data.get("recurrence"),
+                            series_data.get("description"),
+                        ))
+
+                    # 2) Tags (dimension)
+                    for raw_tag in event.get("tags", []) or []:
+                        tag_data = self.prepare_tag_data(raw_tag)
+                        if not tag_data:
+                            continue
+                        if tag_data["id"] not in unique_tag_ids:
+                            unique_tag_ids.add(tag_data["id"])
+                            tags_rows.append((tag_data.get("id"), tag_data.get("label")))
+
+                        event_id_raw = event.get("id")
+                        if event_id_raw:
+                            pair = (str(event_id_raw), tag_data["id"])
+                            if pair not in unique_event_tag_pairs:
+                                unique_event_tag_pairs.add(pair)
+                                event_tag_rows.append(pair)
+
+                    # 3) Event (fact) with series_id FK
                     d = self.prepare_event_data(event)
-                    rows.append((
+                    event_rows.append((
                         d.get("id"), d.get("ticker"), d.get("slug"), d.get("title"), d.get("description"),
                         d.get("start_date"), d.get("creation_date"), d.get("end_date"),
                         d.get("closed_time"), d.get("created_at"), d.get("updated_at"),
@@ -277,13 +414,30 @@ class DbUploader:
                         d.get("volume1mo"), d.get("volume1yr"),
                         d.get("liquidity"), d.get("open_interest"),
                         d.get("liquidity_amm"), d.get("liquidity_clob"),
-                        d.get("competitive"), d.get("comment_count"),
+                        d.get("competitive"), d.get("comment_count"), d.get("series_id"),
                     ))
                 try:
-                    execute_batch(cursor, insert_sql, rows, page_size=100)
+                    # One transaction per batch: series -> tags -> events -> event_tags.
+                    if series_rows:
+                        execute_batch(cursor, upsert_series_sql, series_rows, page_size=100)
+                    if tags_rows:
+                        execute_batch(cursor, upsert_tags_sql, tags_rows, page_size=200)
+
+                    execute_batch(cursor, insert_events_sql, event_rows, page_size=100)
+
+                    if event_tag_rows:
+                        execute_batch(cursor, upsert_event_tags_sql, event_tag_rows, page_size=300)
+
                     conn.commit()
-                    self.stats["events_inserted"] += len(rows)
-                    print(f"  [OK] Batch {i // batch_size + 1}: {len(rows)} events")
+                    self.stats["series_upserted"] += len(series_rows)
+                    self.stats["tags_upserted"] += len(tags_rows)
+                    self.stats["events_inserted"] += len(event_rows)
+                    self.stats["event_tags_upserted"] += len(event_tag_rows)
+                    print(
+                        f"  [OK] Batch {i // batch_size + 1}: "
+                        f"{len(event_rows)} events, {len(series_rows)} series, "
+                        f"{len(tags_rows)} tags, {len(event_tag_rows)} event_tags"
+                    )
                 except Exception as e:
                     conn.rollback()
                     msg = f"Error uploading events batch {i // batch_size + 1}: {e}"
@@ -486,6 +640,12 @@ class DbUploader:
         print("=" * 70)
         if self.stats["events_inserted"]:
             print(f"[OK] Events inserted/updated: {self.stats['events_inserted']}")
+        if self.stats["series_upserted"]:
+            print(f"[OK] Series inserted/updated: {self.stats['series_upserted']}")
+        if self.stats["tags_upserted"]:
+            print(f"[OK] Tags inserted/updated: {self.stats['tags_upserted']}")
+        if self.stats["event_tags_upserted"]:
+            print(f"[OK] Event tags inserted/updated: {self.stats['event_tags_upserted']}")
         if self.stats["markets_inserted"]:
             print(f"[OK] Markets inserted/updated: {self.stats['markets_inserted']}")
         if self.stats["redemptions_inserted"]:
