@@ -70,7 +70,61 @@ CREATE INDEX IF NOT EXISTS idx_events_ticker ON events(ticker);
 DO $$ BEGIN RAISE NOTICE '✅ Events table created'; END $$;
 
 -- ============================================================================
--- 2. MARKETS TABLE - Individual markets within events
+-- 2. EVENT METADATA TABLES - Series and tags normalization
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '🏷️ Creating series/tags tables...'; END $$;
+
+CREATE TABLE IF NOT EXISTS series (
+    id TEXT PRIMARY KEY,
+    ticker TEXT,
+    slug TEXT,
+    title TEXT,
+    subtitle TEXT,
+    series_type TEXT,
+    recurrence TEXT,
+    description TEXT
+);
+
+CREATE TABLE IF NOT EXISTS tags (
+    id TEXT PRIMARY KEY,
+    label TEXT
+);
+
+CREATE TABLE IF NOT EXISTS event_tags (
+    event_id TEXT NOT NULL,
+    tag_id TEXT NOT NULL,
+    PRIMARY KEY (event_id, tag_id),
+    CONSTRAINT fk_event_tags_event
+        FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+    CONSTRAINT fk_event_tags_tag
+        FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+);
+
+-- Ensure events table can reference series safely on existing databases.
+ALTER TABLE events
+    ADD COLUMN IF NOT EXISTS series_id TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'fk_events_series'
+          AND conrelid = 'events'::regclass
+    ) THEN
+        ALTER TABLE events
+            ADD CONSTRAINT fk_events_series
+            FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_events_series_id ON events(series_id);
+CREATE INDEX IF NOT EXISTS idx_event_tags_tag_id ON event_tags(tag_id);
+
+DO $$ BEGIN RAISE NOTICE '✅ Series/tags tables created'; END $$;
+
+-- ============================================================================
+-- 3. MARKETS TABLE - Individual markets within events
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE '📈 Creating markets table...'; END $$;
 
@@ -373,6 +427,30 @@ FROM events
 ORDER BY volume DESC
 LIMIT 100;
 
+-- Flattened events data for analytics (one row per event-tag relation)
+CREATE OR REPLACE VIEW events_flat_analytics AS
+SELECT
+    e.id,
+    e.title,
+    e.start_date,
+    e.end_date,
+    e.active,
+    e.closed,
+    e.volume,
+    e.liquidity,
+    s.id AS series_id,
+    s.title AS series_title,
+    s.series_type,
+    t.id AS tag_id,
+    t.label AS tag_label
+FROM events e
+LEFT JOIN series s
+    ON s.id = e.series_id
+LEFT JOIN event_tags et
+    ON et.event_id = e.id
+LEFT JOIN tags t
+    ON t.id = et.tag_id;
+
 -- User PnL Summary
 CREATE OR REPLACE VIEW user_pnl_summary AS
 SELECT 
@@ -570,6 +648,9 @@ DO $$ BEGIN RAISE NOTICE '✅ PolyStars database initialization complete!'; END 
 DO $$ BEGIN RAISE NOTICE ''; END $$;
 DO $$ BEGIN RAISE NOTICE '📊 Created tables:'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - events'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - series'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - tags'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - event_tags'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - markets'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - redemptions'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - user_closed_positions'; END $$;
@@ -581,6 +662,7 @@ DO $$ BEGIN RAISE NOTICE ''; END $$;
 DO $$ BEGIN RAISE NOTICE '📈 Created views:'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - events_summary'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - top_volume_events'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - events_flat_analytics'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - user_pnl_summary'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - recent_loads'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - genesis_status'; END $$;
