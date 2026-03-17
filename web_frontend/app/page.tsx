@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowUpDown, Copy, Loader2, Pencil, RotateCcw } from "lucide-react";
 
 const RAW_API_BASE = process.env.NEXT_PUBLIC_SEASON_API_BASE_URL ?? "http://localhost:8001";
 const API_BASE = RAW_API_BASE === "/" ? "" : RAW_API_BASE.replace(/\/$/, "");
 
-type TabKey = "overview" | "eligibility" | "claims" | "seasonClaims" | "winners" | "scenarios" | "reset";
+type TabKey = "overview" | "eligibility" | "claims" | "seasonClaims" | "winners" | "eventCards" | "scenarios" | "reset";
 
 type Season = {
   id: number;
@@ -79,6 +80,51 @@ type WinnerWalletForm = {
   minted_asset_address: string;
 };
 
+type EventCardRow = {
+  event_id: string;
+  event_ticker?: string | null;
+  event_slug?: string | null;
+  event_title?: string | null;
+  event_description?: string | null;
+  card_title?: string | null;
+  card_lore?: string | null;
+  primary_tag?: string | null;
+  secondary_tag?: string | null;
+  agent_name: string;
+  model_name: string;
+  prompt_version: string;
+  status: "ok" | "error";
+  error_text?: string | null;
+  generated_at: string;
+  updated_at: string;
+};
+
+type EventCardForm = {
+  event_id: string;
+  card_title: string;
+  card_lore: string;
+  primary_tag: string;
+  secondary_tag: string;
+  agent_name: string;
+  model_name: string;
+  prompt_version: string;
+  status: "ok" | "error";
+  error_text: string;
+};
+
+type EventCardsSortKey =
+  | "event_id"
+  | "event_ticker"
+  | "event_slug"
+  | "event_title"
+  | "primary_tag"
+  | "secondary_tag"
+  | "status"
+  | "model_name"
+  | "prompt_version"
+  | "generated_at"
+  | "updated_at";
+
 type LocalCountdownItem = { label: string; value: string };
 
 const tabs: Array<{ key: TabKey; label: string }> = [
@@ -87,6 +133,7 @@ const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "claims", label: "Claims Mint" },
   { key: "seasonClaims", label: "Season Claims" },
   { key: "winners", label: "Winner Wallets" },
+  { key: "eventCards", label: "Event Cards" },
   { key: "scenarios", label: "Scenarios" },
   { key: "reset", label: "Reset" },
 ];
@@ -129,6 +176,18 @@ function formatDuration(totalSeconds: number): string {
   if (minutes || parts.length > 0) parts.push(`${minutes}m`);
   parts.push(`${seconds}s`);
   return parts.join(" ");
+}
+
+function formatDateTimeHuman(raw: string): string {
+  const ts = Date.parse(raw);
+  if (Number.isNaN(ts)) return raw;
+  const dt = new Date(ts);
+  const dd = String(dt.getDate()).padStart(2, "0");
+  const mm = String(dt.getMonth() + 1).padStart(2, "0");
+  const yy = String(dt.getFullYear()).slice(-2);
+  const hh = String(dt.getHours()).padStart(2, "0");
+  const mi = String(dt.getMinutes()).padStart(2, "0");
+  return `${dd}.${mm}.${yy} ${hh}:${mi}`;
 }
 
 export default function HomePage() {
@@ -206,6 +265,27 @@ export default function HomePage() {
     minted_tx_hash: "",
     minted_asset_address: "",
   });
+  const [eventCardRows, setEventCardRows] = useState<EventCardRow[]>([]);
+  const [eventCardsLimit, setEventCardsLimit] = useState("500");
+  const [eventCardsStatusFilter, setEventCardsStatusFilter] = useState("all");
+  const [eventCardsEventIdFilter, setEventCardsEventIdFilter] = useState("");
+  const [eventCardsPage, setEventCardsPage] = useState(1);
+  const [eventCardsSortKey, setEventCardsSortKey] = useState<EventCardsSortKey>("generated_at");
+  const [eventCardsSortDir, setEventCardsSortDir] = useState<"asc" | "desc">("desc");
+  const [eventCardRegeneratingEventId, setEventCardRegeneratingEventId] = useState("");
+  const [eventCardForm, setEventCardForm] = useState<EventCardForm>({
+    event_id: "",
+    card_title: "",
+    card_lore: "",
+    primary_tag: "",
+    secondary_tag: "",
+    agent_name: "agent_1_quant",
+    model_name: "",
+    prompt_version: "v1",
+    status: "ok",
+    error_text: "",
+  });
+  const eventCardsRowsPerPage = 20;
 
   const seasonOptions = useMemo(() => seasons.map((s) => ({ value: s.id, label: `id=${s.id} | ${s.type}#${s.season_number}` })), [seasons]);
   const claimSeasonInfoLines = useMemo(() => claimSeasonInfo.split("\n"), [claimSeasonInfo]);
@@ -299,6 +379,70 @@ export default function HomePage() {
     minted_tx_hash: row.minted_tx_hash ?? "",
     minted_asset_address: row.minted_asset_address ?? "",
   });
+
+  const buildEmptyEventCardForm = (): EventCardForm => ({
+    event_id: "",
+    card_title: "",
+    card_lore: "",
+    primary_tag: "",
+    secondary_tag: "",
+    agent_name: "agent_1_quant",
+    model_name: "",
+    prompt_version: "v1",
+    status: "ok",
+    error_text: "",
+  });
+
+  const mapEventCardRowToForm = (row: EventCardRow): EventCardForm => ({
+    event_id: row.event_id,
+    card_title: row.card_title ?? "",
+    card_lore: row.card_lore ?? "",
+    primary_tag: row.primary_tag ?? "",
+    secondary_tag: row.secondary_tag ?? "",
+    agent_name: row.agent_name ?? "agent_1_quant",
+    model_name: row.model_name ?? "",
+    prompt_version: row.prompt_version ?? "v1",
+    status: row.status ?? "ok",
+    error_text: row.error_text ?? "",
+  });
+  const getEventCardsSortValue = (row: EventCardRow, key: EventCardsSortKey): string => {
+    const value = row[key];
+    if (value == null) return "";
+    return String(value).toLowerCase();
+  };
+  const toggleEventCardsSort = (key: EventCardsSortKey) => {
+    if (eventCardsSortKey === key) {
+      setEventCardsSortDir((prev) => (prev === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setEventCardsSortKey(key);
+    setEventCardsSortDir("asc");
+  };
+  const copyText = async (text: string) => {
+    const value = text.trim();
+    if (!value) return;
+    await navigator.clipboard.writeText(value);
+    setOk(`Copied: ${value}`);
+  };
+  const sortedEventCardRows = useMemo(() => {
+    const rows = [...eventCardRows];
+    rows.sort((a, b) => {
+      const left = getEventCardsSortValue(a, eventCardsSortKey);
+      const right = getEventCardsSortValue(b, eventCardsSortKey);
+      if (left === right) return 0;
+      const result = left > right ? 1 : -1;
+      return eventCardsSortDir === "asc" ? result : -result;
+    });
+    return rows;
+  }, [eventCardRows, eventCardsSortDir, eventCardsSortKey]);
+  const eventCardsTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(sortedEventCardRows.length / eventCardsRowsPerPage)),
+    [sortedEventCardRows.length],
+  );
+  const pagedEventCardRows = useMemo(() => {
+    const start = (eventCardsPage - 1) * eventCardsRowsPerPage;
+    return sortedEventCardRows.slice(start, start + eventCardsRowsPerPage);
+  }, [eventCardsPage, sortedEventCardRows]);
 
   const seasonInfoLineClass = (line: string): string => {
     const trimmed = line.trim();
@@ -430,6 +574,17 @@ export default function HomePage() {
     setWinnerRows(data.rows);
   };
 
+  const refreshEventCardRows = async () => {
+    const safeLimit = Math.max(1, Number(eventCardsLimit) || 500);
+    const params = new URLSearchParams();
+    params.set("limit", String(safeLimit));
+    if (eventCardsStatusFilter !== "all") params.set("status", eventCardsStatusFilter);
+    if (eventCardsEventIdFilter.trim()) params.set("event_id", eventCardsEventIdFilter.trim());
+    const data = await fetchJSON<{ rows: EventCardRow[] }>(`/api/event-cards?${params.toString()}`);
+    setEventCardRows(data.rows);
+    setEventCardsPage(1);
+  };
+
   useEffect(() => {
     void run(async () => {
       const cfg = await fetchJSON<{ default_solana_recipient: string }>("/api/config");
@@ -497,6 +652,18 @@ export default function HomePage() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, winnerSeasonFilterId]);
+
+  useEffect(() => {
+    if (tab !== "eventCards") return;
+    void run(refreshEventCardRows);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  useEffect(() => {
+    if (eventCardsPage > eventCardsTotalPages) {
+      setEventCardsPage(eventCardsTotalPages);
+    }
+  }, [eventCardsPage, eventCardsTotalPages]);
 
   useEffect(() => {
     const wsUrl = API_BASE.replace(/^http/, "ws") + "/ws/events";
@@ -981,6 +1148,348 @@ export default function HomePage() {
               ))}
             </tbody>
           </table>
+        </section>
+      ) : null}
+
+      {tab === "eventCards" ? (
+        <section className="panel">
+          <div className="row">
+            <label>status</label>
+            <select value={eventCardsStatusFilter} onChange={(e) => setEventCardsStatusFilter(e.target.value)}>
+              <option value="all">all</option>
+              <option value="ok">ok</option>
+              <option value="error">error</option>
+            </select>
+            <label>event_id</label>
+            <input
+              value={eventCardsEventIdFilter}
+              onChange={(e) => setEventCardsEventIdFilter(e.target.value)}
+              placeholder="optional exact event_id"
+              style={{ minWidth: 300 }}
+            />
+            <label>limit</label>
+            <input value={eventCardsLimit} onChange={(e) => setEventCardsLimit(e.target.value)} style={{ width: 90 }} />
+            <button onClick={() => void run(refreshEventCardRows)}>Refresh rows</button>
+            <button
+              onClick={() => {
+                setEventCardForm(buildEmptyEventCardForm());
+              }}
+            >
+              Clear form
+            </button>
+          </div>
+
+          <div className="panel">
+            <div className="muted">Edit selected event card</div>
+            <div className="row">
+              <label>event_id</label>
+              <input
+                value={eventCardForm.event_id}
+                onChange={(e) => setEventCardForm((prev) => ({ ...prev, event_id: e.target.value }))}
+                style={{ minWidth: 340 }}
+              />
+              <label>status</label>
+              <select
+                value={eventCardForm.status}
+                onChange={(e) => setEventCardForm((prev) => ({ ...prev, status: e.target.value as "ok" | "error" }))}
+              >
+                <option value="ok">ok</option>
+                <option value="error">error</option>
+              </select>
+              <label>primary_tag</label>
+              <input
+                value={eventCardForm.primary_tag}
+                onChange={(e) => setEventCardForm((prev) => ({ ...prev, primary_tag: e.target.value }))}
+              />
+              <label>secondary_tag</label>
+              <input
+                value={eventCardForm.secondary_tag}
+                onChange={(e) => setEventCardForm((prev) => ({ ...prev, secondary_tag: e.target.value }))}
+              />
+            </div>
+            <div className="row">
+              <label>card_title</label>
+              <input
+                value={eventCardForm.card_title}
+                onChange={(e) => setEventCardForm((prev) => ({ ...prev, card_title: e.target.value }))}
+                style={{ minWidth: 360 }}
+              />
+            </div>
+            <div className="row" style={{ alignItems: "flex-start" }}>
+              <label>card_lore</label>
+              <textarea
+                value={eventCardForm.card_lore}
+                onChange={(e) => setEventCardForm((prev) => ({ ...prev, card_lore: e.target.value }))}
+                rows={8}
+                style={{ minWidth: 760, width: "100%", maxWidth: 1100 }}
+              />
+            </div>
+            <div className="row">
+              <label>agent_name</label>
+              <input
+                value={eventCardForm.agent_name}
+                onChange={(e) => setEventCardForm((prev) => ({ ...prev, agent_name: e.target.value }))}
+              />
+              <label>model_name</label>
+              <input
+                value={eventCardForm.model_name}
+                onChange={(e) => setEventCardForm((prev) => ({ ...prev, model_name: e.target.value }))}
+                style={{ minWidth: 260 }}
+              />
+              <label>prompt_version</label>
+              <input
+                value={eventCardForm.prompt_version}
+                onChange={(e) => setEventCardForm((prev) => ({ ...prev, prompt_version: e.target.value }))}
+              />
+              <label>error_text</label>
+              <input
+                value={eventCardForm.error_text}
+                onChange={(e) => setEventCardForm((prev) => ({ ...prev, error_text: e.target.value }))}
+                style={{ minWidth: 420 }}
+              />
+            </div>
+            <div className="row">
+              <button
+                onClick={() =>
+                  void run(async () => {
+                    const eventId = eventCardForm.event_id.trim();
+                    if (!eventId) throw new Error("event_id is required");
+                    await fetchJSON<{ row: EventCardRow }>(`/api/event-cards/${encodeURIComponent(eventId)}`, {
+                      method: "PUT",
+                      body: JSON.stringify({
+                        card_title: eventCardForm.card_title.trim() || null,
+                        card_lore: eventCardForm.card_lore.trim() || null,
+                        primary_tag: eventCardForm.primary_tag.trim() || null,
+                        secondary_tag: eventCardForm.secondary_tag.trim() || null,
+                        agent_name: eventCardForm.agent_name.trim() || null,
+                        model_name: eventCardForm.model_name.trim() || null,
+                        prompt_version: eventCardForm.prompt_version.trim() || null,
+                        status: eventCardForm.status,
+                        error_text: eventCardForm.error_text.trim() || null,
+                      }),
+                    });
+                    setOk(`Event card ${eventId} updated`);
+                    await refreshEventCardRows();
+                  })
+                }
+              >
+                Save changes
+              </button>
+              <button
+                disabled={Boolean(eventCardRegeneratingEventId)}
+                onClick={() =>
+                  void run(async () => {
+                    const eventId = eventCardForm.event_id.trim();
+                    if (!eventId) throw new Error("event_id is required for regenerate");
+                    setEventCardRegeneratingEventId(eventId);
+                    try {
+                      const out = await fetchJSON<{ status: string; row: EventCardRow }>(
+                        `/api/event-cards/${encodeURIComponent(eventId)}/regenerate`,
+                        { method: "POST" },
+                      );
+                      setEventCardForm(mapEventCardRowToForm(out.row));
+                      setOk(`Preview regenerated for ${eventId}. Click Save changes to persist.`);
+                      await refreshEventCardRows();
+                    } finally {
+                      setEventCardRegeneratingEventId("");
+                    }
+                  })
+                }
+              >
+                {eventCardRegeneratingEventId === eventCardForm.event_id.trim() ? "Regenerating..." : "Regenerate selected event"}
+              </button>
+              {eventCardRegeneratingEventId ? (
+                <span className="muted">Regeneration in progress for: {eventCardRegeneratingEventId}</span>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="overflow-auto rounded-xl border border-slate-700 bg-slate-900 shadow-sm">
+            <table className="event-cards-table w-full border-collapse text-xs text-slate-200">
+              <thead className="sticky top-0 z-30 bg-slate-800">
+                <tr>
+                  <th className="sticky left-0 z-40 border-b border-r border-slate-700 bg-slate-800 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("event_id")}>
+                      event_id <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("event_ticker")}>
+                      ticker <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("event_slug")}>
+                      slug <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("event_title")}>
+                      event_title <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">event_description</th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">card_title</th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">card_lore</th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("primary_tag")}>
+                      primary_tag <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("secondary_tag")}>
+                      secondary_tag <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("status")}>
+                      status <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("model_name")}>
+                      model <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("prompt_version")}>
+                      prompt <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("generated_at")}>
+                      generated_at <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("updated_at")}>
+                      updated_at <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="sticky right-0 z-40 border-b border-l border-slate-700 bg-slate-800 px-3 py-2 text-left font-semibold">
+                    actions
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {pagedEventCardRows.map((row, idx) => {
+                  const stripe = idx % 2 === 0 ? "bg-slate-900" : "bg-slate-800/60";
+                  const statusClass = row.status === "ok"
+                    ? "bg-emerald-900/40 text-emerald-300 border-emerald-700"
+                    : "bg-rose-900/40 text-rose-300 border-rose-700";
+                  return (
+                    <tr key={row.event_id} className={`${stripe} hover:bg-slate-800`}>
+                      <td className={`sticky left-0 z-20 border-b border-r border-slate-700 px-3 py-2 ${stripe}`}>
+                        <div className="flex h-8 items-center gap-1.5">
+                          <span className="max-w-[180px] truncate font-medium" title={row.event_id}>{row.event_id}</span>
+                          <button
+                            title="Copy event_id"
+                            className="rounded p-1 text-slate-400 hover:bg-slate-700 hover:text-slate-100"
+                            onClick={() => void copyText(row.event_id)}
+                          >
+                            <Copy size={13} />
+                          </button>
+                        </div>
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2"><div className="h-8 truncate" title={row.event_ticker ?? ""}>{row.event_ticker ?? ""}</div></td>
+                      <td className="border-b border-slate-700 px-3 py-2">
+                        <div className="flex h-8 items-center gap-1.5">
+                          <span className="max-w-[140px] truncate" title={row.event_slug ?? ""}>{row.event_slug ?? ""}</span>
+                          {(row.event_slug ?? "").trim() ? (
+                            <button
+                              title="Copy slug"
+                              className="rounded p-1 text-slate-400 hover:bg-slate-700 hover:text-slate-100"
+                              onClick={() => void copyText(row.event_slug ?? "")}
+                            >
+                              <Copy size={13} />
+                            </button>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2"><div className="h-8 max-w-[220px] truncate" title={row.event_title ?? ""}>{row.event_title ?? ""}</div></td>
+                      <td className="border-b border-slate-700 px-3 py-2"><div className="h-8 max-w-[260px] truncate" title={row.event_description ?? ""}>{row.event_description ?? ""}</div></td>
+                      <td className="border-b border-slate-700 px-3 py-2"><div className="h-8 max-w-[220px] truncate" title={row.card_title ?? ""}>{row.card_title ?? ""}</div></td>
+                      <td className="border-b border-slate-700 px-3 py-2"><div className="h-8 max-w-[260px] truncate" title={row.card_lore ?? ""}>{row.card_lore ?? ""}</div></td>
+                      <td className="border-b border-slate-700 px-3 py-2">
+                        {row.primary_tag ? <span className="inline-flex rounded-full bg-indigo-900/40 px-2 py-1 text-[11px] font-medium text-indigo-200">{row.primary_tag}</span> : null}
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2">
+                        {row.secondary_tag ? <span className="inline-flex rounded-full bg-purple-900/40 px-2 py-1 text-[11px] font-medium text-purple-200">{row.secondary_tag}</span> : null}
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2">
+                        <span className={`inline-flex rounded-full border px-2 py-1 text-[11px] font-semibold ${statusClass}`}>{row.status}</span>
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2"><span className="font-mono text-[11px] text-slate-300">{row.model_name}</span></td>
+                      <td className="border-b border-slate-700 px-3 py-2"><div className="h-8 max-w-[100px] truncate" title={row.prompt_version}>{row.prompt_version}</div></td>
+                      <td className="border-b border-slate-700 px-3 py-2"><div className="h-8 whitespace-nowrap text-slate-300">{formatDateTimeHuman(row.generated_at)}</div></td>
+                      <td className="border-b border-slate-700 px-3 py-2"><div className="h-8 whitespace-nowrap text-slate-300">{formatDateTimeHuman(row.updated_at)}</div></td>
+                      <td className={`sticky right-0 z-20 border-b border-l border-slate-700 px-3 py-2 ${stripe}`}>
+                        <div className="flex h-8 items-center gap-1">
+                          <button
+                            title="Edit row"
+                            className="rounded p-1 text-slate-400 hover:bg-slate-700 hover:text-slate-100"
+                            onClick={() => {
+                              setEventCardForm(mapEventCardRowToForm(row));
+                            }}
+                          >
+                            <Pencil size={14} />
+                          </button>
+                          <button
+                            title="Regenerate row"
+                            disabled={Boolean(eventCardRegeneratingEventId)}
+                            className="rounded p-1 text-slate-400 hover:bg-slate-700 hover:text-slate-100"
+                            onClick={() =>
+                              void run(async () => {
+                                // Immediately show currently selected row values in editor form.
+                                setEventCardForm(mapEventCardRowToForm(row));
+                                setEventCardRegeneratingEventId(row.event_id);
+                                try {
+                                  const out = await fetchJSON<{ status: string; row: EventCardRow }>(
+                                    `/api/event-cards/${encodeURIComponent(row.event_id)}/regenerate`,
+                                    { method: "POST" },
+                                  );
+                                  setEventCardForm(mapEventCardRowToForm(out.row));
+                                  setOk(`Preview regenerated for ${row.event_id}. Click Save changes to persist.`);
+                                  await refreshEventCardRows();
+                                } finally {
+                                  setEventCardRegeneratingEventId("");
+                                }
+                              })
+                            }
+                          >
+                            {eventCardRegeneratingEventId === row.event_id ? (
+                              <Loader2 size={14} className="animate-spin" />
+                            ) : (
+                              <RotateCcw size={14} />
+                            )}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="muted">
+              Rows: {eventCardRows.length} | Page {eventCardsPage}/{eventCardsTotalPages} | 20 per page
+            </span>
+            <div className="row" style={{ marginBottom: 0 }}>
+              <button
+                onClick={() => setEventCardsPage((prev) => Math.max(1, prev - 1))}
+                disabled={eventCardsPage <= 1}
+              >
+                Prev
+              </button>
+              <button
+                onClick={() => setEventCardsPage((prev) => Math.min(eventCardsTotalPages, prev + 1))}
+                disabled={eventCardsPage >= eventCardsTotalPages}
+              >
+                Next
+              </button>
+            </div>
+          </div>
         </section>
       ) : null}
 

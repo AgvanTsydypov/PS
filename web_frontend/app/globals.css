@@ -1,3 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 :root {
   color-scheme: dark;
   --bg: #0f1115;
@@ -102,14 +106,14 @@ main {
   color: var(--danger);
 }
 
-table {
+table:not(.event-cards-table) {
   width: 100%;
   border-collapse: collapse;
   font-size: 12px;
 }
 
-th,
-td {
+table:not(.event-cards-table) th,
+table:not(.event-cards-table) td {
   border: 1px solid var(--border);
   padding: 6px;
   text-align: left;

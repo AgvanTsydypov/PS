@@ -122,6 +122,18 @@ class WinnerWalletsUpsertRequest(BaseModel):
     minted_asset_address: Optional[str] = None
 
 
+class EventCardUpdateRequest(BaseModel):
+    card_title: Optional[str] = None
+    card_lore: Optional[str] = None
+    primary_tag: Optional[str] = None
+    secondary_tag: Optional[str] = None
+    agent_name: Optional[str] = None
+    model_name: Optional[str] = None
+    prompt_version: Optional[str] = None
+    status: str = "ok"
+    error_text: Optional[str] = None
+
+
 class WsHub:
     def __init__(self) -> None:
         self._connections: List[WebSocket] = []
@@ -1369,6 +1381,15 @@ class SeasonWorkbenchService:
                 payload[key] = value.astimezone(timezone.utc).isoformat()
         return payload
 
+    @staticmethod
+    def _format_event_card_row(row: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(row)
+        for key in ("generated_at", "updated_at"):
+            value = payload.get(key)
+            if isinstance(value, datetime):
+                payload[key] = value.astimezone(timezone.utc).isoformat()
+        return payload
+
     def list_winner_wallet_rows(self, season_id: Optional[int], limit: int) -> List[Dict[str, Any]]:
         safe_limit = min(max(limit, 1), 1000)
         conn = self.manager.get_connection()
@@ -1590,6 +1611,287 @@ class SeasonWorkbenchService:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    def list_event_cards(
+        self,
+        *,
+        limit: int,
+        status: Optional[str],
+        event_id: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 2000)
+        status_filter = (status or "").strip().lower()
+        if status_filter and status_filter not in {"ok", "error"}:
+            raise ValueError("status must be one of: ok, error")
+        event_id_filter = (event_id or "").strip()
+
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                if event_id_filter and status_filter:
+                    cursor.execute(
+                        """
+                        SELECT
+                            ec.event_id,
+                            e.ticker AS event_ticker,
+                            e.slug AS event_slug,
+                            e.title AS event_title,
+                            e.description AS event_description,
+                            ec.card_title,
+                            ec.card_lore,
+                            ec.primary_tag,
+                            ec.secondary_tag,
+                            ec.agent_name,
+                            ec.model_name,
+                            ec.prompt_version,
+                            ec.status,
+                            ec.error_text,
+                            ec.generated_at,
+                            ec.updated_at
+                        FROM event_cards ec
+                        LEFT JOIN events e ON e.id = ec.event_id
+                        WHERE ec.event_id = %s
+                          AND ec.status = %s
+                        ORDER BY ec.generated_at DESC, ec.event_id ASC
+                        LIMIT %s
+                        """,
+                        (event_id_filter, status_filter, safe_limit),
+                    )
+                elif event_id_filter:
+                    cursor.execute(
+                        """
+                        SELECT
+                            ec.event_id,
+                            e.ticker AS event_ticker,
+                            e.slug AS event_slug,
+                            e.title AS event_title,
+                            e.description AS event_description,
+                            ec.card_title,
+                            ec.card_lore,
+                            ec.primary_tag,
+                            ec.secondary_tag,
+                            ec.agent_name,
+                            ec.model_name,
+                            ec.prompt_version,
+                            ec.status,
+                            ec.error_text,
+                            ec.generated_at,
+                            ec.updated_at
+                        FROM event_cards ec
+                        LEFT JOIN events e ON e.id = ec.event_id
+                        WHERE ec.event_id = %s
+                        ORDER BY ec.generated_at DESC, ec.event_id ASC
+                        LIMIT %s
+                        """,
+                        (event_id_filter, safe_limit),
+                    )
+                elif status_filter:
+                    cursor.execute(
+                        """
+                        SELECT
+                            ec.event_id,
+                            e.ticker AS event_ticker,
+                            e.slug AS event_slug,
+                            e.title AS event_title,
+                            e.description AS event_description,
+                            ec.card_title,
+                            ec.card_lore,
+                            ec.primary_tag,
+                            ec.secondary_tag,
+                            ec.agent_name,
+                            ec.model_name,
+                            ec.prompt_version,
+                            ec.status,
+                            ec.error_text,
+                            ec.generated_at,
+                            ec.updated_at
+                        FROM event_cards ec
+                        LEFT JOIN events e ON e.id = ec.event_id
+                        WHERE ec.status = %s
+                        ORDER BY ec.generated_at DESC, ec.event_id ASC
+                        LIMIT %s
+                        """,
+                        (status_filter, safe_limit),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT
+                            ec.event_id,
+                            e.ticker AS event_ticker,
+                            e.slug AS event_slug,
+                            e.title AS event_title,
+                            e.description AS event_description,
+                            ec.card_title,
+                            ec.card_lore,
+                            ec.primary_tag,
+                            ec.secondary_tag,
+                            ec.agent_name,
+                            ec.model_name,
+                            ec.prompt_version,
+                            ec.status,
+                            ec.error_text,
+                            ec.generated_at,
+                            ec.updated_at
+                        FROM event_cards ec
+                        LEFT JOIN events e ON e.id = ec.event_id
+                        ORDER BY ec.generated_at DESC, ec.event_id ASC
+                        LIMIT %s
+                        """,
+                        (safe_limit,),
+                    )
+                rows = [dict(row) for row in cursor.fetchall()]
+                return [self._format_event_card_row(row) for row in rows]
+        finally:
+            conn.close()
+
+    def update_event_card(self, event_id: str, req: EventCardUpdateRequest) -> Dict[str, Any]:
+        target_event_id = event_id.strip()
+        if not target_event_id:
+            raise ValueError("event_id is required")
+        status = req.status.strip().lower()
+        if status not in {"ok", "error"}:
+            raise ValueError("status must be one of: ok, error")
+
+        card_title = self._normalize_optional_text(req.card_title)
+        card_lore = self._normalize_optional_text(req.card_lore)
+        primary_tag = self._normalize_optional_text(req.primary_tag)
+        secondary_tag = self._normalize_optional_text(req.secondary_tag)
+        agent_name = self._normalize_optional_text(req.agent_name)
+        model_name = self._normalize_optional_text(req.model_name)
+        prompt_version = self._normalize_optional_text(req.prompt_version)
+        error_text = self._normalize_optional_text(req.error_text)
+
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(
+                    """
+                    UPDATE event_cards
+                    SET
+                        card_title = %s,
+                        card_lore = %s,
+                        primary_tag = %s,
+                        secondary_tag = %s,
+                        agent_name = COALESCE(%s, agent_name),
+                        model_name = COALESCE(%s, model_name),
+                        prompt_version = COALESCE(%s, prompt_version),
+                        status = %s,
+                        error_text = %s,
+                        updated_at = NOW()
+                    WHERE event_id = %s
+                    RETURNING
+                        event_id,
+                        card_title,
+                        card_lore,
+                        primary_tag,
+                        secondary_tag,
+                        agent_name,
+                        model_name,
+                        prompt_version,
+                        status,
+                        error_text,
+                        generated_at,
+                        updated_at
+                    """,
+                    (
+                        card_title,
+                        card_lore,
+                        primary_tag,
+                        secondary_tag,
+                        agent_name,
+                        model_name,
+                        prompt_version,
+                        status,
+                        error_text,
+                        target_event_id,
+                    ),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    raise ValueError(f"Event card for event_id={target_event_id} not found")
+            conn.commit()
+            return self._format_event_card_row(dict(row))
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def regenerate_event_card(self, event_id: str) -> Dict[str, Any]:
+        target_event_id = event_id.strip()
+        if not target_event_id:
+            raise ValueError("event_id is required")
+
+        generator = self.scheduler._get_event_card_generator()
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                rows = self.scheduler._fetch_event_card_payloads(cursor, [target_event_id])
+            payload_row = rows[0] if rows else None
+            if not payload_row:
+                raise ValueError(f"Event payload not found for event_id={target_event_id}")
+
+            payload = {
+                "title": payload_row.get("title"),
+                "description": payload_row.get("description"),
+                "series": {
+                    "title": payload_row.get("series_title"),
+                    "recurrence": payload_row.get("series_recurrence"),
+                },
+                "tags": payload_row.get("tags") or [],
+            }
+            try:
+                card = generator.generate(payload)
+            except Exception as exc:
+                raise ValueError(f"Failed to regenerate event card for event_id={target_event_id}: {exc}")
+
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        e.id AS event_id,
+                        e.ticker AS event_ticker,
+                        e.slug AS event_slug,
+                        e.title AS event_title,
+                        e.description AS event_description,
+                        ec.card_title,
+                        ec.card_lore,
+                        ec.primary_tag,
+                        ec.secondary_tag,
+                        ec.agent_name,
+                        ec.model_name,
+                        ec.prompt_version,
+                        ec.status,
+                        ec.error_text,
+                        ec.generated_at,
+                        ec.updated_at
+                    FROM events e
+                    LEFT JOIN event_cards ec ON ec.event_id = e.id
+                    WHERE e.id = %s
+                    LIMIT 1
+                    """,
+                    (target_event_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    raise RuntimeError(f"Event {target_event_id} not found")
+
+            preview = dict(row)
+            generated = card.model_dump()
+            preview["card_title"] = generated.get("card_title")
+            preview["card_lore"] = generated.get("card_lore")
+            preview["primary_tag"] = generated.get("primary_tag")
+            preview["secondary_tag"] = generated.get("secondary_tag")
+            preview["agent_name"] = str(preview.get("agent_name") or self.scheduler.event_cards_agent_name)
+            preview["model_name"] = str(generator.model)
+            preview["prompt_version"] = str(generator.prompt_version)
+            preview["status"] = "ok"
+            preview["error_text"] = None
+            # Preview-only regeneration: DB is not modified here.
+            return self._format_event_card_row(preview)
         finally:
             conn.close()
 
@@ -1839,6 +2141,37 @@ def delete_winner(row_id: int) -> Dict[str, Any]:
     try:
         service.delete_winner_wallet_row(row_id=row_id)
         return {"status": "ok", "message": f"Winner wallet row {row_id} deleted"}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/event-cards")
+def get_event_cards(
+    limit: int = 500,
+    status: Optional[str] = None,
+    event_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    try:
+        rows = service.list_event_cards(limit=limit, status=status, event_id=event_id)
+        return {"rows": rows}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.put("/api/event-cards/{event_id}")
+def update_event_card(event_id: str, req: EventCardUpdateRequest) -> Dict[str, Any]:
+    try:
+        row = service.update_event_card(event_id=event_id, req=req)
+        return {"row": row}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/event-cards/{event_id}/regenerate")
+def regenerate_event_card(event_id: str) -> Dict[str, Any]:
+    try:
+        row = service.regenerate_event_card(event_id=event_id)
+        return {"status": "ok", "row": row}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
