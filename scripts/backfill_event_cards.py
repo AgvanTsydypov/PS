@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from typing import Any, Dict, List, Optional
 
 import psycopg2
@@ -277,6 +278,26 @@ def main() -> None:
     parser.add_argument("--skip-genesis", action="store_true", help="Exclude Genesis-period events from candidate selection.")
     parser.add_argument("--local", action="store_true", help="Use LOCAL_DB_* env settings first.")
     parser.add_argument("--model", type=str, default="", help="Override model for this run.")
+    parser.add_argument("--max-retries", type=int, default=3, help="Retries per event on generation failure.")
+    parser.add_argument("--retry-delay-seconds", type=float, default=1.5, help="Base delay between retries.")
+    parser.add_argument(
+        "--fallback-empty-tags",
+        action="store_true",
+        default=True,
+        help="Use fallback tag when event has no tags (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-fallback-empty-tags",
+        action="store_false",
+        dest="fallback_empty_tags",
+        help="Disable fallback tag for empty tags.",
+    )
+    parser.add_argument(
+        "--fallback-tag",
+        type=str,
+        default="General",
+        help="Fallback tag label used when tags are empty and fallback is enabled.",
+    )
     parser.add_argument("--prompt-version", type=str, default="v1", help="Prompt version to store in event_cards.")
     parser.add_argument("--agent-name", type=str, default="agent_1_quant", help="Agent name to store in event_cards.")
     args = parser.parse_args()
@@ -285,6 +306,10 @@ def main() -> None:
         raise ValueError("--batch-size must be > 0")
     if args.limit < 0:
         raise ValueError("--limit must be >= 0")
+    if args.max_retries <= 0:
+        raise ValueError("--max-retries must be > 0")
+    if args.retry_delay_seconds < 0:
+        raise ValueError("--retry-delay-seconds must be >= 0")
     include_genesis = not args.skip_genesis
 
     conn = psycopg2.connect(**_db_params(use_local_db=args.local))
@@ -314,7 +339,8 @@ def main() -> None:
         print(
             f"Starting event cards backfill: model={model_name}, batch_size={args.batch_size}, "
             f"limit={args.limit or 'unlimited'}, retry_errors={args.retry_errors}, "
-            f"include_genesis={include_genesis}"
+            f"include_genesis={include_genesis}, max_retries={args.max_retries}, "
+            f"fallback_empty_tags={args.fallback_empty_tags}"
         )
 
         while True:
@@ -359,22 +385,38 @@ def main() -> None:
                     },
                     "tags": payload_row.get("tags") or [],
                 }
-                try:
-                    card = generator.generate(payload)
+                tags = payload["tags"]
+                if (not tags) and args.fallback_empty_tags:
+                    fallback_tag = (args.fallback_tag or "").strip() or "General"
+                    payload["tags"] = [fallback_tag]
+
+                last_error: Optional[str] = None
+                generated: Optional[Dict[str, Any]] = None
+                for attempt in range(1, args.max_retries + 1):
+                    try:
+                        card = generator.generate(payload)
+                        generated = card.model_dump()
+                        break
+                    except Exception as exc:
+                        last_error = str(exc)
+                        if attempt < args.max_retries and args.retry_delay_seconds > 0:
+                            time.sleep(args.retry_delay_seconds * attempt)
+
+                if generated is not None:
                     _upsert_ok(
                         conn=conn,
                         event_id=event_id,
-                        generated=card.model_dump(),
+                        generated=generated,
                         model_name=model_name,
                         prompt_version=prompt_version,
                         agent_name=args.agent_name,
                     )
                     total_success += 1
-                except Exception as exc:
+                else:
                     _upsert_error(
                         conn=conn,
                         event_id=event_id,
-                        error_text=str(exc),
+                        error_text=last_error or "Generation failed after retries",
                         model_name=model_name,
                         prompt_version=prompt_version,
                         agent_name=args.agent_name,
