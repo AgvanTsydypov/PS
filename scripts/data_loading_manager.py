@@ -49,13 +49,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Genesis period definition
-# GENESIS_START_DATE = date(2024, 7, 6)
-# GENESIS_END_DATE = date(2026, 1, 5)
-
-# For testing - use shorter period:
-GENESIS_START_DATE = date(2024, 6, 1)
-GENESIS_END_DATE = date(2026, 3, 14)
+def _env_date(name: str, default: date) -> date:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip()
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be in YYYY-MM-DD format, got: {value}") from exc
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -72,6 +74,14 @@ def _env_int_or_none(name: str, default: Optional[int]) -> Optional[int]:
     if value == "" or value.lower() in {"none", "null"}:
         return None
     return int(value)
+
+
+# Genesis period definition (configurable via .env)
+# Example:
+#   GENESIS_START_DATE=2024-07-06
+#   GENESIS_END_DATE=2026-01-05
+GENESIS_START_DATE = _env_date("GENESIS_START_DATE", date(2024, 6, 1))
+GENESIS_END_DATE = _env_date("GENESIS_END_DATE", date(2026, 2, 6))
 
 
 GENESIS_MIN_VOLUME = _env_int("GENESIS_MIN_VOLUME", 5_000)  # 100M in prod
