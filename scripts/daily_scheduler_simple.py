@@ -45,7 +45,7 @@ import argparse
 import tempfile
 import requests
 from datetime import datetime, date, timedelta, timezone
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 import psycopg2.extras
 
@@ -63,6 +63,7 @@ from scripts.data_loading_manager import (
     RESOLUTION_READY_OFFSET_DAYS,
     ORIGIN_SNAPSHOT_OFFSET_DAYS,
 )
+from scripts.ai import Agent1QuantCardGenerator
 
 STANDARD_SEASON_TOTAL_SUPPLY_TEST = 10
 STANDARD_SEASON_ACTIVE_DAYS = 9
@@ -73,6 +74,13 @@ ORIGIN_TOP_WALLETS_GENESIS = 20
 GENESIS_SEASON_TOTAL_SUPPLY_TEST = 15
 GENESIS_SEASON_FAR_FUTURE_END = datetime(9999, 12, 31, tzinfo=timezone.utc)
 GAMMA_API_BASE_URL = "https://gamma-api.polymarket.com"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ==========================================
@@ -340,6 +348,16 @@ class SimplifiedScheduler:
         self.use_closed_time_pipeline = os.getenv("POLYSTARS_USE_CLOSED_TIME_PIPELINE", "false").strip().lower() in {"1", "true", "yes", "on"}
         self.pending_poll_limit = int(os.getenv("POLYSTARS_PENDING_POLL_LIMIT", "1000"))
         self.ready_batch_limit = int(os.getenv("POLYSTARS_READY_BATCH_LIMIT", "1000"))
+        self.event_cards_post_downstream_enabled = _env_bool(
+            "POLYSTARS_EVENT_CARDS_POST_DOWNSTREAM_ENABLED",
+            _env_bool("POLYSTARS_EVENT_CARDS_PRE_SNAPSHOT_ENABLED", True),
+        )
+        self.event_cards_batch_size = int(os.getenv("POLYSTARS_EVENT_CARDS_BATCH_SIZE", "25"))
+        self.event_cards_max_per_run = int(os.getenv("POLYSTARS_EVENT_CARDS_MAX_PER_RUN", "200"))
+        self.event_cards_model = os.getenv("POLYSTARS_EVENT_CARDS_MODEL", "").strip()
+        self.event_cards_prompt_version = os.getenv("POLYSTARS_EVENT_CARDS_PROMPT_VERSION", "v1").strip() or "v1"
+        self.event_cards_agent_name = os.getenv("POLYSTARS_EVENT_CARDS_AGENT_NAME", "agent_1_quant").strip() or "agent_1_quant"
+        self._event_card_generator: Optional[Agent1QuantCardGenerator] = None
         
         # Script configurations
         self.scripts = {
@@ -458,6 +476,300 @@ class SimplifiedScheduler:
             f"pending={still_pending:,}, errors={errors:,}"
         )
         return {"checked": checked, "ready": moved_to_ready, "pending": still_pending, "errors": errors}
+
+    def _get_event_card_generator(self) -> Agent1QuantCardGenerator:
+        if self._event_card_generator is None:
+            self._event_card_generator = Agent1QuantCardGenerator(
+                model=self.event_cards_model or None,
+                prompt_version=self.event_cards_prompt_version,
+            )
+            # Persist resolved model name (including client default fallback).
+            self.event_cards_model = self._event_card_generator.model
+        return self._event_card_generator
+
+    def _fetch_event_card_payloads(self, cursor: Any, event_ids: List[str]) -> List[Dict[str, Any]]:
+        cursor.execute(
+            """
+            SELECT
+                e.id AS event_id,
+                e.title,
+                e.description,
+                s.title AS series_title,
+                s.recurrence AS series_recurrence,
+                COALESCE(
+                    ARRAY_REMOVE(ARRAY_AGG(DISTINCT t.label), NULL),
+                    ARRAY[]::TEXT[]
+                ) AS tags
+            FROM events e
+            LEFT JOIN series s
+                ON s.id = e.series_id
+            LEFT JOIN event_tags et
+                ON et.event_id = e.id
+            LEFT JOIN tags t
+                ON t.id = et.tag_id
+            WHERE e.id = ANY(%s)
+            GROUP BY
+                e.id,
+                e.title,
+                e.description,
+                s.title,
+                s.recurrence
+            ORDER BY e.id ASC
+            """,
+            (event_ids,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def _get_genesis_event_ids_missing_cards(self, cursor: Any, limit: int) -> List[str]:
+        cursor.execute(
+            """
+            SELECT e.id
+            FROM events e
+            LEFT JOIN event_cards ec
+                ON ec.event_id = e.id
+               AND ec.status = 'ok'
+            WHERE ec.event_id IS NULL
+              AND (
+                  COALESCE(e.end_date::date, e.creation_date::date, e.start_date::date)
+                  BETWEEN %s AND %s
+              )
+            ORDER BY COALESCE(e.end_date, e.creation_date, e.start_date) ASC, e.id ASC
+            LIMIT %s
+            """,
+            (GENESIS_START_DATE, GENESIS_END_DATE, limit),
+        )
+        rows = cursor.fetchall()
+        event_ids: List[str] = []
+        for row in rows:
+            if isinstance(row, dict):
+                event_ids.append(str(row.get("id")))
+            else:
+                event_ids.append(str(row[0]))
+        return [eid for eid in event_ids if eid and eid.lower() != "none"]
+
+    def _mark_event_card_success(
+        self,
+        cursor: Any,
+        event_id: str,
+        generated: Dict[str, Any],
+    ) -> None:
+        cursor.execute(
+            """
+            INSERT INTO event_cards (
+                event_id,
+                card_title,
+                card_lore,
+                primary_tag,
+                secondary_tag,
+                agent_name,
+                model_name,
+                prompt_version,
+                status,
+                error_text,
+                generated_at,
+                updated_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, 'ok', NULL, NOW(), NOW()
+            )
+            ON CONFLICT (event_id) DO UPDATE SET
+                card_title = EXCLUDED.card_title,
+                card_lore = EXCLUDED.card_lore,
+                primary_tag = EXCLUDED.primary_tag,
+                secondary_tag = EXCLUDED.secondary_tag,
+                agent_name = EXCLUDED.agent_name,
+                model_name = EXCLUDED.model_name,
+                prompt_version = EXCLUDED.prompt_version,
+                status = 'ok',
+                error_text = NULL,
+                generated_at = NOW(),
+                updated_at = NOW()
+            """,
+            (
+                event_id,
+                generated.get("card_title"),
+                generated.get("card_lore"),
+                generated.get("primary_tag"),
+                generated.get("secondary_tag"),
+                self.event_cards_agent_name,
+                self.event_cards_model,
+                self.event_cards_prompt_version,
+            ),
+        )
+
+    def _mark_event_card_error(self, cursor: Any, event_id: str, error_text: str) -> None:
+        err = (error_text or "unknown error").strip()
+        if len(err) > 2000:
+            err = err[:2000]
+
+        cursor.execute(
+            """
+            INSERT INTO event_cards (
+                event_id,
+                card_title,
+                card_lore,
+                primary_tag,
+                secondary_tag,
+                agent_name,
+                model_name,
+                prompt_version,
+                status,
+                error_text,
+                generated_at,
+                updated_at
+            ) VALUES (
+                %s, NULL, NULL, NULL, NULL, %s, %s, %s, 'error', %s, NOW(), NOW()
+            )
+            ON CONFLICT (event_id) DO UPDATE SET
+                status = 'error',
+                error_text = EXCLUDED.error_text,
+                agent_name = EXCLUDED.agent_name,
+                model_name = EXCLUDED.model_name,
+                prompt_version = EXCLUDED.prompt_version,
+                updated_at = NOW()
+            """,
+            (
+                event_id,
+                self.event_cards_agent_name,
+                self.event_cards_model,
+                self.event_cards_prompt_version,
+                err,
+            ),
+        )
+
+    def _ensure_event_cards_schema(self) -> None:
+        """
+        Backward-compatible DDL for environments created before event_cards existed.
+        """
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS event_cards (
+                        event_id TEXT PRIMARY KEY,
+                        card_title TEXT,
+                        card_lore TEXT,
+                        primary_tag TEXT,
+                        secondary_tag TEXT,
+                        agent_name TEXT NOT NULL DEFAULT 'agent_1_quant',
+                        model_name TEXT NOT NULL DEFAULT 'gemini-2.5-flash',
+                        prompt_version TEXT NOT NULL DEFAULT 'v1',
+                        status TEXT NOT NULL DEFAULT 'ok'
+                            CHECK (status IN ('ok', 'error')),
+                        error_text TEXT,
+                        generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        CONSTRAINT fk_event_cards_event
+                            FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+                    )
+                    """
+                )
+                cursor.execute("ALTER TABLE event_cards ALTER COLUMN card_title DROP NOT NULL")
+                cursor.execute("ALTER TABLE event_cards ALTER COLUMN card_lore DROP NOT NULL")
+                cursor.execute("ALTER TABLE event_cards ALTER COLUMN primary_tag DROP NOT NULL")
+                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS secondary_tag TEXT")
+                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS agent_name TEXT NOT NULL DEFAULT 'agent_1_quant'")
+                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS model_name TEXT NOT NULL DEFAULT 'gemini-2.5-flash'")
+                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS prompt_version TEXT NOT NULL DEFAULT 'v1'")
+                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ok'")
+                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS error_text TEXT")
+                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
+                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
+                cursor.execute(
+                    """
+                    ALTER TABLE event_cards
+                    DROP CONSTRAINT IF EXISTS event_cards_status_check
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE event_cards
+                    ADD CONSTRAINT event_cards_status_check
+                    CHECK (status IN ('ok', 'error'))
+                    """
+                )
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_status ON event_cards(status)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_prompt_version ON event_cards(prompt_version)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_generated_at ON event_cards(generated_at DESC)")
+                cursor.execute("DROP VIEW IF EXISTS event_cards_pending")
+                cursor.execute("DROP TABLE IF EXISTS event_card_jobs")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def generate_event_cards_for_event_ids(self, event_ids: List[str]) -> Dict[str, int]:
+        """
+        Generate/update event cards for specific event ids.
+        Intended to run after downstream scripts finish for those events.
+        """
+        if not self.event_cards_post_downstream_enabled:
+            return {"requested": 0, "processed": 0, "success": 0, "failed": 0}
+        if self.dry_run:
+            return {"requested": len(event_ids), "processed": 0, "success": 0, "failed": 0}
+
+        cleaned_ids: List[str] = []
+        seen: set[str] = set()
+        for raw in event_ids:
+            event_id = str(raw or "").strip()
+            if not event_id or event_id in seen:
+                continue
+            seen.add(event_id)
+            cleaned_ids.append(event_id)
+        if not cleaned_ids:
+            return {"requested": 0, "processed": 0, "success": 0, "failed": 0}
+
+        requested = len(cleaned_ids)
+        if self.event_cards_max_per_run > 0:
+            cleaned_ids = cleaned_ids[: self.event_cards_max_per_run]
+
+        self._ensure_event_cards_schema()
+        generator = self._get_event_card_generator()
+        conn = self.manager.get_connection()
+        try:
+            processed = 0
+            success = 0
+            failed = 0
+
+            for idx in range(0, len(cleaned_ids), max(1, self.event_cards_batch_size)):
+                batch_ids = cleaned_ids[idx : idx + max(1, self.event_cards_batch_size)]
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                    rows = self._fetch_event_card_payloads(cursor, event_ids=batch_ids)
+                    conn.commit()
+
+                by_event_id = {str(row.get("event_id")): row for row in rows}
+                for event_id in batch_ids:
+                    row = by_event_id.get(event_id)
+                    if not row:
+                        failed += 1
+                        continue
+                    payload = {
+                        "title": row.get("title"),
+                        "description": row.get("description"),
+                        "series": {
+                            "title": row.get("series_title"),
+                            "recurrence": row.get("series_recurrence"),
+                        },
+                        "tags": row.get("tags") or [],
+                    }
+                    try:
+                        card = generator.generate(payload)
+                        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                            self._mark_event_card_success(cursor, event_id=event_id, generated=card.model_dump())
+                            conn.commit()
+                        success += 1
+                    except Exception as exc:
+                        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                            self._mark_event_card_error(cursor, event_id=event_id, error_text=str(exc))
+                            conn.commit()
+                        failed += 1
+                    processed += 1
+
+            return {"requested": requested, "processed": processed, "success": success, "failed": failed}
+        finally:
+            conn.close()
 
     def _create_standard_season(self, cursor, start_date: datetime, season_number: int) -> int:
         """Create a new standard season and return its id."""
@@ -1545,6 +1857,13 @@ class SimplifiedScheduler:
                             step_success = False
 
                     if step_success and not self.dry_run:
+                        card_stats = self.generate_event_cards_for_event_ids(ready_event_ids)
+                        results['event_cards'] = {'success': True, **card_stats}
+                        print(
+                            f"🧠 Event cards: requested={card_stats['requested']:,}, "
+                            f"processed={card_stats['processed']:,}, success={card_stats['success']:,}, "
+                            f"failed={card_stats['failed']:,}"
+                        )
                         processed = self.manager.mark_resolution_events_processed(ready_event_ids)
                         print(f"✅ Marked {processed:,} event(s) as processed in resolution queue")
                     elif not self.dry_run:
@@ -1558,6 +1877,7 @@ class SimplifiedScheduler:
                 )
                 for script_key in ['redemptions', 'positions', 'leaderboard']:
                     results[script_key] = {'success': True, 'skipped': True, 'reason': 'no_ready_events'}
+                results['event_cards'] = {'success': True, 'skipped': True, 'reason': 'no_ready_events'}
         else:
             # Legacy date-based pipeline
             print(f"\n📅 Redemptions/Positions/Leaderboard: Loading for {redemptions_date}")
@@ -1733,6 +2053,48 @@ class SimplifiedScheduler:
                     # Mark error for failed loads
                     error_msg = results[script_key].get('error', 'Script execution failed')
                     self.manager.mark_data_error(script_key, GENESIS_START_DATE, error_msg)
+
+            # Generate cards for historical events only after full downstream success.
+            all_steps_success = all(results[key].get('success') for key in ['events', 'redemptions', 'positions', 'leaderboard'])
+            if all_steps_success and not self.dry_run:
+                print("\n🧠 Generating event cards for historical load...")
+                total_requested = 0
+                total_processed = 0
+                total_success = 0
+                total_failed = 0
+                batch_limit = max(1, self.event_cards_max_per_run)
+                conn = self.manager.get_connection()
+                try:
+                    while True:
+                        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                            target_event_ids = self._get_genesis_event_ids_missing_cards(cursor, limit=batch_limit)
+                            conn.commit()
+                        if not target_event_ids:
+                            break
+
+                        card_stats = self.generate_event_cards_for_event_ids(target_event_ids)
+                        total_requested += int(card_stats.get("requested", 0))
+                        total_processed += int(card_stats.get("processed", 0))
+                        total_success += int(card_stats.get("success", 0))
+                        total_failed += int(card_stats.get("failed", 0))
+
+                        # Safety break in case generation returns zero progress.
+                        if int(card_stats.get("processed", 0)) == 0:
+                            break
+                finally:
+                    conn.close()
+
+                results["event_cards"] = {
+                    "success": True,
+                    "requested": total_requested,
+                    "processed": total_processed,
+                    "success_count": total_success,
+                    "failed": total_failed,
+                }
+                print(
+                    f"🧠 Historical event cards: requested={total_requested:,}, "
+                    f"processed={total_processed:,}, success={total_success:,}, failed={total_failed:,}"
+                )
             
             # Summary
             print("\n" + "="*70)
@@ -1896,6 +2258,12 @@ class SimplifiedScheduler:
                         as_of=datetime.utcnow(),
                     )
                     if ready_for_day:
+                        card_stats = self.generate_event_cards_for_event_ids(ready_for_day)
+                        print(
+                            f"🧠 Event cards ({missing_date}): requested={card_stats['requested']:,}, "
+                            f"processed={card_stats['processed']:,}, success={card_stats['success']:,}, "
+                            f"failed={card_stats['failed']:,}"
+                        )
                         processed = self.manager.mark_resolution_events_processed(ready_for_day)
                         print(
                             f"✅ Marked {processed:,} ready event(s) as processed for {missing_date}"

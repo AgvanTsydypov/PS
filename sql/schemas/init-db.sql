@@ -586,7 +586,36 @@ CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_end_date
 DO $$ BEGIN RAISE NOTICE '✅ event_resolution_queue table created'; END $$;
 
 -- ============================================================================
--- 8. USER WALLET SIGN-INS TABLE - Auth logins for user site
+-- 8. EVENT CARDS TABLES - AI-generated trader card metadata
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '🧠 Creating event_cards tables...'; END $$;
+
+CREATE TABLE IF NOT EXISTS event_cards (
+    event_id TEXT PRIMARY KEY,
+    card_title TEXT,
+    card_lore TEXT,
+    primary_tag TEXT,
+    secondary_tag TEXT,
+    agent_name TEXT NOT NULL DEFAULT 'agent_1_quant',
+    model_name TEXT NOT NULL DEFAULT 'gemini-2.5-flash',
+    prompt_version TEXT NOT NULL DEFAULT 'v1',
+    status TEXT NOT NULL DEFAULT 'ok'
+        CHECK (status IN ('ok', 'error')),
+    error_text TEXT,
+    generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_event_cards_event
+        FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_cards_status ON event_cards(status);
+CREATE INDEX IF NOT EXISTS idx_event_cards_prompt_version ON event_cards(prompt_version);
+CREATE INDEX IF NOT EXISTS idx_event_cards_generated_at ON event_cards(generated_at DESC);
+
+DO $$ BEGIN RAISE NOTICE '✅ event_cards tables created'; END $$;
+
+-- ============================================================================
+-- 9. USER WALLET SIGN-INS TABLE - Auth logins for user site
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE '🔐 Creating user_wallet_signins table...'; END $$;
 
@@ -694,6 +723,7 @@ DO $$ BEGIN RAISE NOTICE '   - user_closed_positions'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - trader_leaderboard'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - data_loads (tracking)'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - event_resolution_queue'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - event_cards'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - user_wallet_signins'; END $$;
 DO $$ BEGIN RAISE NOTICE ''; END $$;
 DO $$ BEGIN RAISE NOTICE '📈 Created views:'; END $$;
