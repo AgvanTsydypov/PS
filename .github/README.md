@@ -1,56 +1,27 @@
-# 📖 Документация PolyStars
+# PolyStars Documentation Index
 
-## Начните здесь
+This file is a quick navigation entry for project docs.  
+For full setup and operational details, use the root `README.md`.
 
-### 🚀 [START.md](../START.md)
-Быстрый старт за 2 минуты. Запуск Docker и загрузка данных.
+## Start Here
 
-### 🐳 [DOCKER.md](../DOCKER.md)
-Полная документация по Docker. Все команды и настройки.
+- [Project README](../README.md) - primary project documentation
+- [Local Run Guide](../LOCAL_RUN.md) - local services and ports
+- [Setup Guide](../docs/SETUP.md) - full environment setup
+- [Database Setup](../docs/DATABASE_SETUP.md) - DB initialization and notes
+- [Admin Workbench Guide](../docs/ADMIN_UI.md) - admin UI/API behavior
+- [Flask API Reference](../docs/API.md) - `app.py` endpoints
 
-### 📘 [README.md](../README.md)
-Основная документация проекта. Структура, установка, использование.
+## Core Areas
 
----
+- [Scripts](../scripts/) - data loading, scheduler, backfills, AI agents
+- [SQL Schemas](../sql/schemas/) - schema and DB bootstrapping
+- [Admin Backend](../web_backend/) - FastAPI backend for admin workbench
+- [Admin Frontend](../web_frontend/) - Next.js admin UI
+- [User Backend](../user_web_backend/) - user-facing backend services
+- [User Frontend](../user_web_frontend/) - user-facing frontend
 
-## Структура проекта
+## Notes
 
-```
-PolyStars/
-├── START.md              ← Начните отсюда
-├── DOCKER.md             ← Docker инструкции
-├── README.md             ← Полная документация
-│
-├── docker-compose.yml    # Docker конфигурация
-├── Dockerfile.python     # Python образ
-├── .env                  # Переменные окружения
-│
-├── scripts/              # Python ETL скрипты
-│   ├── fetch/            # Загрузка данных
-│   ├── db/               # Работа с БД
-│   └── analytics/        # Аналитика
-│
-├── sql/schemas/          # SQL схемы
-│   └── init-db.sql       # Автоинициализация БД
-│
-├── app/                  # Next.js приложение
-├── components/           # React компоненты
-└── lib/                  # Утилиты
-```
-
----
-
-## Быстрая навигация
-
-| Что нужно | Файл |
-|-----------|------|
-| Запустить проект | [START.md](../START.md) |
-| Docker команды | [DOCKER.md](../DOCKER.md) |
-| Структура проекта | [README.md](../README.md) |
-| Настройка БД | [sql/schemas/](../sql/schemas/) |
-| Python скрипты | [scripts/](../scripts/) |
-
----
-
-**Версия:** 1.0  
-**Дата:** 2026-02-08
+- The source of truth for project documentation is [`../README.md`](../README.md).
+- Keep this file short and focused on navigation.
