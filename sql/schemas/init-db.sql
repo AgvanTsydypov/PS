@@ -87,7 +87,10 @@ CREATE TABLE IF NOT EXISTS series (
 
 CREATE TABLE IF NOT EXISTS tags (
     id TEXT PRIMARY KEY,
-    label TEXT
+    label TEXT,
+    hex_color TEXT,
+    CONSTRAINT tags_hex_color_format
+        CHECK (hex_color IS NULL OR hex_color ~* '^#[0-9a-f]{6}$')
 );
 
 CREATE TABLE IF NOT EXISTS event_tags (
@@ -99,6 +102,23 @@ CREATE TABLE IF NOT EXISTS event_tags (
     CONSTRAINT fk_event_tags_tag
         FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
 );
+
+ALTER TABLE tags
+    ADD COLUMN IF NOT EXISTS hex_color TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'tags_hex_color_format'
+          AND conrelid = 'tags'::regclass
+    ) THEN
+        ALTER TABLE tags
+            ADD CONSTRAINT tags_hex_color_format
+            CHECK (hex_color IS NULL OR hex_color ~* '^#[0-9a-f]{6}$');
+    END IF;
+END $$;
 
 -- Ensure events table can reference series safely on existing databases.
 ALTER TABLE events
@@ -120,6 +140,7 @@ END $$;
 
 CREATE INDEX IF NOT EXISTS idx_events_series_id ON events(series_id);
 CREATE INDEX IF NOT EXISTS idx_event_tags_tag_id ON event_tags(tag_id);
+CREATE INDEX IF NOT EXISTS idx_tags_hex_color ON tags(hex_color);
 
 DO $$ BEGIN RAISE NOTICE '✅ Series/tags tables created'; END $$;
 

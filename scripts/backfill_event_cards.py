@@ -100,6 +100,21 @@ def _ensure_event_cards_schema(conn: Any) -> None:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_status ON event_cards(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_prompt_version ON event_cards(prompt_version)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_generated_at ON event_cards(generated_at DESC)")
+        cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS hex_color TEXT")
+        cursor.execute(
+            """
+            ALTER TABLE tags
+            DROP CONSTRAINT IF EXISTS tags_hex_color_format
+            """
+        )
+        cursor.execute(
+            """
+            ALTER TABLE tags
+            ADD CONSTRAINT tags_hex_color_format
+            CHECK (hex_color IS NULL OR hex_color ~* '^#[0-9a-f]{6}$')
+            """
+        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_hex_color ON tags(hex_color)")
 
 
 def _select_candidate_event_ids(

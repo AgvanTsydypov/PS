@@ -24,6 +24,8 @@ import psycopg2
 import requests
 from dotenv import load_dotenv
 
+from scripts.ai import Agent2ColoristGenerator
+
 load_dotenv()
 
 
@@ -52,12 +54,108 @@ class EventMetadataBackfiller:
             "events_failed": 0,
             "series_upserted": 0,
             "tags_upserted": 0,
+            "tag_colors_generated": 0,
             "event_tags_inserted": 0,
             "events_series_updated": 0,
         }
+        self.tag_colors_model = os.getenv("POLYSTARS_TAG_COLORS_MODEL", "").strip()
+        self.tag_colors_prompt_version = (
+            os.getenv("POLYSTARS_TAG_COLORS_PROMPT_VERSION", "v1").strip() or "v1"
+        )
+        self._tag_color_generator: Optional[Agent2ColoristGenerator] = None
 
     def _get_conn(self):
         return psycopg2.connect(**self.connection_params)
+
+    def _get_tag_color_generator(self) -> Agent2ColoristGenerator:
+        if self._tag_color_generator is None:
+            self._tag_color_generator = Agent2ColoristGenerator(
+                model=self.tag_colors_model or None,
+                prompt_version=self.tag_colors_prompt_version,
+            )
+            self.tag_colors_model = self._tag_color_generator.model
+        return self._tag_color_generator
+
+    @staticmethod
+    def _ensure_tags_color_schema(conn) -> None:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS hex_color TEXT")
+            cursor.execute(
+                """
+                ALTER TABLE tags
+                DROP CONSTRAINT IF EXISTS tags_hex_color_format
+                """
+            )
+            cursor.execute(
+                """
+                ALTER TABLE tags
+                ADD CONSTRAINT tags_hex_color_format
+                CHECK (hex_color IS NULL OR hex_color ~* '^#[0-9a-f]{6}$')
+                """
+            )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_hex_color ON tags(hex_color)")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def _assign_missing_tag_colors(self, cursor, candidate_tag_ids: List[str]) -> int:
+        if not candidate_tag_ids:
+            return 0
+        cursor.execute(
+            """
+            SELECT id, COALESCE(NULLIF(BTRIM(label), ''), id) AS effective_label
+            FROM tags
+            WHERE id = ANY(%s)
+              AND hex_color IS NULL
+            ORDER BY id ASC
+            """,
+            (candidate_tag_ids,),
+        )
+        missing_rows = cursor.fetchall()
+        if not missing_rows:
+            return 0
+
+        cursor.execute(
+            """
+            SELECT DISTINCT hex_color
+            FROM tags
+            WHERE hex_color IS NOT NULL
+            ORDER BY hex_color ASC
+            """
+        )
+        palette = [str(row[0]) for row in cursor.fetchall() if row and row[0]]
+        generator = self._get_tag_color_generator()
+        generated = 0
+
+        for tag_id, effective_label in missing_rows:
+            try:
+                out = generator.generate(
+                    {
+                        "new_primary_tag": str(effective_label or tag_id),
+                        "existing_palette": palette,
+                    }
+                )
+            except Exception as exc:
+                print(f"      [WARN] tag color generation failed for tag_id={tag_id}: {exc}")
+                continue
+
+            cursor.execute(
+                """
+                UPDATE tags
+                SET hex_color = %s
+                WHERE id = %s
+                  AND hex_color IS NULL
+                """,
+                (out.hex_color, tag_id),
+            )
+            if cursor.rowcount:
+                generated += 1
+                palette.append(out.hex_color)
+        return generated
 
     def _fetch_event_ids(
         self,
@@ -218,6 +316,7 @@ class EventMetadataBackfiller:
                 self.stats["events_series_updated"] += int(cursor.rowcount)
 
             tags = self._extract_tags(event_payload)
+            touched_tag_ids: List[str] = []
             for tag_id, label in tags:
                 cursor.execute(
                     """
@@ -229,6 +328,9 @@ class EventMetadataBackfiller:
                     (tag_id, label),
                 )
                 self.stats["tags_upserted"] += 1
+                touched_tag_ids.append(tag_id)
+
+            self.stats["tag_colors_generated"] += self._assign_missing_tag_colors(cursor, touched_tag_ids)
 
             # Keep mapping in sync with API payload for this event.
             cursor.execute("DELETE FROM event_tags WHERE event_id = %s", (event_id,))
@@ -258,6 +360,7 @@ class EventMetadataBackfiller:
 
         conn = self._get_conn()
         try:
+            self._ensure_tags_color_schema(conn)
             diag = self._read_db_diagnostics(conn)
             print(
                 "   Connected as: "
@@ -309,6 +412,7 @@ class EventMetadataBackfiller:
         print(f"   events_failed: {self.stats['events_failed']}")
         print(f"   series_upserted: {self.stats['series_upserted']}")
         print(f"   tags_upserted: {self.stats['tags_upserted']}")
+        print(f"   tag_colors_generated: {self.stats['tag_colors_generated']}")
         print(f"   event_tags_inserted: {self.stats['event_tags_inserted']}")
         print(f"   events_series_updated: {self.stats['events_series_updated']}")
 

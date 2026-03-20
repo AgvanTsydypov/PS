@@ -35,6 +35,8 @@ import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 
+from scripts.ai import Agent2ColoristGenerator
+
 load_dotenv()
 
 
@@ -64,12 +66,101 @@ class DbUploader:
             "events_inserted": 0,
             "series_upserted": 0,
             "tags_upserted": 0,
+            "tag_colors_generated": 0,
             "event_tags_upserted": 0,
             "markets_inserted": 0,
             "redemptions_inserted": 0,
             "errors": [],
         }
+        self.tag_colors_model = os.getenv("POLYSTARS_TAG_COLORS_MODEL", "").strip()
+        self.tag_colors_prompt_version = (
+            os.getenv("POLYSTARS_TAG_COLORS_PROMPT_VERSION", "v1").strip() or "v1"
+        )
+        self._tag_color_generator: Optional[Agent2ColoristGenerator] = None
         self._test_connection()
+
+    def _get_tag_color_generator(self) -> Agent2ColoristGenerator:
+        if self._tag_color_generator is None:
+            self._tag_color_generator = Agent2ColoristGenerator(
+                model=self.tag_colors_model or None,
+                prompt_version=self.tag_colors_prompt_version,
+            )
+            self.tag_colors_model = self._tag_color_generator.model
+        return self._tag_color_generator
+
+    @staticmethod
+    def _ensure_tags_color_schema(cursor) -> None:
+        cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS hex_color TEXT")
+        cursor.execute(
+            """
+            ALTER TABLE tags
+            DROP CONSTRAINT IF EXISTS tags_hex_color_format
+            """
+        )
+        cursor.execute(
+            """
+            ALTER TABLE tags
+            ADD CONSTRAINT tags_hex_color_format
+            CHECK (hex_color IS NULL OR hex_color ~* '^#[0-9a-f]{6}$')
+            """
+        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_hex_color ON tags(hex_color)")
+
+    def _assign_missing_tag_colors(self, cursor, candidate_tag_ids: List[str]) -> int:
+        if not candidate_tag_ids:
+            return 0
+
+        cursor.execute(
+            """
+            SELECT id, COALESCE(NULLIF(BTRIM(label), ''), id) AS effective_label
+            FROM tags
+            WHERE id = ANY(%s)
+              AND hex_color IS NULL
+            ORDER BY id ASC
+            """,
+            (candidate_tag_ids,),
+        )
+        missing_rows = cursor.fetchall()
+        if not missing_rows:
+            return 0
+
+        cursor.execute(
+            """
+            SELECT DISTINCT hex_color
+            FROM tags
+            WHERE hex_color IS NOT NULL
+            ORDER BY hex_color ASC
+            """
+        )
+        palette = [str(row[0]) for row in cursor.fetchall() if row and row[0]]
+        generator = self._get_tag_color_generator()
+
+        generated = 0
+        for tag_id, effective_label in missing_rows:
+            try:
+                out = generator.generate(
+                    {
+                        "new_primary_tag": str(effective_label or tag_id),
+                        "existing_palette": palette,
+                    }
+                )
+            except Exception as exc:
+                self.stats["errors"].append(f"Tag color generation failed for tag_id={tag_id}: {exc}")
+                continue
+
+            cursor.execute(
+                """
+                UPDATE tags
+                SET hex_color = %s
+                WHERE id = %s
+                  AND hex_color IS NULL
+                """,
+                (out.hex_color, tag_id),
+            )
+            if cursor.rowcount:
+                generated += 1
+                palette.append(out.hex_color)
+        return generated
 
     def _test_connection(self):
         try:
@@ -292,6 +383,9 @@ class DbUploader:
         conn = psycopg2.connect(**self.connection_params)
         cursor = conn.cursor()
         try:
+            self._ensure_tags_color_schema(cursor)
+            conn.commit()
+
             upsert_series_sql = f"""
                 INSERT INTO {self.TABLE_SERIES} (
                     id, ticker, slug, title, subtitle, series_type, recurrence, description
@@ -422,6 +516,10 @@ class DbUploader:
                         execute_batch(cursor, upsert_series_sql, series_rows, page_size=100)
                     if tags_rows:
                         execute_batch(cursor, upsert_tags_sql, tags_rows, page_size=200)
+                    generated_tag_colors = self._assign_missing_tag_colors(
+                        cursor,
+                        [str(row[0]) for row in tags_rows],
+                    )
 
                     execute_batch(cursor, insert_events_sql, event_rows, page_size=100)
 
@@ -431,12 +529,14 @@ class DbUploader:
                     conn.commit()
                     self.stats["series_upserted"] += len(series_rows)
                     self.stats["tags_upserted"] += len(tags_rows)
+                    self.stats["tag_colors_generated"] += generated_tag_colors
                     self.stats["events_inserted"] += len(event_rows)
                     self.stats["event_tags_upserted"] += len(event_tag_rows)
                     print(
                         f"  [OK] Batch {i // batch_size + 1}: "
                         f"{len(event_rows)} events, {len(series_rows)} series, "
-                        f"{len(tags_rows)} tags, {len(event_tag_rows)} event_tags"
+                        f"{len(tags_rows)} tags, {generated_tag_colors} tag_colors, "
+                        f"{len(event_tag_rows)} event_tags"
                     )
                 except Exception as e:
                     conn.rollback()
@@ -644,6 +744,8 @@ class DbUploader:
             print(f"[OK] Series inserted/updated: {self.stats['series_upserted']}")
         if self.stats["tags_upserted"]:
             print(f"[OK] Tags inserted/updated: {self.stats['tags_upserted']}")
+        if self.stats["tag_colors_generated"]:
+            print(f"[OK] Tag colors generated: {self.stats['tag_colors_generated']}")
         if self.stats["event_tags_upserted"]:
             print(f"[OK] Event tags inserted/updated: {self.stats['event_tags_upserted']}")
         if self.stats["markets_inserted"]:
