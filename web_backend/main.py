@@ -1643,6 +1643,8 @@ class SeasonWorkbenchService:
                             ec.card_lore,
                             ec.primary_tag,
                             ec.secondary_tag,
+                            tp.hex_color AS primary_tag_hex_color,
+                            ts.hex_color AS secondary_tag_hex_color,
                             ec.agent_name,
                             ec.model_name,
                             ec.prompt_version,
@@ -1652,6 +1654,8 @@ class SeasonWorkbenchService:
                             ec.updated_at
                         FROM event_cards ec
                         LEFT JOIN events e ON e.id = ec.event_id
+                        LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+                        LEFT JOIN tags ts ON LOWER(BTRIM(ts.label)) = LOWER(BTRIM(ec.secondary_tag))
                         WHERE ec.event_id = %s
                           AND ec.status = %s
                         ORDER BY ec.generated_at DESC, ec.event_id ASC
@@ -1672,6 +1676,8 @@ class SeasonWorkbenchService:
                             ec.card_lore,
                             ec.primary_tag,
                             ec.secondary_tag,
+                            tp.hex_color AS primary_tag_hex_color,
+                            ts.hex_color AS secondary_tag_hex_color,
                             ec.agent_name,
                             ec.model_name,
                             ec.prompt_version,
@@ -1681,6 +1687,8 @@ class SeasonWorkbenchService:
                             ec.updated_at
                         FROM event_cards ec
                         LEFT JOIN events e ON e.id = ec.event_id
+                        LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+                        LEFT JOIN tags ts ON LOWER(BTRIM(ts.label)) = LOWER(BTRIM(ec.secondary_tag))
                         WHERE ec.event_id = %s
                         ORDER BY ec.generated_at DESC, ec.event_id ASC
                         LIMIT %s
@@ -1700,6 +1708,8 @@ class SeasonWorkbenchService:
                             ec.card_lore,
                             ec.primary_tag,
                             ec.secondary_tag,
+                            tp.hex_color AS primary_tag_hex_color,
+                            ts.hex_color AS secondary_tag_hex_color,
                             ec.agent_name,
                             ec.model_name,
                             ec.prompt_version,
@@ -1709,6 +1719,8 @@ class SeasonWorkbenchService:
                             ec.updated_at
                         FROM event_cards ec
                         LEFT JOIN events e ON e.id = ec.event_id
+                        LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+                        LEFT JOIN tags ts ON LOWER(BTRIM(ts.label)) = LOWER(BTRIM(ec.secondary_tag))
                         WHERE ec.status = %s
                         ORDER BY ec.generated_at DESC, ec.event_id ASC
                         LIMIT %s
@@ -1728,6 +1740,8 @@ class SeasonWorkbenchService:
                             ec.card_lore,
                             ec.primary_tag,
                             ec.secondary_tag,
+                            tp.hex_color AS primary_tag_hex_color,
+                            ts.hex_color AS secondary_tag_hex_color,
                             ec.agent_name,
                             ec.model_name,
                             ec.prompt_version,
@@ -1737,6 +1751,8 @@ class SeasonWorkbenchService:
                             ec.updated_at
                         FROM event_cards ec
                         LEFT JOIN events e ON e.id = ec.event_id
+                        LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+                        LEFT JOIN tags ts ON LOWER(BTRIM(ts.label)) = LOWER(BTRIM(ec.secondary_tag))
                         ORDER BY ec.generated_at DESC, ec.event_id ASC
                         LIMIT %s
                         """,
@@ -1861,6 +1877,8 @@ class SeasonWorkbenchService:
                         ec.card_lore,
                         ec.primary_tag,
                         ec.secondary_tag,
+                        tp.hex_color AS primary_tag_hex_color,
+                        ts.hex_color AS secondary_tag_hex_color,
                         ec.agent_name,
                         ec.model_name,
                         ec.prompt_version,
@@ -1870,6 +1888,8 @@ class SeasonWorkbenchService:
                         ec.updated_at
                     FROM events e
                     LEFT JOIN event_cards ec ON ec.event_id = e.id
+                    LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+                    LEFT JOIN tags ts ON LOWER(BTRIM(ts.label)) = LOWER(BTRIM(ec.secondary_tag))
                     WHERE e.id = %s
                     LIMIT 1
                     """,

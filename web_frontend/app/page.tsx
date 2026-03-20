@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ArrowUpDown, Copy, Loader2, Pencil, RotateCcw } from "lucide-react";
 
 const RAW_API_BASE = process.env.NEXT_PUBLIC_SEASON_API_BASE_URL ?? "http://localhost:8001";
@@ -90,6 +90,8 @@ type EventCardRow = {
   card_lore?: string | null;
   primary_tag?: string | null;
   secondary_tag?: string | null;
+  primary_tag_hex_color?: string | null;
+  secondary_tag_hex_color?: string | null;
   agent_name: string;
   model_name: string;
   prompt_version: string;
@@ -188,6 +190,16 @@ function formatDateTimeHuman(raw: string): string {
   const hh = String(dt.getHours()).padStart(2, "0");
   const mi = String(dt.getMinutes()).padStart(2, "0");
   return `${dd}.${mm}.${yy} ${hh}:${mi}`;
+}
+
+function tagChipStyle(hexColor?: string | null): CSSProperties | undefined {
+  const safe = (hexColor ?? "").trim();
+  if (!/^#[0-9a-fA-F]{6}$/.test(safe)) return undefined;
+  return {
+    borderColor: safe,
+    color: safe,
+    backgroundColor: `${safe}20`,
+  };
 }
 
 export default function HomePage() {
@@ -1411,10 +1423,24 @@ export default function HomePage() {
                       <td className="border-b border-slate-700 px-3 py-2"><div className="h-8 max-w-[220px] truncate" title={row.card_title ?? ""}>{row.card_title ?? ""}</div></td>
                       <td className="border-b border-slate-700 px-3 py-2"><div className="h-8 max-w-[260px] truncate" title={row.card_lore ?? ""}>{row.card_lore ?? ""}</div></td>
                       <td className="border-b border-slate-700 px-3 py-2">
-                        {row.primary_tag ? <span className="inline-flex rounded-full bg-indigo-900/40 px-2 py-1 text-[11px] font-medium text-indigo-200">{row.primary_tag}</span> : null}
+                        {row.primary_tag ? (
+                          <span
+                            className="inline-flex rounded-full border px-2 py-1 text-[11px] font-medium"
+                            style={tagChipStyle(row.primary_tag_hex_color)}
+                          >
+                            {row.primary_tag}
+                          </span>
+                        ) : null}
                       </td>
                       <td className="border-b border-slate-700 px-3 py-2">
-                        {row.secondary_tag ? <span className="inline-flex rounded-full bg-purple-900/40 px-2 py-1 text-[11px] font-medium text-purple-200">{row.secondary_tag}</span> : null}
+                        {row.secondary_tag ? (
+                          <span
+                            className="inline-flex rounded-full border px-2 py-1 text-[11px] font-medium"
+                            style={tagChipStyle(row.secondary_tag_hex_color)}
+                          >
+                            {row.secondary_tag}
+                          </span>
+                        ) : null}
                       </td>
                       <td className="border-b border-slate-700 px-3 py-2">
                         <span className={`inline-flex rounded-full border px-2 py-1 text-[11px] font-semibold ${statusClass}`}>{row.status}</span>
