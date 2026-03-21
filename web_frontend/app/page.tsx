@@ -114,6 +114,38 @@ type EventCardForm = {
   error_text: string;
 };
 
+type EventCardPromptPreview = {
+  event_id: string;
+  agent_name: string;
+  model_name: string;
+  prompt_version: string;
+  prompt_text: string;
+  system_instruction: string;
+  user_prompt: string;
+  prompt_parts?: {
+    event_title?: string;
+    event_description?: string;
+    series?: unknown;
+    tags?: unknown;
+    recurring_rule?: string;
+    system_instruction?: string;
+    user_prompt?: string;
+    full_prompt?: string;
+  };
+};
+
+type EventCardPromptDraft = {
+  system_instruction: string;
+  user_prompt: string;
+};
+
+type EventCardRegenerateFields = {
+  card_title: boolean;
+  card_lore: boolean;
+  primary_tag: boolean;
+  secondary_tag: boolean;
+};
+
 type EventCardsSortKey =
   | "event_id"
   | "event_ticker"
@@ -199,6 +231,13 @@ function tagChipStyle(hexColor?: string | null): CSSProperties | undefined {
     borderColor: safe,
     color: safe,
     backgroundColor: `${safe}20`,
+  };
+}
+
+function promptPartsToDraft(parts?: EventCardPromptPreview["prompt_parts"] | null): EventCardPromptDraft {
+  return {
+    system_instruction: String(parts?.system_instruction ?? ""),
+    user_prompt: String(parts?.user_prompt ?? ""),
   };
 }
 
@@ -296,6 +335,24 @@ export default function HomePage() {
     prompt_version: "v1",
     status: "ok",
     error_text: "",
+  });
+  const [eventCardPromptText, setEventCardPromptText] = useState("");
+  const [eventCardPromptMeta, setEventCardPromptMeta] = useState<Pick<
+    EventCardPromptPreview,
+    "event_id" | "agent_name" | "model_name" | "prompt_version"
+  > | null>(null);
+  const [eventCardPromptLoading, setEventCardPromptLoading] = useState(false);
+  const [eventCardPromptContextParts, setEventCardPromptContextParts] = useState<
+    EventCardPromptPreview["prompt_parts"] | null
+  >(null);
+  const [eventCardPromptDraft, setEventCardPromptDraft] = useState<EventCardPromptDraft>(
+    promptPartsToDraft(null),
+  );
+  const [eventCardRegenerateFields, setEventCardRegenerateFields] = useState<EventCardRegenerateFields>({
+    card_title: true,
+    card_lore: true,
+    primary_tag: true,
+    secondary_tag: true,
   });
   const eventCardsRowsPerPage = 20;
 
@@ -595,6 +652,73 @@ export default function HomePage() {
     const data = await fetchJSON<{ rows: EventCardRow[] }>(`/api/event-cards?${params.toString()}`);
     setEventCardRows(data.rows);
     setEventCardsPage(1);
+  };
+
+  const refreshEventCardPrompt = async (eventIdRaw?: string) => {
+    const eventId = (eventIdRaw ?? eventCardForm.event_id).trim();
+    if (!eventId) {
+      setEventCardPromptText("");
+      setEventCardPromptMeta(null);
+      setEventCardPromptContextParts(null);
+      setEventCardPromptDraft(promptPartsToDraft(null));
+      return;
+    }
+    setEventCardPromptLoading(true);
+    try {
+      const data = await fetchJSON<EventCardPromptPreview>(
+        `/api/event-cards/${encodeURIComponent(eventId)}/prompt`,
+      );
+      setEventCardPromptText(data.prompt_text);
+      setEventCardPromptMeta({
+        event_id: data.event_id,
+        agent_name: data.agent_name,
+        model_name: data.model_name,
+        prompt_version: data.prompt_version,
+      });
+      const nextParts = data.prompt_parts ?? null;
+      setEventCardPromptContextParts(nextParts);
+      setEventCardPromptDraft(promptPartsToDraft(nextParts));
+    } finally {
+      setEventCardPromptLoading(false);
+    }
+  };
+
+  const buildPromptPartsOverrideFromDraft = () => {
+    if (!eventCardPromptMeta) {
+      throw new Error("Load prompt first before using custom prompt override");
+    }
+    if (!eventCardPromptContextParts) {
+      throw new Error("Prompt context is missing. Click Load prompt first.");
+    }
+    return {
+      event_title: String(eventCardPromptContextParts?.event_title ?? ""),
+      event_description: String(eventCardPromptContextParts?.event_description ?? ""),
+      series: eventCardPromptContextParts?.series ?? null,
+      tags: Array.isArray(eventCardPromptContextParts?.tags)
+        ? eventCardPromptContextParts?.tags
+        : [],
+      recurring_rule: String(eventCardPromptContextParts?.recurring_rule ?? ""),
+      system_instruction: eventCardPromptDraft.system_instruction,
+      user_prompt: eventCardPromptDraft.user_prompt,
+    };
+  };
+
+  const buildRegenerateRequestBody = (eventId: string) => {
+    const hasLoadedPromptForEvent = eventCardPromptMeta?.event_id === eventId;
+    if (!hasLoadedPromptForEvent) return {};
+    return { prompt_parts: buildPromptPartsOverrideFromDraft() };
+  };
+
+  const mergeRegeneratedEventCardForm = (
+    previous: EventCardForm,
+    regeneratedRow: EventCardRow,
+  ): EventCardForm => {
+    const next = mapEventCardRowToForm(regeneratedRow);
+    if (!eventCardRegenerateFields.card_title) next.card_title = previous.card_title;
+    if (!eventCardRegenerateFields.card_lore) next.card_lore = previous.card_lore;
+    if (!eventCardRegenerateFields.primary_tag) next.primary_tag = previous.primary_tag;
+    if (!eventCardRegenerateFields.secondary_tag) next.secondary_tag = previous.secondary_tag;
+    return next;
   };
 
   useEffect(() => {
@@ -1185,14 +1309,19 @@ export default function HomePage() {
             <button
               onClick={() => {
                 setEventCardForm(buildEmptyEventCardForm());
+                setEventCardPromptText("");
+                setEventCardPromptMeta(null);
+                setEventCardPromptContextParts(null);
+                setEventCardPromptDraft(promptPartsToDraft(null));
               }}
             >
               Clear form
             </button>
           </div>
 
+          <div className="event-cards-top-grid">
           <div className="panel">
-            <div className="muted">Edit selected event card</div>
+            <div className="muted">Edit selected event card (existing logic)</div>
             <div className="row">
               <label>event_id</label>
               <input
@@ -1282,24 +1411,86 @@ export default function HomePage() {
                     });
                     setOk(`Event card ${eventId} updated`);
                     await refreshEventCardRows();
+                    await refreshEventCardPrompt(eventId);
                   })
                 }
               >
                 Save changes
               </button>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={eventCardRegenerateFields.card_title}
+                  onChange={(e) =>
+                    setEventCardRegenerateFields((prev) => ({ ...prev, card_title: e.target.checked }))
+                  }
+                />{" "}
+                regen `card_title`
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={eventCardRegenerateFields.card_lore}
+                  onChange={(e) =>
+                    setEventCardRegenerateFields((prev) => ({ ...prev, card_lore: e.target.checked }))
+                  }
+                />{" "}
+                regen `card_lore`
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={eventCardRegenerateFields.primary_tag}
+                  onChange={(e) =>
+                    setEventCardRegenerateFields((prev) => ({ ...prev, primary_tag: e.target.checked }))
+                  }
+                />{" "}
+                regen `primary_tag`
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={eventCardRegenerateFields.secondary_tag}
+                  onChange={(e) =>
+                    setEventCardRegenerateFields((prev) => ({ ...prev, secondary_tag: e.target.checked }))
+                  }
+                />{" "}
+                regen `secondary_tag`
+              </label>
               <button
                 disabled={Boolean(eventCardRegeneratingEventId)}
                 onClick={() =>
                   void run(async () => {
                     const eventId = eventCardForm.event_id.trim();
                     if (!eventId) throw new Error("event_id is required for regenerate");
+                    const previousForm = { ...eventCardForm };
                     setEventCardRegeneratingEventId(eventId);
                     try {
-                      const out = await fetchJSON<{ status: string; row: EventCardRow }>(
+                      const out = await fetchJSON<{
+                        status: string;
+                        row: EventCardRow;
+                        prompt_text?: string;
+                        prompt_parts?: EventCardPromptPreview["prompt_parts"];
+                      }>(
                         `/api/event-cards/${encodeURIComponent(eventId)}/regenerate`,
-                        { method: "POST" },
+                        {
+                          method: "POST",
+                          body: JSON.stringify(buildRegenerateRequestBody(eventId)),
+                        },
                       );
-                      setEventCardForm(mapEventCardRowToForm(out.row));
+                      setEventCardForm(mergeRegeneratedEventCardForm(previousForm, out.row));
+                      if (out.prompt_text) {
+                        setEventCardPromptText(out.prompt_text);
+                        setEventCardPromptMeta({
+                          event_id: eventId,
+                          agent_name: out.row.agent_name ?? "agent_1_quant",
+                          model_name: out.row.model_name ?? "",
+                          prompt_version: out.row.prompt_version ?? "v1",
+                        });
+                        const nextParts = out.prompt_parts ?? null;
+                        setEventCardPromptContextParts(nextParts);
+                        setEventCardPromptDraft(promptPartsToDraft(nextParts));
+                      }
                       setOk(`Preview regenerated for ${eventId}. Click Save changes to persist.`);
                       await refreshEventCardRows();
                     } finally {
@@ -1314,6 +1505,113 @@ export default function HomePage() {
                 <span className="muted">Regeneration in progress for: {eventCardRegeneratingEventId}</span>
               ) : null}
             </div>
+          </div>
+          <div className="panel">
+            <div className="muted">Current model prompt (all Python-used parts)</div>
+            <div className="row">
+              <label>event_id</label>
+              <input value={eventCardForm.event_id} readOnly style={{ minWidth: 340, opacity: 0.8 }} />
+              <button
+                onClick={() => void run(async () => refreshEventCardPrompt())}
+                disabled={eventCardPromptLoading}
+              >
+                {eventCardPromptLoading ? "Loading prompt..." : "Load prompt"}
+              </button>
+            </div>
+            <div className="row">
+              <span className="muted">
+                {eventCardPromptMeta
+                  ? `agent=${eventCardPromptMeta.agent_name} | model=${eventCardPromptMeta.model_name} | prompt_version=${eventCardPromptMeta.prompt_version}`
+                  : "Prompt metadata will appear here."}
+              </span>
+            </div>
+            <div className="row">
+              <span className="muted">
+                Only `system_instruction` and `user_prompt` are sent to model override. DB is updated only via Save changes.
+              </span>
+            </div>
+            <div className="row" style={{ alignItems: "flex-start" }}>
+              <label>event_title</label>
+              <textarea
+                readOnly
+                rows={2}
+                className="mono readonly-prompt-field"
+                value={String(eventCardPromptContextParts?.event_title ?? "")}
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div className="row" style={{ alignItems: "flex-start" }}>
+              <label>event_description</label>
+              <textarea
+                readOnly
+                rows={3}
+                className="mono readonly-prompt-field"
+                value={String(eventCardPromptContextParts?.event_description ?? "")}
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div className="row" style={{ alignItems: "flex-start" }}>
+              <label>series</label>
+              <textarea
+                readOnly
+                rows={4}
+                className="mono readonly-prompt-field"
+                value={JSON.stringify(eventCardPromptContextParts?.series ?? null, null, 2)}
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div className="row" style={{ alignItems: "flex-start" }}>
+              <label>tags</label>
+              <textarea
+                readOnly
+                rows={4}
+                className="mono readonly-prompt-field"
+                value={JSON.stringify(eventCardPromptContextParts?.tags ?? [], null, 2)}
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div className="row" style={{ alignItems: "flex-start" }}>
+              <label>recurring_rule</label>
+              <textarea
+                readOnly
+                rows={3}
+                className="mono readonly-prompt-field"
+                value={String(eventCardPromptContextParts?.recurring_rule ?? "")}
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div className="row" style={{ alignItems: "flex-start" }}>
+              <label>system_instruction</label>
+              <textarea
+                rows={3}
+                className="mono"
+                value={eventCardPromptDraft.system_instruction}
+                onChange={(e) => setEventCardPromptDraft((prev) => ({ ...prev, system_instruction: e.target.value }))}
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div className="row" style={{ alignItems: "flex-start" }}>
+              <label>user_prompt</label>
+              <textarea
+                rows={10}
+                className="mono"
+                value={eventCardPromptDraft.user_prompt}
+                onChange={(e) => setEventCardPromptDraft((prev) => ({ ...prev, user_prompt: e.target.value }))}
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div className="row" style={{ alignItems: "flex-start" }}>
+              <label>full_prompt</label>
+              <textarea
+                readOnly
+                value={eventCardPromptText}
+                rows={10}
+                className="mono readonly-prompt-field"
+                placeholder="full_prompt (system + user)"
+                style={{ width: "100%", minHeight: 200 }}
+              />
+            </div>
+          </div>
           </div>
 
           <div className="overflow-auto rounded-xl border border-slate-700 bg-slate-900 shadow-sm">
@@ -1456,6 +1754,9 @@ export default function HomePage() {
                             className="rounded p-1 text-slate-400 hover:bg-slate-700 hover:text-slate-100"
                             onClick={() => {
                               setEventCardForm(mapEventCardRowToForm(row));
+                              void refreshEventCardPrompt(row.event_id).catch(() => {
+                                // prompt load errors are handled by global run when used explicitly
+                              });
                             }}
                           >
                             <Pencil size={14} />
@@ -1467,14 +1768,36 @@ export default function HomePage() {
                             onClick={() =>
                               void run(async () => {
                                 // Immediately show currently selected row values in editor form.
-                                setEventCardForm(mapEventCardRowToForm(row));
+                                const previousForm = mapEventCardRowToForm(row);
+                                setEventCardForm(previousForm);
+                                await refreshEventCardPrompt(row.event_id);
                                 setEventCardRegeneratingEventId(row.event_id);
                                 try {
-                                  const out = await fetchJSON<{ status: string; row: EventCardRow }>(
+                                  const out = await fetchJSON<{
+                                    status: string;
+                                    row: EventCardRow;
+                                    prompt_text?: string;
+                                    prompt_parts?: EventCardPromptPreview["prompt_parts"];
+                                  }>(
                                     `/api/event-cards/${encodeURIComponent(row.event_id)}/regenerate`,
-                                    { method: "POST" },
+                                    {
+                                      method: "POST",
+                                      body: JSON.stringify(buildRegenerateRequestBody(row.event_id)),
+                                    },
                                   );
-                                  setEventCardForm(mapEventCardRowToForm(out.row));
+                                  setEventCardForm(mergeRegeneratedEventCardForm(previousForm, out.row));
+                                  if (out.prompt_text) {
+                                    setEventCardPromptText(out.prompt_text);
+                                    setEventCardPromptMeta({
+                                      event_id: row.event_id,
+                                      agent_name: out.row.agent_name ?? "agent_1_quant",
+                                      model_name: out.row.model_name ?? "",
+                                      prompt_version: out.row.prompt_version ?? "v1",
+                                    });
+                                    const nextParts = out.prompt_parts ?? null;
+                                    setEventCardPromptContextParts(nextParts);
+                                    setEventCardPromptDraft(promptPartsToDraft(nextParts));
+                                  }
                                   setOk(`Preview regenerated for ${row.event_id}. Click Save changes to persist.`);
                                   await refreshEventCardRows();
                                 } finally {

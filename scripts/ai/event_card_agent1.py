@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from .gemini_client import GeminiJsonClient
+from .claude_client import ClaudeJsonClient
 
 
 FOUNDATIONAL_TAG_PRIORITY = [
@@ -38,6 +38,20 @@ NOISE_TAGS = {
     "weekly",
 }
 
+USER_PROMPT_REQUIRED_MARKERS = (
+    "Input event payload:",
+    "- title:",
+    "- description:",
+    "- series:",
+    "- tags:",
+    "Hard rules:",
+    "- card_title:",
+    "- card_lore:",
+    "- primary_tag:",
+    "- secondary_tag:",
+    "- recurrence rule:",
+)
+
 
 class Agent1CardResponse(BaseModel):
     card_title: str
@@ -56,10 +70,10 @@ class Agent1QuantCardGenerator:
     ) -> None:
         self.prompt_version = prompt_version
         if model and model.strip():
-            self.client = GeminiJsonClient(model=model.strip())
+            self.client = ClaudeJsonClient(model=model.strip())
         else:
-            # Fall back to GeminiJsonClient default model.
-            self.client = GeminiJsonClient()
+            # Fall back to ClaudeJsonClient default model.
+            self.client = ClaudeJsonClient()
         self.model = self.client.model
 
     @staticmethod
@@ -192,14 +206,15 @@ class Agent1QuantCardGenerator:
             secondary_tag=secondary,
         )
 
-    def generate(self, payload: dict[str, Any]) -> Agent1CardResponse:
+    def build_prompt_context(self, payload: dict[str, Any]) -> dict[str, Any]:
         event_title = str(payload.get("title") or "").strip()
         event_description = str(payload.get("description") or "").strip()
+        series_payload = payload.get("series")
         tags = self._normalize_tags(payload.get("tags"))
         if not tags:
             raise ValueError("Event payload must include at least one tag")
 
-        recurring = self._is_recurring(payload.get("series"))
+        recurring = self._is_recurring(series_payload)
         recurring_rule = (
             "Series recurrence is daily/weekly. Frame lore as recurring consensus matrix "
             "or ongoing volatility tracker."
@@ -212,7 +227,7 @@ class Agent1QuantCardGenerator:
             "Input event payload:\n"
             f"- title: {event_title}\n"
             f"- description: {event_description}\n"
-            f"- series: {payload.get('series')}\n"
+            f"- series: {series_payload}\n"
             f"- tags: {tags}\n\n"
             "Hard rules:\n"
             "- card_title: max 7 words, no question mark, no trailing ellipsis.\n"
@@ -226,11 +241,108 @@ class Agent1QuantCardGenerator:
             "You are Agent 1 The Quant, a Web3 prediction-market terminal. "
             "Return only structured JSON and follow constraints exactly."
         )
+        full_prompt = (
+            "System instruction:\n"
+            f"{system_instruction}\n\n"
+            "User prompt:\n"
+            f"{prompt}"
+        )
+        prompt_parts = {
+            "event_title": event_title,
+            "event_description": event_description,
+            "series": series_payload,
+            "tags": tags,
+            "recurring_rule": recurring_rule,
+            "system_instruction": system_instruction,
+            "user_prompt": prompt,
+            "full_prompt": full_prompt,
+        }
 
+        return {
+            "event_title": event_title,
+            "event_description": event_description,
+            "series": series_payload,
+            "tags": tags,
+            "recurring": recurring,
+            "recurring_rule": recurring_rule,
+            "prompt": prompt,
+            "system_instruction": system_instruction,
+            "full_prompt": full_prompt,
+            "prompt_parts": prompt_parts,
+        }
+
+    @staticmethod
+    def _validate_user_prompt_structure(user_prompt: str) -> None:
+        missing = [marker for marker in USER_PROMPT_REQUIRED_MARKERS if marker not in user_prompt]
+        if missing:
+            raise ValueError(
+                "Prompt structure is invalid. Missing required markers: "
+                + ", ".join(missing)
+            )
+
+    def build_prompt_context_from_parts(
+        self,
+        payload: dict[str, Any],
+        prompt_parts: dict[str, Any],
+    ) -> dict[str, Any]:
+        event_title = str(prompt_parts.get("event_title") or "").strip()
+        if not event_title:
+            raise ValueError("Prompt part 'event_title' is required")
+
+        event_description = str(prompt_parts.get("event_description") or "").strip()
+        series_payload = prompt_parts.get("series")
+        tags = self._normalize_tags(prompt_parts.get("tags"))
+        if not tags:
+            raise ValueError("Prompt part 'tags' must include at least one tag")
+
+        recurring = self._is_recurring(payload.get("series"))
+        recurring_rule = str(prompt_parts.get("recurring_rule") or "").strip()
+        if not recurring_rule:
+            raise ValueError("Prompt part 'recurring_rule' is required")
+
+        system_instruction = str(prompt_parts.get("system_instruction") or "").strip()
+        if not system_instruction:
+            raise ValueError("Prompt part 'system_instruction' is required")
+
+        user_prompt = str(prompt_parts.get("user_prompt") or "").strip()
+        if not user_prompt:
+            raise ValueError("Prompt part 'user_prompt' is required")
+        self._validate_user_prompt_structure(user_prompt)
+
+        full_prompt = (
+            "System instruction:\n"
+            f"{system_instruction}\n\n"
+            "User prompt:\n"
+            f"{user_prompt}"
+        )
+        normalized_parts = {
+            "event_title": event_title,
+            "event_description": event_description,
+            "series": series_payload,
+            "tags": tags,
+            "recurring_rule": recurring_rule,
+            "system_instruction": system_instruction,
+            "user_prompt": user_prompt,
+            "full_prompt": full_prompt,
+        }
+        return {
+            "event_title": event_title,
+            "event_description": event_description,
+            "series": series_payload,
+            "tags": tags,
+            "recurring": recurring,
+            "recurring_rule": recurring_rule,
+            "prompt": user_prompt,
+            "system_instruction": system_instruction,
+            "full_prompt": full_prompt,
+            "prompt_parts": normalized_parts,
+        }
+
+    def _generate_from_prompt_context(self, prompt_ctx: dict[str, Any]) -> Agent1CardResponse:
         raw = self.client.generate_json(
-            prompt=prompt,
+            prompt=prompt_ctx["prompt"],
             response_schema=Agent1CardResponse,
-            system_instruction=system_instruction,
+            system_instruction=prompt_ctx["system_instruction"],
             temperature=0.2,
         )
         if isinstance(raw, Agent1CardResponse):
@@ -242,7 +354,19 @@ class Agent1QuantCardGenerator:
 
         return self._enforce_constraints(
             raw=result,
-            event_title=event_title,
-            tags=tags,
-            recurring=recurring,
+            event_title=prompt_ctx["event_title"],
+            tags=prompt_ctx["tags"],
+            recurring=prompt_ctx["recurring"],
         )
+
+    def generate(self, payload: dict[str, Any]) -> Agent1CardResponse:
+        prompt_ctx = self.build_prompt_context(payload)
+        return self._generate_from_prompt_context(prompt_ctx)
+
+    def generate_with_prompt_parts(
+        self,
+        payload: dict[str, Any],
+        prompt_parts: dict[str, Any],
+    ) -> tuple[Agent1CardResponse, dict[str, Any]]:
+        prompt_ctx = self.build_prompt_context_from_parts(payload=payload, prompt_parts=prompt_parts)
+        return self._generate_from_prompt_context(prompt_ctx), prompt_ctx
