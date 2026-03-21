@@ -66,7 +66,7 @@ class Agent1QuantCardGenerator:
     def __init__(
         self,
         model: Optional[str] = None,
-        prompt_version: str = "v4",
+        prompt_version: str = "v5",
     ) -> None:
         self.prompt_version = prompt_version
         if model and model.strip():
@@ -230,7 +230,7 @@ class Agent1QuantCardGenerator:
             f"- series: {series_payload}\n"
             f"- tags: {tags}\n\n"
             "Hard rules:\n"
-            "- card_title: max 7 words, no question mark, no trailing ellipsis. Title must suit naming for trading collectible card.\n"
+            "- card_title: max 3 words, no question mark, no trailing ellipsis. Title must suit naming for trading collectible card.\n"
             "- card_lore: max 3 sentences, under 50 words, cold analytical quant-terminal tone.\n"
             "- primary_tag: must be exactly one string from provided tags array. The chosen tag must resemble the broadest category possible for the event.\n"
             "- secondary_tag: must be distinct tag from provided tags array; null only if one tag exists. The tag must represent narrowed category but still be recognizable.\n"
