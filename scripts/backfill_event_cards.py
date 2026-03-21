@@ -117,6 +117,24 @@ def _ensure_event_cards_schema(conn: Any) -> None:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_hex_color ON tags(hex_color)")
 
 
+def _sync_event_tag_primary_flags(conn: Any, event_id: str, primary_tag: Optional[str]) -> None:
+    normalized_primary = (primary_tag or "").strip() or None
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE tags t
+            SET is_primary = CASE
+                WHEN %s IS NOT NULL AND LOWER(BTRIM(t.label)) = LOWER(BTRIM(%s)) THEN TRUE
+                ELSE FALSE
+            END
+            FROM event_tags et
+            WHERE et.event_id = %s
+              AND et.tag_id = t.id
+            """,
+            (normalized_primary, normalized_primary, event_id),
+        )
+
+
 def _select_candidate_event_ids(
     conn: Any,
     batch_size: int,
@@ -238,6 +256,7 @@ def _upsert_ok(
                 prompt_version,
             ),
         )
+    _sync_event_tag_primary_flags(conn, event_id=event_id, primary_tag=generated.get("primary_tag"))
     conn.commit()
 
 
@@ -281,6 +300,7 @@ def _upsert_error(
             """,
             (event_id, agent_name, model_name, prompt_version, err),
         )
+    _sync_event_tag_primary_flags(conn, event_id=event_id, primary_tag=None)
     conn.commit()
 
 
