@@ -54,9 +54,10 @@ if [ -f "/app/sql/schemas/create_simple_tracking.sql" ]; then
 fi
 
 # Export environment variables for cron
-# Cron doesn't inherit environment variables, so we need to add them explicitly
+# Cron doesn't inherit environment variables, so we need to add them explicitly.
+# Keep all UPPER_SNAKE_CASE vars to avoid missing new flags from .env/.env.prod.
 echo "🔧 Setting up cron environment..."
-printenv | grep -E '^(DB_|LOCAL_DB_|POSTGRES_|PYTHON|SUPABASE_|ALCHEMY_|GENESIS_|DAILY_|MAX_)' | sed 's/^\(.*\)$/export \1/g' > /app/cron_env.sh
+printenv | grep -E '^[A-Z_][A-Z0-9_]*=' | sed 's/^\(.*\)$/export \1/g' > /app/cron_env.sh
 chmod +x /app/cron_env.sh
 
 # Setup cron jobs with current environment
