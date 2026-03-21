@@ -91,6 +91,7 @@ class DbUploader:
     @staticmethod
     def _ensure_tags_color_schema(cursor) -> None:
         cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS hex_color TEXT")
+        cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE")
         cursor.execute(
             """
             ALTER TABLE tags
@@ -115,6 +116,7 @@ class DbUploader:
             SELECT id, COALESCE(NULLIF(BTRIM(label), ''), id) AS effective_label
             FROM tags
             WHERE id = ANY(%s)
+              AND is_primary = TRUE
               AND hex_color IS NULL
             ORDER BY id ASC
             """,
@@ -126,13 +128,18 @@ class DbUploader:
 
         cursor.execute(
             """
-            SELECT DISTINCT hex_color
+            SELECT DISTINCT COALESCE(NULLIF(BTRIM(label), ''), id) AS tag_label, hex_color
             FROM tags
-            WHERE hex_color IS NOT NULL
-            ORDER BY hex_color ASC
+            WHERE is_primary = TRUE
+              AND hex_color IS NOT NULL
+            ORDER BY tag_label ASC, hex_color ASC
             """
         )
-        palette = [str(row[0]) for row in cursor.fetchall() if row and row[0]]
+        palette = [
+            {"tag_label": str(row[0]), "hex_color": str(row[1])}
+            for row in cursor.fetchall()
+            if row and row[1]
+        ]
         generator = self._get_tag_color_generator()
 
         generated = 0
@@ -159,7 +166,7 @@ class DbUploader:
             )
             if cursor.rowcount:
                 generated += 1
-                palette.append(out.hex_color)
+                palette.append({"tag_label": str(effective_label or tag_id), "hex_color": out.hex_color})
         return generated
 
     def _test_connection(self):

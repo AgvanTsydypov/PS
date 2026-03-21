@@ -319,18 +319,19 @@ class SeasonWorkbenchService:
 
     def _sync_event_tag_primary_flags(self, cursor: Any, event_id: str, primary_tag: Optional[str]) -> None:
         normalized_primary = self._normalize_optional_text(primary_tag)
+        if not normalized_primary:
+            return
         cursor.execute(
             """
             UPDATE tags t
-            SET is_primary = CASE
-                WHEN %s IS NOT NULL AND LOWER(BTRIM(t.label)) = LOWER(BTRIM(%s)) THEN TRUE
-                ELSE FALSE
-            END
+            SET is_primary = TRUE
             FROM event_tags et
             WHERE et.event_id = %s
               AND et.tag_id = t.id
+              AND LOWER(BTRIM(t.label)) = LOWER(BTRIM(%s))
+              AND COALESCE(t.is_primary, FALSE) = FALSE
             """,
-            (normalized_primary, normalized_primary, event_id),
+            (event_id, normalized_primary),
         )
 
     def get_seasons(self) -> List[Dict[str, Any]]:

@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from .gemini_client import GeminiJsonClient
+from .claude_client import ClaudeJsonClient
 
 
 HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -65,17 +65,43 @@ def is_dark_mode_legible(hex_color: str) -> bool:
     return True
 
 
+def _theme_bucket(tag: str) -> str:
+    text = (tag or "").lower().strip()
+    if any(key in text for key in ("finance", "macro", "econom", "stocks", "rates", "yield")):
+        return "finance"
+    if any(key in text for key in ("politic", "election", "war", "conflict", "middle east", "geopolit")):
+        return "politics"
+    if any(key in text for key in ("tech", "ai", "crypto", "space", "science", "web3")):
+        return "tech"
+    if any(key in text for key in ("weather", "climate", "environment", "earth", "energy")):
+        return "environment"
+    if any(key in text for key in ("sport",)):
+        return "sports"
+    if any(key in text for key in ("pop", "culture", "entertainment", "music", "film")):
+        return "culture"
+    return "general"
+
+
+def _min_hue_distance_for_pair(left_tag: str, right_tag: str) -> float:
+    # Thematically similar tags: tighter hue rotation. Different themes: wider.
+    return 5.0 if _theme_bucket(left_tag) == _theme_bucket(right_tag) else 20.0
+
+
 def is_hue_contrast_valid(
     candidate_hex: str,
-    existing_palette: list[str],
-    *,
-    min_hue_distance: float = 30.0,
+    candidate_tag: str,
+    existing_palette: list[dict[str, str]],
 ) -> bool:
     if not existing_palette:
         return True
     candidate_hue, _, _ = hex_to_hsl(candidate_hex)
     for existing in existing_palette:
-        existing_hue, _, _ = hex_to_hsl(existing)
+        existing_hex = normalize_hex_color(existing.get("hex_color"))
+        existing_tag = str(existing.get("tag_label") or "").strip()
+        if not existing_hex:
+            continue
+        existing_hue, _, _ = hex_to_hsl(existing_hex)
+        min_hue_distance = _min_hue_distance_for_pair(candidate_tag, existing_tag)
         if hue_distance_degrees(candidate_hue, existing_hue) < min_hue_distance:
             return False
     return True
@@ -95,25 +121,32 @@ class Agent2ColoristGenerator:
     ) -> None:
         self.prompt_version = prompt_version
         if model and model.strip():
-            self.client = GeminiJsonClient(model=model.strip())
+            self.client = ClaudeJsonClient(model=model.strip())
         else:
-            self.client = GeminiJsonClient()
+            self.client = ClaudeJsonClient()
         self.model = self.client.model
 
     @staticmethod
-    def _normalize_palette(raw_palette: Any) -> list[str]:
+    def _normalize_palette(raw_palette: Any) -> list[dict[str, str]]:
         if not isinstance(raw_palette, list):
             return []
-        normalized: list[str] = []
+        normalized: list[dict[str, str]] = []
         seen: set[str] = set()
         for value in raw_palette:
-            normalized_hex = normalize_hex_color(value)
+            tag_label = ""
+            normalized_hex: Optional[str] = None
+            if isinstance(value, str):
+                normalized_hex = normalize_hex_color(value)
+            elif isinstance(value, dict):
+                tag_label = str(value.get("tag_label") or value.get("label") or "").strip()
+                normalized_hex = normalize_hex_color(value.get("hex_color"))
             if not normalized_hex:
                 continue
-            if normalized_hex in seen:
+            key = f"{tag_label.lower()}|{normalized_hex}"
+            if key in seen:
                 continue
-            seen.add(normalized_hex)
-            normalized.append(normalized_hex)
+            seen.add(key)
+            normalized.append({"tag_label": tag_label, "hex_color": normalized_hex})
         return normalized
 
     @staticmethod
@@ -134,7 +167,7 @@ class Agent2ColoristGenerator:
         return ([206.0, 280.0, 36.0, 160.0], 72.0, 58.0)
 
     @staticmethod
-    def _pick_fallback_hex(tag: str, existing_palette: list[str]) -> str:
+    def _pick_fallback_hex(tag: str, existing_palette: list[dict[str, str]]) -> str:
         base_hues, saturation, lightness = Agent2ColoristGenerator._theme_hues_and_style(tag)
         hue_offsets = [0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180]
         sat_offsets = [0.0, -6.0, 6.0, -10.0, 10.0]
@@ -148,21 +181,21 @@ class Agent2ColoristGenerator:
                         candidate = hsl_to_hex(hue, saturation + sat_offset, lightness + light_offset)
                         if not is_dark_mode_legible(candidate):
                             continue
-                        if not is_hue_contrast_valid(candidate, existing_palette):
+                        if not is_hue_contrast_valid(candidate, tag, existing_palette):
                             continue
                         return candidate
 
         # Absolute last-resort deterministic search.
         for hue in range(0, 360, 5):
             candidate = hsl_to_hex(float(hue), 74.0, 58.0)
-            if is_dark_mode_legible(candidate) and is_hue_contrast_valid(candidate, existing_palette):
+            if is_dark_mode_legible(candidate) and is_hue_contrast_valid(candidate, tag, existing_palette):
                 return candidate
         return "#5AA9FF"
 
-    def _enforce_constraints(self, candidate_hex: Any, tag: str, existing_palette: list[str]) -> str:
+    def _enforce_constraints(self, candidate_hex: Any, tag: str, existing_palette: list[dict[str, str]]) -> str:
         normalized = normalize_hex_color(candidate_hex)
         if normalized and is_dark_mode_legible(normalized):
-            if not existing_palette or is_hue_contrast_valid(normalized, existing_palette):
+            if not existing_palette or is_hue_contrast_valid(normalized, tag, existing_palette):
                 return normalized
         return self._pick_fallback_hex(tag=tag, existing_palette=existing_palette)
 
@@ -174,7 +207,9 @@ class Agent2ColoristGenerator:
 
         rules = (
             "If existing_palette is empty, pick the best thematic color immediately.\n"
-            "If existing_palette is non-empty, ensure hue is at least 30 degrees away from every existing color.\n"
+            "If existing_palette is non-empty, use hue rotation thresholds:\n"
+            "- at least 5 degrees away for thematically similar tags\n"
+            "- at least 20 degrees away for thematically different tags\n"
             "Theme mapping: finance/macro -> green/gold; geopolitics/conflict -> red/orange; "
             "tech/ai/space -> cyan/purple; environment -> green/teal.\n"
             "Dark mode legibility: color must pop on dark background; avoid pure blinding neon and muddy low-saturation tones.\n"
