@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from collections import defaultdict, deque
@@ -84,6 +85,84 @@ class ClaudeJsonClient:
             raise ValueError("Claude returned empty text content")
         return "\n".join(chunks).strip()
 
+    @staticmethod
+    def _strip_code_fences(text: str) -> str:
+        value = (text or "").strip()
+        if not value:
+            return value
+        fence_match = re.match(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", value, flags=re.DOTALL | re.IGNORECASE)
+        if fence_match:
+            return fence_match.group(1).strip()
+        return value
+
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str:
+        value = (text or "").strip()
+        if not value:
+            return value
+        start = value.find("{")
+        if start < 0:
+            return value
+        depth = 0
+        in_string = False
+        escape = False
+        for idx in range(start, len(value)):
+            ch = value[idx]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch == "{":
+                depth += 1
+                continue
+            if ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return value[start : idx + 1].strip()
+        return value
+
+    @staticmethod
+    def _normalize_json_text(text: str) -> str:
+        stripped = ClaudeJsonClient._strip_code_fences(text)
+        return ClaudeJsonClient._extract_first_json_object(stripped)
+
+    def _call_messages_api(
+        self,
+        *,
+        user_prompt: str,
+        system_text: str,
+        temperature: float,
+        max_output_tokens: int,
+    ) -> dict[str, Any]:
+        req_body = {
+            "model": self.model,
+            "max_tokens": max_output_tokens,
+            "temperature": temperature,
+            "system": system_text,
+            "messages": [{"role": "user", "content": user_prompt}],
+        }
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=req_body,
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code >= 400:
+            raise ValueError(f"Claude API error {response.status_code}: {response.text}")
+        return response.json()
+
     def generate_json(
         self,
         prompt: str,
@@ -113,39 +192,41 @@ class ClaudeJsonClient:
         system_text = (system_instruction or "").strip()
         if not system_text:
             system_text = "Return strictly valid JSON that matches the provided schema."
-
-        req_body = {
-            "model": self.model,
-            "max_tokens": max_output_tokens,
-            "temperature": temperature,
-            "system": system_text,
-            "messages": [{"role": "user", "content": user_prompt}],
-        }
-        headers = {
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers=headers,
-            json=req_body,
-            timeout=self.timeout_seconds,
+        attempts = (
+            (user_prompt, system_text),
+            (
+                user_prompt
+                + "\n\nCRITICAL: Return a raw JSON object only. Do not wrap in markdown fences.",
+                system_text
+                + " Output must be a single raw JSON object string without markdown code fences.",
+            ),
         )
-        if response.status_code >= 400:
-            raise ValueError(f"Claude API error {response.status_code}: {response.text}")
+        last_error: Exception | None = None
+        for attempt_user_prompt, attempt_system_text in attempts:
+            payload = self._call_messages_api(
+                user_prompt=attempt_user_prompt,
+                system_text=attempt_system_text,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+            )
+            raw_text = self._extract_text_from_response(payload)
+            normalized_json = self._normalize_json_text(raw_text)
 
-        payload = response.json()
-        raw_json = self._extract_text_from_response(payload)
+            if isinstance(response_schema, type) and issubclass(response_schema, BaseModel):
+                try:
+                    return response_schema.model_validate_json(normalized_json)
+                except ValidationError as exc:
+                    last_error = exc
+                    continue
+            else:
+                try:
+                    return json.loads(normalized_json)
+                except json.JSONDecodeError as exc:
+                    last_error = exc
+                    continue
 
-        if isinstance(response_schema, type) and issubclass(response_schema, BaseModel):
-            try:
-                return response_schema.model_validate_json(raw_json)
-            except ValidationError as exc:
-                raise ValueError(f"Response does not match schema: {exc}") from exc
-
-        try:
-            parsed = json.loads(raw_json)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON response: {exc}") from exc
-        return parsed
+        if isinstance(last_error, ValidationError):
+            raise ValueError(f"Response does not match schema: {last_error}") from last_error
+        if isinstance(last_error, json.JSONDecodeError):
+            raise ValueError(f"Invalid JSON response: {last_error}") from last_error
+        raise ValueError("Claude returned a non-JSON response")
