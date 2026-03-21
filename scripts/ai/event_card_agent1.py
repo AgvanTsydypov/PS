@@ -66,7 +66,7 @@ class Agent1QuantCardGenerator:
     def __init__(
         self,
         model: Optional[str] = None,
-        prompt_version: str = "v1",
+        prompt_version: str = "v2",
     ) -> None:
         self.prompt_version = prompt_version
         if model and model.strip():
@@ -232,13 +232,13 @@ class Agent1QuantCardGenerator:
             "Hard rules:\n"
             "- card_title: max 7 words, no question mark, no trailing ellipsis.\n"
             "- card_lore: max 3 sentences, under 50 words, cold analytical quant-terminal tone.\n"
-            "- primary_tag: must be exactly one string from provided tags array.\n"
+            "- primary_tag: must be exactly one string from provided tags array. The chosen tag must resemble the broadest category possible for the event.\n"
             "- secondary_tag: must be distinct tag from provided tags array; null only if one tag exists.\n"
             f"- recurrence rule: {recurring_rule}\n"
         )
 
         system_instruction = (
-            "You are Agent 1 The Quant, a Web3 prediction-market terminal. "
+            "You are The Quant, a prediction-market terminal from not-so-distant future. Rewire the fields in a way so they will be applied to Collectible card."
             "Return only structured JSON and follow constraints exactly."
         )
         full_prompt = (
