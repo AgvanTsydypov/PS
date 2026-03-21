@@ -71,7 +71,10 @@ def _theme_bucket(tag: str) -> str:
         return "finance"
     if any(key in text for key in ("politic", "election", "war", "conflict", "middle east", "geopolit")):
         return "politics"
-    if any(key in text for key in ("tech", "ai", "crypto", "space", "science", "web3")):
+    if any(
+        key in text
+        for key in ("tech", "ai", "crypto", "bitcoin", "btc", "ethereum", "eth", "space", "science", "web3")
+    ):
         return "tech"
     if any(key in text for key in ("weather", "climate", "environment", "earth", "energy")):
         return "environment"
