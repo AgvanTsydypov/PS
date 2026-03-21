@@ -3,7 +3,7 @@ Backfill missing tag colors in `tags.hex_color` using Agent 2 (The Colorist).
 
 This script:
 1) Ensures `tags.hex_color` schema exists
-2) Selects tags where `hex_color IS NULL`
+2) Selects tags where `is_primary = TRUE AND hex_color IS NULL`
 3) Generates a distinct color for each tag with Agent 2
 4) Updates only rows that are still NULL (idempotent)
 
@@ -90,6 +90,7 @@ class TagColorBackfiller:
         cursor = conn.cursor()
         try:
             cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS hex_color TEXT")
+            cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE")
             cursor.execute(
                 """
                 ALTER TABLE tags
@@ -115,7 +116,7 @@ class TagColorBackfiller:
     def _fetch_total_missing(conn) -> int:
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT COUNT(*) FROM tags WHERE hex_color IS NULL")
+            cursor.execute("SELECT COUNT(*) FROM tags WHERE is_primary = TRUE AND hex_color IS NULL")
             return int(cursor.fetchone()[0])
         finally:
             cursor.close()
@@ -132,7 +133,8 @@ class TagColorBackfiller:
                 """
                 SELECT id, COALESCE(NULLIF(BTRIM(label), ''), id) AS effective_label
                 FROM tags
-                WHERE hex_color IS NULL
+                WHERE is_primary = TRUE
+                  AND hex_color IS NULL
                 ORDER BY id ASC
                 LIMIT %s
                 """,
@@ -144,18 +146,24 @@ class TagColorBackfiller:
             cursor.close()
 
     @staticmethod
-    def _fetch_palette(conn) -> List[str]:
+    def _fetch_palette(conn) -> List[dict]:
         cursor = conn.cursor()
         try:
             cursor.execute(
                 """
-                SELECT DISTINCT hex_color
+                SELECT DISTINCT COALESCE(NULLIF(BTRIM(label), ''), id) AS tag_label, hex_color
                 FROM tags
-                WHERE hex_color IS NOT NULL
-                ORDER BY hex_color ASC
+                WHERE is_primary = TRUE
+                  AND hex_color IS NOT NULL
+                ORDER BY tag_label ASC, hex_color ASC
                 """
             )
-            return [str(row[0]) for row in cursor.fetchall() if row and row[0]]
+            palette: List[dict] = []
+            for row in cursor.fetchall():
+                if not row or not row[1]:
+                    continue
+                palette.append({"tag_label": str(row[0]), "hex_color": str(row[1])})
+            return palette
         finally:
             cursor.close()
 
@@ -237,7 +245,7 @@ class TagColorBackfiller:
                         conn.commit()
                         if cursor.rowcount:
                             self.stats["updated"] += 1
-                            palette.append(out.hex_color)
+                            palette.append({"tag_label": label, "hex_color": out.hex_color})
                         else:
                             self.stats["skipped_not_null"] += 1
                     except Exception as exc:

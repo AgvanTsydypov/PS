@@ -49,7 +49,6 @@ def _db_params(use_local_db: bool) -> Dict[str, Any]:
         "sslmode": os.getenv("DB_SSLMODE", "require"),
     }
 
-
 def _ensure_event_cards_schema(conn: Any) -> None:
     with conn.cursor() as cursor:
         cursor.execute(
@@ -119,19 +118,20 @@ def _ensure_event_cards_schema(conn: Any) -> None:
 
 def _sync_event_tag_primary_flags(conn: Any, event_id: str, primary_tag: Optional[str]) -> None:
     normalized_primary = (primary_tag or "").strip() or None
+    if not normalized_primary:
+        return
     with conn.cursor() as cursor:
         cursor.execute(
             """
             UPDATE tags t
-            SET is_primary = CASE
-                WHEN %s IS NOT NULL AND LOWER(BTRIM(t.label)) = LOWER(BTRIM(%s)) THEN TRUE
-                ELSE FALSE
-            END
+            SET is_primary = TRUE
             FROM event_tags et
             WHERE et.event_id = %s
               AND et.tag_id = t.id
+              AND LOWER(BTRIM(t.label)) = LOWER(BTRIM(%s))
+              AND COALESCE(t.is_primary, FALSE) = FALSE
             """,
-            (normalized_primary, normalized_primary, event_id),
+            (event_id, normalized_primary),
         )
 
 
