@@ -35,7 +35,14 @@ import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 
-from scripts.ai import Agent2ColoristGenerator
+try:
+    # Works when project root is on PYTHONPATH (e.g. scripts run as package).
+    from scripts.ai import Agent2ColoristGenerator
+except ModuleNotFoundError as exc:
+    # Fallback for direct script execution where only /app/scripts is on sys.path.
+    if getattr(exc, "name", None) != "scripts":
+        raise
+    from ai import Agent2ColoristGenerator
 
 load_dotenv()
 
