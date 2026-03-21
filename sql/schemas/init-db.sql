@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS tags (
     id TEXT PRIMARY KEY,
     label TEXT,
     hex_color TEXT,
+    is_primary BOOLEAN NOT NULL DEFAULT FALSE,
     CONSTRAINT tags_hex_color_format
         CHECK (hex_color IS NULL OR hex_color ~* '^#[0-9a-f]{6}$')
 );
@@ -105,6 +106,9 @@ CREATE TABLE IF NOT EXISTS event_tags (
 
 ALTER TABLE tags
     ADD COLUMN IF NOT EXISTS hex_color TEXT;
+
+ALTER TABLE tags
+    ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE;
 
 DO $$
 BEGIN
@@ -141,6 +145,7 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_events_series_id ON events(series_id);
 CREATE INDEX IF NOT EXISTS idx_event_tags_tag_id ON event_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_tags_hex_color ON tags(hex_color);
+CREATE INDEX IF NOT EXISTS idx_tags_is_primary ON tags(is_primary);
 
 DO $$ BEGIN RAISE NOTICE '✅ Series/tags tables created'; END $$;
 

@@ -595,6 +595,11 @@ class SimplifiedScheduler:
                 self.event_cards_prompt_version,
             ),
         )
+        self._sync_event_tag_primary_flags(
+            cursor=cursor,
+            event_id=event_id,
+            primary_tag=generated.get("primary_tag"),
+        )
 
     def _mark_event_card_error(self, cursor: Any, event_id: str, error_text: str) -> None:
         err = (error_text or "unknown error").strip()
@@ -634,6 +639,27 @@ class SimplifiedScheduler:
                 self.event_cards_prompt_version,
                 err,
             ),
+        )
+        self._sync_event_tag_primary_flags(
+            cursor=cursor,
+            event_id=event_id,
+            primary_tag=None,
+        )
+
+    def _sync_event_tag_primary_flags(self, cursor: Any, event_id: str, primary_tag: Optional[str]) -> None:
+        normalized_primary = (primary_tag or "").strip() or None
+        cursor.execute(
+            """
+            UPDATE tags t
+            SET is_primary = CASE
+                WHEN %s IS NOT NULL AND LOWER(BTRIM(t.label)) = LOWER(BTRIM(%s)) THEN TRUE
+                ELSE FALSE
+            END
+            FROM event_tags et
+            WHERE et.event_id = %s
+              AND et.tag_id = t.id
+            """,
+            (normalized_primary, normalized_primary, event_id),
         )
 
     def _ensure_event_cards_schema(self) -> None:

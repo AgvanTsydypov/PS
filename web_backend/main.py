@@ -303,6 +303,22 @@ class SeasonWorkbenchService:
         finally:
             conn.close()
 
+    def _sync_event_tag_primary_flags(self, cursor: Any, event_id: str, primary_tag: Optional[str]) -> None:
+        normalized_primary = self._normalize_optional_text(primary_tag)
+        cursor.execute(
+            """
+            UPDATE tags t
+            SET is_primary = CASE
+                WHEN %s IS NOT NULL AND LOWER(BTRIM(t.label)) = LOWER(BTRIM(%s)) THEN TRUE
+                ELSE FALSE
+            END
+            FROM event_tags et
+            WHERE et.event_id = %s
+              AND et.tag_id = t.id
+            """,
+            (normalized_primary, normalized_primary, event_id),
+        )
+
     def get_seasons(self) -> List[Dict[str, Any]]:
         conn = self.manager.get_connection()
         try:
@@ -1828,8 +1844,15 @@ class SeasonWorkbenchService:
                 row = cursor.fetchone()
                 if not row:
                     raise ValueError(f"Event card for event_id={target_event_id} not found")
+                persisted = dict(row)
+                primary_for_sync = persisted.get("primary_tag") if persisted.get("status") == "ok" else None
+                self._sync_event_tag_primary_flags(
+                    cursor=cursor,
+                    event_id=target_event_id,
+                    primary_tag=primary_for_sync,
+                )
             conn.commit()
-            return self._format_event_card_row(dict(row))
+            return self._format_event_card_row(persisted)
         except Exception:
             conn.rollback()
             raise
