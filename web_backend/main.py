@@ -134,6 +134,20 @@ class EventCardUpdateRequest(BaseModel):
     error_text: Optional[str] = None
 
 
+class EventCardPromptPartsOverride(BaseModel):
+    event_title: str
+    event_description: str
+    series: Any = None
+    tags: List[str]
+    recurring_rule: str
+    system_instruction: str
+    user_prompt: str
+
+
+class EventCardRegenerateRequest(BaseModel):
+    prompt_parts: Optional[EventCardPromptPartsOverride] = None
+
+
 class WsHub:
     def __init__(self) -> None:
         self._connections: List[WebSocket] = []
@@ -1859,7 +1873,11 @@ class SeasonWorkbenchService:
         finally:
             conn.close()
 
-    def regenerate_event_card(self, event_id: str) -> Dict[str, Any]:
+    def regenerate_event_card(
+        self,
+        event_id: str,
+        prompt_parts_override: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         target_event_id = event_id.strip()
         if not target_event_id:
             raise ValueError("event_id is required")
@@ -1883,7 +1901,14 @@ class SeasonWorkbenchService:
                 "tags": payload_row.get("tags") or [],
             }
             try:
-                card = generator.generate(payload)
+                if prompt_parts_override:
+                    card, prompt_ctx = generator.generate_with_prompt_parts(
+                        payload=payload,
+                        prompt_parts=prompt_parts_override,
+                    )
+                else:
+                    prompt_ctx = generator.build_prompt_context(payload)
+                    card = generator.generate(payload)
             except Exception as exc:
                 raise ValueError(f"Failed to regenerate event card for event_id={target_event_id}: {exc}")
 
@@ -1934,7 +1959,50 @@ class SeasonWorkbenchService:
             preview["status"] = "ok"
             preview["error_text"] = None
             # Preview-only regeneration: DB is not modified here.
-            return self._format_event_card_row(preview)
+            return {
+                "row": self._format_event_card_row(preview),
+                "prompt_text": str(prompt_ctx["full_prompt"]),
+                "system_instruction": str(prompt_ctx["system_instruction"]),
+                "user_prompt": str(prompt_ctx["prompt"]),
+                "prompt_parts": dict(prompt_ctx["prompt_parts"]),
+            }
+        finally:
+            conn.close()
+
+    def get_event_card_prompt_preview(self, event_id: str) -> Dict[str, Any]:
+        target_event_id = event_id.strip()
+        if not target_event_id:
+            raise ValueError("event_id is required")
+
+        generator = self.scheduler._get_event_card_generator()
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                rows = self.scheduler._fetch_event_card_payloads(cursor, [target_event_id])
+            payload_row = rows[0] if rows else None
+            if not payload_row:
+                raise ValueError(f"Event payload not found for event_id={target_event_id}")
+
+            payload = {
+                "title": payload_row.get("title"),
+                "description": payload_row.get("description"),
+                "series": {
+                    "title": payload_row.get("series_title"),
+                    "recurrence": payload_row.get("series_recurrence"),
+                },
+                "tags": payload_row.get("tags") or [],
+            }
+            prompt_ctx = generator.build_prompt_context(payload)
+            return {
+                "event_id": target_event_id,
+                "agent_name": self.scheduler.event_cards_agent_name,
+                "model_name": str(generator.model),
+                "prompt_version": str(generator.prompt_version),
+                "prompt_text": str(prompt_ctx["full_prompt"]),
+                "system_instruction": str(prompt_ctx["system_instruction"]),
+                "user_prompt": str(prompt_ctx["prompt"]),
+                "prompt_parts": dict(prompt_ctx["prompt_parts"]),
+            }
         finally:
             conn.close()
 
@@ -2211,10 +2279,22 @@ def update_event_card(event_id: str, req: EventCardUpdateRequest) -> Dict[str, A
 
 
 @app.post("/api/event-cards/{event_id}/regenerate")
-def regenerate_event_card(event_id: str) -> Dict[str, Any]:
+def regenerate_event_card(event_id: str, req: Optional[EventCardRegenerateRequest] = None) -> Dict[str, Any]:
     try:
-        row = service.regenerate_event_card(event_id=event_id)
-        return {"status": "ok", "row": row}
+        prompt_parts_override = req.prompt_parts.model_dump() if req and req.prompt_parts else None
+        payload = service.regenerate_event_card(
+            event_id=event_id,
+            prompt_parts_override=prompt_parts_override,
+        )
+        return {"status": "ok", **payload}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/event-cards/{event_id}/prompt")
+def event_card_prompt(event_id: str) -> Dict[str, Any]:
+    try:
+        return service.get_event_card_prompt_preview(event_id=event_id)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

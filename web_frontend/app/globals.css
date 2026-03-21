@@ -132,8 +132,24 @@ table:not(.event-cards-table) td {
   min-width: 0;
 }
 
+.event-cards-top-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.readonly-prompt-field {
+  opacity: 0.56;
+  background: #131821;
+  border-color: #273041;
+}
+
 @media (max-width: 1100px) {
   .claims-columns {
+    grid-template-columns: 1fr;
+  }
+  .event-cards-top-grid {
     grid-template-columns: 1fr;
   }
 }
