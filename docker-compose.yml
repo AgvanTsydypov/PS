@@ -6,6 +6,8 @@ services:
       dockerfile: Dockerfile.python
     container_name: polystars_python
     restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env}
     logging:
       driver: "json-file"
       options:
@@ -27,6 +29,8 @@ services:
       LOCAL_DB_NAME: ${DB_NAME}
       LOCAL_DB_USER: ${DB_USER}
       LOCAL_DB_PASSWORD: ${DB_PASSWORD}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
       
       # Python settings
       PYTHONUNBUFFERED: 1
