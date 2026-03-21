@@ -799,7 +799,7 @@ class DataLoadingManager:
                     closed = CASE WHEN %s IS NOT NULL THEN closed ELSE %s END,
                     closed_time = CASE WHEN %s IS NOT NULL THEN closed_time ELSE %s END,
                     resolution_ready_at = CASE
-                        WHEN %s IS NULL THEN resolution_ready_at
+                        WHEN %s IS NOT NULL THEN resolution_ready_at
                         WHEN %s = TRUE AND %s IS NOT NULL
                             THEN (%s::timestamptz + (%s * INTERVAL '1 day'))
                         ELSE resolution_ready_at
