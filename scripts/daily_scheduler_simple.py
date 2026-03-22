@@ -345,7 +345,8 @@ class SimplifiedScheduler:
         self.manager = DataLoadingManager(use_local_db=use_local_db)
         self.use_local_db = use_local_db
         self.dry_run = dry_run
-        self.use_closed_time_pipeline = os.getenv("POLYSTARS_USE_CLOSED_TIME_PIPELINE", "false").strip().lower() in {"1", "true", "yes", "on"}
+        # Closed-time pipeline is now the only supported mode.
+        self.use_closed_time_pipeline = True
         self.pending_poll_limit = int(os.getenv("POLYSTARS_PENDING_POLL_LIMIT", "1000"))
         self.ready_batch_limit = int(os.getenv("POLYSTARS_READY_BATCH_LIMIT", "1000"))
         self.event_cards_post_downstream_enabled = _env_bool(
@@ -1564,15 +1565,13 @@ class SimplifiedScheduler:
             dates = self.manager.get_loading_dates()
             print(f"\nToday's Loading Dates ({dates['reference_date']}):")
             print(f"  • Events: {dates['events_date']} ({EVENTS_LAG_DAYS} day{'s' if EVENTS_LAG_DAYS > 1 else ''} ago)")
-            print(f"  • Redemptions: {dates['redemptions_date']} ({DATA_LAG_DAYS} days ago)")
+            print(f"  • Downstream trigger: closed_time + {RESOLUTION_READY_OFFSET_DAYS} day(s)")
             
             # Check if today's data loaded
             events_loaded = self.manager.is_data_loaded_for_date(dates['events_date'], 'events')
-            redemptions_loaded = self.manager.is_data_loaded_for_date(dates['redemptions_date'], 'redemptions')
             
             print(f"\nToday's Status:")
             print(f"  • Events ({dates['events_date']}): {'✅ Loaded' if events_loaded else '⏳ Pending'}")
-            print(f"  • Redemptions ({dates['redemptions_date']}): {'✅ Loaded' if redemptions_loaded else '⏳ Pending'}")
             
             # Check for missing dates
             last_loaded = self.manager.get_last_loaded_date('events')
@@ -1615,7 +1614,7 @@ class SimplifiedScheduler:
             os.environ['POLYSTARS_IS_GENESIS'] = 'true' if is_genesis else 'false'
 
             # In closed_time pipeline, events ingestion must not require closed=true.
-            if self.use_closed_time_pipeline and not is_genesis:
+            if not is_genesis:
                 # 'none' means "omit closed filter" (fetch both open and closed).
                 os.environ['POLYSTARS_EVENTS_CLOSED_ONLY'] = 'none'
                 os.environ['POLYSTARS_RESOLUTION_STATUS'] = ''
@@ -1766,7 +1765,7 @@ class SimplifiedScheduler:
         print("="*70)
         print(f"Mode: {'DRY RUN' if self.dry_run else 'PRODUCTION'}")
         print(f"Database: {'Local PostgreSQL' if self.use_local_db else 'Supabase'}")
-        print(f"Closed-time pipeline: {'ENABLED' if self.use_closed_time_pipeline else 'DISABLED (legacy date-based)'}")
+        print("Closed-time pipeline: ENABLED")
 
         # Update standard season lifecycle before daily ETL tasks.
         self.run_standard_season_update()
@@ -1888,15 +1887,26 @@ class SimplifiedScheduler:
                     f"{len(ready_event_ids):,} ready event(s) by "
                     f"closed_time + {RESOLUTION_READY_OFFSET_DAYS}d"
                 )
+                downstream_run_id = None if self.dry_run else self.manager.start_downstream_run(
+                    trigger_type='daily',
+                    events_load_date=events_date,
+                    ready_events_requested=len(ready_event_ids),
+                )
                 os.environ['POLYSTARS_EVENT_IDS'] = ",".join(ready_event_ids)
                 try:
                     # Keep date config for compatibility with existing scripts, but event_ids are authoritative.
                     self.configure_for_date(events_date, is_genesis=False)
                     step_success = True
+                    downstream_errors: List[str] = []
                     for script_key in ['redemptions', 'positions', 'leaderboard']:
-                        results[script_key] = self.run_script(script_key, target_date=events_date)
+                        # In closed-time mode this run can include multiple event dates,
+                        # so use per-run table deltas (target_date=None) instead of date-scoped counters.
+                        results[script_key] = self.run_script(script_key, target_date=None)
                         if not results[script_key].get('success'):
                             step_success = False
+                            downstream_errors.append(
+                                f"{script_key}: {results[script_key].get('error', 'script execution failed')}"
+                            )
 
                     if step_success and not self.dry_run:
                         card_stats = self.generate_event_cards_for_event_ids(ready_event_ids)
@@ -1906,9 +1916,51 @@ class SimplifiedScheduler:
                             f"processed={card_stats['processed']:,}, success={card_stats['success']:,}, "
                             f"failed={card_stats['failed']:,}"
                         )
-                        processed = self.manager.mark_resolution_events_processed(ready_event_ids)
+                        processed = self.manager.mark_resolution_events_processed(
+                            ready_event_ids,
+                            processed_run_id=downstream_run_id,
+                        )
                         print(f"✅ Marked {processed:,} event(s) as processed in resolution queue")
+                        self.manager.finish_downstream_run(
+                            run_id=downstream_run_id,
+                            status='success',
+                            ready_events_processed=processed,
+                            ready_events_failed=max(0, len(ready_event_ids) - processed),
+                            redemptions_delta=int(results['redemptions'].get('records', 0)),
+                            positions_delta=int(results['positions'].get('records', 0)),
+                            leaderboard_delta=int(results['leaderboard'].get('records', 0)),
+                            event_cards_requested=int(card_stats.get('requested', 0)),
+                            event_cards_processed=int(card_stats.get('processed', 0)),
+                            event_cards_success=int(card_stats.get('success', 0)),
+                            event_cards_failed=int(card_stats.get('failed', 0)),
+                            error_text=None,
+                        )
+                        self.manager.link_data_load_to_downstream_run(
+                            events_date,
+                            downstream_run_id,
+                            processed,
+                        )
                     elif not self.dry_run:
+                        error_text = "; ".join(downstream_errors) if downstream_errors else "downstream steps failed"
+                        self.manager.mark_resolution_events_downstream_attempt(
+                            ready_event_ids,
+                            error_text=error_text,
+                        )
+                        if downstream_run_id is not None:
+                            self.manager.finish_downstream_run(
+                                run_id=downstream_run_id,
+                                status='partial',
+                                ready_events_processed=0,
+                                ready_events_failed=len(ready_event_ids),
+                                redemptions_delta=int(results.get('redemptions', {}).get('records', 0)),
+                                positions_delta=int(results.get('positions', {}).get('records', 0)),
+                                leaderboard_delta=int(results.get('leaderboard', {}).get('records', 0)),
+                                event_cards_requested=0,
+                                event_cards_processed=0,
+                                event_cards_success=0,
+                                event_cards_failed=0,
+                                error_text=error_text,
+                            )
                         print("⚠️  Some downstream scripts failed; ready events remain unprocessed for retry")
                 finally:
                     os.environ.pop('POLYSTARS_EVENT_IDS', None)
@@ -2275,21 +2327,14 @@ class SimplifiedScheduler:
                 # Configure for this date
                 self.configure_for_date(missing_date, is_genesis=False)
                 downstream_success = True
+                downstream_counts = {'redemptions': 0, 'positions': 0, 'leaderboard': 0}
                 
                 for script_key in ['redemptions', 'positions', 'leaderboard']:
-                    # Check if already loaded
-                    if self.manager.is_data_loaded_for_date(missing_date, script_key):
-                        print(f"  ⏭️  {self.scripts[script_key]['name']}: Already loaded")
-                        continue
-                    
-                    result = self.run_script(script_key, target_date=missing_date)
+                    result = self.run_script(script_key, target_date=None)
                     if result['success']:
-                        self.manager.mark_data_loaded(script_key, missing_date,
-                                                    record_count=result['records'],
-                                                    load_type='daily')
+                        downstream_counts[script_key] = int(result.get('records', 0))
                     else:
                         error_msg = result.get('error', 'Script execution failed')
-                        self.manager.mark_data_error(script_key, missing_date, error_msg)
                         print(f"  ⚠️  {self.scripts[script_key]['name']} failed (continuing...)")
                         downstream_success = False
 
@@ -2300,13 +2345,40 @@ class SimplifiedScheduler:
                         as_of=datetime.utcnow(),
                     )
                     if ready_for_day:
+                        run_id = self.manager.start_downstream_run(
+                            trigger_type='catch_up',
+                            events_load_date=missing_date,
+                            ready_events_requested=len(ready_for_day),
+                        )
                         card_stats = self.generate_event_cards_for_event_ids(ready_for_day)
                         print(
                             f"🧠 Event cards ({missing_date}): requested={card_stats['requested']:,}, "
                             f"processed={card_stats['processed']:,}, success={card_stats['success']:,}, "
                             f"failed={card_stats['failed']:,}"
                         )
-                        processed = self.manager.mark_resolution_events_processed(ready_for_day)
+                        processed = self.manager.mark_resolution_events_processed(
+                            ready_for_day,
+                            processed_run_id=run_id,
+                        )
+                        self.manager.finish_downstream_run(
+                            run_id=run_id,
+                            status='success',
+                            ready_events_processed=processed,
+                            ready_events_failed=max(0, len(ready_for_day) - processed),
+                            redemptions_delta=downstream_counts['redemptions'],
+                            positions_delta=downstream_counts['positions'],
+                            leaderboard_delta=downstream_counts['leaderboard'],
+                            event_cards_requested=int(card_stats.get('requested', 0)),
+                            event_cards_processed=int(card_stats.get('processed', 0)),
+                            event_cards_success=int(card_stats.get('success', 0)),
+                            event_cards_failed=int(card_stats.get('failed', 0)),
+                            error_text=None,
+                        )
+                        self.manager.link_data_load_to_downstream_run(
+                            missing_date,
+                            run_id,
+                            processed,
+                        )
                         print(
                             f"✅ Marked {processed:,} ready event(s) as processed for {missing_date}"
                         )

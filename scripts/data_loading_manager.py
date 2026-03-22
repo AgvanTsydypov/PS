@@ -45,6 +45,7 @@ import psycopg2.extras
 from datetime import date, timedelta, datetime
 from typing import Dict, Optional, List
 import os
+import uuid
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -146,54 +147,105 @@ class DataLoadingManager:
             conn = psycopg2.connect(**self.connection_params)
             cursor = conn.cursor()
             
-            # Check if data_loads table exists
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'data_loads'
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS data_loads (
+                    id SERIAL PRIMARY KEY,
+                    load_date DATE NOT NULL UNIQUE,
+                    events_loaded BOOLEAN DEFAULT FALSE,
+                    events_loaded_at TIMESTAMPTZ,
+                    events_count INTEGER DEFAULT 0,
+                    markets_count INTEGER DEFAULT 0,
+                    load_type VARCHAR(20) DEFAULT 'daily' CHECK (load_type IN ('genesis', 'daily')),
+                    events_error TEXT,
+                    last_downstream_run_id BIGINT,
+                    downstream_last_run_at TIMESTAMPTZ,
+                    downstream_ready_events_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
                 )
-            """)
-            
-            table_exists = cursor.fetchone()[0]
-            
-            if not table_exists:
-                print("⚠️  Table 'data_loads' not found - creating...")
-                
-                # Create table
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS data_loads (
-                        id SERIAL PRIMARY KEY,
-                        load_date DATE NOT NULL UNIQUE,
-                        
-                        events_loaded BOOLEAN DEFAULT FALSE,
-                        redemptions_loaded BOOLEAN DEFAULT FALSE,
-                        positions_loaded BOOLEAN DEFAULT FALSE,
-                        leaderboard_loaded BOOLEAN DEFAULT FALSE,
-                        
-                        events_loaded_at TIMESTAMPTZ,
-                        redemptions_loaded_at TIMESTAMPTZ,
-                        positions_loaded_at TIMESTAMPTZ,
-                        leaderboard_loaded_at TIMESTAMPTZ,
-                        
-                        events_count INTEGER DEFAULT 0,
-                        redemptions_count INTEGER DEFAULT 0,
-                        positions_count INTEGER DEFAULT 0,
-                        leaderboard_count INTEGER DEFAULT 0,
-                        
-                        load_type VARCHAR(20) DEFAULT 'daily' CHECK (load_type IN ('genesis', 'daily')),
-                        
-                        events_error TEXT,
-                        redemptions_error TEXT,
-                        positions_error TEXT,
-                        leaderboard_error TEXT,
-                        
-                        created_at TIMESTAMPTZ DEFAULT NOW(),
-                        updated_at TIMESTAMPTZ DEFAULT NOW()
-                    )
-                """)
-                
-                conn.commit()
-                print("✅ Table 'data_loads' created")
+                """
+            )
+            cursor.execute("ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS markets_count INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS events_error TEXT")
+            cursor.execute("ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS last_downstream_run_id BIGINT")
+            cursor.execute("ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS downstream_last_run_at TIMESTAMPTZ")
+            cursor.execute(
+                """
+                ALTER TABLE data_loads
+                ADD COLUMN IF NOT EXISTS downstream_ready_events_count INTEGER NOT NULL DEFAULT 0
+                """
+            )
+            # Remove legacy date-based downstream columns.
+            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_loaded")
+            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_loaded")
+            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_loaded")
+            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_loaded_at")
+            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_loaded_at")
+            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_loaded_at")
+            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_count")
+            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_count")
+            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_count")
+            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_error")
+            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_error")
+            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_error")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_data_loads_date ON data_loads(load_date DESC)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_data_loads_type ON data_loads(load_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_data_loads_events_loaded ON data_loads(events_loaded)")
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS downstream_runs (
+                    id BIGSERIAL PRIMARY KEY,
+                    run_uuid UUID NOT NULL UNIQUE,
+                    trigger_type TEXT NOT NULL
+                        CHECK (trigger_type IN ('daily', 'genesis', 'catch_up', 'manual')),
+                    status TEXT NOT NULL DEFAULT 'running'
+                        CHECK (status IN ('running', 'success', 'partial', 'error')),
+                    events_load_date DATE,
+                    ready_events_requested INTEGER NOT NULL DEFAULT 0,
+                    ready_events_processed INTEGER NOT NULL DEFAULT 0,
+                    ready_events_failed INTEGER NOT NULL DEFAULT 0,
+                    redemptions_delta INTEGER NOT NULL DEFAULT 0,
+                    positions_delta INTEGER NOT NULL DEFAULT 0,
+                    leaderboard_delta INTEGER NOT NULL DEFAULT 0,
+                    event_cards_requested INTEGER NOT NULL DEFAULT 0,
+                    event_cards_processed INTEGER NOT NULL DEFAULT 0,
+                    event_cards_success INTEGER NOT NULL DEFAULT 0,
+                    event_cards_failed INTEGER NOT NULL DEFAULT 0,
+                    error_text TEXT,
+                    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    finished_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cursor.execute(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.table_constraints
+                        WHERE constraint_name = 'fk_data_loads_last_downstream_run'
+                          AND table_name = 'data_loads'
+                    ) THEN
+                        ALTER TABLE data_loads
+                            ADD CONSTRAINT fk_data_loads_last_downstream_run
+                            FOREIGN KEY (last_downstream_run_id) REFERENCES downstream_runs(id)
+                            ON DELETE SET NULL;
+                    END IF;
+                END $$;
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_downstream_runs_started_at ON downstream_runs(started_at DESC)"
+            )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_downstream_runs_status ON downstream_runs(status)")
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_downstream_runs_events_load_date ON downstream_runs(events_load_date)"
+            )
 
             # Ensure season events table exists for dedicated lifecycle logs.
             cursor.execute("""
@@ -230,12 +282,58 @@ class DataLoadingManager:
                         CHECK (status IN ('pending', 'ready_for_redemptions', 'processed', 'error')),
                     last_checked_at TIMESTAMPTZ,
                     attempts INTEGER NOT NULL DEFAULT 0,
+                    downstream_attempts INTEGER NOT NULL DEFAULT 0,
+                    last_downstream_attempt_at TIMESTAMPTZ,
                     processed_at TIMESTAMPTZ,
                     error_text TEXT,
+                    downstream_error_text TEXT,
+                    processed_run_id BIGINT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
+            cursor.execute(
+                """
+                ALTER TABLE event_resolution_queue
+                ADD COLUMN IF NOT EXISTS downstream_attempts INTEGER NOT NULL DEFAULT 0
+                """
+            )
+            cursor.execute(
+                """
+                ALTER TABLE event_resolution_queue
+                ADD COLUMN IF NOT EXISTS last_downstream_attempt_at TIMESTAMPTZ
+                """
+            )
+            cursor.execute(
+                """
+                ALTER TABLE event_resolution_queue
+                ADD COLUMN IF NOT EXISTS downstream_error_text TEXT
+                """
+            )
+            cursor.execute(
+                """
+                ALTER TABLE event_resolution_queue
+                ADD COLUMN IF NOT EXISTS processed_run_id BIGINT
+                """
+            )
+            cursor.execute(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.table_constraints
+                        WHERE constraint_name = 'fk_event_resolution_queue_processed_run'
+                          AND table_name = 'event_resolution_queue'
+                    ) THEN
+                        ALTER TABLE event_resolution_queue
+                            ADD CONSTRAINT fk_event_resolution_queue_processed_run
+                            FOREIGN KEY (processed_run_id) REFERENCES downstream_runs(id)
+                            ON DELETE SET NULL;
+                    END IF;
+                END $$;
+                """
+            )
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_status_ready
                 ON event_resolution_queue(status, resolution_ready_at)
@@ -244,6 +342,12 @@ class DataLoadingManager:
                 CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_end_date
                 ON event_resolution_queue(end_date)
             """)
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_processed_run_id
+                ON event_resolution_queue(processed_run_id)
+                """
+            )
             conn.commit()
             
             cursor.close()
@@ -338,20 +442,31 @@ class DataLoadingManager:
         cursor = conn.cursor()
         
         try:
-            column = f'{data_type}_loaded'
-            cursor.execute(f"""
-                SELECT {column} FROM data_loads
+            if data_type != 'events':
+                # Downstream completion is tracked in downstream_runs/event_resolution_queue.
+                return False
+            cursor.execute(
+                """
+                SELECT events_loaded
+                FROM data_loads
                 WHERE load_date = %s
-            """, (load_date,))
-            
+                """,
+                (load_date,),
+            )
             result = cursor.fetchone()
-            return result[0] if result else False
+            return bool(result[0]) if result else False
         finally:
             cursor.close()
             conn.close()
     
-    def mark_data_loaded(self, data_type: str, load_date: date, record_count: int = 0, 
-                        markets_count: int = 0, load_type: str = 'daily'):
+    def mark_data_loaded(
+        self,
+        data_type: str,
+        load_date: date,
+        record_count: int = 0,
+        markets_count: int = 0,
+        load_type: str = 'daily',
+    ):
         """
         Mark data as loaded for a specific date
         
@@ -366,43 +481,184 @@ class DataLoadingManager:
         cursor = conn.cursor()
         
         try:
-            column_loaded = f'{data_type}_loaded'
-            column_loaded_at = f'{data_type}_loaded_at'
-            column_count = f'{data_type}_count'
-            
-            # For events, also update markets_count
-            if data_type == 'events' and markets_count > 0:
-                cursor.execute(f"""
-                    INSERT INTO data_loads (
-                        load_date, {column_loaded}, {column_loaded_at}, {column_count}, 
-                        markets_count, load_type
-                    )
-                    VALUES (%s, TRUE, NOW(), %s, %s, %s)
-                    ON CONFLICT (load_date) 
-                    DO UPDATE SET
-                        {column_loaded} = TRUE,
-                        {column_loaded_at} = NOW(),
-                        {column_count} = %s,
-                        markets_count = %s,
-                        load_type = %s,
-                        updated_at = NOW()
-                """, (load_date, record_count, markets_count, load_type, 
-                     record_count, markets_count, load_type))
-            else:
-                cursor.execute(f"""
-                    INSERT INTO data_loads (
-                        load_date, {column_loaded}, {column_loaded_at}, {column_count}, load_type
-                    )
-                    VALUES (%s, TRUE, NOW(), %s, %s)
-                    ON CONFLICT (load_date) 
-                    DO UPDATE SET
-                        {column_loaded} = TRUE,
-                        {column_loaded_at} = NOW(),
-                        {column_count} = %s,
-                        load_type = %s,
-                        updated_at = NOW()
-                """, (load_date, record_count, load_type, record_count, load_type))
-            
+            if data_type != 'events':
+                # Legacy API compatibility: downstream is no longer tracked in data_loads.
+                return
+            cursor.execute(
+                """
+                INSERT INTO data_loads (
+                    load_date,
+                    events_loaded,
+                    events_loaded_at,
+                    events_count,
+                    markets_count,
+                    load_type,
+                    events_error
+                )
+                VALUES (%s, TRUE, NOW(), %s, %s, %s, NULL)
+                ON CONFLICT (load_date)
+                DO UPDATE SET
+                    events_loaded = TRUE,
+                    events_loaded_at = NOW(),
+                    events_count = %s,
+                    markets_count = %s,
+                    load_type = %s,
+                    events_error = NULL,
+                    updated_at = NOW()
+                """,
+                (load_date, record_count, markets_count, load_type, record_count, markets_count, load_type),
+            )
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
+
+    def mark_data_error(self, data_type: str, load_date: date, error_text: str, load_type: str = 'daily'):
+        """Persist ingest errors for a load_date (events only in closed_time pipeline)."""
+        if data_type != 'events':
+            return
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO data_loads (
+                    load_date,
+                    events_loaded,
+                    events_error,
+                    load_type
+                )
+                VALUES (%s, FALSE, %s, %s)
+                ON CONFLICT (load_date)
+                DO UPDATE SET
+                    events_loaded = FALSE,
+                    events_error = %s,
+                    load_type = %s,
+                    updated_at = NOW()
+                """,
+                (load_date, error_text, load_type, error_text, load_type),
+            )
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
+
+    def start_downstream_run(
+        self,
+        *,
+        trigger_type: str,
+        events_load_date: Optional[date],
+        ready_events_requested: int,
+    ) -> int:
+        """Create a downstream run row and return its id."""
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        try:
+            run_uuid = str(uuid.uuid4())
+            cursor.execute(
+                """
+                INSERT INTO downstream_runs (
+                    run_uuid,
+                    trigger_type,
+                    status,
+                    events_load_date,
+                    ready_events_requested
+                )
+                VALUES (%s, %s, 'running', %s, %s)
+                RETURNING id
+                """,
+                (run_uuid, trigger_type, events_load_date, ready_events_requested),
+            )
+            run_id = cursor.fetchone()[0]
+            conn.commit()
+            return int(run_id)
+        finally:
+            cursor.close()
+            conn.close()
+
+    def finish_downstream_run(
+        self,
+        *,
+        run_id: int,
+        status: str,
+        ready_events_processed: int,
+        ready_events_failed: int,
+        redemptions_delta: int,
+        positions_delta: int,
+        leaderboard_delta: int,
+        event_cards_requested: int = 0,
+        event_cards_processed: int = 0,
+        event_cards_success: int = 0,
+        event_cards_failed: int = 0,
+        error_text: Optional[str] = None,
+    ) -> None:
+        """Finalize downstream run metrics and status."""
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE downstream_runs
+                SET status = %s,
+                    ready_events_processed = %s,
+                    ready_events_failed = %s,
+                    redemptions_delta = %s,
+                    positions_delta = %s,
+                    leaderboard_delta = %s,
+                    event_cards_requested = %s,
+                    event_cards_processed = %s,
+                    event_cards_success = %s,
+                    event_cards_failed = %s,
+                    error_text = %s,
+                    finished_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    status,
+                    ready_events_processed,
+                    ready_events_failed,
+                    redemptions_delta,
+                    positions_delta,
+                    leaderboard_delta,
+                    event_cards_requested,
+                    event_cards_processed,
+                    event_cards_success,
+                    event_cards_failed,
+                    error_text,
+                    run_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
+
+    def link_data_load_to_downstream_run(self, load_date: date, run_id: int, ready_events_processed: int) -> None:
+        """Attach latest downstream run metadata to a load_date row."""
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO data_loads (
+                    load_date,
+                    events_loaded,
+                    load_type,
+                    last_downstream_run_id,
+                    downstream_last_run_at,
+                    downstream_ready_events_count
+                )
+                VALUES (%s, FALSE, 'daily', %s, NOW(), %s)
+                ON CONFLICT (load_date)
+                DO UPDATE SET
+                    last_downstream_run_id = EXCLUDED.last_downstream_run_id,
+                    downstream_last_run_at = NOW(),
+                    downstream_ready_events_count = %s,
+                    updated_at = NOW()
+                """,
+                (load_date, run_id, ready_events_processed, ready_events_processed),
+            )
             conn.commit()
         finally:
             cursor.close()
@@ -626,49 +882,8 @@ class DataLoadingManager:
             List of (date, missing_types) tuples
             Example: [(date(2026,2,7), ['redemptions', 'positions']), ...]
         """
-        if start_from is None:
-            start_from = GENESIS_END_DATE + timedelta(days=1)
-        
-        if up_to is None:
-            up_to = date.today() - timedelta(days=1)
-        
-        conn = psycopg2.connect(**self.connection_params)
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        
-        try:
-            # Find dates where events are loaded but other data types are not
-            cursor.execute("""
-                SELECT 
-                    load_date,
-                    redemptions_loaded,
-                    positions_loaded,
-                    leaderboard_loaded
-                FROM data_loads
-                WHERE events_loaded = TRUE
-                  AND load_date BETWEEN %s AND %s
-                  AND (redemptions_loaded = FALSE 
-                    OR positions_loaded = FALSE 
-                    OR leaderboard_loaded = FALSE)
-                ORDER BY load_date
-            """, (start_from, up_to))
-            
-            incomplete = []
-            for row in cursor.fetchall():
-                missing_types = []
-                if not row['redemptions_loaded']:
-                    missing_types.append('redemptions')
-                if not row['positions_loaded']:
-                    missing_types.append('positions')
-                if not row['leaderboard_loaded']:
-                    missing_types.append('leaderboard')
-                
-                incomplete.append((row['load_date'], missing_types))
-            
-            return incomplete
-            
-        finally:
-            cursor.close()
-            conn.close()
+        # Closed-time pipeline uses event_resolution_queue instead of date-based downstream completeness.
+        return []
     
     def get_last_loaded_date(self, data_type: str = 'events') -> Optional[date]:
         """
@@ -684,15 +899,18 @@ class DataLoadingManager:
         cursor = conn.cursor()
         
         try:
-            column = f'{data_type}_loaded'
-            cursor.execute(f"""
-                SELECT MAX(load_date) FROM data_loads
-                WHERE {column} = TRUE AND load_type = 'daily'
-            """)
-            
+            if data_type != 'events':
+                return None
+            cursor.execute(
+                """
+                SELECT MAX(load_date)
+                FROM data_loads
+                WHERE events_loaded = TRUE
+                  AND load_type = 'daily'
+                """
+            )
             result = cursor.fetchone()
             return result[0] if result[0] else None
-            
         finally:
             cursor.close()
             conn.close()
@@ -899,7 +1117,37 @@ class DataLoadingManager:
             cursor.close()
             conn.close()
 
-    def mark_resolution_events_processed(self, event_ids: List[str]) -> int:
+    def mark_resolution_events_downstream_attempt(
+        self,
+        event_ids: List[str],
+        error_text: Optional[str] = None,
+    ) -> int:
+        """Track downstream attempt on ready events before/after batch processing."""
+        if not event_ids:
+            return 0
+
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE event_resolution_queue
+                SET downstream_attempts = downstream_attempts + 1,
+                    last_downstream_attempt_at = NOW(),
+                    downstream_error_text = %s,
+                    updated_at = NOW()
+                WHERE event_id = ANY(%s)
+                """,
+                (error_text, event_ids),
+            )
+            affected = cursor.rowcount if cursor.rowcount is not None else 0
+            conn.commit()
+            return affected
+        finally:
+            cursor.close()
+            conn.close()
+
+    def mark_resolution_events_processed(self, event_ids: List[str], processed_run_id: Optional[int] = None) -> int:
         """Mark queue rows as processed after successful downstream loading."""
         if not event_ids:
             return 0
@@ -913,10 +1161,12 @@ class DataLoadingManager:
                 SET status = 'processed',
                     processed_at = NOW(),
                     updated_at = NOW(),
-                    error_text = NULL
+                    error_text = NULL,
+                    downstream_error_text = NULL,
+                    processed_run_id = %s
                 WHERE event_id = ANY(%s)
                 """,
-                (event_ids,),
+                (processed_run_id, event_ids),
             )
             affected = cursor.rowcount if cursor.rowcount is not None else 0
             conn.commit()
@@ -953,18 +1203,38 @@ class DataLoadingManager:
         dates = self.get_loading_dates()
         print(f"\nToday's Loading Dates ({dates['reference_date']}):")
         print(f"  Events/Markets: {dates['events_date']} (yesterday)")
-        print(f"  Redemptions/Positions/Leaderboard: {dates['redemptions_date']} (3 days ago)")
+        print(f"  Downstream readiness: closed_time + {RESOLUTION_READY_OFFSET_DAYS} day(s)")
         
         # Check if today's data loaded
         events_date = dates['events_date']
-        redemptions_date = dates['redemptions_date']
-        
         print(f"\nData Status:")
-        for data_type in ['events', 'redemptions', 'positions', 'leaderboard']:
-            check_date = events_date if data_type == 'events' else redemptions_date
-            loaded = self.is_data_loaded_for_date(check_date, data_type)
-            status = "✅ Loaded" if loaded else "⏳ Pending"
-            print(f"  • {data_type.capitalize()}: {status}")
+        events_loaded = self.is_data_loaded_for_date(events_date, 'events')
+        status = "✅ Loaded" if events_loaded else "⏳ Pending"
+        print(f"  • Events: {status}")
+
+        conn = psycopg2.connect(**self.connection_params)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'pending') AS pending_count,
+                    COUNT(*) FILTER (
+                        WHERE status = 'ready_for_redemptions'
+                          AND resolution_ready_at IS NOT NULL
+                          AND resolution_ready_at <= NOW()
+                    ) AS ready_due_count,
+                    COUNT(*) FILTER (WHERE status = 'processed') AS processed_count
+                FROM event_resolution_queue
+                """
+            )
+            pending_count, ready_due_count, processed_count = cursor.fetchone()
+            print(f"  • Queue pending: {pending_count:,}")
+            print(f"  • Queue ready (due now): {ready_due_count:,}")
+            print(f"  • Queue processed: {processed_count:,}")
+        finally:
+            cursor.close()
+            conn.close()
         
         # Check for missing dates
         if genesis_loaded:
