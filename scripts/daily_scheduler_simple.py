@@ -63,7 +63,7 @@ from scripts.data_loading_manager import (
     RESOLUTION_READY_OFFSET_DAYS,
     ORIGIN_SNAPSHOT_OFFSET_DAYS,
 )
-from scripts.ai import Agent1QuantCardGenerator
+from scripts.ai import Agent1QuantCardGenerator, Agent2ColoristGenerator
 
 STANDARD_SEASON_TOTAL_SUPPLY_TEST = 10
 STANDARD_SEASON_ACTIVE_DAYS = 9
@@ -358,7 +358,10 @@ class SimplifiedScheduler:
         self.event_cards_model = os.getenv("POLYSTARS_EVENT_CARDS_MODEL", "").strip()
         self.event_cards_prompt_version = os.getenv("POLYSTARS_EVENT_CARDS_PROMPT_VERSION", "v1").strip() or "v1"
         self.event_cards_agent_name = os.getenv("POLYSTARS_EVENT_CARDS_AGENT_NAME", "agent_1_quant").strip() or "agent_1_quant"
+        self.tag_colors_model = os.getenv("POLYSTARS_TAG_COLORS_MODEL", "").strip()
+        self.tag_colors_prompt_version = os.getenv("POLYSTARS_TAG_COLORS_PROMPT_VERSION", "v1").strip() or "v1"
         self._event_card_generator: Optional[Agent1QuantCardGenerator] = None
+        self._tag_color_generator: Optional[Agent2ColoristGenerator] = None
         
         # Script configurations
         self.scripts = {
@@ -487,6 +490,101 @@ class SimplifiedScheduler:
             # Persist resolved model name (including client default fallback).
             self.event_cards_model = self._event_card_generator.model
         return self._event_card_generator
+
+    def _get_tag_color_generator(self) -> Agent2ColoristGenerator:
+        if self._tag_color_generator is None:
+            self._tag_color_generator = Agent2ColoristGenerator(
+                model=self.tag_colors_model or None,
+                prompt_version=self.tag_colors_prompt_version,
+            )
+            self.tag_colors_model = self._tag_color_generator.model
+        return self._tag_color_generator
+
+    def _assign_missing_primary_tag_colors(self, cursor: Any, event_ids: List[str], max_passes: int = 2) -> int:
+        """
+        Post-Agent1 check:
+        after primary flags are set, assign colors to newly primary tags without color.
+        """
+        ids = [str(eid).strip() for eid in event_ids if str(eid or "").strip()]
+        if not ids:
+            return 0
+
+        total_generated = 0
+        generator = self._get_tag_color_generator()
+
+        for _ in range(max(1, max_passes)):
+            cursor.execute(
+                """
+                SELECT DISTINCT
+                    t.id,
+                    COALESCE(NULLIF(BTRIM(t.label), ''), t.id) AS effective_label
+                FROM tags t
+                JOIN event_tags et
+                    ON et.tag_id = t.id
+                WHERE et.event_id = ANY(%s)
+                  AND COALESCE(t.is_primary, FALSE) = TRUE
+                  AND t.hex_color IS NULL
+                ORDER BY t.id ASC
+                """,
+                (ids,),
+            )
+            missing_rows = cursor.fetchall()
+            if not missing_rows:
+                break
+
+            cursor.execute(
+                """
+                SELECT DISTINCT
+                    COALESCE(NULLIF(BTRIM(label), ''), id) AS tag_label,
+                    hex_color
+                FROM tags
+                WHERE COALESCE(is_primary, FALSE) = TRUE
+                  AND hex_color IS NOT NULL
+                ORDER BY tag_label ASC, hex_color ASC
+                """
+            )
+            palette = [
+                {"tag_label": str(row[0]), "hex_color": str(row[1])}
+                for row in cursor.fetchall()
+                if row and row[1]
+            ]
+
+            generated_this_pass = 0
+            for tag_id, effective_label in missing_rows:
+                try:
+                    out = generator.generate(
+                        {
+                            "new_primary_tag": str(effective_label or tag_id),
+                            "existing_palette": palette,
+                        }
+                    )
+                except Exception as exc:
+                    print(f"⚠️  Agent 2 failed for tag_id={tag_id}: {exc}")
+                    continue
+
+                cursor.execute(
+                    """
+                    UPDATE tags
+                    SET hex_color = %s
+                    WHERE id = %s
+                      AND hex_color IS NULL
+                    """,
+                    (out.hex_color, tag_id),
+                )
+                if cursor.rowcount:
+                    generated_this_pass += 1
+                    palette.append(
+                        {
+                            "tag_label": str(effective_label or tag_id),
+                            "hex_color": out.hex_color,
+                        }
+                    )
+
+            total_generated += generated_this_pass
+            if generated_this_pass == 0:
+                break
+
+        return total_generated
 
     def _fetch_event_card_payloads(self, cursor: Any, event_ids: List[str]) -> List[Dict[str, Any]]:
         cursor.execute(
@@ -720,6 +818,7 @@ class SimplifiedScheduler:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_prompt_version ON event_cards(prompt_version)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_generated_at ON event_cards(generated_at DESC)")
                 cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS hex_color TEXT")
+                cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE")
                 cursor.execute(
                     """
                     ALTER TABLE tags
@@ -775,6 +874,7 @@ class SimplifiedScheduler:
             processed = 0
             success = 0
             failed = 0
+            tag_colors_generated = 0
 
             for idx in range(0, len(cleaned_ids), max(1, self.event_cards_batch_size)):
                 batch_ids = cleaned_ids[idx : idx + max(1, self.event_cards_batch_size)]
@@ -810,7 +910,20 @@ class SimplifiedScheduler:
                         failed += 1
                     processed += 1
 
-            return {"requested": requested, "processed": processed, "success": success, "failed": failed}
+                with conn.cursor() as cursor:
+                    tag_colors_generated += self._assign_missing_primary_tag_colors(
+                        cursor,
+                        event_ids=batch_ids,
+                    )
+                    conn.commit()
+
+            return {
+                "requested": requested,
+                "processed": processed,
+                "success": success,
+                "failed": failed,
+                "tag_colors_generated": tag_colors_generated,
+            }
         finally:
             conn.close()
 
@@ -1914,7 +2027,8 @@ class SimplifiedScheduler:
                         print(
                             f"🧠 Event cards: requested={card_stats['requested']:,}, "
                             f"processed={card_stats['processed']:,}, success={card_stats['success']:,}, "
-                            f"failed={card_stats['failed']:,}"
+                            f"failed={card_stats['failed']:,}, "
+                            f"tag_colors={card_stats.get('tag_colors_generated', 0):,}"
                         )
                         processed = self.manager.mark_resolution_events_processed(
                             ready_event_ids,
@@ -1933,6 +2047,7 @@ class SimplifiedScheduler:
                             event_cards_processed=int(card_stats.get('processed', 0)),
                             event_cards_success=int(card_stats.get('success', 0)),
                             event_cards_failed=int(card_stats.get('failed', 0)),
+                            tag_colors_generated=int(card_stats.get('tag_colors_generated', 0)),
                             error_text=None,
                         )
                         self.manager.link_data_load_to_downstream_run(
@@ -1959,6 +2074,7 @@ class SimplifiedScheduler:
                                 event_cards_processed=0,
                                 event_cards_success=0,
                                 event_cards_failed=0,
+                                tag_colors_generated=0,
                                 error_text=error_text,
                             )
                         print("⚠️  Some downstream scripts failed; ready events remain unprocessed for retry")
@@ -2354,7 +2470,8 @@ class SimplifiedScheduler:
                         print(
                             f"🧠 Event cards ({missing_date}): requested={card_stats['requested']:,}, "
                             f"processed={card_stats['processed']:,}, success={card_stats['success']:,}, "
-                            f"failed={card_stats['failed']:,}"
+                            f"failed={card_stats['failed']:,}, "
+                            f"tag_colors={card_stats.get('tag_colors_generated', 0):,}"
                         )
                         processed = self.manager.mark_resolution_events_processed(
                             ready_for_day,
@@ -2372,6 +2489,7 @@ class SimplifiedScheduler:
                             event_cards_processed=int(card_stats.get('processed', 0)),
                             event_cards_success=int(card_stats.get('success', 0)),
                             event_cards_failed=int(card_stats.get('failed', 0)),
+                            tag_colors_generated=int(card_stats.get('tag_colors_generated', 0)),
                             error_text=None,
                         )
                         self.manager.link_data_load_to_downstream_run(

@@ -213,6 +213,7 @@ class DataLoadingManager:
                     event_cards_processed INTEGER NOT NULL DEFAULT 0,
                     event_cards_success INTEGER NOT NULL DEFAULT 0,
                     event_cards_failed INTEGER NOT NULL DEFAULT 0,
+                    tag_colors_generated INTEGER NOT NULL DEFAULT 0,
                     error_text TEXT,
                     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     finished_at TIMESTAMPTZ,
@@ -245,6 +246,12 @@ class DataLoadingManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_downstream_runs_status ON downstream_runs(status)")
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_downstream_runs_events_load_date ON downstream_runs(events_load_date)"
+            )
+            cursor.execute(
+                """
+                ALTER TABLE downstream_runs
+                ADD COLUMN IF NOT EXISTS tag_colors_generated INTEGER NOT NULL DEFAULT 0
+                """
             )
 
             # Ensure season events table exists for dedicated lifecycle logs.
@@ -590,6 +597,7 @@ class DataLoadingManager:
         event_cards_processed: int = 0,
         event_cards_success: int = 0,
         event_cards_failed: int = 0,
+        tag_colors_generated: int = 0,
         error_text: Optional[str] = None,
     ) -> None:
         """Finalize downstream run metrics and status."""
@@ -609,6 +617,7 @@ class DataLoadingManager:
                     event_cards_processed = %s,
                     event_cards_success = %s,
                     event_cards_failed = %s,
+                    tag_colors_generated = %s,
                     error_text = %s,
                     finished_at = NOW(),
                     updated_at = NOW()
@@ -625,6 +634,7 @@ class DataLoadingManager:
                     event_cards_processed,
                     event_cards_success,
                     event_cards_failed,
+                    tag_colors_generated,
                     error_text,
                     run_id,
                 ),
