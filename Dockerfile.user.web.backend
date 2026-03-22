@@ -18,7 +18,7 @@ RUN npm ci --omit=dev
 
 COPY scripts /app/scripts
 COPY user_web_backend /app/user_web_backend
-COPY web_backend /app/web_backend
+COPY admin_backend /app/admin_backend
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1

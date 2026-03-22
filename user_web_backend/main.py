@@ -45,7 +45,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from scripts.season_manager import SeasonManager
-from web_backend.main import BLOCKCHAIN_BASE_ZORA, MintClaimRequest, SeasonWorkbenchService
+from admin_backend.main import BLOCKCHAIN_BASE_ZORA, MintClaimRequest, SeasonWorkbenchService
 
 logger = logging.getLogger(__name__)
 

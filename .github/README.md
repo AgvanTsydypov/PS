@@ -16,8 +16,8 @@ For full setup and operational details, use the root `README.md`.
 
 - [Scripts](../scripts/) - data loading, scheduler, backfills, AI agents
 - [SQL Schemas](../sql/schemas/) - schema and DB bootstrapping
-- [Admin Backend](../web_backend/) - FastAPI backend for admin workbench
-- [Admin Frontend](../web_frontend/) - Next.js admin UI
+- [Admin Backend](../admin_backend/) - FastAPI backend for admin workbench
+- [Admin Frontend](../admin_frontend/) - Next.js admin UI
 - [User Backend](../user_web_backend/) - user-facing backend services
 - [User Frontend](../user_web_frontend/) - user-facing frontend
 

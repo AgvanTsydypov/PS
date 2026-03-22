@@ -1,6 +1,6 @@
 # PolyStars Admin Workbench — UI Reference
 
-**URL:** `http://localhost` (nginx) → proxied to `web_backend :8001`  
+**URL:** `http://localhost` (nginx) → proxied to `admin_backend :8001`  
 **Purpose:** Internal tool for testing and operating the NFT season lifecycle.
 
 ---
