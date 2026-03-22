@@ -148,7 +148,6 @@ type EventCardRegenerateFields = {
 
 type EventCardsSortKey =
   | "event_id"
-  | "event_ticker"
   | "event_slug"
   | "event_title"
   | "primary_tag"
@@ -1624,11 +1623,6 @@ export default function HomePage() {
                     </button>
                   </th>
                   <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
-                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("event_ticker")}>
-                      ticker <ArrowUpDown size={13} />
-                    </button>
-                  </th>
-                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
                     <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("event_slug")}>
                       slug <ArrowUpDown size={13} />
                     </button>
@@ -1701,7 +1695,6 @@ export default function HomePage() {
                           </button>
                         </div>
                       </td>
-                      <td className="border-b border-slate-700 px-3 py-2"><div className="h-8 truncate" title={row.event_ticker ?? ""}>{row.event_ticker ?? ""}</div></td>
                       <td className="border-b border-slate-700 px-3 py-2">
                         <div className="flex h-8 items-center gap-1.5">
                           <span className="max-w-[140px] truncate" title={row.event_slug ?? ""}>{row.event_slug ?? ""}</span>
@@ -1733,8 +1726,7 @@ export default function HomePage() {
                       <td className="border-b border-slate-700 px-3 py-2">
                         {row.secondary_tag ? (
                           <span
-                            className="inline-flex rounded-full border px-2 py-1 text-[11px] font-medium"
-                            style={tagChipStyle(row.secondary_tag_hex_color)}
+                            className="inline-flex rounded-full border border-slate-500 bg-slate-700/40 px-2 py-1 text-[11px] font-medium text-slate-200"
                           >
                             {row.secondary_tag}
                           </span>
