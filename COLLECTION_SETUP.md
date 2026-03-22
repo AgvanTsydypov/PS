@@ -124,7 +124,7 @@ Important behavior:
 4) Copy the same Zora values to `.env.prod` (if minting on VPS), then restart backend:
 
 ```bash
-docker compose --env-file .env.prod up -d --build web_backend
+docker compose --env-file .env.prod up -d --build admin_backend
 ```
 
 Important:

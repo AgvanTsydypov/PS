@@ -13,7 +13,7 @@ This repository includes:
 
 - `scripts/` - data loaders, scheduler, backfill tools, AI agents
 - `sql/schemas/init-db.sql` - main database schema and analytics views
-- `web_backend/` + `web_frontend/` - admin workbench API and UI
+- `admin_backend/` + `admin_frontend/` - admin workbench API and UI
 - `user_web_backend/` + `user_web_frontend/` - user-facing services
 - `docs/` - setup and API documentation
 
@@ -33,7 +33,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # Frontends
-cd web_frontend && npm install
+cd admin_frontend && npm install
 cd ../user_web_frontend && npm install
 cd ..
 ```
@@ -74,11 +74,11 @@ psql -h localhost -U postgres -d polystars -f sql/schemas/init-db.sql
 
 ```bash
 # Backend APIs
-uvicorn web_backend.main:app --host 0.0.0.0 --port 8001 --reload
+uvicorn admin_backend.main:app --host 0.0.0.0 --port 8001 --reload
 uvicorn user_web_backend.main:app --host 0.0.0.0 --port 8011 --reload
 
 # Frontends (separate terminals)
-cd web_frontend && npm run dev
+cd admin_frontend && npm run dev
 cd user_web_frontend && npm run dev -- -p 3001
 ```
 
@@ -146,8 +146,8 @@ python scripts/db/backfill_tag_colors.py --batch-size 50
 ## Admin Workbench
 
 Admin stack:
-- API: `web_backend/main.py` (default `:8001`)
-- UI: `web_frontend/app/page.tsx` (default `:3000`)
+- API: `admin_backend/main.py` (default `:8001`)
+- UI: `admin_frontend/app/page.tsx` (default `:3000`)
 
 Main capabilities:
 - season lifecycle controls

@@ -125,11 +125,11 @@ services:
       - polystars_network
 
   # Web stack (Next.js + FastAPI + Nginx)
-  web_backend:
+  admin_backend:
     build:
       context: .
-      dockerfile: Dockerfile.web.backend
-    container_name: polystars_web_backend
+      dockerfile: Docker.admin.backend
+    container_name: polystars_admin_backend
     restart: unless-stopped
     env_file:
       - ${ENV_FILE:-.env}
@@ -143,16 +143,16 @@ services:
     networks:
       - polystars_web_network
 
-  web_frontend:
+  admin_frontend:
     build:
       context: .
-      dockerfile: Dockerfile.web.frontend
+      dockerfile: Docker.admin.frontend
       args:
         NEXT_PUBLIC_SEASON_API_BASE_URL: "/"
-    container_name: polystars_web_frontend
+    container_name: polystars_admin_frontend
     restart: unless-stopped
     depends_on:
-      - web_backend
+      - admin_backend
     expose:
       - "3000"
     networks:
@@ -163,8 +163,8 @@ services:
     container_name: polystars_web_nginx
     restart: unless-stopped
     depends_on:
-      - web_backend
-      - web_frontend
+      - admin_backend
+      - admin_frontend
     ports:
       - "127.0.0.1:8088:80"
     volumes:

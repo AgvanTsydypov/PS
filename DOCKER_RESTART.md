@@ -19,12 +19,12 @@ docker compose down
 
 ### Перезапустить только веб-часть:
 ```bash
-docker compose restart web_backend web_frontend web_nginx
+docker compose restart admin_backend admin_frontend web_nginx
 ```
 
 ### Пересобрать только веб-часть:
 ```bash
-docker compose up -d --build web_backend web_frontend web_nginx
+docker compose up -d --build admin_backend admin_frontend web_nginx
 ```
 
 ### Проверить веб:
