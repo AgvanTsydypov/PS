@@ -6,7 +6,7 @@ import { ArrowUpDown, Copy, Loader2, Pencil, RotateCcw } from "lucide-react";
 const RAW_API_BASE = process.env.NEXT_PUBLIC_SEASON_API_BASE_URL ?? "http://localhost:8001";
 const API_BASE = RAW_API_BASE === "/" ? "" : RAW_API_BASE.replace(/\/$/, "");
 
-type TabKey = "overview" | "eligibility" | "claims" | "seasonClaims" | "winners" | "eventCards" | "scenarios" | "reset";
+type TabKey = "overview" | "eligibility" | "claims" | "seasonClaims" | "winners" | "eventCards" | "eventPictures" | "scenarios" | "reset";
 
 type Season = {
   id: number;
@@ -86,6 +86,8 @@ type EventCardRow = {
   event_slug?: string | null;
   event_title?: string | null;
   event_description?: string | null;
+  event_image_url?: string | null;
+  manual_image_url?: string | null;
   card_title?: string | null;
   card_lore?: string | null;
   primary_tag?: string | null;
@@ -167,6 +169,7 @@ const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "seasonClaims", label: "Season Claims" },
   { key: "winners", label: "Winner Wallets" },
   { key: "eventCards", label: "Event Cards" },
+  { key: "eventPictures", label: "Event Pictures" },
   { key: "scenarios", label: "Scenarios" },
   { key: "reset", label: "Reset" },
 ];
@@ -323,6 +326,8 @@ export default function HomePage() {
   const [eventCardsSortKey, setEventCardsSortKey] = useState<EventCardsSortKey>("generated_at");
   const [eventCardsSortDir, setEventCardsSortDir] = useState<"asc" | "desc">("desc");
   const [eventCardRegeneratingEventId, setEventCardRegeneratingEventId] = useState("");
+  const [eventPictureUploadingEventId, setEventPictureUploadingEventId] = useState("");
+  const [eventPictureDeletingEventId, setEventPictureDeletingEventId] = useState("");
   const [eventCardForm, setEventCardForm] = useState<EventCardForm>({
     event_id: "",
     card_title: "",
@@ -491,6 +496,35 @@ export default function HomePage() {
     if (!value) return;
     await navigator.clipboard.writeText(value);
     setOk(`Copied: ${value}`);
+  };
+  const uploadEventPicture = async (eventId: string, file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch(`${API_BASE}/api/event-cards/${encodeURIComponent(eventId)}/manual-image`, {
+      method: "POST",
+      body: formData,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = (data as { detail?: string }).detail ?? "Upload failed";
+      throw new Error(detail);
+    }
+    const row = (data as { row?: EventCardRow }).row;
+    if (!row) throw new Error("Upload succeeded but row payload is missing");
+    setEventCardRows((prev) => prev.map((item) => (item.event_id === row.event_id ? row : item)));
+  };
+  const deleteEventPicture = async (eventId: string) => {
+    const res = await fetch(`${API_BASE}/api/event-cards/${encodeURIComponent(eventId)}/manual-image`, {
+      method: "DELETE",
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = (data as { detail?: string }).detail ?? "Delete failed";
+      throw new Error(detail);
+    }
+    const row = (data as { row?: EventCardRow }).row;
+    if (!row) throw new Error("Delete succeeded but row payload is missing");
+    setEventCardRows((prev) => prev.map((item) => (item.event_id === row.event_id ? row : item)));
   };
   const sortedEventCardRows = useMemo(() => {
     const rows = [...eventCardRows];
@@ -789,7 +823,7 @@ export default function HomePage() {
   }, [tab, winnerSeasonFilterId]);
 
   useEffect(() => {
-    if (tab !== "eventCards") return;
+    if (tab !== "eventCards" && tab !== "eventPictures") return;
     void run(refreshEventCardRows);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
@@ -1804,6 +1838,186 @@ export default function HomePage() {
                               <RotateCcw size={14} />
                             )}
                           </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="muted">
+              Rows: {eventCardRows.length} | Page {eventCardsPage}/{eventCardsTotalPages} | 20 per page
+            </span>
+            <div className="row" style={{ marginBottom: 0 }}>
+              <button
+                onClick={() => setEventCardsPage((prev) => Math.max(1, prev - 1))}
+                disabled={eventCardsPage <= 1}
+              >
+                Prev
+              </button>
+              <button
+                onClick={() => setEventCardsPage((prev) => Math.min(eventCardsTotalPages, prev + 1))}
+                disabled={eventCardsPage >= eventCardsTotalPages}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {tab === "eventPictures" ? (
+        <section className="panel">
+          <div className="row">
+            <label>status</label>
+            <select value={eventCardsStatusFilter} onChange={(e) => setEventCardsStatusFilter(e.target.value)}>
+              <option value="all">all</option>
+              <option value="ok">ok</option>
+              <option value="error">error</option>
+            </select>
+            <label>event_id</label>
+            <input
+              value={eventCardsEventIdFilter}
+              onChange={(e) => setEventCardsEventIdFilter(e.target.value)}
+              placeholder="optional exact event_id"
+              style={{ minWidth: 300 }}
+            />
+            <label>limit</label>
+            <input value={eventCardsLimit} onChange={(e) => setEventCardsLimit(e.target.value)} style={{ width: 90 }} />
+            <button onClick={() => void run(refreshEventCardRows)}>Refresh rows</button>
+          </div>
+
+          <div className="overflow-auto rounded-xl border border-slate-700 bg-slate-900 shadow-sm">
+            <table className="event-cards-table w-full border-collapse text-xs text-slate-200">
+              <thead className="sticky top-0 z-30 bg-slate-800">
+                <tr>
+                  <th className="sticky left-0 z-40 border-b border-r border-slate-700 bg-slate-800 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("event_id")}>
+                      event_id <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("event_slug")}>
+                      slug <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("event_title")}>
+                      title <ArrowUpDown size={13} />
+                    </button>
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">image</th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">manual_image</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pagedEventCardRows.map((row, idx) => {
+                  const stripe = idx % 2 === 0 ? "bg-slate-900" : "bg-slate-800/60";
+                  return (
+                    <tr key={`image-${row.event_id}`} className={`${stripe} hover:bg-slate-800`}>
+                      <td className={`sticky left-0 z-20 border-b border-r border-slate-700 px-3 py-2 ${stripe}`}>
+                        <div className="flex h-8 items-center gap-1.5">
+                          <span className="max-w-[220px] truncate font-medium" title={row.event_id}>{row.event_id}</span>
+                          <button
+                            title="Copy event_id"
+                            className="rounded p-1 text-slate-400 hover:bg-slate-700 hover:text-slate-100"
+                            onClick={() => void copyText(row.event_id)}
+                          >
+                            <Copy size={13} />
+                          </button>
+                        </div>
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2">
+                        <div className="flex h-8 items-center gap-1.5">
+                          <span className="max-w-[220px] truncate" title={row.event_slug ?? ""}>{row.event_slug ?? ""}</span>
+                          {(row.event_slug ?? "").trim() ? (
+                            <button
+                              title="Copy slug"
+                              className="rounded p-1 text-slate-400 hover:bg-slate-700 hover:text-slate-100"
+                              onClick={() => void copyText(row.event_slug ?? "")}
+                            >
+                              <Copy size={13} />
+                            </button>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2">
+                        <div className="max-w-[320px] truncate" title={row.event_title ?? ""}>{row.event_title ?? ""}</div>
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2">
+                        {row.event_image_url ? (
+                          <a href={row.event_image_url} target="_blank" rel="noreferrer">
+                            <img
+                              src={row.event_image_url}
+                              alt={row.event_title ?? row.event_id}
+                              className="h-20 w-auto max-w-[330px] rounded border border-slate-600 object-cover"
+                              loading="lazy"
+                            />
+                          </a>
+                        ) : (
+                          <span className="text-slate-500">no image</span>
+                        )}
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2">
+                        <div className="flex items-start gap-3">
+                          {row.manual_image_url ? (
+                            <a href={row.manual_image_url} target="_blank" rel="noreferrer">
+                              <img
+                                src={row.manual_image_url}
+                                alt={`manual-${row.event_id}`}
+                                className="h-20 w-auto max-w-[330px] rounded border border-slate-600 object-cover"
+                                loading="lazy"
+                              />
+                            </a>
+                          ) : (
+                            <div className="flex h-20 w-[210px] items-center justify-center rounded border border-dashed border-slate-600 text-slate-500">
+                              no manual image
+                            </div>
+                          )}
+                          <div className="flex flex-col gap-2">
+                            <label className="inline-flex w-fit cursor-pointer rounded border border-slate-600 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-700">
+                              {eventPictureUploadingEventId === row.event_id ? "Uploading..." : "Upload"}
+                              <input
+                                type="file"
+                                accept="image/jpeg,image/png,image/webp,image/gif"
+                                className="hidden"
+                                disabled={eventPictureUploadingEventId === row.event_id}
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  e.currentTarget.value = "";
+                                  if (!file) return;
+                                  void run(async () => {
+                                    setEventPictureUploadingEventId(row.event_id);
+                                    try {
+                                      await uploadEventPicture(row.event_id, file);
+                                      setOk(`Manual image uploaded for ${row.event_id}`);
+                                    } finally {
+                                      setEventPictureUploadingEventId("");
+                                    }
+                                  });
+                                }}
+                              />
+                            </label>
+                            <button
+                              className="inline-flex w-fit rounded border border-rose-700 px-2 py-1 text-[11px] text-rose-300 hover:bg-rose-900/30 disabled:cursor-not-allowed disabled:opacity-60"
+                              disabled={!row.manual_image_url || eventPictureDeletingEventId === row.event_id}
+                              onClick={() =>
+                                void run(async () => {
+                                  setEventPictureDeletingEventId(row.event_id);
+                                  try {
+                                    await deleteEventPicture(row.event_id);
+                                    setOk(`Manual image deleted for ${row.event_id}`);
+                                  } finally {
+                                    setEventPictureDeletingEventId("");
+                                  }
+                                })
+                              }
+                            >
+                              {eventPictureDeletingEventId === row.event_id ? "Deleting..." : "Delete"}
+                            </button>
+                          </div>
                         </div>
                       </td>
                     </tr>
