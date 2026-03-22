@@ -434,7 +434,7 @@ class SeasonWorkbenchService:
 
         filename = file.filename or "upload"
         content_type = self._detect_content_type(filename=filename, declared_content_type=file.content_type)
-        max_bytes = int(os.getenv("ADMIN_MANUAL_IMAGE_MAX_BYTES", str(5 * 1024 * 1024)))
+        max_bytes = int(os.getenv("ADMIN_MANUAL_IMAGE_MAX_BYTES", str(100 * 1024 * 1024)))
         file_bytes = file.file.read(max_bytes + 1)
         if not file_bytes:
             raise ValueError("Uploaded file is empty")
