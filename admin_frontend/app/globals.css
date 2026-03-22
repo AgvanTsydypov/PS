@@ -1,0 +1,155 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --bg-soft: #171a20;
+  --panel: #1d222b;
+  --border: #2c3340;
+  --text: #e6e9ee;
+  --muted: #a8b0bd;
+  --accent: #4ea1ff;
+  --danger: #ff6b6b;
+  --ok: #5ad27a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+main {
+  padding: 16px;
+}
+
+.title {
+  margin: 0 0 12px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.tab.active {
+  border-color: var(--accent);
+  color: white;
+}
+
+.panel {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.ok {
+  color: var(--ok);
+}
+
+.season-info-blue {
+  color: #5aa9ff;
+}
+
+.error {
+  color: var(--danger);
+}
+
+table:not(.event-cards-table) {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+table:not(.event-cards-table) th,
+table:not(.event-cards-table) td {
+  border: 1px solid var(--border);
+  padding: 6px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.claims-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.claims-left,
+.claims-right {
+  min-width: 0;
+}
+
+.event-cards-top-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.readonly-prompt-field {
+  opacity: 0.56;
+  background: #131821;
+  border-color: #273041;
+}
+
+@media (max-width: 1100px) {
+  .claims-columns {
+    grid-template-columns: 1fr;
+  }
+  .event-cards-top-grid {
+    grid-template-columns: 1fr;
+  }
+}
