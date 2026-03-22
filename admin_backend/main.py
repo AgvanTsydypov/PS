@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,10 +20,17 @@ from time import monotonic
 from typing import Any, Dict, List, Optional
 
 import psycopg2.extras
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from solders.pubkey import Pubkey
+
+try:
+    import boto3
+    from botocore.config import Config
+except Exception:  # pragma: no cover - fallback for environments without R2 deps
+    boto3 = None
+    Config = None
 
 # Add project root to path (same approach as other scripts)
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -179,6 +187,7 @@ class SeasonWorkbenchService:
         self.manager = DataLoadingManager(use_local_db=True)
         self.season_manager = SeasonManager(use_local_db=True)
         self.scheduler = SimplifiedScheduler(use_local_db=True, dry_run=False)
+        self._r2_client: Any = None
         # Wallet list is mostly stable within a season. Cache for 10 days by default.
         self.wallets_cache_ttl_seconds = int(os.getenv("WALLETS_CACHE_TTL_SECONDS", "864000"))
         self._wallets_cache: Dict[tuple[int, str, bool, int], tuple[float, List[str]]] = {}
@@ -316,6 +325,272 @@ class SeasonWorkbenchService:
             raise
         finally:
             conn.close()
+
+    def _r2_required_env(self) -> Dict[str, str]:
+        endpoint = str(os.getenv("R2_ENDPOINT", "")).strip()
+        bucket = str(os.getenv("R2_BUCKET", "")).strip()
+        access_key = str(os.getenv("R2_ACCESS_KEY_ID", "")).strip()
+        secret_key = str(os.getenv("R2_SECRET_ACCESS_KEY", "")).strip()
+        public_base_url = str(os.getenv("R2_PUBLIC_BASE_URL", "")).strip().rstrip("/")
+        if not endpoint:
+            raise ValueError("R2_ENDPOINT is required")
+        if not bucket:
+            raise ValueError("R2_BUCKET is required")
+        if not access_key:
+            raise ValueError("R2_ACCESS_KEY_ID is required")
+        if not secret_key:
+            raise ValueError("R2_SECRET_ACCESS_KEY is required")
+        if not public_base_url:
+            raise ValueError("R2_PUBLIC_BASE_URL is required")
+        return {
+            "endpoint": endpoint,
+            "bucket": bucket,
+            "access_key": access_key,
+            "secret_key": secret_key,
+            "public_base_url": public_base_url,
+        }
+
+    def _get_r2_client(self) -> Any:
+        if boto3 is None or Config is None:
+            raise ValueError("R2 upload dependencies are missing. Install boto3 and botocore.")
+        if self._r2_client is not None:
+            return self._r2_client
+        cfg = self._r2_required_env()
+        self._r2_client = boto3.client(
+            "s3",
+            endpoint_url=cfg["endpoint"],
+            aws_access_key_id=cfg["access_key"],
+            aws_secret_access_key=cfg["secret_key"],
+            region_name="auto",
+            config=Config(signature_version="s3v4"),
+        )
+        return self._r2_client
+
+    @staticmethod
+    def _detect_content_type(filename: str, declared_content_type: Optional[str]) -> str:
+        content_type = (declared_content_type or "").strip().lower()
+        if content_type in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+            return content_type
+        lower_name = filename.lower()
+        if lower_name.endswith(".jpg") or lower_name.endswith(".jpeg"):
+            return "image/jpeg"
+        if lower_name.endswith(".png"):
+            return "image/png"
+        if lower_name.endswith(".webp"):
+            return "image/webp"
+        if lower_name.endswith(".gif"):
+            return "image/gif"
+        raise ValueError("Unsupported image type. Allowed: jpeg, png, webp, gif")
+
+    @staticmethod
+    def _content_type_extension(content_type: str) -> str:
+        if content_type == "image/jpeg":
+            return "jpg"
+        if content_type == "image/png":
+            return "png"
+        if content_type == "image/webp":
+            return "webp"
+        if content_type == "image/gif":
+            return "gif"
+        raise ValueError("Unsupported image type")
+
+    def _build_r2_object_key(self, event_id: str, ext: str) -> str:
+        prefix = str(os.getenv("R2_PREFIX", "dev")).strip().strip("/")
+        safe_event_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", event_id.strip())
+        unique = uuid.uuid4().hex
+        if prefix:
+            return f"{prefix}/event-images/{safe_event_id}/{unique}.{ext}"
+        return f"event-images/{safe_event_id}/{unique}.{ext}"
+
+    @staticmethod
+    def _extract_r2_key_from_public_url(public_base_url: str, url: Optional[str]) -> Optional[str]:
+        if not url:
+            return None
+        base = public_base_url.rstrip("/")
+        value = str(url).strip()
+        if not value.startswith(base + "/"):
+            return None
+        return value[len(base) + 1 :]
+
+    def _delete_r2_object_if_managed(self, old_url: Optional[str]) -> None:
+        if not old_url:
+            return
+        try:
+            cfg = self._r2_required_env()
+            key = self._extract_r2_key_from_public_url(cfg["public_base_url"], old_url)
+            if not key:
+                return
+            self._get_r2_client().delete_object(Bucket=cfg["bucket"], Key=key)
+        except Exception:
+            # Old image cleanup should not block replacing with a new one.
+            logger.warning("Could not delete old manual image from R2", exc_info=True)
+
+    def upload_event_card_manual_image(self, event_id: str, file: UploadFile) -> Dict[str, Any]:
+        target_event_id = event_id.strip()
+        if not target_event_id:
+            raise ValueError("event_id is required")
+        if file is None:
+            raise ValueError("file is required")
+
+        filename = file.filename or "upload"
+        content_type = self._detect_content_type(filename=filename, declared_content_type=file.content_type)
+        max_bytes = int(os.getenv("ADMIN_MANUAL_IMAGE_MAX_BYTES", str(5 * 1024 * 1024)))
+        file_bytes = file.file.read(max_bytes + 1)
+        if not file_bytes:
+            raise ValueError("Uploaded file is empty")
+        if len(file_bytes) > max_bytes:
+            raise ValueError(f"File is too large. Max size is {max_bytes} bytes")
+
+        cfg = self._r2_required_env()
+        ext = self._content_type_extension(content_type)
+        key = self._build_r2_object_key(target_event_id, ext)
+        self._get_r2_client().put_object(
+            Bucket=cfg["bucket"],
+            Key=key,
+            Body=file_bytes,
+            ContentType=content_type,
+            CacheControl="public, max-age=31536000, immutable",
+        )
+        new_public_url = f"{cfg['public_base_url']}/{key}"
+
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(
+                    "SELECT manual_image_url FROM event_cards WHERE event_id = %s LIMIT 1",
+                    (target_event_id,),
+                )
+                existing = cursor.fetchone()
+                if not existing:
+                    raise ValueError(f"Event card for event_id={target_event_id} not found")
+                old_manual_image_url = self._normalize_optional_text(existing.get("manual_image_url"))
+
+                cursor.execute(
+                    """
+                    UPDATE event_cards
+                    SET manual_image_url = %s, updated_at = NOW()
+                    WHERE event_id = %s
+                    """,
+                    (new_public_url, target_event_id),
+                )
+                cursor.execute(
+                    """
+                    SELECT
+                        ec.event_id,
+                        e.ticker AS event_ticker,
+                        e.slug AS event_slug,
+                        e.title AS event_title,
+                        e.description AS event_description,
+                        COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
+                        ec.manual_image_url,
+                        ec.card_title,
+                        ec.card_lore,
+                        ec.primary_tag,
+                        ec.secondary_tag,
+                        tp.hex_color AS primary_tag_hex_color,
+                        ts.hex_color AS secondary_tag_hex_color,
+                        ec.agent_name,
+                        ec.model_name,
+                        ec.prompt_version,
+                        ec.status,
+                        ec.error_text,
+                        ec.generated_at,
+                        ec.updated_at
+                    FROM event_cards ec
+                    LEFT JOIN events e ON e.id = ec.event_id
+                    LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+                    LEFT JOIN tags ts ON LOWER(BTRIM(ts.label)) = LOWER(BTRIM(ec.secondary_tag))
+                    WHERE ec.event_id = %s
+                    LIMIT 1
+                    """,
+                    (target_event_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    raise RuntimeError(f"Event card for event_id={target_event_id} not found after update")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            try:
+                self._get_r2_client().delete_object(Bucket=cfg["bucket"], Key=key)
+            except Exception:
+                logger.warning("Could not rollback uploaded R2 image after DB failure", exc_info=True)
+            raise
+        finally:
+            conn.close()
+
+        self._delete_r2_object_if_managed(old_manual_image_url)
+        return self._format_event_card_row(dict(row))
+
+    def delete_event_card_manual_image(self, event_id: str) -> Dict[str, Any]:
+        target_event_id = event_id.strip()
+        if not target_event_id:
+            raise ValueError("event_id is required")
+
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(
+                    "SELECT manual_image_url FROM event_cards WHERE event_id = %s LIMIT 1",
+                    (target_event_id,),
+                )
+                existing = cursor.fetchone()
+                if not existing:
+                    raise ValueError(f"Event card for event_id={target_event_id} not found")
+                old_manual_image_url = self._normalize_optional_text(existing.get("manual_image_url"))
+
+                cursor.execute(
+                    """
+                    UPDATE event_cards
+                    SET manual_image_url = NULL, updated_at = NOW()
+                    WHERE event_id = %s
+                    """,
+                    (target_event_id,),
+                )
+                cursor.execute(
+                    """
+                    SELECT
+                        ec.event_id,
+                        e.ticker AS event_ticker,
+                        e.slug AS event_slug,
+                        e.title AS event_title,
+                        e.description AS event_description,
+                        COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
+                        ec.manual_image_url,
+                        ec.card_title,
+                        ec.card_lore,
+                        ec.primary_tag,
+                        ec.secondary_tag,
+                        tp.hex_color AS primary_tag_hex_color,
+                        ts.hex_color AS secondary_tag_hex_color,
+                        ec.agent_name,
+                        ec.model_name,
+                        ec.prompt_version,
+                        ec.status,
+                        ec.error_text,
+                        ec.generated_at,
+                        ec.updated_at
+                    FROM event_cards ec
+                    LEFT JOIN events e ON e.id = ec.event_id
+                    LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+                    LEFT JOIN tags ts ON LOWER(BTRIM(ts.label)) = LOWER(BTRIM(ec.secondary_tag))
+                    WHERE ec.event_id = %s
+                    LIMIT 1
+                    """,
+                    (target_event_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    raise RuntimeError(f"Event card for event_id={target_event_id} not found after update")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        self._delete_r2_object_if_managed(old_manual_image_url)
+        return self._format_event_card_row(dict(row))
 
     def _sync_event_tag_primary_flags(self, cursor: Any, event_id: str, primary_tag: Optional[str]) -> None:
         normalized_primary = self._normalize_optional_text(primary_tag)
@@ -1670,6 +1945,8 @@ class SeasonWorkbenchService:
                             e.slug AS event_slug,
                             e.title AS event_title,
                             e.description AS event_description,
+                            COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
+                            ec.manual_image_url,
                             ec.card_title,
                             ec.card_lore,
                             ec.primary_tag,
@@ -1703,6 +1980,8 @@ class SeasonWorkbenchService:
                             e.slug AS event_slug,
                             e.title AS event_title,
                             e.description AS event_description,
+                            COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
+                            ec.manual_image_url,
                             ec.card_title,
                             ec.card_lore,
                             ec.primary_tag,
@@ -1735,6 +2014,8 @@ class SeasonWorkbenchService:
                             e.slug AS event_slug,
                             e.title AS event_title,
                             e.description AS event_description,
+                            COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
+                            ec.manual_image_url,
                             ec.card_title,
                             ec.card_lore,
                             ec.primary_tag,
@@ -1767,6 +2048,8 @@ class SeasonWorkbenchService:
                             e.slug AS event_slug,
                             e.title AS event_title,
                             e.description AS event_description,
+                            COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
+                            ec.manual_image_url,
                             ec.card_title,
                             ec.card_lore,
                             ec.primary_tag,
@@ -2274,6 +2557,24 @@ def get_event_cards(
 def update_event_card(event_id: str, req: EventCardUpdateRequest) -> Dict[str, Any]:
     try:
         row = service.update_event_card(event_id=event_id, req=req)
+        return {"row": row}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/event-cards/{event_id}/manual-image")
+def upload_event_card_manual_image(event_id: str, file: UploadFile = File(...)) -> Dict[str, Any]:
+    try:
+        row = service.upload_event_card_manual_image(event_id=event_id, file=file)
+        return {"row": row}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/event-cards/{event_id}/manual-image")
+def delete_event_card_manual_image(event_id: str) -> Dict[str, Any]:
+    try:
+        row = service.delete_event_card_manual_image(event_id=event_id)
         return {"row": row}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))

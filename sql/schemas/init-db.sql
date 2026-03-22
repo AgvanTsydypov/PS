@@ -715,6 +715,7 @@ CREATE TABLE IF NOT EXISTS event_cards (
     card_lore TEXT,
     primary_tag TEXT,
     secondary_tag TEXT,
+    manual_image_url TEXT,
     agent_name TEXT NOT NULL DEFAULT 'agent_1_quant',
     model_name TEXT NOT NULL DEFAULT 'gemini-2.5-flash',
     prompt_version TEXT NOT NULL DEFAULT 'v1',
@@ -726,6 +727,9 @@ CREATE TABLE IF NOT EXISTS event_cards (
     CONSTRAINT fk_event_cards_event
         FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
 );
+
+ALTER TABLE event_cards
+    ADD COLUMN IF NOT EXISTS manual_image_url TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_event_cards_status ON event_cards(status);
 CREATE INDEX IF NOT EXISTS idx_event_cards_prompt_version ON event_cards(prompt_version);
