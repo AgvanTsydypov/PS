@@ -711,6 +711,8 @@ DO $$ BEGIN RAISE NOTICE '🧠 Creating event_cards tables...'; END $$;
 
 CREATE TABLE IF NOT EXISTS event_cards (
     event_id TEXT PRIMARY KEY,
+    series_id TEXT,
+    reccurence TEXT NOT NULL DEFAULT 'unique',
     card_title TEXT,
     card_lore TEXT,
     primary_tag TEXT,
@@ -729,11 +731,41 @@ CREATE TABLE IF NOT EXISTS event_cards (
 );
 
 ALTER TABLE event_cards
+    ADD COLUMN IF NOT EXISTS series_id TEXT;
+
+ALTER TABLE event_cards
+    ADD COLUMN IF NOT EXISTS reccurence TEXT NOT NULL DEFAULT 'unique';
+
+ALTER TABLE event_cards
     ADD COLUMN IF NOT EXISTS manual_image_url TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'fk_event_cards_series'
+          AND conrelid = 'event_cards'::regclass
+    ) THEN
+        ALTER TABLE event_cards
+            ADD CONSTRAINT fk_event_cards_series
+            FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+UPDATE event_cards ec
+SET
+    series_id = e.series_id,
+    reccurence = COALESCE(NULLIF(BTRIM(s.recurrence), ''), 'unique')
+FROM events e
+LEFT JOIN series s
+    ON s.id = e.series_id
+WHERE ec.event_id = e.id;
 
 CREATE INDEX IF NOT EXISTS idx_event_cards_status ON event_cards(status);
 CREATE INDEX IF NOT EXISTS idx_event_cards_prompt_version ON event_cards(prompt_version);
 CREATE INDEX IF NOT EXISTS idx_event_cards_generated_at ON event_cards(generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_event_cards_series_id ON event_cards(series_id);
 
 DO $$ BEGIN RAISE NOTICE '✅ event_cards tables created'; END $$;
 

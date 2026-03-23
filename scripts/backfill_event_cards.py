@@ -55,10 +55,13 @@ def _ensure_event_cards_schema(conn: Any) -> None:
             """
             CREATE TABLE IF NOT EXISTS event_cards (
                 event_id TEXT PRIMARY KEY,
+                series_id TEXT,
+                reccurence TEXT NOT NULL DEFAULT 'unique',
                 card_title TEXT,
                 card_lore TEXT,
                 primary_tag TEXT,
                 secondary_tag TEXT,
+                manual_image_url TEXT,
                 agent_name TEXT NOT NULL DEFAULT 'agent_1_quant',
                 model_name TEXT NOT NULL DEFAULT 'gemini-2.5-flash',
                 prompt_version TEXT NOT NULL DEFAULT 'v1',
@@ -75,7 +78,10 @@ def _ensure_event_cards_schema(conn: Any) -> None:
         cursor.execute("ALTER TABLE event_cards ALTER COLUMN card_title DROP NOT NULL")
         cursor.execute("ALTER TABLE event_cards ALTER COLUMN card_lore DROP NOT NULL")
         cursor.execute("ALTER TABLE event_cards ALTER COLUMN primary_tag DROP NOT NULL")
+        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS series_id TEXT")
+        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS reccurence TEXT NOT NULL DEFAULT 'unique'")
         cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS secondary_tag TEXT")
+        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS manual_image_url TEXT")
         cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS agent_name TEXT NOT NULL DEFAULT 'agent_1_quant'")
         cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS model_name TEXT NOT NULL DEFAULT 'gemini-2.5-flash'")
         cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS prompt_version TEXT NOT NULL DEFAULT 'v1'")
@@ -99,6 +105,18 @@ def _ensure_event_cards_schema(conn: Any) -> None:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_status ON event_cards(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_prompt_version ON event_cards(prompt_version)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_generated_at ON event_cards(generated_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_series_id ON event_cards(series_id)")
+        cursor.execute(
+            """
+            UPDATE event_cards ec
+            SET
+                series_id = e.series_id,
+                reccurence = COALESCE(NULLIF(BTRIM(s.recurrence), ''), 'unique')
+            FROM events e
+            LEFT JOIN series s ON s.id = e.series_id
+            WHERE ec.event_id = e.id
+            """
+        )
         cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS hex_color TEXT")
         cursor.execute(
             """
@@ -218,6 +236,8 @@ def _upsert_ok(
             """
             INSERT INTO event_cards (
                 event_id,
+                series_id,
+                reccurence,
                 card_title,
                 card_lore,
                 primary_tag,
@@ -230,9 +250,19 @@ def _upsert_ok(
                 generated_at,
                 updated_at
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, 'ok', NULL, NOW(), NOW()
+                %s,
+                (SELECT e.series_id FROM events e WHERE e.id = %s),
+                (
+                    SELECT COALESCE(NULLIF(BTRIM(s.recurrence), ''), 'unique')
+                    FROM events e
+                    LEFT JOIN series s ON s.id = e.series_id
+                    WHERE e.id = %s
+                ),
+                %s, %s, %s, %s, %s, %s, %s, 'ok', NULL, NOW(), NOW()
             )
             ON CONFLICT (event_id) DO UPDATE SET
+                series_id = EXCLUDED.series_id,
+                reccurence = EXCLUDED.reccurence,
                 card_title = EXCLUDED.card_title,
                 card_lore = EXCLUDED.card_lore,
                 primary_tag = EXCLUDED.primary_tag,
@@ -246,6 +276,8 @@ def _upsert_ok(
                 updated_at = NOW()
             """,
             (
+                event_id,
+                event_id,
                 event_id,
                 generated.get("card_title"),
                 generated.get("card_lore"),
@@ -276,6 +308,8 @@ def _upsert_error(
             """
             INSERT INTO event_cards (
                 event_id,
+                series_id,
+                reccurence,
                 card_title,
                 card_lore,
                 primary_tag,
@@ -288,9 +322,19 @@ def _upsert_error(
                 generated_at,
                 updated_at
             ) VALUES (
-                %s, NULL, NULL, NULL, NULL, %s, %s, %s, 'error', %s, NOW(), NOW()
+                %s,
+                (SELECT e.series_id FROM events e WHERE e.id = %s),
+                (
+                    SELECT COALESCE(NULLIF(BTRIM(s.recurrence), ''), 'unique')
+                    FROM events e
+                    LEFT JOIN series s ON s.id = e.series_id
+                    WHERE e.id = %s
+                ),
+                NULL, NULL, NULL, NULL, %s, %s, %s, 'error', %s, NOW(), NOW()
             )
             ON CONFLICT (event_id) DO UPDATE SET
+                series_id = EXCLUDED.series_id,
+                reccurence = EXCLUDED.reccurence,
                 status = 'error',
                 error_text = EXCLUDED.error_text,
                 agent_name = EXCLUDED.agent_name,
@@ -298,7 +342,7 @@ def _upsert_error(
                 prompt_version = EXCLUDED.prompt_version,
                 updated_at = NOW()
             """,
-            (event_id, agent_name, model_name, prompt_version, err),
+            (event_id, event_id, event_id, agent_name, model_name, prompt_version, err),
         )
     _sync_event_tag_primary_flags(conn, event_id=event_id, primary_tag=None)
     conn.commit()
