@@ -82,6 +82,8 @@ type WinnerWalletForm = {
 
 type EventCardRow = {
   event_id: string;
+  series_id?: string | null;
+  reccurence?: string | null;
   event_ticker?: string | null;
   event_slug?: string | null;
   event_title?: string | null;
@@ -511,7 +513,17 @@ export default function HomePage() {
     }
     const row = (data as { row?: EventCardRow }).row;
     if (!row) throw new Error("Upload succeeded but row payload is missing");
-    setEventCardRows((prev) => prev.map((item) => (item.event_id === row.event_id ? row : item)));
+    setEventCardRows((prev) =>
+      prev.map((item) => {
+        if (row.series_id && item.series_id === row.series_id) {
+          return { ...item, manual_image_url: row.manual_image_url };
+        }
+        if (!row.series_id && item.event_id === row.event_id) {
+          return { ...item, manual_image_url: row.manual_image_url };
+        }
+        return item;
+      }),
+    );
   };
   const deleteEventPicture = async (eventId: string) => {
     const res = await fetch(`${API_BASE}/api/event-cards/${encodeURIComponent(eventId)}/manual-image`, {
@@ -524,7 +536,17 @@ export default function HomePage() {
     }
     const row = (data as { row?: EventCardRow }).row;
     if (!row) throw new Error("Delete succeeded but row payload is missing");
-    setEventCardRows((prev) => prev.map((item) => (item.event_id === row.event_id ? row : item)));
+    setEventCardRows((prev) =>
+      prev.map((item) => {
+        if (row.series_id && item.series_id === row.series_id) {
+          return { ...item, manual_image_url: row.manual_image_url };
+        }
+        if (!row.series_id && item.event_id === row.event_id) {
+          return { ...item, manual_image_url: row.manual_image_url };
+        }
+        return item;
+      }),
+    );
   };
   const sortedEventCardRows = useMemo(() => {
     const rows = [...eventCardRows];
@@ -1657,6 +1679,9 @@ export default function HomePage() {
                     </button>
                   </th>
                   <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    reccurence
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
                     <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("event_slug")}>
                       slug <ArrowUpDown size={13} />
                     </button>
@@ -1727,6 +1752,11 @@ export default function HomePage() {
                           >
                             <Copy size={13} />
                           </button>
+                        </div>
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2">
+                        <div className="h-8 max-w-[120px] truncate" title={row.reccurence ?? ""}>
+                          {row.reccurence ?? ""}
                         </div>
                       </td>
                       <td className="border-b border-slate-700 px-3 py-2">
@@ -1898,6 +1928,7 @@ export default function HomePage() {
                       event_id <ArrowUpDown size={13} />
                     </button>
                   </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">reccurence</th>
                   <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
                     <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("event_slug")}>
                       slug <ArrowUpDown size={13} />
@@ -1908,6 +1939,7 @@ export default function HomePage() {
                       title <ArrowUpDown size={13} />
                     </button>
                   </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">series_id</th>
                   <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">image</th>
                   <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">manual_image</th>
                 </tr>
@@ -1930,6 +1962,9 @@ export default function HomePage() {
                         </div>
                       </td>
                       <td className="border-b border-slate-700 px-3 py-2">
+                        <div className="max-w-[140px] truncate" title={row.reccurence ?? ""}>{row.reccurence ?? ""}</div>
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2">
                         <div className="flex h-8 items-center gap-1.5">
                           <span className="max-w-[220px] truncate" title={row.event_slug ?? ""}>{row.event_slug ?? ""}</span>
                           {(row.event_slug ?? "").trim() ? (
@@ -1945,6 +1980,9 @@ export default function HomePage() {
                       </td>
                       <td className="border-b border-slate-700 px-3 py-2">
                         <div className="max-w-[320px] truncate" title={row.event_title ?? ""}>{row.event_title ?? ""}</div>
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2">
+                        <div className="max-w-[180px] truncate" title={row.series_id ?? ""}>{row.series_id ?? ""}</div>
                       </td>
                       <td className="border-b border-slate-700 px-3 py-2">
                         {row.event_image_url ? (

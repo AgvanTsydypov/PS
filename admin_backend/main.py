@@ -453,30 +453,75 @@ class SeasonWorkbenchService:
         )
         new_public_url = f"{cfg['public_base_url']}/{key}"
 
+        old_manual_image_urls: List[str] = []
         conn = self.manager.get_connection()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 cursor.execute(
-                    "SELECT manual_image_url FROM event_cards WHERE event_id = %s LIMIT 1",
+                    """
+                    SELECT
+                        ec.event_id,
+                        COALESCE(ec.series_id, e.series_id) AS series_id
+                    FROM event_cards ec
+                    LEFT JOIN events e ON e.id = ec.event_id
+                    WHERE ec.event_id = %s
+                    LIMIT 1
+                    """,
                     (target_event_id,),
                 )
-                existing = cursor.fetchone()
-                if not existing:
+                target = cursor.fetchone()
+                if not target:
                     raise ValueError(f"Event card for event_id={target_event_id} not found")
-                old_manual_image_url = self._normalize_optional_text(existing.get("manual_image_url"))
+                target_series_id = self._normalize_optional_text(target.get("series_id"))
 
-                cursor.execute(
-                    """
-                    UPDATE event_cards
-                    SET manual_image_url = %s, updated_at = NOW()
-                    WHERE event_id = %s
-                    """,
-                    (new_public_url, target_event_id),
-                )
+                if target_series_id:
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT manual_image_url
+                        FROM event_cards
+                        WHERE series_id = %s
+                          AND manual_image_url IS NOT NULL
+                        """,
+                        (target_series_id,),
+                    )
+                    old_manual_image_urls = [
+                        str(row.get("manual_image_url")).strip()
+                        for row in cursor.fetchall()
+                        if row.get("manual_image_url")
+                    ]
+                    cursor.execute(
+                        """
+                        UPDATE event_cards
+                        SET manual_image_url = %s, updated_at = NOW()
+                        WHERE series_id = %s
+                        """,
+                        (new_public_url, target_series_id),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT manual_image_url FROM event_cards WHERE event_id = %s LIMIT 1",
+                        (target_event_id,),
+                    )
+                    existing = cursor.fetchone()
+                    if not existing:
+                        raise ValueError(f"Event card for event_id={target_event_id} not found")
+                    old_manual = self._normalize_optional_text(existing.get("manual_image_url"))
+                    if old_manual:
+                        old_manual_image_urls = [old_manual]
+                    cursor.execute(
+                        """
+                        UPDATE event_cards
+                        SET manual_image_url = %s, updated_at = NOW()
+                        WHERE event_id = %s
+                        """,
+                        (new_public_url, target_event_id),
+                    )
                 cursor.execute(
                     """
                     SELECT
                         ec.event_id,
+                        ec.series_id,
+                        ec.reccurence,
                         e.ticker AS event_ticker,
                         e.slug AS event_slug,
                         e.title AS event_title,
@@ -519,7 +564,8 @@ class SeasonWorkbenchService:
         finally:
             conn.close()
 
-        self._delete_r2_object_if_managed(old_manual_image_url)
+        for old_url in {url for url in old_manual_image_urls if url and url != new_public_url}:
+            self._delete_r2_object_if_managed(old_url)
         return self._format_event_card_row(dict(row))
 
     def delete_event_card_manual_image(self, event_id: str) -> Dict[str, Any]:
@@ -527,30 +573,75 @@ class SeasonWorkbenchService:
         if not target_event_id:
             raise ValueError("event_id is required")
 
+        old_manual_image_urls: List[str] = []
         conn = self.manager.get_connection()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 cursor.execute(
-                    "SELECT manual_image_url FROM event_cards WHERE event_id = %s LIMIT 1",
-                    (target_event_id,),
-                )
-                existing = cursor.fetchone()
-                if not existing:
-                    raise ValueError(f"Event card for event_id={target_event_id} not found")
-                old_manual_image_url = self._normalize_optional_text(existing.get("manual_image_url"))
-
-                cursor.execute(
                     """
-                    UPDATE event_cards
-                    SET manual_image_url = NULL, updated_at = NOW()
-                    WHERE event_id = %s
+                    SELECT
+                        ec.event_id,
+                        COALESCE(ec.series_id, e.series_id) AS series_id
+                    FROM event_cards ec
+                    LEFT JOIN events e ON e.id = ec.event_id
+                    WHERE ec.event_id = %s
+                    LIMIT 1
                     """,
                     (target_event_id,),
                 )
+                target = cursor.fetchone()
+                if not target:
+                    raise ValueError(f"Event card for event_id={target_event_id} not found")
+                target_series_id = self._normalize_optional_text(target.get("series_id"))
+
+                if target_series_id:
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT manual_image_url
+                        FROM event_cards
+                        WHERE series_id = %s
+                          AND manual_image_url IS NOT NULL
+                        """,
+                        (target_series_id,),
+                    )
+                    old_manual_image_urls = [
+                        str(row.get("manual_image_url")).strip()
+                        for row in cursor.fetchall()
+                        if row.get("manual_image_url")
+                    ]
+                    cursor.execute(
+                        """
+                        UPDATE event_cards
+                        SET manual_image_url = NULL, updated_at = NOW()
+                        WHERE series_id = %s
+                        """,
+                        (target_series_id,),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT manual_image_url FROM event_cards WHERE event_id = %s LIMIT 1",
+                        (target_event_id,),
+                    )
+                    existing = cursor.fetchone()
+                    if not existing:
+                        raise ValueError(f"Event card for event_id={target_event_id} not found")
+                    old_manual = self._normalize_optional_text(existing.get("manual_image_url"))
+                    if old_manual:
+                        old_manual_image_urls = [old_manual]
+                    cursor.execute(
+                        """
+                        UPDATE event_cards
+                        SET manual_image_url = NULL, updated_at = NOW()
+                        WHERE event_id = %s
+                        """,
+                        (target_event_id,),
+                    )
                 cursor.execute(
                     """
                     SELECT
                         ec.event_id,
+                        ec.series_id,
+                        ec.reccurence,
                         e.ticker AS event_ticker,
                         e.slug AS event_slug,
                         e.title AS event_title,
@@ -589,7 +680,8 @@ class SeasonWorkbenchService:
         finally:
             conn.close()
 
-        self._delete_r2_object_if_managed(old_manual_image_url)
+        for old_url in {url for url in old_manual_image_urls if url}:
+            self._delete_r2_object_if_managed(old_url)
         return self._format_event_card_row(dict(row))
 
     def _sync_event_tag_primary_flags(self, cursor: Any, event_id: str, primary_tag: Optional[str]) -> None:
@@ -1941,6 +2033,8 @@ class SeasonWorkbenchService:
                         """
                         SELECT
                             ec.event_id,
+                            ec.series_id,
+                            ec.reccurence,
                             e.ticker AS event_ticker,
                             e.slug AS event_slug,
                             e.title AS event_title,
@@ -1976,6 +2070,8 @@ class SeasonWorkbenchService:
                         """
                         SELECT
                             ec.event_id,
+                            ec.series_id,
+                            ec.reccurence,
                             e.ticker AS event_ticker,
                             e.slug AS event_slug,
                             e.title AS event_title,
@@ -2010,6 +2106,8 @@ class SeasonWorkbenchService:
                         """
                         SELECT
                             ec.event_id,
+                            ec.series_id,
+                            ec.reccurence,
                             e.ticker AS event_ticker,
                             e.slug AS event_slug,
                             e.title AS event_title,
@@ -2044,6 +2142,8 @@ class SeasonWorkbenchService:
                         """
                         SELECT
                             ec.event_id,
+                            ec.series_id,
+                            ec.reccurence,
                             e.ticker AS event_ticker,
                             e.slug AS event_slug,
                             e.title AS event_title,
@@ -2114,6 +2214,8 @@ class SeasonWorkbenchService:
                     WHERE event_id = %s
                     RETURNING
                         event_id,
+                        series_id,
+                        reccurence,
                         card_title,
                         card_lore,
                         primary_tag,
@@ -2201,6 +2303,8 @@ class SeasonWorkbenchService:
                     """
                     SELECT
                         e.id AS event_id,
+                        ec.series_id,
+                        ec.reccurence,
                         e.ticker AS event_ticker,
                         e.slug AS event_slug,
                         e.title AS event_title,
