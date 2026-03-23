@@ -309,6 +309,22 @@ CREATE INDEX IF NOT EXISTS idx_redemptions_redeemer ON redemptions(redeemer_addr
 CREATE INDEX IF NOT EXISTS idx_redemptions_timestamp ON redemptions(timestamp_unix DESC);
 CREATE INDEX IF NOT EXISTS idx_redemptions_payout ON redemptions(payout_usdc DESC);
 
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.table_constraints
+        WHERE constraint_name = 'fk_redemptions_event'
+          AND table_name = 'redemptions'
+    ) THEN
+        ALTER TABLE redemptions
+            ADD CONSTRAINT fk_redemptions_event
+            FOREIGN KEY (event_id) REFERENCES events(id)
+            ON DELETE CASCADE
+            NOT VALID;
+    END IF;
+END $$;
+
 DO $$ BEGIN RAISE NOTICE '✅ Redemptions table created'; END $$;
 
 -- ============================================================================
@@ -369,6 +385,22 @@ CREATE INDEX IF NOT EXISTS idx_user_closed_positions_timestamp ON user_closed_po
 CREATE INDEX IF NOT EXISTS idx_user_closed_positions_realized_pnl ON user_closed_positions(realized_pnl DESC);
 CREATE INDEX IF NOT EXISTS idx_user_closed_positions_event_slug ON user_closed_positions(event_slug);
 CREATE INDEX IF NOT EXISTS idx_user_closed_positions_outcome ON user_closed_positions(outcome_index);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.table_constraints
+        WHERE constraint_name = 'fk_user_closed_positions_event'
+          AND table_name = 'user_closed_positions'
+    ) THEN
+        ALTER TABLE user_closed_positions
+            ADD CONSTRAINT fk_user_closed_positions_event
+            FOREIGN KEY (event_id) REFERENCES events(id)
+            ON DELETE CASCADE
+            NOT VALID;
+    END IF;
+END $$;
 
 DO $$ BEGIN RAISE NOTICE '✅ User_closed_positions table created'; END $$;
 
@@ -692,6 +724,22 @@ BEGIN
             ADD CONSTRAINT fk_event_resolution_queue_processed_run
             FOREIGN KEY (processed_run_id) REFERENCES downstream_runs(id)
             ON DELETE SET NULL;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.table_constraints
+        WHERE constraint_name = 'fk_event_resolution_queue_event'
+          AND table_name = 'event_resolution_queue'
+    ) THEN
+        ALTER TABLE event_resolution_queue
+            ADD CONSTRAINT fk_event_resolution_queue_event
+            FOREIGN KEY (event_id) REFERENCES events(id)
+            ON DELETE CASCADE
+            NOT VALID;
     END IF;
 END $$;
 
