@@ -77,12 +77,15 @@ def _parse_decimal(value: Any) -> Optional[Decimal]:
         return None
 
 
-def _fetch_event_volume(session: requests.Session, event_id: str, timeout: int) -> Optional[Decimal]:
+def _fetch_event_data(
+    session: requests.Session, event_id: str, timeout: int
+) -> tuple[Optional[Decimal], str]:
     url = f"{API_BASE_URL}/events/{event_id}"
     response = session.get(url, timeout=timeout)
     response.raise_for_status()
     payload = response.json()
-    return _parse_decimal(payload.get("volume"))
+    title = str(payload.get("title") or "").strip() or "<no title>"
+    return _parse_decimal(payload.get("volume")), title
 
 
 def _delete_event_by_id(conn: Any, event_id: str) -> bool:
@@ -165,12 +168,15 @@ def main() -> None:
     try:
         for index, event_id in enumerate(event_ids, start=1):
             try:
-                volume = _fetch_event_volume(session=session, event_id=event_id, timeout=args.timeout)
+                volume, title = _fetch_event_data(
+                    session=session,
+                    event_id=event_id,
+                    timeout=args.timeout,
+                )
                 if volume is None:
                     unknown_volume_count += 1
-                    print(f"[{index}/{total}] event_id={event_id} volume=UNKNOWN")
+                    print(f"[{index}/{total}] event_id={event_id} title={title!r} volume=UNKNOWN")
                     if db_conn is None:
-                        print("           -> skipped (run with --delete-matched to remove UNKNOWN)")
                         continue
                     try:
                         if _delete_event_by_id(conn=db_conn, event_id=event_id):
@@ -187,7 +193,10 @@ def main() -> None:
 
                 if volume < threshold:
                     low_volume_count += 1
-                    print(f"[{index}/{total}] event_id={event_id} volume={volume:,} (< {threshold:,})")
+                    print(
+                        f"[{index}/{total}] event_id={event_id} title={title!r} "
+                        f"volume={volume:,} (< {threshold:,})"
+                    )
 
                     if db_conn is not None:
                         try:
