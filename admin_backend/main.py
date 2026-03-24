@@ -442,6 +442,9 @@ class SeasonWorkbenchService:
         force_mode = self._env_flag("ADMIN_MANUAL_IMAGE_WATERMARK_FORCE", "1")
         denoise_mode = str(os.getenv("GEMINI_WATERMARK_TOOL_DENOISE", "off")).strip().lower()
         threshold_raw = str(os.getenv("GEMINI_WATERMARK_TOOL_THRESHOLD", "0.25")).strip()
+        denoise_strength = str(os.getenv("GEMINI_WATERMARK_TOOL_STRENGTH", "")).strip()
+        denoise_sigma = str(os.getenv("GEMINI_WATERMARK_TOOL_SIGMA", "")).strip()
+        denoise_radius = str(os.getenv("GEMINI_WATERMARK_TOOL_RADIUS", "")).strip()
 
         input_ext = ext if ext in {"jpg", "jpeg", "png", "webp", "gif", "bmp"} else "jpg"
         try:
@@ -450,12 +453,26 @@ class SeasonWorkbenchService:
                 output_path = Path(tmpdir) / f"output.{input_ext}"
                 input_path.write_bytes(file_bytes)
 
+                def append_numeric_flag(cmd: List[str], flag: str, raw: str) -> None:
+                    if not raw:
+                        return
+                    # Accept integer/float-looking values only, skip invalid env values.
+                    if re.fullmatch(r"\d+(\.\d+)?", raw):
+                        cmd.extend([flag, raw])
+                    else:
+                        logger.warning("Ignoring invalid %s value: %s", flag, raw)
+
                 def build_cmd(chosen_denoise: str) -> List[str]:
                     cmd: List[str] = [tool_bin, "-i", str(input_path), "-o", str(output_path)]
                     if force_mode:
                         cmd.append("--force")
                     if chosen_denoise and chosen_denoise != "off":
                         cmd.extend(["--denoise", chosen_denoise])
+                        append_numeric_flag(cmd, "--strength", denoise_strength)
+                        if chosen_denoise == "ai":
+                            append_numeric_flag(cmd, "--sigma", denoise_sigma)
+                        elif chosen_denoise in {"ns", "telea", "soft"}:
+                            append_numeric_flag(cmd, "--radius", denoise_radius)
                     if threshold_raw and not force_mode:
                         cmd.extend(["--threshold", threshold_raw])
                     return cmd
