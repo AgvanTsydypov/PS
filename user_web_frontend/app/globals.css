@@ -72,14 +72,35 @@ main {
   font-size: 12px;
 }
 
+.nft-grid-wrap {
+  position: relative;
+  overflow: visible;
+}
+
 .nft-grid {
   display: flex;
   flex-wrap: nowrap;
-  gap: 10px;
+  gap: 20px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding-bottom: 6px;
+  padding: 84px 52px 96px;
+  margin: -72px -48px -72px;
+  scroll-padding-inline: 48px;
   scroll-snap-type: x proximity;
+}
+
+.nft-card-wrapper {
+  perspective: 1200px;
+  transform-style: preserve-3d;
+  position: relative;
+  z-index: 1;
+  flex: 0 0 calc((100% - 60px) / 7);
+  min-width: 140px;
+  scroll-snap-align: start;
+}
+
+.nft-card-wrapper.nft-card-wrapper-active {
+  z-index: 20;
 }
 
 .nft-card {
@@ -89,9 +110,109 @@ main {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  flex: 0 0 calc((100% - 60px) / 7);
-  min-width: 140px;
-  scroll-snap-align: start;
+  width: 100%;
+  height: 100%;
+}
+
+.nft-card-tilt {
+  position: relative;
+  isolation: isolate;
+  transform-origin: center center;
+  transform-style: preserve-3d;
+  will-change: transform;
+  transform:
+    rotateX(var(--nft-tilt-x, 0deg))
+    rotateY(var(--nft-tilt-y, 0deg))
+    scale(var(--nft-scale, 1));
+  transition:
+    transform 0.6s cubic-bezier(0.23, 1, 0.32, 1),
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.nft-card-tilt.nft-card-active {
+  --nft-scale: 1.33;
+  z-index: 2;
+  border-color: #3e4c68;
+  box-shadow: 0 18px 40px rgba(5, 10, 22, 0.62);
+  transition: transform 0.1s cubic-bezier(0.1, 0.5, 0.3, 1);
+}
+
+.nft-card-tilt::before,
+.nft-card-tilt::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.nft-card-tilt::before {
+  opacity: 0;
+  transition: opacity 0.32s ease;
+  mix-blend-mode: var(--sheen-blend-mode, overlay);
+  background:
+    radial-gradient(
+      farthest-corner circle at var(--pointer-x, 50%) var(--pointer-y, 50%),
+      rgba(255, 255, 255, var(--shine-radial-opacity, 0.2)) 10%,
+      rgba(255, 255, 255, 0) 65%
+    ),
+    linear-gradient(
+      105deg,
+      transparent 20%,
+      rgba(255, 255, 255, var(--shine-linear-soft, 0.1)) 25%,
+      rgba(255, 255, 255, var(--shine-linear-hard, 0.42)) 45%,
+      rgba(255, 255, 255, var(--shine-linear-soft, 0.1)) 50%,
+      transparent 55%
+    );
+  background-size: 250% 250%;
+  background-position: var(--pointer-x, 50%) var(--pointer-y, 50%);
+}
+
+.nft-card-tilt::after {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  mix-blend-mode: color-dodge;
+  background: linear-gradient(
+    105deg,
+    transparent 38%,
+    rgba(255, 255, 255, 0.04) 45%,
+    rgba(255, 255, 255, 0.55) 49.5%,
+    rgba(255, 255, 255, 0.68) 50%,
+    rgba(255, 255, 255, 0.55) 50.5%,
+    rgba(255, 255, 255, 0.04) 55%,
+    transparent 62%
+  );
+  background-size: 210% 210%;
+  background-position: var(--pointer-x, 50%) var(--pointer-y, 50%);
+}
+
+.nft-card-tilt.nft-card-active::before,
+.nft-card-tilt.nft-card-active::after {
+  opacity: 1;
+}
+
+.nft-card.theme-subtle {
+  --sheen-blend-mode: overlay;
+  --shine-radial-opacity: 0.15;
+  --shine-linear-soft: 0.05;
+  --shine-linear-hard: 0.2;
+}
+
+.nft-card.theme-vivid {
+  --sheen-blend-mode: color-dodge;
+  --shine-radial-opacity: 0.16;
+  --shine-linear-soft: 0.08;
+  --shine-linear-hard: 0.34;
+}
+
+.nft-card-tilt .nft-image {
+  transform: translateZ(16px);
+}
+
+.nft-card-tilt .nft-card-body {
+  transform: translateZ(10px);
 }
 
 .nft-image {
@@ -158,6 +279,24 @@ main {
 
 .nft-board-horizontal {
   max-width: min(1600px, calc(100vw - 32px));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nft-card-tilt {
+    transform: none;
+    transition: none;
+  }
+
+  .nft-card-tilt::before,
+  .nft-card-tilt::after {
+    background: rgba(255, 255, 255, 0.1);
+    mix-blend-mode: normal;
+  }
+
+  .nft-card-tilt.nft-card-active::before,
+  .nft-card-tilt.nft-card-active::after {
+    opacity: 1;
+  }
 }
 
 .wallet-ticker-strip {
