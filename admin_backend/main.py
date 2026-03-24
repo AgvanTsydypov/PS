@@ -11,7 +11,10 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -403,6 +406,102 @@ class SeasonWorkbenchService:
         return f"event-images/{safe_event_id}/{unique}.{ext}"
 
     @staticmethod
+    def _env_flag(name: str, default: str = "0") -> bool:
+        return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _resolve_gemini_watermark_tool_bin(self) -> str:
+        configured = str(os.getenv("GEMINI_WATERMARK_TOOL_BIN", "")).strip()
+        if configured:
+            return configured
+
+        discovered = shutil.which("GeminiWatermarkTool")
+        if discovered:
+            return discovered
+
+        candidates = [
+            Path(__file__).resolve().parent / "GeminiWatermarkTool",
+            Path(project_root) / "GeminiWatermarkTool",
+            Path.cwd() / "GeminiWatermarkTool",
+        ]
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return str(candidate)
+
+        raise FileNotFoundError(
+            "GeminiWatermarkTool binary not found. Set GEMINI_WATERMARK_TOOL_BIN "
+            "or place GeminiWatermarkTool in admin_backend/"
+        )
+
+    def _maybe_remove_gemini_watermark(self, file_bytes: bytes, ext: str) -> bytes:
+        if not self._env_flag("ADMIN_MANUAL_IMAGE_REMOVE_GEMINI_WATERMARK", "1"):
+            return file_bytes
+
+        tool_bin = self._resolve_gemini_watermark_tool_bin()
+        timeout_seconds = int(os.getenv("GEMINI_WATERMARK_TOOL_TIMEOUT_SECONDS", "45"))
+        strict_mode = self._env_flag("ADMIN_MANUAL_IMAGE_WATERMARK_STRICT", "0")
+        force_mode = self._env_flag("ADMIN_MANUAL_IMAGE_WATERMARK_FORCE", "1")
+        denoise_mode = str(os.getenv("GEMINI_WATERMARK_TOOL_DENOISE", "off")).strip().lower()
+        threshold_raw = str(os.getenv("GEMINI_WATERMARK_TOOL_THRESHOLD", "0.25")).strip()
+
+        input_ext = ext if ext in {"jpg", "jpeg", "png", "webp", "gif", "bmp"} else "jpg"
+        try:
+            with tempfile.TemporaryDirectory(prefix="manual-image-watermark-") as tmpdir:
+                input_path = Path(tmpdir) / f"input.{input_ext}"
+                output_path = Path(tmpdir) / f"output.{input_ext}"
+                input_path.write_bytes(file_bytes)
+
+                def build_cmd(chosen_denoise: str) -> List[str]:
+                    cmd: List[str] = [tool_bin, "-i", str(input_path), "-o", str(output_path)]
+                    if force_mode:
+                        cmd.append("--force")
+                    if chosen_denoise and chosen_denoise != "off":
+                        cmd.extend(["--denoise", chosen_denoise])
+                    if threshold_raw and not force_mode:
+                        cmd.extend(["--threshold", threshold_raw])
+                    return cmd
+
+                def run_cmd(cmd: List[str]) -> subprocess.CompletedProcess[str]:
+                    return subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=max(1, timeout_seconds),
+                        check=False,
+                    )
+
+                result = run_cmd(build_cmd(denoise_mode))
+                if result.returncode != 0:
+                    stderr = (result.stderr or "").strip()
+                    stdout = (result.stdout or "").strip()
+                    details = stderr or stdout or f"exit code {result.returncode}"
+                    needs_vulkan_fallback = (
+                        denoise_mode == "ai"
+                        and ("libvulkan" in details.lower() or "vulkan" in details.lower())
+                    )
+                    if needs_vulkan_fallback:
+                        logger.warning("GeminiWatermarkTool AI denoise unavailable; retrying without denoise")
+                        result = run_cmd(build_cmd("off"))
+                        if result.returncode != 0:
+                            stderr = (result.stderr or "").strip()
+                            stdout = (result.stdout or "").strip()
+                            details = stderr or stdout or f"exit code {result.returncode}"
+                            raise RuntimeError(f"GeminiWatermarkTool failed after fallback: {details}")
+                    else:
+                        raise RuntimeError(f"GeminiWatermarkTool failed: {details}")
+
+                if not output_path.exists():
+                    raise RuntimeError("GeminiWatermarkTool did not produce output file")
+                cleaned = output_path.read_bytes()
+                if not cleaned:
+                    raise RuntimeError("GeminiWatermarkTool produced empty output")
+                return cleaned
+        except Exception as exc:
+            if strict_mode:
+                raise RuntimeError(f"Manual image watermark removal failed: {exc}") from exc
+            logger.warning("Manual image watermark removal failed; keeping original upload", exc_info=True)
+            return file_bytes
+
+    @staticmethod
     def _extract_r2_key_from_public_url(public_base_url: str, url: Optional[str]) -> Optional[str]:
         if not url:
             return None
@@ -443,6 +542,7 @@ class SeasonWorkbenchService:
 
         cfg = self._r2_required_env()
         ext = self._content_type_extension(content_type)
+        file_bytes = self._maybe_remove_gemini_watermark(file_bytes=file_bytes, ext=ext)
         key = self._build_r2_object_key(target_event_id, ext)
         self._get_r2_client().put_object(
             Bucket=cfg["bucket"],
