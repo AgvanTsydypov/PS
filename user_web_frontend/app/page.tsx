@@ -431,6 +431,66 @@ export default function HomePage() {
     return JSON.stringify(error);
   }
 
+  function updateNftCardTilt(target: HTMLElement, clientX: number, clientY: number) {
+    const rect = target.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const relativeX = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const relativeY = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
+    const MAX_TILT_X = 20;
+    const MAX_TILT_Y = 20;
+    const rotateY = (relativeX - 0.5) * (MAX_TILT_Y * 2);
+    const rotateX = (0.5 - relativeY) * (MAX_TILT_X * 2);
+
+    target.classList.add("nft-card-active");
+    target.parentElement?.classList.add("nft-card-wrapper-active");
+    target.style.setProperty("--nft-tilt-x", `${rotateX.toFixed(2)}deg`);
+    target.style.setProperty("--nft-tilt-y", `${rotateY.toFixed(2)}deg`);
+    target.style.setProperty("--pointer-x", `${(relativeX * 100).toFixed(2)}%`);
+    target.style.setProperty("--pointer-y", `${(relativeY * 100).toFixed(2)}%`);
+  }
+
+  function resetNftCardTilt(target: HTMLElement) {
+    target.classList.remove("nft-card-active");
+    target.parentElement?.classList.remove("nft-card-wrapper-active");
+    target.style.setProperty("--nft-tilt-x", "0deg");
+    target.style.setProperty("--nft-tilt-y", "0deg");
+    target.style.setProperty("--pointer-x", "50%");
+    target.style.setProperty("--pointer-y", "50%");
+  }
+
+  function handleNftGridMouseMove(event: React.MouseEvent<HTMLDivElement>) {
+    const PROXIMITY_PX = 10;
+    const clientX = event.clientX;
+    const clientY = event.clientY;
+    const wrappers = event.currentTarget.querySelectorAll<HTMLElement>(".nft-card-wrapper");
+
+    wrappers.forEach((wrapper) => {
+      const card = wrapper.querySelector<HTMLElement>(".nft-card-tilt");
+      if (!card) return;
+      // Use the transformed card bounds so scaled edges remain interactive.
+      const rect = card.getBoundingClientRect();
+      const isWithinProximity =
+        clientX >= rect.left - PROXIMITY_PX &&
+        clientX <= rect.right + PROXIMITY_PX &&
+        clientY >= rect.top - PROXIMITY_PX &&
+        clientY <= rect.bottom + PROXIMITY_PX;
+
+      if (!isWithinProximity) {
+        resetNftCardTilt(card);
+        return;
+      }
+
+      const clampedX = Math.min(rect.right, Math.max(rect.left, clientX));
+      const clampedY = Math.min(rect.bottom, Math.max(rect.top, clientY));
+      updateNftCardTilt(card, clampedX, clampedY);
+    });
+  }
+
+  function handleNftGridMouseLeave(event: React.MouseEvent<HTMLDivElement>) {
+    const cards = event.currentTarget.querySelectorAll<HTMLElement>(".nft-card-tilt");
+    cards.forEach((card) => resetNftCardTilt(card));
+  }
+
   async function refreshMyNfts() {
     if (!accessToken || !isSignedIn) {
       setMyNfts([]);
@@ -1026,43 +1086,56 @@ export default function HomePage() {
             {!myNftsLoading && !myNftsError && myNfts.length === 0 ? (
               <div className="season-board-muted">No NFT in this wallet yet.</div>
             ) : null}
-            <div className="nft-grid">
-              {myNfts.map((item) => (
-                <article key={item.token_id} className="nft-card">
-                  {item.image_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img className="nft-image" src={item.image_url} alt={item.name || `NFT ${item.token_id}`} />
-                  ) : (
-                    <div className="nft-image nft-image-empty">No preview</div>
-                  )}
-                  <div className="nft-card-body">
-                    <strong>{item.name || `Token #${item.token_id}`}</strong>
-                    <span>Token ID: {item.token_id}</span>
-                    {Array.isArray(item.metadata?.attributes) && item.metadata!.attributes.length > 0 ? (
-                      <div className="nft-attributes">
-                        {item.metadata!.attributes.slice(0, 6).map((attr, index) => {
-                          const trait = String(attr?.trait_type ?? "").trim() || "Attribute";
-                          const valueRaw = attr?.value;
-                          const value =
-                            valueRaw === null || valueRaw === undefined
-                              ? "N/A"
-                              : String(valueRaw);
-                          return (
-                            <span className="nft-attr" key={`${item.token_id}:${trait}:${index}`}>
-                              {trait}: {value}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                    {item.explorer_url ? (
-                      <a href={item.explorer_url} target="_blank" rel="noreferrer">
-                        Open in Blockscout
-                      </a>
-                    ) : null}
-                  </div>
-                </article>
-              ))}
+            <div className="nft-grid-wrap">
+              <div
+                className="nft-grid"
+                onMouseMove={handleNftGridMouseMove}
+                onMouseLeave={handleNftGridMouseLeave}
+              >
+                {myNfts.map((item) => {
+                  return (
+                    <div
+                      key={item.token_id}
+                      className="nft-card-wrapper"
+                    >
+                      <article className="nft-card nft-card-tilt theme-vivid">
+                        {item.image_url ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img className="nft-image" src={item.image_url} alt={item.name || `NFT ${item.token_id}`} />
+                        ) : (
+                          <div className="nft-image nft-image-empty">No preview</div>
+                        )}
+                        <div className="nft-card-body">
+                          <strong>{item.name || `Token #${item.token_id}`}</strong>
+                          <span>Token ID: {item.token_id}</span>
+                          {Array.isArray(item.metadata?.attributes) && item.metadata!.attributes.length > 0 ? (
+                            <div className="nft-attributes">
+                              {item.metadata!.attributes.slice(0, 6).map((attr, index) => {
+                                const trait = String(attr?.trait_type ?? "").trim() || "Attribute";
+                                const valueRaw = attr?.value;
+                                const value =
+                                  valueRaw === null || valueRaw === undefined
+                                    ? "N/A"
+                                    : String(valueRaw);
+                                return (
+                                  <span className="nft-attr" key={`${item.token_id}:${trait}:${index}`}>
+                                    {trait}: {value}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          ) : null}
+                          {item.explorer_url ? (
+                            <a href={item.explorer_url} target="_blank" rel="noreferrer">
+                              Open in Blockscout
+                            </a>
+                          ) : null}
+                        </div>
+                      </article>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </>
         )}
