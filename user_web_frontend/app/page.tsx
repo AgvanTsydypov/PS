@@ -436,10 +436,13 @@ export default function HomePage() {
     if (!rect.width || !rect.height) return;
     const relativeX = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
     const relativeY = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
-    const MAX_TILT_X = 20;
-    const MAX_TILT_Y = 20;
-    const rotateY = (relativeX - 0.5) * (MAX_TILT_Y * 2);
-    const rotateX = (0.5 - relativeY) * (MAX_TILT_X * 2);
+    const MAX_TILT = 20;
+    const rotateY = (relativeX - 0.5) * (MAX_TILT * 2);
+    const rotateX = (0.5 - relativeY) * (MAX_TILT * 2);
+    // Plain-number ratios (-1..1) for CSS diffuse lighting.
+    // +ratio-x → tilted down (shadow), -ratio-x → tilted up (light).
+    const tiltRatioX = (relativeY - 0.5) * 2;
+    const tiltRatioY = (relativeX - 0.5) * 2;
 
     target.classList.add("nft-card-active");
     target.parentElement?.classList.add("nft-card-wrapper-active");
@@ -447,6 +450,8 @@ export default function HomePage() {
     target.style.setProperty("--nft-tilt-y", `${rotateY.toFixed(2)}deg`);
     target.style.setProperty("--pointer-x", `${(relativeX * 100).toFixed(2)}%`);
     target.style.setProperty("--pointer-y", `${(relativeY * 100).toFixed(2)}%`);
+    target.style.setProperty("--tilt-ratio-x", tiltRatioX.toFixed(3));
+    target.style.setProperty("--tilt-ratio-y", tiltRatioY.toFixed(3));
   }
 
   function resetNftCardTilt(target: HTMLElement) {
@@ -456,6 +461,8 @@ export default function HomePage() {
     target.style.setProperty("--nft-tilt-y", "0deg");
     target.style.setProperty("--pointer-x", "50%");
     target.style.setProperty("--pointer-y", "50%");
+    target.style.setProperty("--tilt-ratio-x", "0");
+    target.style.setProperty("--tilt-ratio-y", "0");
   }
 
   function handleNftGridMouseMove(event: React.MouseEvent<HTMLDivElement>) {
