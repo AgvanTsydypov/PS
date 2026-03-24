@@ -5,7 +5,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     gnupg \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get install -y --no-install-recommends \
+    nodejs \
+    libvulkan1 \
+    mesa-vulkan-drivers \
+    vulkan-tools \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -20,6 +24,7 @@ COPY scripts /app/scripts
 COPY admin_backend /app/admin_backend
 COPY sql /app/sql
 COPY data /app/data
+RUN if [ -f /app/admin_backend/GeminiWatermarkToolLinux ]; then chmod +x /app/admin_backend/GeminiWatermarkToolLinux; fi
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
