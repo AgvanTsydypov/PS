@@ -1915,6 +1915,64 @@ class SimplifiedScheduler:
             duration = time.time() - start_time
             print(f"\n❌ Failed (code {e.returncode})")
             return {'success': False, 'duration': duration, 'error': str(e), 'records': 0, 'markets': 0}
+
+    def refresh_participants_snapshot(self) -> Dict:
+        """
+        Full refresh of participants snapshot table from sql/queries/participants.sql.
+        Runs as a post-downstream step.
+        """
+        print(f"\n{'='*70}")
+        print("🚀 RUNNING: Participants Snapshot Refresh")
+        print(f"{'='*70}")
+
+        if self.dry_run:
+            print("🔍 DRY RUN - Skipping")
+            return {'success': True, 'skipped': True, 'records': 0}
+
+        query_path = os.path.join(project_root, 'sql', 'queries', 'participants.sql')
+        if not os.path.exists(query_path):
+            msg = f"Participants SQL query not found: {query_path}"
+            print(f"❌ {msg}")
+            return {'success': False, 'error': msg, 'records': 0}
+
+        start_time = time.time()
+        conn = self.manager.get_connection()
+        cursor = conn.cursor()
+        try:
+            with open(query_path, 'r', encoding='utf-8') as f:
+                participants_query = f.read().strip().rstrip(';')
+
+            cursor.execute("TRUNCATE TABLE participants")
+            cursor.execute(
+                f"""
+                INSERT INTO participants (
+                    proxy_wallet,
+                    event_slug,
+                    entry_cwap,
+                    total_volume,
+                    total_pnl,
+                    roi_percentage,
+                    risk,
+                    skill,
+                    influence,
+                    rank
+                )
+                {participants_query}
+                """
+            )
+            inserted = cursor.rowcount if cursor.rowcount is not None else 0
+            conn.commit()
+            duration = time.time() - start_time
+            print(f"\n✅ Completed ({duration:.1f}s) - {inserted:,} rows refreshed")
+            return {'success': True, 'duration': duration, 'records': int(inserted)}
+        except Exception as e:
+            conn.rollback()
+            duration = time.time() - start_time
+            print(f"\n❌ Failed ({duration:.1f}s): {e}")
+            return {'success': False, 'duration': duration, 'error': str(e), 'records': 0}
+        finally:
+            cursor.close()
+            conn.close()
     
     def run_daily_pipeline(self, force: bool = False) -> Dict:
         """Run daily data pipeline"""
@@ -2101,6 +2159,10 @@ class SimplifiedScheduler:
                             downstream_run_id,
                             processed,
                         )
+                        participants_result = self.refresh_participants_snapshot()
+                        results['participants'] = participants_result
+                        if not participants_result.get('success'):
+                            print("⚠️  Participants refresh failed after downstream success")
                     elif not self.dry_run:
                         error_text = "; ".join(downstream_errors) if downstream_errors else "downstream steps failed"
                         self.manager.mark_resolution_events_downstream_attempt(
@@ -2134,6 +2196,7 @@ class SimplifiedScheduler:
                 for script_key in ['redemptions', 'positions', 'leaderboard']:
                     results[script_key] = {'success': True, 'skipped': True, 'reason': 'no_ready_events'}
                 results['event_cards'] = {'success': True, 'skipped': True, 'reason': 'no_ready_events'}
+                results['participants'] = {'success': True, 'skipped': True, 'reason': 'no_ready_events'}
         else:
             # Legacy date-based pipeline
             print(f"\n📅 Redemptions/Positions/Leaderboard: Loading for {redemptions_date}")
@@ -2351,6 +2414,10 @@ class SimplifiedScheduler:
                     f"🧠 Historical event cards: requested={total_requested:,}, "
                     f"processed={total_processed:,}, success={total_success:,}, failed={total_failed:,}"
                 )
+                participants_result = self.refresh_participants_snapshot()
+                results["participants"] = participants_result
+                if not participants_result.get('success'):
+                    print("⚠️  Participants refresh failed after historical downstream success")
             
             # Summary
             print("\n" + "="*70)
@@ -2435,6 +2502,7 @@ class SimplifiedScheduler:
         # Load each missing date
         results = {}
         start_time = time.time()
+        participants_refresh_needed = False
         
         for i, missing_date in enumerate(missing_dates, 1):
             print(f"\n{'='*70}")
@@ -2499,6 +2567,8 @@ class SimplifiedScheduler:
                         error_msg = result.get('error', 'Script execution failed')
                         print(f"  ⚠️  {self.scripts[script_key]['name']} failed (continuing...)")
                         downstream_success = False
+                if downstream_success:
+                    participants_refresh_needed = True
 
                 # In closed-time mode, keep queue statuses consistent during catch-up too.
                 if self.use_closed_time_pipeline and downstream_success:
@@ -2557,6 +2627,12 @@ class SimplifiedScheduler:
             
             print(f"\n📊 Progress: {i}/{len(missing_dates)} days")
             print(f"⏱️  Elapsed: {elapsed/60:.1f} min | Remaining: ~{estimated_remaining/60:.1f} min")
+
+        if participants_refresh_needed and not self.dry_run:
+            participants_result = self.refresh_participants_snapshot()
+            results["participants_refresh"] = participants_result
+            if not participants_result.get('success'):
+                print("⚠️  Participants refresh failed after catch-up downstream success")
         
         # Summary
         total_time = time.time() - start_time
