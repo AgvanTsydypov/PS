@@ -858,6 +858,33 @@ CREATE INDEX IF NOT EXISTS idx_user_wallet_signins_last_signed_in_at
 
 DO $$ BEGIN RAISE NOTICE '✅ user_wallet_signins table created'; END $$;
 
+-- ============================================================================
+-- 11. PARTICIPANTS SNAPSHOT TABLE
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '👥 Creating participants table...'; END $$;
+
+CREATE TABLE IF NOT EXISTS participants (
+    proxy_wallet TEXT NOT NULL,
+    event_slug TEXT NOT NULL,
+    entry_cwap NUMERIC(20, 4),
+    total_volume NUMERIC(20, 2),
+    total_pnl NUMERIC(20, 2),
+    roi_percentage NUMERIC(20, 2),
+    risk TEXT NOT NULL,
+    skill TEXT NOT NULL,
+    influence TEXT NOT NULL,
+    rank INTEGER,
+    refreshed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (proxy_wallet, event_slug)
+);
+
+CREATE INDEX IF NOT EXISTS idx_participants_event_slug ON participants(event_slug);
+CREATE INDEX IF NOT EXISTS idx_participants_proxy_wallet ON participants(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_participants_rank ON participants(rank);
+CREATE INDEX IF NOT EXISTS idx_participants_refreshed_at ON participants(refreshed_at DESC);
+
+DO $$ BEGIN RAISE NOTICE '✅ participants table created'; END $$;
+
 -- Tracking views
 CREATE OR REPLACE VIEW recent_loads AS
 SELECT 
@@ -946,6 +973,7 @@ DO $$ BEGIN RAISE NOTICE '   - downstream_runs'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - event_resolution_queue'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - event_cards'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - user_wallet_signins'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - participants'; END $$;
 DO $$ BEGIN RAISE NOTICE ''; END $$;
 DO $$ BEGIN RAISE NOTICE '📈 Created views:'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - events_summary'; END $$;
