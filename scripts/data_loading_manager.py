@@ -969,7 +969,12 @@ class DataLoadingManager:
                     e.closed_time,
                     CASE
                         WHEN COALESCE(e.closed, FALSE) = TRUE AND e.closed_time IS NOT NULL
-                            THEN e.closed_time + (%s * INTERVAL '1 day')
+                            THEN (
+                                (
+                                    (e.closed_time AT TIME ZONE 'UTC')::date
+                                    + (%s * INTERVAL '1 day')
+                                ) + TIME '01:00'
+                            ) AT TIME ZONE 'UTC'
                         ELSE NULL
                     END AS resolution_ready_at,
                     CASE
@@ -1043,7 +1048,12 @@ class DataLoadingManager:
                     resolution_ready_at = CASE
                         WHEN %s IS NOT NULL THEN resolution_ready_at
                         WHEN %s = TRUE AND %s IS NOT NULL
-                            THEN (%s::timestamptz + (%s * INTERVAL '1 day'))
+                            THEN (
+                                (
+                                    (%s::timestamptz AT TIME ZONE 'UTC')::date
+                                    + (%s * INTERVAL '1 day')
+                                ) + TIME '01:00'
+                            ) AT TIME ZONE 'UTC'
                         ELSE resolution_ready_at
                     END,
                     status = CASE
