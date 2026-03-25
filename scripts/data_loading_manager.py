@@ -286,7 +286,7 @@ class DataLoadingManager:
                     closed_time TIMESTAMPTZ,
                     resolution_ready_at TIMESTAMPTZ,
                     status TEXT NOT NULL DEFAULT 'pending'
-                        CHECK (status IN ('pending', 'ready_for_redemptions', 'processed', 'error')),
+                        CHECK (status IN ('pending', 'ready_for_redemptions', 'processed', 'error', 'trashed')),
                     last_checked_at TIMESTAMPTZ,
                     attempts INTEGER NOT NULL DEFAULT 0,
                     downstream_attempts INTEGER NOT NULL DEFAULT 0,
@@ -321,6 +321,19 @@ class DataLoadingManager:
                 """
                 ALTER TABLE event_resolution_queue
                 ADD COLUMN IF NOT EXISTS processed_run_id BIGINT
+                """
+            )
+            cursor.execute(
+                """
+                ALTER TABLE event_resolution_queue
+                DROP CONSTRAINT IF EXISTS event_resolution_queue_status_check
+                """
+            )
+            cursor.execute(
+                """
+                ALTER TABLE event_resolution_queue
+                ADD CONSTRAINT event_resolution_queue_status_check
+                CHECK (status IN ('pending', 'ready_for_redemptions', 'processed', 'error', 'trashed'))
                 """
             )
             cursor.execute(
@@ -975,6 +988,7 @@ class DataLoadingManager:
                     resolution_ready_at = EXCLUDED.resolution_ready_at,
                     status = CASE
                         WHEN event_resolution_queue.status = 'processed' THEN 'processed'
+                        WHEN event_resolution_queue.status = 'trashed' THEN 'trashed'
                         ELSE EXCLUDED.status
                     END,
                     updated_at = NOW()
@@ -1034,6 +1048,7 @@ class DataLoadingManager:
                     END,
                     status = CASE
                         WHEN status = 'processed' THEN 'processed'
+                        WHEN status = 'trashed' THEN 'trashed'
                         WHEN %s IS NOT NULL THEN 'pending'
                         WHEN %s = TRUE AND %s IS NOT NULL THEN 'ready_for_redemptions'
                         ELSE 'pending'
