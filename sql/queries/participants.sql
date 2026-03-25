@@ -59,13 +59,14 @@ SELECT
     CASE 
         WHEN rt.capital_weighted_vwap <= 0.20 THEN 'Oracle'
         WHEN rt.capital_weighted_vwap <= 0.50 THEN 'Outlier'
-        WHEN rt.capital_weighted_vwap <= 0.70 THEN 'Kinetic'
+        WHEN rt.capital_weighted_vwap <= 0.70 THEN 'Momentum'
         WHEN rt.capital_weighted_vwap <= 0.90 THEN 'Validator'
         ELSE 'Harvester'
     END AS risk,
 
     -- Skill: Capital Efficiency Percentile
     CASE 
+        WHEN rt.roi_percentile >= 0.999 THEN 'P999'
         WHEN rt.roi_percentile >= 0.99 THEN 'P99'
         WHEN rt.roi_percentile >= 0.95 THEN 'P95'
         WHEN rt.roi_percentile >= 0.80 THEN 'P80'
@@ -75,6 +76,7 @@ SELECT
 
     -- Volume: Capital Footprint Percentile
     CASE 
+        WHEN rt.volume_percentile >= 0.999 THEN 'P999'
         WHEN rt.volume_percentile >= 0.99 THEN 'P99'
         WHEN rt.volume_percentile >= 0.95 THEN 'P95'
         WHEN rt.volume_percentile >= 0.80 THEN 'P80'
