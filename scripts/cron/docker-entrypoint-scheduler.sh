@@ -71,11 +71,16 @@ DAILY_SCHEDULE="0 2 * * *"
 SCHEDULER_SCRIPT="$PROJECT_DIR/scripts/daily_scheduler_simple.py"
 SCHEDULER_LOG="$PROJECT_DIR/logs/scheduler.log"
 
-# Job 2: Seasons lifecycle update (00:00 AM UTC)
+# Job 2: Preflight low-volume queue cleanup (1:30 AM UTC)
+PREFLIGHT_SCHEDULE="30 1 * * *"
+PREFLIGHT_SCRIPT="$PROJECT_DIR/scripts/db/print_low_volume_events.py"
+PREFLIGHT_LOG="$PROJECT_DIR/logs/preflight_low_volume.log"
+
+# Job 3: Seasons lifecycle update (00:00 AM UTC)
 SEASON_UPDATE_SCHEDULE="0 0 * * *"
 SEASON_UPDATE_LOG="$PROJECT_DIR/logs/season_update.log"
 
-# Job 3: Weekly log cleanup (3:00 AM UTC every Sunday)
+# Job 4: Weekly log cleanup (3:00 AM UTC every Sunday)
 CLEANUP_SCHEDULE="0 3 * * 0"
 CLEANUP_SCRIPT="$PROJECT_DIR/scripts/utils/cleanup_old_logs.py"
 CLEANUP_LOG="$PROJECT_DIR/logs/cleanup.log"
@@ -89,6 +94,9 @@ crontab -r 2>/dev/null || true
   echo "# Daily data pipeline (2:00 AM UTC)"
   echo "$DAILY_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $SCHEDULER_SCRIPT --run 2>&1 | tee -a $SCHEDULER_LOG"
   echo ""
+  echo "# Preflight low-volume queue cleanup (1:30 AM UTC)"
+  echo "$PREFLIGHT_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $PREFLIGHT_SCRIPT --threshold 5000000 --queue-ready-within-minutes 30 --delete-matched 2>&1 | tee -a $PREFLIGHT_LOG"
+  echo ""
   echo "# Season lifecycle update (00:00 AM UTC)"
   echo "$SEASON_UPDATE_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $SCHEDULER_SCRIPT --season-update 2>&1 | tee -a $SEASON_UPDATE_LOG"
   echo ""
@@ -98,6 +106,7 @@ crontab -r 2>/dev/null || true
 
 echo "✅ Cron jobs added successfully!"
 echo "   Season update: $SEASON_UPDATE_SCHEDULE (00:00 AM UTC)"
+echo "   Preflight low-volume cleanup: $PREFLIGHT_SCHEDULE (1:30 AM UTC)"
 echo "   Daily pipeline: $DAILY_SCHEDULE (2:00 AM UTC)"
 echo "   Weekly cleanup: $CLEANUP_SCHEDULE (3:00 AM UTC every Sunday)"
 echo ""
@@ -113,11 +122,13 @@ echo "✅ Scheduler service initialized successfully!"
 echo ""
 echo "📅 Scheduled Tasks:"
 echo "   • Season update: 00:00 AM UTC"
+echo "   • Preflight low-volume cleanup: 01:30 AM UTC"
 echo "   • Daily pipeline: 2:00 AM UTC"
 echo "   • Log cleanup: 3:00 AM UTC (Sundays)"
 echo ""
 echo "📝 Logs:"
 echo "   • Season update: /app/logs/season_update.log"
+echo "   • Preflight cleanup: /app/logs/preflight_low_volume.log"
 echo "   • Pipeline: /app/logs/scheduler.log"
 echo "   • Cleanup: /app/logs/cleanup.log"
 echo "   • Docker logs: docker logs -f polystars_scheduler (real-time)"

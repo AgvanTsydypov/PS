@@ -3,17 +3,19 @@ Print event IDs whose Polymarket API volume is below a threshold.
 Optionally delete matching events from DB (with cascading deletes).
 
 Flow:
-1) Read event IDs from local `events` table
+1) Read event IDs either from local `events` table OR from `event_resolution_queue`
 2) Call Gamma API: GET /events/{id}
 3) Print events where `volume` < threshold
    (and `volume=UNKNOWN` when deletion mode is enabled)
-4) Optional: delete matching rows from `events` (cascades to related rows)
+4) Optional: write audit record into `event_resolution_trash_log`
+   and delete matching rows from `events`
 
 Usage examples:
   python scripts/db/print_low_volume_events.py
   python scripts/db/print_low_volume_events.py --threshold 5000000
   python scripts/db/print_low_volume_events.py --limit 300 --local
   python scripts/db/print_low_volume_events.py --delete-matched --local
+  python scripts/db/print_low_volume_events.py --queue-ready-within-minutes 30 --delete-matched
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from __future__ import annotations
 import argparse
 import os
 from decimal import Decimal, InvalidOperation
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import psycopg2
@@ -68,6 +71,32 @@ def _fetch_event_ids(use_local_db: bool, limit: Optional[int]) -> List[str]:
         conn.close()
 
 
+def _fetch_ready_queue_event_ids(
+    use_local_db: bool,
+    ready_within_minutes: int,
+    limit: Optional[int],
+) -> List[str]:
+    conn = psycopg2.connect(**_db_params(use_local_db=use_local_db))
+    try:
+        with conn.cursor() as cursor:
+            query = """
+                SELECT event_id
+                FROM event_resolution_queue
+                WHERE status = 'ready_for_redemptions'
+                  AND resolution_ready_at IS NOT NULL
+                  AND resolution_ready_at < (NOW() + (%s * INTERVAL '1 minute'))
+                ORDER BY resolution_ready_at ASC
+            """
+            params: List[Any] = [ready_within_minutes]
+            if limit is not None:
+                query += " LIMIT %s"
+                params.append(limit)
+            cursor.execute(query, tuple(params))
+            return [str(row[0]) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
 def _parse_decimal(value: Any) -> Optional[Decimal]:
     if value is None:
         return None
@@ -94,6 +123,82 @@ def _delete_event_by_id(conn: Any, event_id: str) -> bool:
         deleted = cursor.rowcount > 0
     conn.commit()
     return deleted
+
+
+def _ensure_trash_log_table(conn: Any) -> None:
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_resolution_trash_log (
+                id BIGSERIAL PRIMARY KEY,
+                event_id TEXT NOT NULL,
+                queue_status TEXT,
+                resolution_ready_at TIMESTAMPTZ,
+                api_volume NUMERIC(20, 6),
+                api_title TEXT,
+                reason TEXT NOT NULL,
+                deleted_from_events BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_event_resolution_trash_log_event_id
+            ON event_resolution_trash_log(event_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_event_resolution_trash_log_created_at
+            ON event_resolution_trash_log(created_at DESC)
+            """
+        )
+    conn.commit()
+
+
+def _insert_trash_log(
+    conn: Any,
+    event_id: str,
+    reason: str,
+    api_volume: Optional[Decimal],
+    api_title: str,
+    deleted_from_events: bool,
+) -> None:
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO event_resolution_trash_log (
+                event_id,
+                queue_status,
+                resolution_ready_at,
+                api_volume,
+                api_title,
+                reason,
+                deleted_from_events
+            )
+            SELECT
+                %s,
+                q.status,
+                q.resolution_ready_at,
+                %s,
+                %s,
+                %s,
+                %s
+            FROM (SELECT 1) s
+            LEFT JOIN event_resolution_queue q
+              ON q.event_id = %s
+            """,
+            (
+                event_id,
+                api_volume,
+                api_title,
+                reason,
+                deleted_from_events,
+                event_id,
+            ),
+        )
+    conn.commit()
 
 
 def main() -> None:
@@ -134,6 +239,15 @@ def main() -> None:
             "Related rows are removed by ON DELETE CASCADE constraints."
         ),
     )
+    parser.add_argument(
+        "--queue-ready-within-minutes",
+        type=int,
+        default=None,
+        help=(
+            "Read candidate event IDs from event_resolution_queue where "
+            "status='ready_for_redemptions' and resolution_ready_at < now + N minutes."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -145,15 +259,30 @@ def main() -> None:
         raise ValueError("--limit must be > 0 when provided")
     if args.timeout <= 0:
         raise ValueError("--timeout must be > 0")
+    if args.queue_ready_within_minutes is not None and args.queue_ready_within_minutes < 0:
+        raise ValueError("--queue-ready-within-minutes must be >= 0")
 
-    event_ids = _fetch_event_ids(use_local_db=args.local, limit=args.limit)
+    if args.queue_ready_within_minutes is None:
+        event_ids = _fetch_event_ids(use_local_db=args.local, limit=args.limit)
+        source_label = "events table"
+    else:
+        event_ids = _fetch_ready_queue_event_ids(
+            use_local_db=args.local,
+            ready_within_minutes=args.queue_ready_within_minutes,
+            limit=args.limit,
+        )
+        source_label = (
+            "event_resolution_queue "
+            f"(ready_for_redemptions, resolution_ready_at < now + {args.queue_ready_within_minutes}m)"
+        )
     total = len(event_ids)
     if total == 0:
-        print("No events found in DB.")
+        print(f"No events found in DB source: {source_label}.")
         return
 
-    print(f"Loaded {total} event IDs from DB.")
+    print(f"Loaded {total} event IDs from DB source: {source_label}.")
     print(f"Checking API volume threshold: {threshold:,}")
+    print(f"Run timestamp: {datetime.utcnow().isoformat()}Z")
     print("-" * 80)
 
     low_volume_count = 0
@@ -161,9 +290,12 @@ def main() -> None:
     errors_count = 0
     deleted_count = 0
     deleted_unknown_count = 0
+    logged_count = 0
     session = requests.Session()
     session.headers.update({"Content-Type": "application/json"})
     db_conn = psycopg2.connect(**_db_params(use_local_db=args.local)) if args.delete_matched else None
+    if db_conn is not None:
+        _ensure_trash_log_table(conn=db_conn)
 
     try:
         for index, event_id in enumerate(event_ids, start=1):
@@ -179,12 +311,22 @@ def main() -> None:
                     if db_conn is None:
                         continue
                     try:
-                        if _delete_event_by_id(conn=db_conn, event_id=event_id):
+                        deleted = _delete_event_by_id(conn=db_conn, event_id=event_id)
+                        _insert_trash_log(
+                            conn=db_conn,
+                            event_id=event_id,
+                            reason="Auto-trash: UNKNOWN volume in pre-downstream volume check",
+                            api_volume=None,
+                            api_title=title,
+                            deleted_from_events=deleted,
+                        )
+                        logged_count += 1
+                        if deleted:
                             deleted_count += 1
                             deleted_unknown_count += 1
-                            print("           -> deleted from events (cascade applied, UNKNOWN volume)")
+                            print("           -> logged in event_resolution_trash_log, deleted from events")
                         else:
-                            print("           -> not found in events at delete time")
+                            print("           -> logged in event_resolution_trash_log, not found in events")
                     except psycopg2.Error as exc:
                         db_conn.rollback()
                         errors_count += 1
@@ -200,11 +342,21 @@ def main() -> None:
 
                     if db_conn is not None:
                         try:
-                            if _delete_event_by_id(conn=db_conn, event_id=event_id):
+                            deleted = _delete_event_by_id(conn=db_conn, event_id=event_id)
+                            _insert_trash_log(
+                                conn=db_conn,
+                                event_id=event_id,
+                                reason=f"Auto-trash: volume {volume} below threshold {threshold}",
+                                api_volume=volume,
+                                api_title=title,
+                                deleted_from_events=deleted,
+                            )
+                            logged_count += 1
+                            if deleted:
                                 deleted_count += 1
-                                print(f"           -> deleted from events (cascade applied)")
+                                print("           -> logged in event_resolution_trash_log, deleted from events")
                             else:
-                                print(f"           -> not found in events at delete time")
+                                print("           -> logged in event_resolution_trash_log, not found in events")
                         except psycopg2.Error as exc:
                             db_conn.rollback()
                             errors_count += 1
@@ -224,6 +376,7 @@ def main() -> None:
         f"unknown_volume: {unknown_volume_count}, "
         f"deleted: {deleted_count}, "
         f"deleted_unknown: {deleted_unknown_count}, "
+        f"logged: {logged_count}, "
         f"errors: {errors_count}"
     )
 
