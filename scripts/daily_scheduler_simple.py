@@ -2139,6 +2139,20 @@ class SimplifiedScheduler:
                             processed_run_id=downstream_run_id,
                         )
                         print(f"✅ Marked {processed:,} event(s) as processed in resolution queue")
+                        participants_result = self.refresh_participants_snapshot()
+                        results['participants'] = participants_result
+                        participants_status = 'success' if participants_result.get('success') else 'error'
+                        participants_rows = int(participants_result.get('records', 0) or 0)
+                        participants_duration_ms = (
+                            int(float(participants_result.get('duration', 0)) * 1000)
+                            if participants_result.get('duration') is not None
+                            else None
+                        )
+                        participants_error = (
+                            None
+                            if participants_result.get('success')
+                            else participants_result.get('error', 'participants refresh failed')
+                        )
                         self.manager.finish_downstream_run(
                             run_id=downstream_run_id,
                             status='success',
@@ -2152,6 +2166,10 @@ class SimplifiedScheduler:
                             event_cards_success=int(card_stats.get('success', 0)),
                             event_cards_failed=int(card_stats.get('failed', 0)),
                             tag_colors_generated=int(card_stats.get('tag_colors_generated', 0)),
+                            participants_status=participants_status,
+                            participants_rows=participants_rows,
+                            participants_duration_ms=participants_duration_ms,
+                            participants_error=participants_error,
                             error_text=None,
                         )
                         self.manager.link_data_load_to_downstream_run(
@@ -2159,8 +2177,6 @@ class SimplifiedScheduler:
                             downstream_run_id,
                             processed,
                         )
-                        participants_result = self.refresh_participants_snapshot()
-                        results['participants'] = participants_result
                         if not participants_result.get('success'):
                             print("⚠️  Participants refresh failed after downstream success")
                     elif not self.dry_run:
@@ -2183,6 +2199,10 @@ class SimplifiedScheduler:
                                 event_cards_success=0,
                                 event_cards_failed=0,
                                 tag_colors_generated=0,
+                                participants_status='skipped',
+                                participants_rows=0,
+                                participants_duration_ms=None,
+                                participants_error=None,
                                 error_text=error_text,
                             )
                         print("⚠️  Some downstream scripts failed; ready events remain unprocessed for retry")
@@ -2606,6 +2626,10 @@ class SimplifiedScheduler:
                             event_cards_success=int(card_stats.get('success', 0)),
                             event_cards_failed=int(card_stats.get('failed', 0)),
                             tag_colors_generated=int(card_stats.get('tag_colors_generated', 0)),
+                            participants_status='skipped',
+                            participants_rows=0,
+                            participants_duration_ms=None,
+                            participants_error=None,
                             error_text=None,
                         )
                         self.manager.link_data_load_to_downstream_run(
