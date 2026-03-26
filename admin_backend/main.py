@@ -193,6 +193,8 @@ class SeasonWorkbenchService:
         self._r2_client: Any = None
         # Wallet list is mostly stable within a season. Cache for 10 days by default.
         self.wallets_cache_ttl_seconds = int(os.getenv("WALLETS_CACHE_TTL_SECONDS", "864000"))
+        self.origin_snapshot_offset_days = int(os.getenv("POLYSTARS_ORIGIN_SNAPSHOT_OFFSET_DAYS", "10"))
+        self.origin_lookback_days_standard = int(os.getenv("POLYSTARS_ORIGIN_LOOKBACK_DAYS_STANDARD", "10"))
         self._wallets_cache: Dict[tuple[int, str, bool, int], tuple[float, List[str]]] = {}
         self.ensure_claims_schema_for_mint()
         self.ensure_winners_schema_for_assignment()
@@ -2135,160 +2137,155 @@ class SeasonWorkbenchService:
         limit: int,
         status: Optional[str],
         event_id: Optional[str],
+        snapshot_scope: Optional[str],
     ) -> List[Dict[str, Any]]:
         safe_limit = min(max(limit, 1), 2000)
         status_filter = (status or "").strip().lower()
         if status_filter and status_filter not in {"ok", "error"}:
             raise ValueError("status must be one of: ok, error")
         event_id_filter = (event_id or "").strip()
+        snapshot_scope_filter = (snapshot_scope or "all").strip().lower()
+        standard_snapshot_season_id: Optional[int] = None
+        if snapshot_scope_filter.startswith("standard_season:"):
+            raw_season_id = snapshot_scope_filter.split(":", 1)[1].strip()
+            if not raw_season_id or not raw_season_id.isdigit():
+                raise ValueError("snapshot_scope standard_season must include numeric season_id")
+            standard_snapshot_season_id = int(raw_season_id)
+            snapshot_scope_filter = "standard_season"
+        if snapshot_scope_filter not in {"all", "genesis", "standard", "standard_season", "next_window"}:
+            raise ValueError(
+                "snapshot_scope must be one of: all, genesis, standard, standard_season:<season_id>, next_window"
+            )
 
         conn = self.manager.get_connection()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-                if event_id_filter and status_filter:
-                    cursor.execute(
+                where_parts: List[str] = []
+                params: List[Any] = []
+                if event_id_filter:
+                    where_parts.append("ec.event_id = %s")
+                    params.append(event_id_filter)
+                if status_filter:
+                    where_parts.append("ec.status = %s")
+                    params.append(status_filter)
+                if snapshot_scope_filter == "genesis":
+                    where_parts.append(
                         """
-                        SELECT
-                            ec.event_id,
-                            ec.series_id,
-                            ec.reccurence,
-                            e.ticker AS event_ticker,
-                            e.slug AS event_slug,
-                            e.title AS event_title,
-                            e.description AS event_description,
-                            COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
-                            ec.manual_image_url,
-                            ec.card_title,
-                            ec.card_lore,
-                            ec.primary_tag,
-                            ec.secondary_tag,
-                            tp.hex_color AS primary_tag_hex_color,
-                            ts.hex_color AS secondary_tag_hex_color,
-                            ec.agent_name,
-                            ec.model_name,
-                            ec.prompt_version,
-                            ec.status,
-                            ec.error_text,
-                            ec.generated_at,
-                            ec.updated_at
-                        FROM event_cards ec
-                        LEFT JOIN events e ON e.id = ec.event_id
-                        LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
-                        LEFT JOIN tags ts ON LOWER(BTRIM(ts.label)) = LOWER(BTRIM(ec.secondary_tag))
-                        WHERE ec.event_id = %s
-                          AND ec.status = %s
-                        ORDER BY ec.generated_at DESC, ec.event_id ASC
-                        LIMIT %s
-                        """,
-                        (event_id_filter, status_filter, safe_limit),
-                    )
-                elif event_id_filter:
-                    cursor.execute(
+                        EXISTS (
+                            SELECT 1
+                            FROM winner_wallets_nft_to_claim w
+                            JOIN seasons s ON s.id = w.season_id
+                            LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
+                            LEFT JOIN events e2 ON e2.id = ec.event_id
+                            WHERE s.type = 'genesis'
+                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) >= w.window_start
+                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) < w.window_end
+                        )
                         """
-                        SELECT
-                            ec.event_id,
-                            ec.series_id,
-                            ec.reccurence,
-                            e.ticker AS event_ticker,
-                            e.slug AS event_slug,
-                            e.title AS event_title,
-                            e.description AS event_description,
-                            COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
-                            ec.manual_image_url,
-                            ec.card_title,
-                            ec.card_lore,
-                            ec.primary_tag,
-                            ec.secondary_tag,
-                            tp.hex_color AS primary_tag_hex_color,
-                            ts.hex_color AS secondary_tag_hex_color,
-                            ec.agent_name,
-                            ec.model_name,
-                            ec.prompt_version,
-                            ec.status,
-                            ec.error_text,
-                            ec.generated_at,
-                            ec.updated_at
-                        FROM event_cards ec
-                        LEFT JOIN events e ON e.id = ec.event_id
-                        LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
-                        LEFT JOIN tags ts ON LOWER(BTRIM(ts.label)) = LOWER(BTRIM(ec.secondary_tag))
-                        WHERE ec.event_id = %s
-                        ORDER BY ec.generated_at DESC, ec.event_id ASC
-                        LIMIT %s
-                        """,
-                        (event_id_filter, safe_limit),
                     )
-                elif status_filter:
-                    cursor.execute(
+                elif snapshot_scope_filter == "standard":
+                    where_parts.append(
                         """
-                        SELECT
-                            ec.event_id,
-                            ec.series_id,
-                            ec.reccurence,
-                            e.ticker AS event_ticker,
-                            e.slug AS event_slug,
-                            e.title AS event_title,
-                            e.description AS event_description,
-                            COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
-                            ec.manual_image_url,
-                            ec.card_title,
-                            ec.card_lore,
-                            ec.primary_tag,
-                            ec.secondary_tag,
-                            tp.hex_color AS primary_tag_hex_color,
-                            ts.hex_color AS secondary_tag_hex_color,
-                            ec.agent_name,
-                            ec.model_name,
-                            ec.prompt_version,
-                            ec.status,
-                            ec.error_text,
-                            ec.generated_at,
-                            ec.updated_at
-                        FROM event_cards ec
-                        LEFT JOIN events e ON e.id = ec.event_id
-                        LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
-                        LEFT JOIN tags ts ON LOWER(BTRIM(ts.label)) = LOWER(BTRIM(ec.secondary_tag))
-                        WHERE ec.status = %s
-                        ORDER BY ec.generated_at DESC, ec.event_id ASC
-                        LIMIT %s
-                        """,
-                        (status_filter, safe_limit),
-                    )
-                else:
-                    cursor.execute(
+                        EXISTS (
+                            SELECT 1
+                            FROM winner_wallets_nft_to_claim w
+                            JOIN seasons s ON s.id = w.season_id
+                            LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
+                            LEFT JOIN events e2 ON e2.id = ec.event_id
+                            WHERE s.type = 'standard'
+                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) >= w.window_start
+                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) < w.window_end
+                        )
                         """
-                        SELECT
-                            ec.event_id,
-                            ec.series_id,
-                            ec.reccurence,
-                            e.ticker AS event_ticker,
-                            e.slug AS event_slug,
-                            e.title AS event_title,
-                            e.description AS event_description,
-                            COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
-                            ec.manual_image_url,
-                            ec.card_title,
-                            ec.card_lore,
-                            ec.primary_tag,
-                            ec.secondary_tag,
-                            tp.hex_color AS primary_tag_hex_color,
-                            ts.hex_color AS secondary_tag_hex_color,
-                            ec.agent_name,
-                            ec.model_name,
-                            ec.prompt_version,
-                            ec.status,
-                            ec.error_text,
-                            ec.generated_at,
-                            ec.updated_at
-                        FROM event_cards ec
-                        LEFT JOIN events e ON e.id = ec.event_id
-                        LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
-                        LEFT JOIN tags ts ON LOWER(BTRIM(ts.label)) = LOWER(BTRIM(ec.secondary_tag))
-                        ORDER BY ec.generated_at DESC, ec.event_id ASC
-                        LIMIT %s
-                        """,
-                        (safe_limit,),
                     )
+                elif snapshot_scope_filter == "standard_season":
+                    where_parts.append(
+                        """
+                        EXISTS (
+                            SELECT 1
+                            FROM winner_wallets_nft_to_claim w
+                            JOIN seasons s ON s.id = w.season_id
+                            LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
+                            LEFT JOIN events e2 ON e2.id = ec.event_id
+                            WHERE s.type = 'standard'
+                              AND s.id = %s
+                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) >= w.window_start
+                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) < w.window_end
+                        )
+                        """
+                    )
+                    params.append(standard_snapshot_season_id)
+                elif snapshot_scope_filter == "next_window":
+                    where_parts.append(
+                        """
+                        EXISTS (
+                            SELECT 1
+                            FROM (
+                                SELECT
+                                    (
+                                        s.end_date
+                                        - make_interval(days => %s)
+                                        - make_interval(days => %s)
+                                    ) AS window_start,
+                                    (
+                                        s.end_date
+                                        - make_interval(days => %s)
+                                    ) AS window_end
+                                FROM seasons s
+                                WHERE s.type = 'standard'
+                                ORDER BY s.start_date DESC, s.id DESC
+                                LIMIT 1
+                            ) nw
+                            LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
+                            LEFT JOIN events e2 ON e2.id = ec.event_id
+                            WHERE COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) >= nw.window_start
+                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) < nw.window_end
+                        )
+                        """
+                    )
+                    params.extend(
+                        [
+                            self.origin_snapshot_offset_days,
+                            self.origin_lookback_days_standard,
+                            self.origin_snapshot_offset_days,
+                        ]
+                    )
+
+                where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+                query = f"""
+                    SELECT
+                        ec.event_id,
+                        ec.series_id,
+                        ec.reccurence,
+                        e.ticker AS event_ticker,
+                        e.slug AS event_slug,
+                        e.title AS event_title,
+                        e.description AS event_description,
+                        COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
+                        ec.manual_image_url,
+                        ec.card_title,
+                        ec.card_lore,
+                        ec.primary_tag,
+                        ec.secondary_tag,
+                        tp.hex_color AS primary_tag_hex_color,
+                        ts.hex_color AS secondary_tag_hex_color,
+                        ec.agent_name,
+                        ec.model_name,
+                        ec.prompt_version,
+                        ec.status,
+                        ec.error_text,
+                        ec.generated_at,
+                        ec.updated_at
+                    FROM event_cards ec
+                    LEFT JOIN events e ON e.id = ec.event_id
+                    LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+                    LEFT JOIN tags ts ON LOWER(BTRIM(ts.label)) = LOWER(BTRIM(ec.secondary_tag))
+                    {where_sql}
+                    ORDER BY ec.generated_at DESC, ec.event_id ASC
+                    LIMIT %s
+                """
+                params.append(safe_limit)
+                cursor.execute(query, tuple(params))
                 rows = [dict(row) for row in cursor.fetchall()]
                 return [self._format_event_card_row(row) for row in rows]
         finally:
@@ -2766,9 +2763,15 @@ def get_event_cards(
     limit: int = 500,
     status: Optional[str] = None,
     event_id: Optional[str] = None,
+    snapshot_scope: Optional[str] = "all",
 ) -> Dict[str, Any]:
     try:
-        rows = service.list_event_cards(limit=limit, status=status, event_id=event_id)
+        rows = service.list_event_cards(
+            limit=limit,
+            status=status,
+            event_id=event_id,
+            snapshot_scope=snapshot_scope,
+        )
         return {"rows": rows}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))

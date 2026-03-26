@@ -323,6 +323,7 @@ export default function HomePage() {
   const [eventCardRows, setEventCardRows] = useState<EventCardRow[]>([]);
   const [eventCardsLimit, setEventCardsLimit] = useState("500");
   const [eventCardsStatusFilter, setEventCardsStatusFilter] = useState("all");
+  const [eventCardsSnapshotScope, setEventCardsSnapshotScope] = useState("all");
   const [eventCardsEventIdFilter, setEventCardsEventIdFilter] = useState("");
   const [eventCardsPage, setEventCardsPage] = useState(1);
   const [eventCardsSortKey, setEventCardsSortKey] = useState<EventCardsSortKey>("generated_at");
@@ -363,6 +364,21 @@ export default function HomePage() {
   const eventCardsRowsPerPage = 20;
 
   const seasonOptions = useMemo(() => seasons.map((s) => ({ value: s.id, label: `id=${s.id} | ${s.type}#${s.season_number}` })), [seasons]);
+  const eventCardsSnapshotOptions = useMemo(() => {
+    const standardSeasonOptions = [...seasons]
+      .filter((s) => s.type === "standard")
+      .sort((a, b) => b.season_number - a.season_number || b.id - a.id)
+      .map((s) => ({
+        value: `standard_season:${s.id}`,
+        label: `standard#${s.season_number} snapshot (id=${s.id})`,
+      }));
+    return [
+      { value: "all", label: "all" },
+      { value: "genesis", label: "genesis snapshot" },
+      ...standardSeasonOptions,
+      { value: "next_window", label: "next window (future season)" },
+    ];
+  }, [seasons]);
   const claimSeasonInfoLines = useMemo(() => claimSeasonInfo.split("\n"), [claimSeasonInfo]);
   const liveCountdown = useMemo<LocalCountdownItem[]>(() => {
     if (syncedNowMs == null) return [];
@@ -703,6 +719,7 @@ export default function HomePage() {
     const params = new URLSearchParams();
     params.set("limit", String(safeLimit));
     if (eventCardsStatusFilter !== "all") params.set("status", eventCardsStatusFilter);
+    if (eventCardsSnapshotScope !== "all") params.set("snapshot_scope", eventCardsSnapshotScope);
     if (eventCardsEventIdFilter.trim()) params.set("event_id", eventCardsEventIdFilter.trim());
     const data = await fetchJSON<{ rows: EventCardRow[] }>(`/api/event-cards?${params.toString()}`);
     setEventCardRows(data.rows);
@@ -847,14 +864,27 @@ export default function HomePage() {
   useEffect(() => {
     if (tab !== "eventCards" && tab !== "eventPictures") return;
     void run(refreshEventCardRows);
+    // Auto-refresh when dropdown filters change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [tab, eventCardsStatusFilter, eventCardsSnapshotScope]);
 
   useEffect(() => {
     if (eventCardsPage > eventCardsTotalPages) {
       setEventCardsPage(eventCardsTotalPages);
     }
   }, [eventCardsPage, eventCardsTotalPages]);
+
+  useEffect(() => {
+    if (!eventCardsSnapshotScope.startsWith("standard_season:")) return;
+    const validStandardSeasonScopes = new Set(
+      seasons
+        .filter((s) => s.type === "standard")
+        .map((s) => `standard_season:${s.id}`),
+    );
+    if (!validStandardSeasonScopes.has(eventCardsSnapshotScope)) {
+      setEventCardsSnapshotScope("all");
+    }
+  }, [eventCardsSnapshotScope, seasons]);
 
   useEffect(() => {
     const wsUrl = API_BASE.replace(/^http/, "ws") + "/ws/events";
@@ -1351,6 +1381,10 @@ export default function HomePage() {
               <option value="ok">ok</option>
               <option value="error">error</option>
             </select>
+            <label>snapshot</label>
+            <select value={eventCardsSnapshotScope} onChange={(e) => setEventCardsSnapshotScope(e.target.value)}>
+              {eventCardsSnapshotOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
             <label>event_id</label>
             <input
               value={eventCardsEventIdFilter}
@@ -1682,6 +1716,9 @@ export default function HomePage() {
                     reccurence
                   </th>
                   <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
+                    series_id
+                  </th>
+                  <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">
                     <button className="inline-flex items-center gap-1" onClick={() => toggleEventCardsSort("event_slug")}>
                       slug <ArrowUpDown size={13} />
                     </button>
@@ -1757,6 +1794,11 @@ export default function HomePage() {
                       <td className="border-b border-slate-700 px-3 py-2">
                         <div className="h-8 max-w-[120px] truncate" title={row.reccurence ?? ""}>
                           {row.reccurence ?? ""}
+                        </div>
+                      </td>
+                      <td className="border-b border-slate-700 px-3 py-2">
+                        <div className="h-8 max-w-[180px] truncate" title={row.series_id ?? ""}>
+                          {row.series_id ?? ""}
                         </div>
                       </td>
                       <td className="border-b border-slate-700 px-3 py-2">
