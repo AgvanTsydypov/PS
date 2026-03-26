@@ -69,6 +69,10 @@ CREATE TABLE IF NOT EXISTS downstream_runs (
     event_cards_success INTEGER NOT NULL DEFAULT 0,
     event_cards_failed INTEGER NOT NULL DEFAULT 0,
     tag_colors_generated INTEGER NOT NULL DEFAULT 0,
+    participants_status TEXT,
+    participants_rows INTEGER NOT NULL DEFAULT 0,
+    participants_duration_ms INTEGER,
+    participants_error TEXT,
     error_text TEXT,
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at TIMESTAMPTZ,
@@ -83,6 +87,10 @@ CREATE INDEX IF NOT EXISTS idx_downstream_runs_status
 CREATE INDEX IF NOT EXISTS idx_downstream_runs_events_load_date
     ON downstream_runs(events_load_date);
 ALTER TABLE downstream_runs ADD COLUMN IF NOT EXISTS tag_colors_generated INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE downstream_runs ADD COLUMN IF NOT EXISTS participants_status TEXT;
+ALTER TABLE downstream_runs ADD COLUMN IF NOT EXISTS participants_rows INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE downstream_runs ADD COLUMN IF NOT EXISTS participants_duration_ms INTEGER;
+ALTER TABLE downstream_runs ADD COLUMN IF NOT EXISTS participants_error TEXT;
 
 DO $$
 BEGIN
@@ -206,6 +214,10 @@ SELECT
     event_cards_success,
     event_cards_failed,
     tag_colors_generated,
+    participants_status,
+    participants_rows,
+    participants_duration_ms,
+    participants_error,
     started_at,
     finished_at
 FROM downstream_runs

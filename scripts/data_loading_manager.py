@@ -142,239 +142,38 @@ class DataLoadingManager:
             raise NotImplementedError("Supabase connection not implemented")
     
     def _ensure_tables(self):
-        """Ensure tracking tables exist"""
+        """Validate that required tables exist (DDL lives in init-db.sql)."""
+        required_tables = (
+            "data_loads",
+            "downstream_runs",
+            "season_events_log",
+            "event_resolution_queue",
+        )
         try:
             conn = psycopg2.connect(**self.connection_params)
             cursor = conn.cursor()
-            
             cursor.execute(
                 """
-                CREATE TABLE IF NOT EXISTS data_loads (
-                    id SERIAL PRIMARY KEY,
-                    load_date DATE NOT NULL UNIQUE,
-                    events_loaded BOOLEAN DEFAULT FALSE,
-                    events_loaded_at TIMESTAMPTZ,
-                    events_count INTEGER DEFAULT 0,
-                    markets_count INTEGER DEFAULT 0,
-                    load_type VARCHAR(20) DEFAULT 'daily' CHECK (load_type IN ('genesis', 'daily')),
-                    events_error TEXT,
-                    last_downstream_run_id BIGINT,
-                    downstream_last_run_at TIMESTAMPTZ,
-                    downstream_ready_events_count INTEGER NOT NULL DEFAULT 0,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                SELECT relname
+                FROM pg_class
+                WHERE relkind = 'r'
+                  AND relnamespace = 'public'::regnamespace
+                  AND relname = ANY(%s)
+                """,
+                (list(required_tables),),
+            )
+            existing = {row[0] for row in cursor.fetchall()}
+            missing = [name for name in required_tables if name not in existing]
+            if missing:
+                print(
+                    "⚠️  Required tables are missing. "
+                    "Run sql/schemas/init-db.sql first: "
+                    f"{', '.join(missing)}"
                 )
-                """
-            )
-            cursor.execute("ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS markets_count INTEGER DEFAULT 0")
-            cursor.execute("ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS events_error TEXT")
-            cursor.execute("ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS last_downstream_run_id BIGINT")
-            cursor.execute("ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS downstream_last_run_at TIMESTAMPTZ")
-            cursor.execute(
-                """
-                ALTER TABLE data_loads
-                ADD COLUMN IF NOT EXISTS downstream_ready_events_count INTEGER NOT NULL DEFAULT 0
-                """
-            )
-            # Remove legacy date-based downstream columns.
-            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_loaded")
-            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_loaded")
-            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_loaded")
-            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_loaded_at")
-            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_loaded_at")
-            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_loaded_at")
-            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_count")
-            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_count")
-            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_count")
-            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_error")
-            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_error")
-            cursor.execute("ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_error")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_data_loads_date ON data_loads(load_date DESC)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_data_loads_type ON data_loads(load_type)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_data_loads_events_loaded ON data_loads(events_loaded)")
-
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS downstream_runs (
-                    id BIGSERIAL PRIMARY KEY,
-                    run_uuid UUID NOT NULL UNIQUE,
-                    trigger_type TEXT NOT NULL
-                        CHECK (trigger_type IN ('daily', 'genesis', 'catch_up', 'manual')),
-                    status TEXT NOT NULL DEFAULT 'running'
-                        CHECK (status IN ('running', 'success', 'partial', 'error')),
-                    events_load_date DATE,
-                    ready_events_requested INTEGER NOT NULL DEFAULT 0,
-                    ready_events_processed INTEGER NOT NULL DEFAULT 0,
-                    ready_events_failed INTEGER NOT NULL DEFAULT 0,
-                    redemptions_delta INTEGER NOT NULL DEFAULT 0,
-                    positions_delta INTEGER NOT NULL DEFAULT 0,
-                    leaderboard_delta INTEGER NOT NULL DEFAULT 0,
-                    event_cards_requested INTEGER NOT NULL DEFAULT 0,
-                    event_cards_processed INTEGER NOT NULL DEFAULT 0,
-                    event_cards_success INTEGER NOT NULL DEFAULT 0,
-                    event_cards_failed INTEGER NOT NULL DEFAULT 0,
-                    tag_colors_generated INTEGER NOT NULL DEFAULT 0,
-                    error_text TEXT,
-                    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    finished_at TIMESTAMPTZ,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
-            cursor.execute(
-                """
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1
-                        FROM information_schema.table_constraints
-                        WHERE constraint_name = 'fk_data_loads_last_downstream_run'
-                          AND table_name = 'data_loads'
-                    ) THEN
-                        ALTER TABLE data_loads
-                            ADD CONSTRAINT fk_data_loads_last_downstream_run
-                            FOREIGN KEY (last_downstream_run_id) REFERENCES downstream_runs(id)
-                            ON DELETE SET NULL;
-                    END IF;
-                END $$;
-                """
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_downstream_runs_started_at ON downstream_runs(started_at DESC)"
-            )
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_downstream_runs_status ON downstream_runs(status)")
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_downstream_runs_events_load_date ON downstream_runs(events_load_date)"
-            )
-            cursor.execute(
-                """
-                ALTER TABLE downstream_runs
-                ADD COLUMN IF NOT EXISTS tag_colors_generated INTEGER NOT NULL DEFAULT 0
-                """
-            )
-
-            # Ensure season events table exists for dedicated lifecycle logs.
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS season_events_log (
-                    id BIGSERIAL PRIMARY KEY,
-                    event_name TEXT NOT NULL,
-                    season_id INTEGER,
-                    details TEXT,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_season_events_log_created_at
-                ON season_events_log(created_at DESC)
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_season_events_log_event_name
-                ON season_events_log(event_name)
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_season_events_log_season_id
-                ON season_events_log(season_id)
-            """)
-
-            # Track event resolution lifecycle for closed_time-based processing.
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS event_resolution_queue (
-                    event_id TEXT PRIMARY KEY,
-                    end_date TIMESTAMPTZ,
-                    closed BOOLEAN NOT NULL DEFAULT FALSE,
-                    closed_time TIMESTAMPTZ,
-                    resolution_ready_at TIMESTAMPTZ,
-                    status TEXT NOT NULL DEFAULT 'pending'
-                        CHECK (status IN ('pending', 'ready_for_redemptions', 'processed', 'error', 'trashed')),
-                    last_checked_at TIMESTAMPTZ,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    downstream_attempts INTEGER NOT NULL DEFAULT 0,
-                    last_downstream_attempt_at TIMESTAMPTZ,
-                    processed_at TIMESTAMPTZ,
-                    error_text TEXT,
-                    downstream_error_text TEXT,
-                    processed_run_id BIGINT,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-            """)
-            cursor.execute(
-                """
-                ALTER TABLE event_resolution_queue
-                ADD COLUMN IF NOT EXISTS downstream_attempts INTEGER NOT NULL DEFAULT 0
-                """
-            )
-            cursor.execute(
-                """
-                ALTER TABLE event_resolution_queue
-                ADD COLUMN IF NOT EXISTS last_downstream_attempt_at TIMESTAMPTZ
-                """
-            )
-            cursor.execute(
-                """
-                ALTER TABLE event_resolution_queue
-                ADD COLUMN IF NOT EXISTS downstream_error_text TEXT
-                """
-            )
-            cursor.execute(
-                """
-                ALTER TABLE event_resolution_queue
-                ADD COLUMN IF NOT EXISTS processed_run_id BIGINT
-                """
-            )
-            cursor.execute(
-                """
-                ALTER TABLE event_resolution_queue
-                DROP CONSTRAINT IF EXISTS event_resolution_queue_status_check
-                """
-            )
-            cursor.execute(
-                """
-                ALTER TABLE event_resolution_queue
-                ADD CONSTRAINT event_resolution_queue_status_check
-                CHECK (status IN ('pending', 'ready_for_redemptions', 'processed', 'error', 'trashed'))
-                """
-            )
-            cursor.execute(
-                """
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1
-                        FROM information_schema.table_constraints
-                        WHERE constraint_name = 'fk_event_resolution_queue_processed_run'
-                          AND table_name = 'event_resolution_queue'
-                    ) THEN
-                        ALTER TABLE event_resolution_queue
-                            ADD CONSTRAINT fk_event_resolution_queue_processed_run
-                            FOREIGN KEY (processed_run_id) REFERENCES downstream_runs(id)
-                            ON DELETE SET NULL;
-                    END IF;
-                END $$;
-                """
-            )
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_status_ready
-                ON event_resolution_queue(status, resolution_ready_at)
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_end_date
-                ON event_resolution_queue(end_date)
-            """)
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_processed_run_id
-                ON event_resolution_queue(processed_run_id)
-                """
-            )
-            conn.commit()
-            
             cursor.close()
             conn.close()
-            
         except Exception as e:
-            print(f"⚠️  Could not ensure tables: {e}")
+            print(f"⚠️  Could not validate required tables: {e}")
 
     def get_connection(self):
         """Get a DB connection using manager settings."""
@@ -611,6 +410,10 @@ class DataLoadingManager:
         event_cards_success: int = 0,
         event_cards_failed: int = 0,
         tag_colors_generated: int = 0,
+        participants_status: Optional[str] = None,
+        participants_rows: int = 0,
+        participants_duration_ms: Optional[int] = None,
+        participants_error: Optional[str] = None,
         error_text: Optional[str] = None,
     ) -> None:
         """Finalize downstream run metrics and status."""
@@ -631,6 +434,10 @@ class DataLoadingManager:
                     event_cards_success = %s,
                     event_cards_failed = %s,
                     tag_colors_generated = %s,
+                    participants_status = %s,
+                    participants_rows = %s,
+                    participants_duration_ms = %s,
+                    participants_error = %s,
                     error_text = %s,
                     finished_at = NOW(),
                     updated_at = NOW()
@@ -648,6 +455,10 @@ class DataLoadingManager:
                     event_cards_success,
                     event_cards_failed,
                     tag_colors_generated,
+                    participants_status,
+                    participants_rows,
+                    participants_duration_ms,
+                    participants_error,
                     error_text,
                     run_id,
                 ),
