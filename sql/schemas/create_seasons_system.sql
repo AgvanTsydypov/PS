@@ -266,22 +266,30 @@ BEGIN
     END IF;
 END $$;
 
+-- Drop compatibility/analytics views early to avoid dependency errors during column migration.
+DROP VIEW IF EXISTS v_origins_eligibility;
+DROP VIEW IF EXISTS v_origin_wallets;
+
 CREATE TABLE IF NOT EXISTS winner_wallets_nft_to_claim (
     id BIGSERIAL PRIMARY KEY,
     season_id INTEGER NOT NULL,
-    wallet_address VARCHAR(42) NOT NULL,
+    proxy_wallet VARCHAR(42) NOT NULL,
     source TEXT NOT NULL DEFAULT 'top_pnl_30d_season_start',
-    total_pnl_window NUMERIC,
-    pnl_rank INTEGER,
     window_start TIMESTAMPTZ NOT NULL,
     window_end TIMESTAMPTZ NOT NULL,
     snapshot_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    entry_cwap NUMERIC(20, 4),
+    total_volume NUMERIC(20, 2),
+    total_pnl NUMERIC(20, 2),
+    roi_percentage NUMERIC(20, 2),
+    entry_bracket TEXT,
+    edge TEXT,
+    yield TEXT,
+    gravity TEXT,
+    rank INTEGER,
     event_id TEXT,
-    market_id TEXT,
-    condition_id TEXT,
     event_slug TEXT,
-    event_title TEXT,
     is_minted BOOLEAN NOT NULL DEFAULT FALSE,
     minted_at TIMESTAMPTZ,
     minted_to_wallet TEXT,
@@ -291,18 +299,25 @@ CREATE TABLE IF NOT EXISTS winner_wallets_nft_to_claim (
     minted_asset_address TEXT,
     CONSTRAINT fk_origin_snapshot_season
         FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
-    CONSTRAINT origin_wallet_format_check
-        CHECK (wallet_address ~* '^0x[a-f0-9]{40}$'),
-    CONSTRAINT origin_snapshot_unique_wallet_per_season
-        UNIQUE (season_id, wallet_address)
+    CONSTRAINT winner_proxy_wallet_format_check
+        CHECK (proxy_wallet ~* '^0x[a-f0-9]{40}$'),
+    CONSTRAINT winner_wallet_unique_per_season
+        UNIQUE (season_id, proxy_wallet)
 );
 
 -- Ensure columns exist for upgraded databases.
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS proxy_wallet VARCHAR(42);
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS event_id TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS market_id TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS condition_id TEXT;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS event_slug TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS event_title TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS entry_cwap NUMERIC(20, 4);
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS total_volume NUMERIC(20, 2);
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS total_pnl NUMERIC(20, 2);
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS roi_percentage NUMERIC(20, 2);
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS entry_bracket TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS edge TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS yield TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS gravity TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS rank INTEGER;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS is_minted BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_at TIMESTAMPTZ;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_to_wallet TEXT;
@@ -311,22 +326,51 @@ ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_claim_id
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_tx_hash TEXT;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_asset_address TEXT;
 
+-- Backward-compatible migration from legacy column naming.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'winner_wallets_nft_to_claim'
+          AND column_name = 'wallet_address'
+    ) THEN
+        EXECUTE '
+            UPDATE winner_wallets_nft_to_claim
+            SET proxy_wallet = LOWER(wallet_address)
+            WHERE proxy_wallet IS NULL
+              AND wallet_address IS NOT NULL
+        ';
+    END IF;
+END $$;
+
+-- Remove legacy business columns after migrating to participants payload model.
+ALTER TABLE winner_wallets_nft_to_claim DROP COLUMN IF EXISTS wallet_address;
+ALTER TABLE winner_wallets_nft_to_claim DROP COLUMN IF EXISTS total_pnl_window;
+ALTER TABLE winner_wallets_nft_to_claim DROP COLUMN IF EXISTS pnl_rank;
+ALTER TABLE winner_wallets_nft_to_claim DROP COLUMN IF EXISTS market_id;
+ALTER TABLE winner_wallets_nft_to_claim DROP COLUMN IF EXISTS condition_id;
+ALTER TABLE winner_wallets_nft_to_claim DROP COLUMN IF EXISTS event_title;
+
 CREATE INDEX IF NOT EXISTS idx_winners_snapshot_season
     ON winner_wallets_nft_to_claim(season_id);
-CREATE INDEX IF NOT EXISTS idx_winners_snapshot_wallet
-    ON winner_wallets_nft_to_claim(wallet_address);
-CREATE INDEX IF NOT EXISTS idx_winners_snapshot_rank
-    ON winner_wallets_nft_to_claim(season_id, pnl_rank);
+CREATE INDEX IF NOT EXISTS idx_winners_snapshot_proxy_wallet
+    ON winner_wallets_nft_to_claim(proxy_wallet);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_winners_snapshot_season_proxy_wallet
+    ON winner_wallets_nft_to_claim(season_id, proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_winners_snapshot_season_rank
+    ON winner_wallets_nft_to_claim(season_id, rank);
 CREATE INDEX IF NOT EXISTS idx_winners_snapshot_event_id
     ON winner_wallets_nft_to_claim(event_id);
-CREATE INDEX IF NOT EXISTS idx_winners_snapshot_market_id
-    ON winner_wallets_nft_to_claim(market_id);
+CREATE INDEX IF NOT EXISTS idx_winners_snapshot_event_slug
+    ON winner_wallets_nft_to_claim(event_slug);
 
-COMMENT ON TABLE winner_wallets_nft_to_claim IS 'Frozen per-season winners eligible to claim NFT in Vault. Includes top qualifying market/event context per wallet.';
-COMMENT ON COLUMN winner_wallets_nft_to_claim.window_start IS 'Inclusive lower bound of PnL window used to compute snapshot';
-COMMENT ON COLUMN winner_wallets_nft_to_claim.window_end IS 'Exclusive upper bound of PnL window';
-COMMENT ON COLUMN winner_wallets_nft_to_claim.event_id IS 'Event id of the highest-PnL closed position for this wallet in the snapshot window';
-COMMENT ON COLUMN winner_wallets_nft_to_claim.market_id IS 'Market id of the highest-PnL closed position for this wallet in the snapshot window';
+COMMENT ON TABLE winner_wallets_nft_to_claim IS 'Frozen per-season randomized participants allocation. Technical mint metadata + participant analytics payload.';
+COMMENT ON COLUMN winner_wallets_nft_to_claim.window_start IS 'Inclusive lower bound used to derive season working events';
+COMMENT ON COLUMN winner_wallets_nft_to_claim.window_end IS 'Exclusive upper bound used to derive season working events';
+COMMENT ON COLUMN winner_wallets_nft_to_claim.event_id IS 'Participant event id sampled from participants materialized view';
+COMMENT ON COLUMN winner_wallets_nft_to_claim.event_slug IS 'Participant event slug sampled from participants materialized view';
 
 DO $$ BEGIN RAISE NOTICE '✅ winner_wallets_nft_to_claim table created'; END $$;
 
@@ -334,7 +378,7 @@ DO $$ BEGIN RAISE NOTICE '✅ winner_wallets_nft_to_claim table created'; END $$
 CREATE INDEX IF NOT EXISTS idx_claims_season_user_wallet_lower
     ON claims(season_id, LOWER(user_wallet));
 CREATE INDEX IF NOT EXISTS idx_winners_snapshot_season_wallet_lower
-    ON winner_wallets_nft_to_claim(season_id, LOWER(wallet_address));
+    ON winner_wallets_nft_to_claim(season_id, LOWER(proxy_wallet));
 
 DO $$
 BEGIN
@@ -352,12 +396,17 @@ BEGIN
 END $$;
 
 -- Backfill snapshots for existing standard/genesis seasons (idempotent).
+-- Uses randomized rows from participants constrained to season "working events".
 DO $$
 DECLARE
     backfilled_count INTEGER := 0;
 BEGIN
     IF to_regclass('public.user_closed_positions') IS NULL THEN
-        RAISE NOTICE '⚠️  user_closed_positions table not found, skipping origin snapshots backfill';
+        RAISE NOTICE '⚠️  user_closed_positions table not found, skipping winners backfill';
+        RETURN;
+    END IF;
+    IF to_regclass('public.participants') IS NULL THEN
+        RAISE NOTICE '⚠️  participants relation not found, skipping winners backfill';
         RETURN;
     END IF;
 
@@ -380,260 +429,157 @@ BEGIN
                 ELSE 20
             END AS rank_limit,
             CASE
-                WHEN s.type = 'standard' THEN 'top_pnl_10d_lagged_standard_backfill'
-                ELSE 'top_pnl_genesis_window_backfill'
+                WHEN s.type = 'standard' THEN 'participants_randomized_standard_backfill'
+                ELSE 'participants_randomized_genesis_backfill'
             END AS snapshot_source
         FROM seasons s
         WHERE s.type IN ('standard', 'genesis')
           AND NOT EXISTS (
               SELECT 1
-              FROM winner_wallets_nft_to_claim sow
-              WHERE sow.season_id = s.id
+              FROM winner_wallets_nft_to_claim w
+              WHERE w.season_id = s.id
           )
     ),
     inserted AS (
         INSERT INTO winner_wallets_nft_to_claim (
             season_id,
-            wallet_address,
+            proxy_wallet,
             source,
-            total_pnl_window,
-            pnl_rank,
             window_start,
             window_end,
             snapshot_at,
             event_id,
-            market_id,
-            condition_id,
             event_slug,
-            event_title
+            entry_cwap,
+            total_volume,
+            total_pnl,
+            roi_percentage,
+            entry_bracket,
+            edge,
+            yield,
+            gravity,
+            rank
         )
         SELECT
             ts.id AS season_id,
-            ranked.wallet_address,
+            picked.proxy_wallet,
             ts.snapshot_source::TEXT AS source,
-            ranked.total_pnl_window,
-            ranked.pnl_rank,
             ts.window_start AS window_start,
             ts.window_end AS window_end,
             NOW() AS snapshot_at,
-            qp.event_id,
-            qp.market_id,
-            qp.condition_id,
-            qp.event_slug,
-            qp.title AS event_title
+            picked.event_id,
+            picked.event_slug,
+            picked.entry_cwap,
+            picked.total_volume,
+            picked.total_pnl,
+            picked.roi_percentage,
+            picked.entry_bracket,
+            picked.edge,
+            picked.yield,
+            picked.gravity,
+            picked.rank
         FROM target_seasons ts
         CROSS JOIN LATERAL (
-            WITH pnl_window AS (
+            WITH position_base AS (
                 SELECT
-                    LOWER(proxy_wallet) AS wallet_address,
-                    SUM(realized_pnl) AS total_pnl_window
-                FROM user_closed_positions
-                WHERE proxy_wallet IS NOT NULL
-                  AND COALESCE(
-                        end_date_parsed,
-                        timestamp_human,
-                        TO_TIMESTAMP(timestamp_unix)
-                      ) >= ts.window_start
-                  AND COALESCE(
-                        end_date_parsed,
-                        timestamp_human,
-                        TO_TIMESTAMP(timestamp_unix)
-                      ) < ts.window_end
-                GROUP BY LOWER(proxy_wallet)
-                HAVING SUM(realized_pnl) > 0
+                    LOWER(ucp.proxy_wallet) AS proxy_wallet,
+                    COALESCE(
+                        ucp.end_date_parsed,
+                        ucp.timestamp_human,
+                        TO_TIMESTAMP(ucp.timestamp_unix)
+                    ) AS position_time,
+                    COALESCE(
+                        ucp.event_id,
+                        e_by_slug.id
+                    ) AS event_id,
+                    COALESCE(ucp.event_slug, e_by_id.slug, e_by_slug.slug) AS event_slug
+                FROM user_closed_positions ucp
+                LEFT JOIN events e_by_id
+                    ON ucp.event_id IS NOT NULL
+                   AND e_by_id.id = ucp.event_id
+                LEFT JOIN LATERAL (
+                    SELECT e.id, e.slug
+                    FROM events e
+                    WHERE ucp.event_slug IS NOT NULL
+                      AND e.slug = ucp.event_slug
+                    LIMIT 1
+                ) e_by_slug ON TRUE
+                WHERE ucp.proxy_wallet IS NOT NULL
             ),
-            ranked AS (
+            resolved_positions AS (
                 SELECT
-                    wallet_address,
-                    total_pnl_window,
-                    ROW_NUMBER() OVER (ORDER BY total_pnl_window DESC, wallet_address ASC) AS pnl_rank
-                FROM pnl_window
+                    pb.event_id,
+                    pb.event_slug,
+                    CASE
+                        WHEN ts.type = 'standard' THEN COALESCE(erq.resolution_ready_at, erq.closed_time)
+                        ELSE pb.position_time
+                    END AS season_anchor_at
+                FROM position_base pb
+                LEFT JOIN event_resolution_queue erq
+                    ON erq.event_id = pb.event_id
+                WHERE (
+                    ts.type = 'standard'
+                    AND pb.event_id IS NOT NULL
+                    AND COALESCE(erq.closed, FALSE) = TRUE
+                    AND COALESCE(erq.resolution_ready_at, erq.closed_time) IS NOT NULL
+                    AND COALESCE(erq.resolution_ready_at, erq.closed_time) >= ts.window_start
+                    AND COALESCE(erq.resolution_ready_at, erq.closed_time) < ts.window_end
+                ) OR (
+                    ts.type = 'genesis'
+                    AND pb.position_time IS NOT NULL
+                    AND pb.position_time >= ts.window_start
+                    AND pb.position_time < ts.window_end
+                )
             ),
-            enough_data AS (
-                SELECT COUNT(*) AS wallet_count
-                FROM ranked
+            working_events AS (
+                SELECT DISTINCT event_id, event_slug
+                FROM resolved_positions
+                WHERE event_id IS NOT NULL OR event_slug IS NOT NULL
+            ),
+            candidate_participants AS (
+                SELECT p.*
+                FROM participants p
+                WHERE p.proxy_wallet IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM working_events we
+                      WHERE (
+                          we.event_id IS NOT NULL
+                          AND p.event_id = we.event_id
+                      ) OR (
+                          we.event_slug IS NOT NULL
+                          AND p.event_slug = we.event_slug
+                      )
+                  )
+            ),
+            per_wallet_random AS (
+                SELECT DISTINCT ON (LOWER(p.proxy_wallet))
+                    LOWER(p.proxy_wallet) AS proxy_wallet,
+                    p.event_id,
+                    p.event_slug,
+                    p.entry_cwap,
+                    p.total_volume,
+                    p.total_pnl,
+                    p.roi_percentage,
+                    p.entry_bracket,
+                    p.edge,
+                    p.yield,
+                    p.gravity,
+                    p.rank
+                FROM candidate_participants p
+                ORDER BY LOWER(p.proxy_wallet), RANDOM()
             )
-            SELECT
-                r.wallet_address,
-                r.total_pnl_window,
-                r.pnl_rank
-            FROM ranked r
-            CROSS JOIN enough_data d
-            WHERE d.wallet_count >= ts.rank_limit
-              AND r.pnl_rank <= ts.rank_limit
-        ) AS ranked
-        LEFT JOIN LATERAL (
-            SELECT DISTINCT ON (LOWER(ucp.proxy_wallet))
-                COALESCE(
-                    ucp.event_id,
-                    m_by_id.event_id,
-                    m_by_condition.event_id,
-                    e_by_slug.id,
-                    e_by_title.id
-                ) AS event_id,
-                COALESCE(ucp.market_id, m_by_id.id, m_by_condition.id) AS market_id,
-                COALESCE(ucp.condition_id, m_by_id.condition_id, m_by_condition.condition_id) AS condition_id,
-                COALESCE(ucp.event_slug, e_by_id.slug, e_by_slug.slug, e_by_title.slug) AS event_slug,
-                COALESCE(ucp.title, e_by_id.title, e_by_slug.title, e_by_title.title) AS title
-            FROM user_closed_positions ucp
-            LEFT JOIN markets m_by_id
-                ON ucp.market_id IS NOT NULL
-               AND m_by_id.id = ucp.market_id
-            LEFT JOIN markets m_by_condition
-                ON m_by_id.id IS NULL
-               AND ucp.condition_id IS NOT NULL
-               AND m_by_condition.condition_id = ucp.condition_id
-            LEFT JOIN events e_by_id
-                ON e_by_id.id = COALESCE(ucp.event_id, m_by_id.event_id, m_by_condition.event_id)
-            LEFT JOIN LATERAL (
-                SELECT e.id, e.slug, e.title
-                FROM events e
-                WHERE ucp.event_slug IS NOT NULL
-                  AND e.slug = ucp.event_slug
-                LIMIT 1
-            ) e_by_slug
-                ON e_by_id.id IS NULL
-            LEFT JOIN LATERAL (
-                SELECT e.id, e.slug, e.title
-                FROM events e
-                WHERE ucp.title IS NOT NULL
-                  AND e.title = ucp.title
-                LIMIT 1
-            ) e_by_title
-                ON e_by_id.id IS NULL
-               AND e_by_slug.id IS NULL
-            WHERE ucp.proxy_wallet IS NOT NULL
-              AND LOWER(ucp.proxy_wallet) = ranked.wallet_address
-              AND COALESCE(
-                    ucp.end_date_parsed,
-                    ucp.timestamp_human,
-                    TO_TIMESTAMP(ucp.timestamp_unix)
-                  ) >= ts.window_start
-              AND COALESCE(
-                    ucp.end_date_parsed,
-                    ucp.timestamp_human,
-                    TO_TIMESTAMP(ucp.timestamp_unix)
-                  ) < ts.window_end
-            ORDER BY
-                LOWER(ucp.proxy_wallet),
-                ucp.realized_pnl DESC,
-                COALESCE(
-                    ucp.end_date_parsed,
-                    ucp.timestamp_human,
-                    TO_TIMESTAMP(ucp.timestamp_unix)
-                ) DESC
-        ) qp ON TRUE
+            SELECT *
+            FROM per_wallet_random
+            ORDER BY RANDOM()
+            LIMIT ts.rank_limit
+        ) AS picked
         RETURNING 1
     )
     SELECT COUNT(*) INTO backfilled_count
     FROM inserted;
 
     RAISE NOTICE '✅ winner_wallets_nft_to_claim backfill rows inserted: %', backfilled_count;
-END $$;
-
--- Enrich existing rows where market/event context was not captured before this migration.
-DO $$
-DECLARE
-    enriched_count INTEGER := 0;
-BEGIN
-    IF to_regclass('public.user_closed_positions') IS NULL THEN
-        RETURN;
-    END IF;
-
-    WITH candidates AS (
-        SELECT
-            w.id,
-            q.event_id,
-            q.market_id,
-            q.condition_id,
-            q.event_slug,
-            q.event_title
-        FROM winner_wallets_nft_to_claim w
-        LEFT JOIN LATERAL (
-            SELECT DISTINCT ON (LOWER(ucp.proxy_wallet))
-                COALESCE(
-                    ucp.event_id,
-                    m_by_id.event_id,
-                    m_by_condition.event_id,
-                    e_by_slug.id,
-                    e_by_title.id
-                ) AS event_id,
-                COALESCE(ucp.market_id, m_by_id.id, m_by_condition.id) AS market_id,
-                COALESCE(ucp.condition_id, m_by_id.condition_id, m_by_condition.condition_id) AS condition_id,
-                COALESCE(ucp.event_slug, e_by_id.slug, e_by_slug.slug, e_by_title.slug) AS event_slug,
-                COALESCE(ucp.title, e_by_id.title, e_by_slug.title, e_by_title.title) AS event_title
-            FROM user_closed_positions ucp
-            LEFT JOIN markets m_by_id
-                ON ucp.market_id IS NOT NULL
-               AND m_by_id.id = ucp.market_id
-            LEFT JOIN markets m_by_condition
-                ON m_by_id.id IS NULL
-               AND ucp.condition_id IS NOT NULL
-               AND m_by_condition.condition_id = ucp.condition_id
-            LEFT JOIN events e_by_id
-                ON e_by_id.id = COALESCE(ucp.event_id, m_by_id.event_id, m_by_condition.event_id)
-            LEFT JOIN LATERAL (
-                SELECT e.id, e.slug, e.title
-                FROM events e
-                WHERE ucp.event_slug IS NOT NULL
-                  AND e.slug = ucp.event_slug
-                LIMIT 1
-            ) e_by_slug
-                ON e_by_id.id IS NULL
-            LEFT JOIN LATERAL (
-                SELECT e.id, e.slug, e.title
-                FROM events e
-                WHERE ucp.title IS NOT NULL
-                  AND e.title = ucp.title
-                LIMIT 1
-            ) e_by_title
-                ON e_by_id.id IS NULL
-               AND e_by_slug.id IS NULL
-            WHERE ucp.proxy_wallet IS NOT NULL
-              AND LOWER(ucp.proxy_wallet) = LOWER(w.wallet_address)
-              AND COALESCE(
-                    ucp.end_date_parsed,
-                    ucp.timestamp_human,
-                    TO_TIMESTAMP(ucp.timestamp_unix)
-                  ) >= w.window_start
-              AND COALESCE(
-                    ucp.end_date_parsed,
-                    ucp.timestamp_human,
-                    TO_TIMESTAMP(ucp.timestamp_unix)
-                  ) < w.window_end
-            ORDER BY
-                LOWER(ucp.proxy_wallet),
-                ucp.realized_pnl DESC,
-                COALESCE(
-                    ucp.end_date_parsed,
-                    ucp.timestamp_human,
-                    TO_TIMESTAMP(ucp.timestamp_unix)
-                ) DESC
-        ) q ON TRUE
-        WHERE (
-            w.event_id IS NULL
-            OR w.market_id IS NULL
-            OR w.condition_id IS NULL
-            OR w.event_slug IS NULL
-            OR w.event_title IS NULL
-        )
-    ),
-    updated AS (
-        UPDATE winner_wallets_nft_to_claim w
-        SET
-            event_id = COALESCE(w.event_id, c.event_id),
-            market_id = COALESCE(w.market_id, c.market_id),
-            condition_id = COALESCE(w.condition_id, c.condition_id),
-            event_slug = COALESCE(w.event_slug, c.event_slug),
-            event_title = COALESCE(w.event_title, c.event_title)
-        FROM candidates c
-        WHERE w.id = c.id
-        RETURNING 1
-    )
-    SELECT COUNT(*) INTO enriched_count
-    FROM updated;
-
-    RAISE NOTICE '✅ winner_wallets_nft_to_claim metadata enriched rows: %', enriched_count;
 END $$;
 
 -- Compatibility view: Origins for currently active standard season.
@@ -654,13 +600,13 @@ WITH active_standard AS (
     LIMIT 1
 )
 SELECT
-    sow.wallet_address,
+    sow.proxy_wallet AS wallet_address,
     sow.source,
-    sow.total_pnl_window AS total_pnl_30d,
-    sow.pnl_rank
+    sow.total_pnl AS total_pnl_30d,
+    sow.rank AS pnl_rank
 FROM winner_wallets_nft_to_claim sow
 JOIN active_standard a ON a.id = sow.season_id
-ORDER BY sow.pnl_rank, sow.wallet_address;
+ORDER BY sow.rank NULLS LAST, sow.proxy_wallet;
 
 COMMENT ON VIEW v_origin_wallets IS 'Compatibility view returning Origins wallets snapshot for currently active standard season.';
 
@@ -745,7 +691,7 @@ SELECT
     c.season_id as claimed_season_id,
     c.timestamp as claim_timestamp
 FROM v_origin_wallets vo
-LEFT JOIN claims c ON LOWER(vo.wallet_address) = LOWER(c.user_wallet) 
+LEFT JOIN claims c ON LOWER(vo.wallet_address) = LOWER(c.user_wallet)
     AND c.phase_type = 'vault'
     AND c.status = 'COMPLETED';
 
@@ -774,7 +720,7 @@ BEGIN
         SELECT 1
         FROM winner_wallets_nft_to_claim sow
         JOIN active_standard a ON a.id = sow.season_id
-        WHERE LOWER(sow.wallet_address) = LOWER(wallet_addr)
+        WHERE LOWER(sow.proxy_wallet) = LOWER(wallet_addr)
     );
 END;
 $$ LANGUAGE plpgsql STABLE;

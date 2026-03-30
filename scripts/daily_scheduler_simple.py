@@ -69,9 +69,7 @@ STANDARD_SEASON_TOTAL_SUPPLY_TEST = 10
 STANDARD_SEASON_ACTIVE_DAYS = 9
 STANDARD_SEASON_CYCLE_DAYS = 10
 ORIGIN_LOOKBACK_DAYS_STANDARD = 10
-ORIGIN_TOP_WALLETS_STANDARD = 10
-ORIGIN_TOP_WALLETS_GENESIS = 20
-GENESIS_SEASON_TOTAL_SUPPLY_TEST = 15
+GENESIS_SEASON_TOTAL_SUPPLY_TEST = 2000
 GENESIS_SEASON_FAR_FUTURE_END = datetime(9999, 12, 31, tzinfo=timezone.utc)
 GAMMA_API_BASE_URL = "https://gamma-api.polymarket.com"
 
@@ -1058,15 +1056,16 @@ class SimplifiedScheduler:
 
     def _snapshot_origin_wallets_for_season(self, cursor, season_id: int, season_start_date: datetime) -> int:
         """
-        Freeze Origins list at season start and persist it into winner_wallets_nft_to_claim.
+        Freeze season winners snapshot at season start into winner_wallets_nft_to_claim.
 
         Rules:
         - standard: [season_start - ORIGIN_SNAPSHOT_OFFSET_DAYS - 10d, season_start - ORIGIN_SNAPSHOT_OFFSET_DAYS)
                     bound by event resolution anchor (resolution_ready_at/closed_time), not end_date
         - genesis: [GENESIS_START_DATE, GENESIS_END_DATE + 1 day)
-        - include only wallets with positive realized PnL sum
-        - standard keeps top-10, genesis keeps top-20
-        - require at least N eligible wallets, otherwise save none
+        - derive working events from positions in the selected window
+        - sample random participant rows from participants for those events
+        - enforce unique wallet per season (one proxy wallet max)
+        - sample size follows season NFT supply (standard/genesis)
         """
         season_start_date = self._utc_day_start(season_start_date)
 
@@ -1085,8 +1084,8 @@ class SimplifiedScheduler:
             # Snapshot window is season-driven: previous cycle boundary.
             window_end = season_start_date - timedelta(days=ORIGIN_SNAPSHOT_OFFSET_DAYS)
             window_start = window_end - timedelta(days=ORIGIN_LOOKBACK_DAYS_STANDARD)
-            source = "top_pnl_10d_resolution_ready_standard"
-            rank_limit = ORIGIN_TOP_WALLETS_STANDARD
+            source = "participants_randomized_resolution_ready_standard"
+            rank_limit = STANDARD_SEASON_TOTAL_SUPPLY_TEST
             use_resolution_anchor = True
         else:
             window_start = datetime.combine(GENESIS_START_DATE, datetime.min.time(), tzinfo=timezone.utc)
@@ -1096,8 +1095,8 @@ class SimplifiedScheduler:
                 datetime.min.time(),
                 tzinfo=timezone.utc,
             )
-            source = "top_pnl_genesis_window"
-            rank_limit = ORIGIN_TOP_WALLETS_GENESIS
+            source = "participants_randomized_genesis_window"
+            rank_limit = GENESIS_SEASON_TOTAL_SUPPLY_TEST
             use_resolution_anchor = False
 
         # Idempotent re-snapshot in case of retries / manual re-initialization.
@@ -1112,8 +1111,7 @@ class SimplifiedScheduler:
             """
             WITH position_base AS (
                 SELECT
-                    LOWER(ucp.proxy_wallet) AS wallet_address,
-                    ucp.realized_pnl,
+                    LOWER(ucp.proxy_wallet) AS proxy_wallet,
                     COALESCE(
                         ucp.end_date_parsed,
                         ucp.timestamp_human,
@@ -1121,63 +1119,38 @@ class SimplifiedScheduler:
                     ) AS position_time,
                     COALESCE(
                         ucp.event_id,
-                        m_by_id.event_id,
-                        m_by_condition.event_id,
-                        e_by_slug.id,
-                        e_by_title.id
-                    ) AS derived_event_id,
-                    COALESCE(ucp.market_id, m_by_id.id, m_by_condition.id) AS market_id,
-                    COALESCE(ucp.condition_id, m_by_id.condition_id, m_by_condition.condition_id) AS condition_id,
-                    COALESCE(ucp.event_slug, e_by_id.slug, e_by_slug.slug, e_by_title.slug) AS event_slug,
-                    COALESCE(ucp.title, e_by_id.title, e_by_slug.title, e_by_title.title) AS title
+                        e_by_slug.id
+                    ) AS event_id,
+                    COALESCE(ucp.event_slug, e_by_id.slug, e_by_slug.slug) AS event_slug
                 FROM user_closed_positions ucp
-                LEFT JOIN markets m_by_id
-                    ON ucp.market_id IS NOT NULL
-                   AND m_by_id.id = ucp.market_id
-                LEFT JOIN markets m_by_condition
-                    ON m_by_id.id IS NULL
-                   AND ucp.condition_id IS NOT NULL
-                   AND m_by_condition.condition_id = ucp.condition_id
                 LEFT JOIN events e_by_id
-                    ON e_by_id.id = COALESCE(ucp.event_id, m_by_id.event_id, m_by_condition.event_id)
+                    ON ucp.event_id IS NOT NULL
+                   AND e_by_id.id = ucp.event_id
                 LEFT JOIN LATERAL (
-                    SELECT e.id, e.slug, e.title
+                    SELECT e.id, e.slug
                     FROM events e
                     WHERE ucp.event_slug IS NOT NULL
                       AND e.slug = ucp.event_slug
                     LIMIT 1
                 ) e_by_slug
-                    ON e_by_id.id IS NULL
-                LEFT JOIN LATERAL (
-                    SELECT e.id, e.slug, e.title
-                    FROM events e
-                    WHERE ucp.title IS NOT NULL
-                      AND e.title = ucp.title
-                    LIMIT 1
-                ) e_by_title
-                    ON e_by_id.id IS NULL
-                   AND e_by_slug.id IS NULL
+                    ON TRUE
                 WHERE ucp.proxy_wallet IS NOT NULL
             ),
             resolved_positions AS (
                 SELECT
-                    pb.wallet_address,
-                    pb.realized_pnl,
-                    pb.derived_event_id AS event_id,
-                    pb.market_id,
-                    pb.condition_id,
+                    pb.proxy_wallet,
+                    pb.event_id,
                     pb.event_slug,
-                    pb.title,
                     CASE
                         WHEN %s = TRUE THEN COALESCE(erq.resolution_ready_at, erq.closed_time)
                         ELSE pb.position_time
                     END AS season_anchor_at
                 FROM position_base pb
                 LEFT JOIN event_resolution_queue erq
-                  ON erq.event_id = pb.derived_event_id
+                  ON erq.event_id = pb.event_id
                 WHERE (
                     %s = TRUE
-                    AND pb.derived_event_id IS NOT NULL
+                    AND pb.event_id IS NOT NULL
                     AND COALESCE(erq.closed, FALSE) = TRUE
                     AND COALESCE(erq.resolution_ready_at, erq.closed_time) IS NOT NULL
                     AND COALESCE(erq.resolution_ready_at, erq.closed_time) >= %s
@@ -1189,69 +1162,89 @@ class SimplifiedScheduler:
                     AND pb.position_time < %s
                 )
             ),
-            pnl_window AS (
-                SELECT
-                    wallet_address,
-                    SUM(realized_pnl) AS total_pnl_window
+            working_events AS (
+                SELECT DISTINCT event_id, event_slug
                 FROM resolved_positions
-                GROUP BY wallet_address
-                HAVING SUM(realized_pnl) > 0
+                WHERE event_id IS NOT NULL OR event_slug IS NOT NULL
             ),
-            qualifying_position AS (
-                SELECT DISTINCT ON (rp.wallet_address)
-                    rp.wallet_address,
-                    rp.event_id,
-                    rp.market_id,
-                    rp.condition_id,
-                    rp.event_slug,
-                    rp.title
-                FROM resolved_positions rp
-                ORDER BY
-                    rp.wallet_address,
-                    rp.realized_pnl DESC,
-                    rp.season_anchor_at DESC
-            ),
-            ranked AS (
+            candidate_participants AS (
                 SELECT
-                    wallet_address,
-                    total_pnl_window,
-                    ROW_NUMBER() OVER (ORDER BY total_pnl_window DESC, wallet_address ASC) AS pnl_rank
-                FROM pnl_window
+                    p.*
+                FROM participants p
+                WHERE p.proxy_wallet IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM working_events we
+                      WHERE (
+                          we.event_id IS NOT NULL
+                          AND p.event_id = we.event_id
+                      ) OR (
+                          we.event_slug IS NOT NULL
+                          AND p.event_slug = we.event_slug
+                      )
+                  )
+            ),
+            per_wallet_random AS (
+                SELECT DISTINCT ON (LOWER(p.proxy_wallet))
+                    LOWER(p.proxy_wallet) AS proxy_wallet,
+                    p.event_id,
+                    p.event_slug,
+                    p.entry_cwap,
+                    p.total_volume,
+                    p.total_pnl,
+                    p.roi_percentage,
+                    p.entry_bracket,
+                    p.edge,
+                    p.yield,
+                    p.gravity,
+                    p.rank
+                FROM candidate_participants p
+                ORDER BY LOWER(p.proxy_wallet), RANDOM()
+            ),
+            sampled AS (
+                SELECT *
+                FROM per_wallet_random
+                ORDER BY RANDOM()
+                LIMIT %s
             )
             INSERT INTO winner_wallets_nft_to_claim (
                 season_id,
-                wallet_address,
+                proxy_wallet,
                 source,
-                total_pnl_window,
-                pnl_rank,
                 window_start,
                 window_end,
                 snapshot_at,
                 event_id,
-                market_id,
-                condition_id,
                 event_slug,
-                event_title
+                entry_cwap,
+                total_volume,
+                total_pnl,
+                roi_percentage,
+                entry_bracket,
+                edge,
+                yield,
+                gravity,
+                rank
             )
             SELECT
                 %s AS season_id,
-                r.wallet_address,
+                s.proxy_wallet,
                 %s::TEXT AS source,
-                r.total_pnl_window,
-                r.pnl_rank,
                 %s AS window_start,
                 %s AS window_end,
                 NOW() AS snapshot_at,
-                qp.event_id,
-                qp.market_id,
-                qp.condition_id,
-                qp.event_slug,
-                qp.title AS event_title
-            FROM ranked r
-            LEFT JOIN qualifying_position qp
-                ON qp.wallet_address = r.wallet_address
-            WHERE r.pnl_rank <= %s
-            ORDER BY r.pnl_rank
+                s.event_id,
+                s.event_slug,
+                s.entry_cwap,
+                s.total_volume,
+                s.total_pnl,
+                s.roi_percentage,
+                s.entry_bracket,
+                s.edge,
+                s.yield,
+                s.gravity,
+                s.rank
+            FROM sampled s
             """,
             (
                 use_resolution_anchor,
@@ -1261,11 +1254,11 @@ class SimplifiedScheduler:
                 use_resolution_anchor,
                 window_start,
                 window_end,
+                rank_limit,
                 season_id,
                 source,
                 window_start,
                 window_end,
-                rank_limit,
             ),
         )
         return int(cursor.rowcount or 0)
@@ -1918,7 +1911,7 @@ class SimplifiedScheduler:
 
     def refresh_participants_snapshot(self) -> Dict:
         """
-        Full refresh of participants snapshot table from sql/queries/participants.sql.
+        Full refresh of participants materialized view.
         Runs as a post-downstream step.
         """
         print(f"\n{'='*70}")
@@ -1929,49 +1922,51 @@ class SimplifiedScheduler:
             print("🔍 DRY RUN - Skipping")
             return {'success': True, 'skipped': True, 'records': 0}
 
-        query_path = os.path.join(project_root, 'sql', 'queries', 'participants.sql')
-        if not os.path.exists(query_path):
-            msg = f"Participants SQL query not found: {query_path}"
-            print(f"❌ {msg}")
-            return {'success': False, 'error': msg, 'records': 0}
-
         start_time = time.time()
         conn = self.manager.get_connection()
-        cursor = conn.cursor()
+        prev_autocommit = conn.autocommit
+        cursor = None
         try:
-            with open(query_path, 'r', encoding='utf-8') as f:
-                participants_query = f.read().strip().rstrip(';')
-
-            cursor.execute("TRUNCATE TABLE participants")
-            cursor.execute(
-                f"""
-                INSERT INTO participants (
-                    proxy_wallet,
-                    event_slug,
-                    entry_cwap,
-                    total_volume,
-                    total_pnl,
-                    roi_percentage,
-                    risk,
-                    skill,
-                    influence,
-                    rank
+            # REFRESH ... CONCURRENTLY must run outside an explicit transaction block.
+            conn.autocommit = True
+            cursor = conn.cursor()
+            used_concurrent_refresh = True
+            try:
+                cursor.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY participants")
+            except Exception as concurrent_err:
+                print(
+                    "⚠️ Concurrent refresh unavailable, falling back to standard refresh: "
+                    f"{concurrent_err}"
                 )
-                {participants_query}
-                """
-            )
-            inserted = cursor.rowcount if cursor.rowcount is not None else 0
-            conn.commit()
+                used_concurrent_refresh = False
+                cursor.execute("REFRESH MATERIALIZED VIEW participants")
+
+            cursor.execute("SELECT COUNT(*) FROM participants")
+            row = cursor.fetchone()
+            refreshed_rows = int(row[0] or 0) if row else 0
+
             duration = time.time() - start_time
-            print(f"\n✅ Completed ({duration:.1f}s) - {inserted:,} rows refreshed")
-            return {'success': True, 'duration': duration, 'records': int(inserted)}
+            mode = "concurrent" if used_concurrent_refresh else "standard"
+            print(
+                f"\n✅ Completed ({duration:.1f}s) - {refreshed_rows:,} rows refreshed "
+                f"({mode} refresh)"
+            )
+            return {
+                'success': True,
+                'duration': duration,
+                'records': refreshed_rows,
+                'refresh_mode': mode,
+            }
         except Exception as e:
-            conn.rollback()
+            if not conn.autocommit:
+                conn.rollback()
             duration = time.time() - start_time
             print(f"\n❌ Failed ({duration:.1f}s): {e}")
             return {'success': False, 'duration': duration, 'error': str(e), 'records': 0}
         finally:
-            cursor.close()
+            conn.autocommit = prev_autocommit
+            if cursor is not None:
+                cursor.close()
             conn.close()
     
     def run_daily_pipeline(self, force: bool = False) -> Dict:

@@ -913,11 +913,11 @@ def wallet_ticker(limit: int = 100) -> Dict[str, Any]:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT wallet_address
+                SELECT proxy_wallet AS wallet_address
                 FROM (
-                    SELECT DISTINCT lower(wallet_address) AS wallet_address
+                    SELECT DISTINCT lower(proxy_wallet) AS proxy_wallet
                     FROM winner_wallets_nft_to_claim
-                    WHERE wallet_address IS NOT NULL
+                    WHERE proxy_wallet IS NOT NULL
                 ) t
                 ORDER BY random()
                 LIMIT %s

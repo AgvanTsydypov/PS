@@ -2,6 +2,7 @@ WITH event_aggregates AS (
     -- Step 1: Calculate the core metrics per wallet, per event
     SELECT 
         proxy_wallet,
+        MAX(event_id) AS event_id,
         event_slug,
         
         -- True USDC spent (Avg Price * Shares)
@@ -22,16 +23,18 @@ WITH event_aggregates AS (
         event_slug
 ),
 filtered_traders AS (
-    -- Step 2: Expand the funnel. Floor set at 0.001 to remove broken data/0-tick glitches.
+    -- Step 2: Expand the funnel and remove late-stage bot-like entries.
     SELECT * FROM event_aggregates
     WHERE capital_weighted_vwap >= 0.001
+      AND capital_weighted_vwap < 0.97
 ),
 ranked_traders AS (
-    -- Step 3: Calculate dynamic percentiles for ROI and Volume within each event
+    -- Step 3: Calculate dynamic percentiles for relative metrics within each event
     SELECT 
         *,
         PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_roi ASC) AS roi_percentile,
-        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_volume_usdc ASC) AS volume_percentile
+        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_volume_usdc ASC) AS volume_percentile,
+        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY capital_weighted_vwap ASC) AS vwap_percentile
     FROM 
         filtered_traders
 ),
@@ -46,43 +49,51 @@ leaderboard_latest AS (
       AND order_by = 'PNL'
     ORDER BY proxy_wallet, fetched_date DESC, fetched_at DESC
 )
--- Step 5: Final Output & 1:1 UI Mapping
+-- Step 5: Final Output & UI Mapping (4-metric signature)
 SELECT 
     rt.proxy_wallet,
+    rt.event_id,
     rt.event_slug,
     ROUND(rt.capital_weighted_vwap, 4) AS entry_cwap,
     ROUND(rt.event_volume_usdc, 2) AS total_volume,
     ROUND(rt.event_pnl, 2) AS total_pnl,
     ROUND(rt.event_roi * 100, 2) AS roi_percentage,
     
-    -- Risk: The Behavioral Archetype
+    -- 1) ENTRY (Absolute): What true odds/probability did they buy into?
     CASE 
-        WHEN rt.capital_weighted_vwap <= 0.20 THEN 'Oracle'
-        WHEN rt.capital_weighted_vwap <= 0.50 THEN 'Outlier'
-        WHEN rt.capital_weighted_vwap <= 0.70 THEN 'Momentum'
-        WHEN rt.capital_weighted_vwap <= 0.90 THEN 'Validator'
+        WHEN rt.capital_weighted_vwap <= 0.20 THEN 'Anomaly'
+        WHEN rt.capital_weighted_vwap <= 0.40 THEN 'Oracle'
+        WHEN rt.capital_weighted_vwap <= 0.60 THEN 'Outlier'
+        WHEN rt.capital_weighted_vwap <= 0.80 THEN 'Vector'
         ELSE 'Harvester'
-    END AS risk,
+    END AS entry_bracket,
 
-    -- Skill: Capital Efficiency Percentile
+    -- 2) RISK (Relative): How early were they compared to the event cohort?
     CASE 
-        WHEN rt.roi_percentile >= 0.999 THEN 'P999'
+        WHEN rt.vwap_percentile <= 0.010 THEN 'P99'
+        WHEN rt.vwap_percentile <= 0.100 THEN 'P90'
+        WHEN rt.vwap_percentile <= 0.300 THEN 'P70'
+        WHEN rt.vwap_percentile <= 0.500 THEN 'P50'
+        ELSE 'Base'
+    END AS edge,
+
+    -- 3) SKILL: Capital Efficiency Percentile
+    CASE 
         WHEN rt.roi_percentile >= 0.99 THEN 'P99'
-        WHEN rt.roi_percentile >= 0.95 THEN 'P95'
-        WHEN rt.roi_percentile >= 0.80 THEN 'P80'
+        WHEN rt.roi_percentile >= 0.90 THEN 'P90'
+        WHEN rt.roi_percentile >= 0.70 THEN 'P70'
         WHEN rt.roi_percentile >= 0.50 THEN 'P50'
         ELSE 'Base'
-    END AS skill,
+    END AS yield,
 
-    -- Volume: Capital Footprint Percentile
+    -- 4) INFLUENCE: Capital Footprint Percentile
     CASE 
-        WHEN rt.volume_percentile >= 0.999 THEN 'P999'
         WHEN rt.volume_percentile >= 0.99 THEN 'P99'
-        WHEN rt.volume_percentile >= 0.95 THEN 'P95'
-        WHEN rt.volume_percentile >= 0.80 THEN 'P80'
+        WHEN rt.volume_percentile >= 0.90 THEN 'P90'
+        WHEN rt.volume_percentile >= 0.70 THEN 'P70'
         WHEN rt.volume_percentile >= 0.50 THEN 'P50'
         ELSE 'Base'
-    END AS influence,
+    END AS gravity,
     ll.rank
 
 FROM 

@@ -885,7 +885,7 @@ class SeasonWorkbenchService:
                 if wallet_filter == "origin":
                     cursor.execute(
                         """
-                        SELECT DISTINCT lower(wallet_address) AS wallet
+                        SELECT DISTINCT lower(proxy_wallet) AS wallet
                         FROM winner_wallets_nft_to_claim
                         WHERE season_id = %s
                         ORDER BY wallet
@@ -901,7 +901,7 @@ class SeasonWorkbenchService:
                     cursor.execute(
                         """
                         WITH origin_wallets AS (
-                            SELECT lower(wallet_address) AS wallet
+                            SELECT lower(proxy_wallet) AS wallet
                             FROM winner_wallets_nft_to_claim
                             WHERE season_id = %s
                         ),
@@ -1000,7 +1000,7 @@ class SeasonWorkbenchService:
                     cursor.execute(
                         """
                         WITH origin_wallets AS (
-                            SELECT lower(wallet_address) AS wallet
+                            SELECT lower(proxy_wallet) AS wallet
                             FROM winner_wallets_nft_to_claim
                             WHERE season_id = %s
                         ),
@@ -1267,7 +1267,6 @@ class SeasonWorkbenchService:
     def _resolve_event_image_url(self, cursor: Any, row: Dict[str, Any]) -> Optional[str]:
         event_id = str(row.get("event_id") or "").strip()
         event_slug = str(row.get("event_slug") or "").strip()
-        event_title = str(row.get("event_title") or "").strip()
         if event_id:
             cursor.execute(
                 """
@@ -1290,17 +1289,6 @@ class SeasonWorkbenchService:
             image = self._extract_image(cursor.fetchone())
             if image:
                 return image
-        if event_title:
-            cursor.execute(
-                """
-                SELECT COALESCE(NULLIF(TRIM(image), ''), NULLIF(TRIM(icon), '')) AS event_image
-                FROM events WHERE title = %s LIMIT 1
-                """,
-                (event_title,),
-            )
-            image = self._extract_image(cursor.fetchone())
-            if image:
-                return image
         return None
 
     def _build_winner_allocation(
@@ -1313,24 +1301,28 @@ class SeasonWorkbenchService:
             "winner_row_id": int(row["id"]),
             "winner_wallet_address": str(row["wallet_address"]),
             "source": row.get("source"),
-            "total_pnl_window": float(row.get("total_pnl_window") or 0),
-            "pnl_rank": int(row.get("pnl_rank") or 0),
+            "total_pnl_window": float(row.get("total_pnl") or 0),
+            "pnl_rank": int(row.get("rank") or 0),
             "window_start": row.get("window_start").isoformat() if row.get("window_start") else None,
             "window_end": row.get("window_end").isoformat() if row.get("window_end") else None,
             "snapshot_at": row.get("snapshot_at").isoformat() if row.get("snapshot_at") else None,
             "event_id": row.get("event_id"),
-            "market_id": row.get("market_id"),
-            "condition_id": row.get("condition_id"),
             "event_slug": row.get("event_slug"),
-            "event_title": row.get("event_title"),
+            "entry_cwap": row.get("entry_cwap"),
+            "total_volume": row.get("total_volume"),
+            "roi_percentage": row.get("roi_percentage"),
+            "entry_bracket": row.get("entry_bracket"),
+            "edge": row.get("edge"),
+            "yield": row.get("yield"),
+            "gravity": row.get("gravity"),
             "event_image_url": event_image_url,
         }
         return WinnerClaimAllocation(
             row_id=int(row["id"]),
             winner_wallet_address=str(row["wallet_address"]),
             assignment_type=assignment_type,
-            pnl_value=float(row.get("total_pnl_window") or 0),
-            rank=int(row.get("pnl_rank") or 0),
+            pnl_value=float(row.get("total_pnl") or 0),
+            rank=int(row.get("rank") or 0),
             snapshot=snapshot,
         )
 
@@ -1342,23 +1334,27 @@ class SeasonWorkbenchService:
                     """
                     SELECT
                         id,
-                        wallet_address,
+                        proxy_wallet AS wallet_address,
                         source,
-                        total_pnl_window,
-                        pnl_rank,
                         window_start,
                         window_end,
                         snapshot_at,
                         event_id,
-                        market_id,
-                        condition_id,
                         event_slug,
-                        event_title,
+                        entry_cwap,
+                        total_volume,
+                        total_pnl,
+                        roi_percentage,
+                        entry_bracket,
+                        edge,
+                        yield,
+                        gravity,
+                        rank,
                         COALESCE(is_minted, FALSE) AS is_minted,
                         minted_to_wallet
                     FROM winner_wallets_nft_to_claim
                     WHERE season_id = %s
-                      AND LOWER(wallet_address) = LOWER(%s)
+                      AND LOWER(proxy_wallet) = LOWER(%s)
                     LIMIT 1
                     """,
                     (season_id, wallet),
@@ -1376,18 +1372,22 @@ class SeasonWorkbenchService:
                     """
                     SELECT
                         id,
-                        wallet_address,
+                        proxy_wallet AS wallet_address,
                         source,
-                        total_pnl_window,
-                        pnl_rank,
                         window_start,
                         window_end,
                         snapshot_at,
                         event_id,
-                        market_id,
-                        condition_id,
                         event_slug,
-                        event_title
+                        entry_cwap,
+                        total_volume,
+                        total_pnl,
+                        roi_percentage,
+                        entry_bracket,
+                        edge,
+                        yield,
+                        gravity,
+                        rank
                     FROM winner_wallets_nft_to_claim
                     WHERE season_id = %s
                       AND COALESCE(is_minted, FALSE) = FALSE
@@ -1916,13 +1916,15 @@ class SeasonWorkbenchService:
                     cursor.execute(
                         """
                         SELECT
-                            id, season_id, wallet_address, source, total_pnl_window, pnl_rank,
-                            window_start, window_end, snapshot_at, created_at, event_id, market_id,
-                            condition_id, event_slug, event_title, is_minted, minted_at,
+                            id, season_id, proxy_wallet AS wallet_address, source,
+                            window_start, window_end, snapshot_at, created_at,
+                            event_id, event_slug, entry_cwap, total_volume, total_pnl,
+                            roi_percentage, entry_bracket, edge, yield, gravity, rank,
+                            is_minted, minted_at,
                             minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
                             minted_tx_hash, minted_asset_address
                         FROM winner_wallets_nft_to_claim
-                        ORDER BY season_id DESC, pnl_rank ASC NULLS LAST, id DESC
+                        ORDER BY season_id DESC, rank ASC NULLS LAST, id DESC
                         LIMIT %s
                         """,
                         (safe_limit,),
@@ -1931,14 +1933,16 @@ class SeasonWorkbenchService:
                     cursor.execute(
                         """
                         SELECT
-                            id, season_id, wallet_address, source, total_pnl_window, pnl_rank,
-                            window_start, window_end, snapshot_at, created_at, event_id, market_id,
-                            condition_id, event_slug, event_title, is_minted, minted_at,
+                            id, season_id, proxy_wallet AS wallet_address, source,
+                            window_start, window_end, snapshot_at, created_at,
+                            event_id, event_slug, entry_cwap, total_volume, total_pnl,
+                            roi_percentage, entry_bracket, edge, yield, gravity, rank,
+                            is_minted, minted_at,
                             minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
                             minted_tx_hash, minted_asset_address
                         FROM winner_wallets_nft_to_claim
                         WHERE season_id = %s
-                        ORDER BY pnl_rank ASC NULLS LAST, id DESC
+                        ORDER BY rank ASC NULLS LAST, id DESC
                         LIMIT %s
                         """,
                         (season_id, safe_limit),
@@ -1973,20 +1977,22 @@ class SeasonWorkbenchService:
                 cursor.execute(
                     """
                     INSERT INTO winner_wallets_nft_to_claim (
-                        season_id, wallet_address, source, total_pnl_window, pnl_rank,
-                        window_start, window_end, snapshot_at, event_id, market_id, condition_id,
-                        event_slug, event_title, is_minted, minted_at, minted_to_wallet,
+                        season_id, proxy_wallet, source,
+                        window_start, window_end, snapshot_at,
+                        event_id, event_slug,
+                        is_minted, minted_at, minted_to_wallet,
                         minted_to_solana_wallet, minted_claim_id, minted_tx_hash, minted_asset_address
                     ) VALUES (
+                        %s, %s, %s,
                         %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s,
+                        %s, %s, %s,
                         %s, %s, %s, %s
                     )
                     RETURNING
-                        id, season_id, wallet_address, source, total_pnl_window, pnl_rank,
-                        window_start, window_end, snapshot_at, created_at, event_id, market_id,
-                        condition_id, event_slug, event_title, is_minted, minted_at,
+                        id, season_id, proxy_wallet AS wallet_address, source,
+                        window_start, window_end, snapshot_at, created_at,
+                        event_id, event_slug, entry_cwap, total_volume, total_pnl,
+                        roi_percentage, entry_bracket, edge, yield, gravity, rank, is_minted, minted_at,
                         minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
                         minted_tx_hash, minted_asset_address
                     """,
@@ -1994,16 +2000,11 @@ class SeasonWorkbenchService:
                         req.season_id,
                         wallet.lower(),
                         source,
-                        req.total_pnl_window,
-                        req.pnl_rank,
                         window_start,
                         window_end,
                         snapshot_at,
                         self._normalize_optional_text(req.event_id),
-                        self._normalize_optional_text(req.market_id),
-                        self._normalize_optional_text(req.condition_id),
                         self._normalize_optional_text(req.event_slug),
-                        self._normalize_optional_text(req.event_title),
                         req.is_minted,
                         minted_at,
                         self._normalize_optional_text(req.minted_to_wallet),
@@ -2053,18 +2054,13 @@ class SeasonWorkbenchService:
                     UPDATE winner_wallets_nft_to_claim
                     SET
                         season_id = %s,
-                        wallet_address = %s,
+                        proxy_wallet = %s,
                         source = %s,
-                        total_pnl_window = %s,
-                        pnl_rank = %s,
                         window_start = %s,
                         window_end = %s,
                         snapshot_at = %s,
                         event_id = %s,
-                        market_id = %s,
-                        condition_id = %s,
                         event_slug = %s,
-                        event_title = %s,
                         is_minted = %s,
                         minted_at = %s,
                         minted_to_wallet = %s,
@@ -2074,9 +2070,10 @@ class SeasonWorkbenchService:
                         minted_asset_address = %s
                     WHERE id = %s
                     RETURNING
-                        id, season_id, wallet_address, source, total_pnl_window, pnl_rank,
-                        window_start, window_end, snapshot_at, created_at, event_id, market_id,
-                        condition_id, event_slug, event_title, is_minted, minted_at,
+                        id, season_id, proxy_wallet AS wallet_address, source,
+                        window_start, window_end, snapshot_at, created_at,
+                        event_id, event_slug, entry_cwap, total_volume, total_pnl,
+                        roi_percentage, entry_bracket, edge, yield, gravity, rank, is_minted, minted_at,
                         minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
                         minted_tx_hash, minted_asset_address
                     """,
@@ -2084,16 +2081,11 @@ class SeasonWorkbenchService:
                         req.season_id,
                         wallet.lower(),
                         source,
-                        req.total_pnl_window,
-                        req.pnl_rank,
                         window_start,
                         window_end,
                         snapshot_at,
                         self._normalize_optional_text(req.event_id),
-                        self._normalize_optional_text(req.market_id),
-                        self._normalize_optional_text(req.condition_id),
                         self._normalize_optional_text(req.event_slug),
-                        self._normalize_optional_text(req.event_title),
                         req.is_minted,
                         minted_at,
                         self._normalize_optional_text(req.minted_to_wallet),

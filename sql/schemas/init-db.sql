@@ -867,31 +867,115 @@ CREATE INDEX IF NOT EXISTS idx_user_wallet_signins_last_signed_in_at
 DO $$ BEGIN RAISE NOTICE '✅ user_wallet_signins table created'; END $$;
 
 -- ============================================================================
--- 11. PARTICIPANTS SNAPSHOT TABLE
+-- 11. PARTICIPANTS SNAPSHOT MATERIALIZED VIEW
 -- ============================================================================
-DO $$ BEGIN RAISE NOTICE '👥 Creating participants table...'; END $$;
+DO $$ BEGIN RAISE NOTICE '👥 Creating participants materialized view...'; END $$;
 
-CREATE TABLE IF NOT EXISTS participants (
-    proxy_wallet TEXT NOT NULL,
-    event_slug TEXT NOT NULL,
-    entry_cwap NUMERIC(20, 4),
-    total_volume NUMERIC(20, 2),
-    total_pnl NUMERIC(20, 2),
-    roi_percentage NUMERIC(20, 2),
-    risk TEXT NOT NULL,
-    skill TEXT NOT NULL,
-    influence TEXT NOT NULL,
-    rank INTEGER,
-    refreshed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (proxy_wallet, event_slug)
-);
+DO $$
+DECLARE
+    rel_kind "char";
+BEGIN
+    SELECT c.relkind
+    INTO rel_kind
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relname = 'participants';
 
+    -- Migrate old participants table/view to materialized view format.
+    IF rel_kind = 'r' THEN
+        EXECUTE 'DROP TABLE public.participants';
+    ELSIF rel_kind = 'v' THEN
+        EXECUTE 'DROP VIEW public.participants';
+    END IF;
+END $$;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS participants AS
+WITH event_aggregates AS (
+    SELECT
+        proxy_wallet,
+        MAX(event_id) AS event_id,
+        event_slug,
+        SUM(avg_price * total_bought) AS event_volume_usdc,
+        SUM(realized_pnl) AS event_pnl,
+        SUM(avg_price * (avg_price * total_bought)) / NULLIF(SUM(avg_price * total_bought), 0) AS capital_weighted_vwap,
+        SUM(realized_pnl) / NULLIF(SUM(avg_price * total_bought), 0) AS event_roi
+    FROM user_closed_positions
+    GROUP BY proxy_wallet, event_slug
+),
+filtered_traders AS (
+    SELECT *
+    FROM event_aggregates
+    WHERE capital_weighted_vwap >= 0.001
+      AND capital_weighted_vwap < 0.97
+),
+ranked_traders AS (
+    SELECT
+        *,
+        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_roi ASC) AS roi_percentile,
+        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_volume_usdc ASC) AS volume_percentile,
+        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY capital_weighted_vwap ASC) AS vwap_percentile
+    FROM filtered_traders
+),
+leaderboard_latest AS (
+    SELECT DISTINCT ON (proxy_wallet)
+        proxy_wallet,
+        rank
+    FROM trader_leaderboard
+    WHERE category = 'OVERALL'
+      AND time_period = 'ALL'
+      AND order_by = 'PNL'
+    ORDER BY proxy_wallet, fetched_date DESC, fetched_at DESC
+)
+SELECT
+    rt.proxy_wallet,
+    rt.event_id,
+    rt.event_slug,
+    ROUND(rt.capital_weighted_vwap::numeric, 4) AS entry_cwap,
+    ROUND(rt.event_volume_usdc::numeric, 2) AS total_volume,
+    ROUND(rt.event_pnl::numeric, 2) AS total_pnl,
+    ROUND((rt.event_roi * 100)::numeric, 2) AS roi_percentage,
+    CASE
+        WHEN rt.capital_weighted_vwap <= 0.20 THEN 'Anomaly'
+        WHEN rt.capital_weighted_vwap <= 0.40 THEN 'Oracle'
+        WHEN rt.capital_weighted_vwap <= 0.60 THEN 'Outlier'
+        WHEN rt.capital_weighted_vwap <= 0.80 THEN 'Vector'
+        ELSE 'Harvester'
+    END AS entry_bracket,
+    CASE
+        WHEN rt.vwap_percentile <= 0.010 THEN 'P99'
+        WHEN rt.vwap_percentile <= 0.100 THEN 'P90'
+        WHEN rt.vwap_percentile <= 0.300 THEN 'P70'
+        WHEN rt.vwap_percentile <= 0.500 THEN 'P50'
+        ELSE 'Base'
+    END AS edge,
+    CASE
+        WHEN rt.roi_percentile >= 0.99 THEN 'P99'
+        WHEN rt.roi_percentile >= 0.90 THEN 'P90'
+        WHEN rt.roi_percentile >= 0.70 THEN 'P70'
+        WHEN rt.roi_percentile >= 0.50 THEN 'P50'
+        ELSE 'Base'
+    END AS yield,
+    CASE
+        WHEN rt.volume_percentile >= 0.99 THEN 'P99'
+        WHEN rt.volume_percentile >= 0.90 THEN 'P90'
+        WHEN rt.volume_percentile >= 0.70 THEN 'P70'
+        WHEN rt.volume_percentile >= 0.50 THEN 'P50'
+        ELSE 'Base'
+    END AS gravity,
+    ll.rank
+FROM ranked_traders rt
+LEFT JOIN leaderboard_latest ll
+    ON ll.proxy_wallet = rt.proxy_wallet;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_participants_proxy_wallet_event_slug
+    ON participants(proxy_wallet, event_slug);
 CREATE INDEX IF NOT EXISTS idx_participants_event_slug ON participants(event_slug);
+CREATE INDEX IF NOT EXISTS idx_participants_event_id ON participants(event_id);
 CREATE INDEX IF NOT EXISTS idx_participants_proxy_wallet ON participants(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_participants_rank ON participants(rank);
-CREATE INDEX IF NOT EXISTS idx_participants_refreshed_at ON participants(refreshed_at DESC);
 
-DO $$ BEGIN RAISE NOTICE '✅ participants table created'; END $$;
+DO $$ BEGIN RAISE NOTICE '✅ participants materialized view created'; END $$;
 
 -- Tracking views
 CREATE OR REPLACE VIEW recent_loads AS
@@ -985,7 +1069,7 @@ DO $$ BEGIN RAISE NOTICE '   - downstream_runs'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - event_resolution_queue'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - event_cards'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - user_wallet_signins'; END $$;
-DO $$ BEGIN RAISE NOTICE '   - participants'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - participants (materialized view)'; END $$;
 DO $$ BEGIN RAISE NOTICE ''; END $$;
 DO $$ BEGIN RAISE NOTICE '📈 Created views:'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - events_summary'; END $$;
