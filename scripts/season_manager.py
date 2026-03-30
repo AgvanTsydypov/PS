@@ -149,7 +149,7 @@ class SeasonManager:
                         SELECT 1
                         FROM winner_wallets_nft_to_claim
                         WHERE season_id = %s
-                          AND lower(wallet_address) = lower(%s)
+                          AND lower(proxy_wallet) = lower(%s)
                     )
                     """,
                     (season_id, user_wallet),
@@ -174,7 +174,7 @@ class SeasonManager:
                     """
                     SELECT
                         id,
-                        wallet_address,
+                        proxy_wallet AS wallet_address,
                         COALESCE(is_minted, FALSE) AS is_minted,
                         minted_to_wallet,
                         minted_to_solana_wallet,
@@ -184,7 +184,7 @@ class SeasonManager:
                         minted_at
                     FROM winner_wallets_nft_to_claim
                     WHERE season_id = %s
-                      AND lower(wallet_address) = lower(%s)
+                      AND lower(proxy_wallet) = lower(%s)
                     LIMIT 1
                     """,
                     (season_id, user_wallet),
@@ -216,7 +216,7 @@ class SeasonManager:
                         SELECT 1
                         FROM winner_wallets_nft_to_claim sow
                         JOIN active_standard a ON a.id = sow.season_id
-                        WHERE lower(sow.wallet_address) = lower(%s)
+                        WHERE lower(sow.proxy_wallet) = lower(%s)
                     )
                     """,
                     (user_wallet,),
