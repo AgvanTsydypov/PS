@@ -19,13 +19,46 @@
     }
   </style>
 
-  <!-- P99 / Anomaly master gradient (Section 3) -->
-  <linearGradient id="master-gradient" x1="0.5" y1="0" x2="0.45" y2="1">
-    <stop offset="0%"  stop-color="#FFFFFF"/>
-    <stop offset="20%" stop-color="#51FF48"/>
-    <stop offset="40%" stop-color="#0051FF"/>
-    <stop offset="60%" stop-color="#8A2BE2"/>
-    <stop offset="80%" stop-color="#FFBF00"/>
+  <!-- P99 / Anomaly master gradient stops (Section 3) — Gold→Purple→Blue→Green→White -->
+  <linearGradient id="master-gradient">
+    <stop offset="0%"   stop-color="#FFBF00"/>
+    <stop offset="25%"  stop-color="#8A2BE2"/>
+    <stop offset="50%"  stop-color="#0051FF"/>
+    <stop offset="75%"  stop-color="#51FF48"/>
+    <stop offset="100%" stop-color="#FFFFFF"/>
+  </linearGradient>
+
+  <!-- Per-element text gradient instances (angle-specific, centered on own text) -->
+  <linearGradient id="mg-eb" gradientUnits="userSpaceOnUse"
+                  x1="223" y1="653"
+                  x2="293" y2="669"
+                  xlink:href="#master-gradient"/>
+  <linearGradient id="mg-w" gradientUnits="userSpaceOnUse"
+                  x1="268" y1="654"
+                  x2="388" y2="668"
+                  xlink:href="#master-gradient"/>
+  <linearGradient id="mg-edge" gradientUnits="userSpaceOnUse"
+                  x1="105" y1="707"
+                  x2="155" y2="727"
+                  xlink:href="#master-gradient"/>
+  <linearGradient id="mg-yield" gradientUnits="userSpaceOnUse"
+                  x1="238" y1="707"
+                  x2="288" y2="727"
+                  xlink:href="#master-gradient"/>
+  <linearGradient id="mg-grav" gradientUnits="userSpaceOnUse"
+                  x1="366" y1="707"
+                  x2="416" y2="727"
+                  xlink:href="#master-gradient"/>
+
+  <!-- Lower dotted separator gradient — 90° horizontal -->
+  <linearGradient id="mg-sep" gradientUnits="userSpaceOnUse"
+                  x1="57" y1="743"
+                  x2="457" y2="743">
+    <stop offset="0%"   stop-color="#E7FDFD"/>
+    <stop offset="50%"  stop-color="#66FB39"/>
+    <stop offset="75%"  stop-color="#DDDD03"/>
+    <stop offset="88%"  stop-color="#8A00A6"/>
+    <stop offset="100%" stop-color="#009999"/>
   </linearGradient>
 
   <!-- UNIFORM data zone background (Section 10.2) -->
@@ -38,12 +71,17 @@
     <stop offset="90%" stop-color="#C5CC84"/>
   </linearGradient>
 
-  <!-- COGNITIVE TELEMETRY radial gradient (Section 7.3) — horizontally stretched ellipse -->
+  <!-- COGNITIVE TELEMETRY radial gradient (Section 7.3) — horizontally stretched ellipse
+       Center: rgba(239,226,226) #EFE2E2 / Edge: rgba(104,98,98) #686262
+       Intermediate stops at 25%, 50%, 75% per spec -->
   <radialGradient id="cognitive-gradient" cx="0" cy="0" r="1"
                   gradientUnits="userSpaceOnUse"
-                  gradientTransform="translate(258 628.5) scale(140 11.5)">
-    <stop offset="0.144231" stop-color="#EFE2E2"/>
-    <stop offset="1"        stop-color="#686262"/>
+                  gradientTransform="translate(258 625) scale(140 11.5)">
+    <stop offset="0"    stop-color="#EFE2E2"/>
+    <stop offset="0.25" stop-color="#CDC2C2"/>
+    <stop offset="0.50" stop-color="#ACA2A2"/>
+    <stop offset="0.75" stop-color="#8A8282"/>
+    <stop offset="1"    stop-color="#686262"/>
   </radialGradient>
 
   <!-- Border glow blur (2px stdDev = 4px Figma blur) -->
@@ -81,11 +119,11 @@
 <!-- ══ BACKGROUND ══ -->
 <rect width="516" height="802" rx="33" fill="#0B0C10"/>
 
-<!-- ══ BORDER GLOW (driven by YIELD = P90) ══ -->
+<!-- ══ BORDER GLOW (driven by YIELD = P99) ══ -->
 <g filter="url(#glow)">
   <rect x="3" y="3"
         width="510" height="796"
-        rx="30" fill="#FFBF00"/>
+        rx="30" fill="url(#master-gradient)"/>
 </g>
 
 <!-- ══ EVENT IMAGE ══ -->
@@ -124,10 +162,10 @@
   <tspan fill="white"> ]</tspan>
 </text>
 
-<!-- ══ DATA ZONE (pattern: SIGNAL) ══ -->
+<!-- ══ DATA ZONE (pattern: UNIFORM) ══ -->
 <rect x="13.5" y="503.5"
       width="489" height="285"
-      rx="21.5" fill="#CDD2DE" stroke="#000000"/>
+      rx="21.5" fill="url(#uniform-gradient)" stroke="#000000"/>
 
 <!-- ══ TITLE BAR ══ -->
 <rect x="29" y="472" width="458" height="61"
@@ -144,7 +182,7 @@
 <g filter="url(#shadow)">
   <text x="258" y="548"
         text-anchor="middle" dominant-baseline="hanging"
-        font-size="18" stroke="black" stroke-width="0.5" paint-order="stroke">
+        font-size="18">
     <tspan fill="white">SECTOR: </tspan>
     <tspan fill="#51E147">CELEBRITIES</tspan>
   </text>
@@ -154,7 +192,7 @@
 <g filter="url(#shadow)">
   <text x="258" y="579"
         text-anchor="middle" dominant-baseline="hanging"
-        font-size="16" fill="#888888" letter-spacing="0" stroke="black" stroke-width="0.5" paint-order="stroke">
+        font-size="16" fill="#888888" letter-spacing="0">
     NODE: NONE
   </text>
 </g>
@@ -172,35 +210,35 @@
 <text x="258" y="617"
       text-anchor="middle" dominant-baseline="hanging"
       font-size="20"
-      fill="url(#cognitive-gradient)" stroke="black" stroke-width="0.5" paint-order="stroke">
+      fill="url(#cognitive-gradient)">
   COGNITIVE TELEMETRY
 </text>
 
 <!-- ══ ENTRY BRACKET + WALLET ══ -->
 <text x="258" y="654"
       text-anchor="middle" dominant-baseline="hanging"
-      font-size="15" stroke="black" stroke-width="0.5" paint-order="stroke">
+      font-size="15">
   <tspan fill="white">[ </tspan>
-  <tspan fill="#FFBF00">ORACLE</tspan>
+  <tspan fill="url(#mg-eb)">ANOMALY</tspan>
   <tspan fill="white"> ] :// </tspan>
-  <tspan fill="url(#master-gradient)" font-size="14">0xBb8E703...</tspan>
+  <tspan fill="url(#mg-w)" font-size="14">0xBb8E703...</tspan>
 </text>
 
 <!-- ══ METRIC LABELS ══ -->
 <g filter="url(#shadow)">
   <text x="130" y="686"
         text-anchor="middle" dominant-baseline="hanging"
-        font-size="12" fill="white" stroke="black" stroke-width="0.5" paint-order="stroke">
+        font-size="12" fill="white">
     EDGE:
   </text>
   <text x="263" y="686"
         text-anchor="middle" dominant-baseline="hanging"
-        font-size="12" fill="white" stroke="black" stroke-width="0.5" paint-order="stroke">
+        font-size="12" fill="white">
     YIELD:
   </text>
   <text x="391" y="686"
         text-anchor="middle" dominant-baseline="hanging"
-        font-size="12" fill="white" stroke="black" stroke-width="0.5" paint-order="stroke">
+        font-size="12" fill="white">
     GRAVITY:
   </text>
 </g>
@@ -208,37 +246,37 @@
 <!-- ══ METRIC VALUES ══ -->
 <text x="130" y="707"
       text-anchor="middle" dominant-baseline="hanging"
-      font-size="20" fill="url(#master-gradient)" stroke="black" stroke-width="0.5" paint-order="stroke">
+      font-size="20" fill="url(#mg-edge)">
   P99
 </text>
 <text x="263" y="707"
       text-anchor="middle" dominant-baseline="hanging"
-      font-size="20" fill="#FFBF00" stroke="black" stroke-width="0.5" paint-order="stroke">
-  P90
+      font-size="20" fill="url(#mg-yield)">
+  P99
 </text>
 <text x="391" y="707"
       text-anchor="middle" dominant-baseline="hanging"
-      font-size="20" fill="#00FF2F" stroke="black" stroke-width="0.5" paint-order="stroke">
-  P50
+      font-size="20" fill="url(#mg-grav)">
+  P99
 </text>
 
-<!-- ══ LOWER SEPARATOR (driven by GRAVITY = P50) ══ -->
+<!-- ══ LOWER SEPARATOR (driven by GRAVITY = P99) ══ -->
 <line x1="57" y1="743"
       x2="457" y2="743"
-      stroke="#00FF2F" stroke-width="2"
+      stroke="url(#mg-sep)" stroke-width="2"
       stroke-dasharray="2 4"/>
 
 <!-- ══ FOOTER ══ -->
 <g filter="url(#shadow)">
   <text x="58" y="754"
         dominant-baseline="hanging"
-        font-size="16" stroke="black" stroke-width="0.5" paint-order="stroke">
+        font-size="16">
     <tspan fill="#2E5CFF">POLYMARKET</tspan>
     <tspan fill="white"> GLOBAL RANK:</tspan>
   </text>
   <text x="458" y="754"
         text-anchor="end" dominant-baseline="hanging"
-        font-size="16" fill="white" stroke="black" stroke-width="0.5" paint-order="stroke">
+        font-size="16" fill="white">
     #63564
   </text>
 </g>

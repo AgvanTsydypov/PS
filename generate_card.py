@@ -13,6 +13,7 @@ Usage:
 import base64
 import html
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -293,8 +294,42 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     rank_str    = _esc(f"#{rank}")
     image_url   = _to_data_uri(data.get("image_url", ""))
     logo_href   = _to_data_uri(LOGO_HREF)
+    _is_grad = lambda c: "master-gradient" in c or "mg-" in c
+    bracket_fill  = "url(#mg-eb)"    if _is_grad(bracket_color) else bracket_color
+    wallet_fill   = "url(#mg-w)"     if _is_grad(wallet_color)  else wallet_color
+    edge_val_fill = "url(#mg-edge)"  if _is_grad(edge_color)    else edge_color
+    yld_val_fill  = "url(#mg-yield)" if _is_grad(yield_color)   else yield_color
+    grav_val_fill = "url(#mg-grav)"  if _is_grad(gravity_color) else gravity_color
+    dotted_fill   = "url(#mg-sep)"   if _is_grad(dotted_color)  else dotted_color
 
     sig = _sig_attrs(is_signal)
+
+    # ── 5b. Gradient coordinates — corner-to-corner diagonal across text bbox
+    # Matches reference: Gold at top-left → White at bottom-right
+    # Gradient runs from (cx - W/2, cy - H/2) → (cx + W/2, cy + H/2)
+
+    # P99 labels — font-size 20, "P99"/"P999" ≈ 50×20 px
+    p99_hw, p99_hh = 25, 10
+    p99_cy = Y_METRIC_VALUES + 10
+    edge_gx1, edge_gy1 = COL_EDGE - p99_hw,    p99_cy - p99_hh
+    edge_gx2, edge_gy2 = COL_EDGE + p99_hw,    p99_cy + p99_hh
+    yld_gx1,  yld_gy1  = COL_YIELD - p99_hw,   p99_cy - p99_hh
+    yld_gx2,  yld_gy2  = COL_YIELD + p99_hw,   p99_cy + p99_hh
+    grav_gx1, grav_gy1 = COL_GRAVITY - p99_hw,  p99_cy - p99_hh
+    grav_gx2, grav_gy2 = COL_GRAVITY + p99_hw,  p99_cy + p99_hh
+
+    # ANOMALY bracket — font-size 15, up to 9 chars ≈ 70×15 px
+    eb_hw, eb_hh = 35, 8
+    eb_cy = Y_BRACKET + 7
+    eb_x1, eb_y1 = DZ_CX - eb_hw,  eb_cy - eb_hh
+    eb_x2, eb_y2 = DZ_CX + eb_hw,  eb_cy + eb_hh
+
+    # Wallet label — font-size 14, ~13 chars ≈ 120×14 px
+    w_hw, w_hh = 60, 7
+    w_cx = DZ_CX + 70
+    w_cy = Y_BRACKET + 7
+    w_x1, w_y1 = w_cx - w_hw,  w_cy - w_hh
+    w_x2, w_y2 = w_cx + w_hw,  w_cy + w_hh
 
     # ── 6. Build SVG string ──────────────────────────────────────────
     font_b64 = _load_font_b64()
@@ -330,13 +365,46 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     }}
   </style>
 
-  <!-- P99 / Anomaly master gradient (Section 3) -->
-  <linearGradient id="master-gradient" x1="0.5" y1="0" x2="0.45" y2="1">
-    <stop offset="0%"  stop-color="#FFFFFF"/>
-    <stop offset="20%" stop-color="#51FF48"/>
-    <stop offset="40%" stop-color="#0051FF"/>
-    <stop offset="60%" stop-color="#8A2BE2"/>
-    <stop offset="80%" stop-color="#FFBF00"/>
+  <!-- P99 / Anomaly master gradient stops (Section 3) — Gold→Purple→Blue→Green→White -->
+  <linearGradient id="master-gradient">
+    <stop offset="0%"   stop-color="#FFBF00"/>
+    <stop offset="25%"  stop-color="#8A2BE2"/>
+    <stop offset="50%"  stop-color="#0051FF"/>
+    <stop offset="75%"  stop-color="#51FF48"/>
+    <stop offset="100%" stop-color="#FFFFFF"/>
+  </linearGradient>
+
+  <!-- Per-element text gradient instances (angle-specific, centered on own text) -->
+  <linearGradient id="mg-eb" gradientUnits="userSpaceOnUse"
+                  x1="{eb_x1}" y1="{eb_y1}"
+                  x2="{eb_x2}" y2="{eb_y2}"
+                  xlink:href="#master-gradient"/>
+  <linearGradient id="mg-w" gradientUnits="userSpaceOnUse"
+                  x1="{w_x1}" y1="{w_y1}"
+                  x2="{w_x2}" y2="{w_y2}"
+                  xlink:href="#master-gradient"/>
+  <linearGradient id="mg-edge" gradientUnits="userSpaceOnUse"
+                  x1="{edge_gx1}" y1="{edge_gy1}"
+                  x2="{edge_gx2}" y2="{edge_gy2}"
+                  xlink:href="#master-gradient"/>
+  <linearGradient id="mg-yield" gradientUnits="userSpaceOnUse"
+                  x1="{yld_gx1}" y1="{yld_gy1}"
+                  x2="{yld_gx2}" y2="{yld_gy2}"
+                  xlink:href="#master-gradient"/>
+  <linearGradient id="mg-grav" gradientUnits="userSpaceOnUse"
+                  x1="{grav_gx1}" y1="{grav_gy1}"
+                  x2="{grav_gx2}" y2="{grav_gy2}"
+                  xlink:href="#master-gradient"/>
+
+  <!-- Lower dotted separator gradient — 90° horizontal -->
+  <linearGradient id="mg-sep" gradientUnits="userSpaceOnUse"
+                  x1="{LOWER_SEP_X1}" y1="{Y_LOWER_SEP}"
+                  x2="{LOWER_SEP_X2}" y2="{Y_LOWER_SEP}">
+    <stop offset="0%"   stop-color="#E7FDFD"/>
+    <stop offset="50%"  stop-color="#66FB39"/>
+    <stop offset="75%"  stop-color="#DDDD03"/>
+    <stop offset="88%"  stop-color="#8A00A6"/>
+    <stop offset="100%" stop-color="#009999"/>
   </linearGradient>
 
   <!-- UNIFORM data zone background (Section 10.2) -->
@@ -349,12 +417,17 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     <stop offset="90%" stop-color="#C5CC84"/>
   </linearGradient>
 
-  <!-- COGNITIVE TELEMETRY radial gradient (Section 7.3) — horizontally stretched ellipse -->
+  <!-- COGNITIVE TELEMETRY radial gradient (Section 7.3) — horizontally stretched ellipse
+       Center: rgba(239,226,226) #EFE2E2 / Edge: rgba(104,98,98) #686262
+       Intermediate stops at 25%, 50%, 75% per spec -->
   <radialGradient id="cognitive-gradient" cx="0" cy="0" r="1"
                   gradientUnits="userSpaceOnUse"
-                  gradientTransform="translate({DZ_CX} {Y_COG_TEL + 11.5}) scale(140 11.5)">
-    <stop offset="0.144231" stop-color="#EFE2E2"/>
-    <stop offset="1"        stop-color="#686262"/>
+                  gradientTransform="translate({DZ_CX} {Y_COG_TEL + 8}) scale(140 11.5)">
+    <stop offset="0"    stop-color="#EFE2E2"/>
+    <stop offset="0.25" stop-color="#CDC2C2"/>
+    <stop offset="0.50" stop-color="#ACA2A2"/>
+    <stop offset="0.75" stop-color="#8A8282"/>
+    <stop offset="1"    stop-color="#686262"/>
   </radialGradient>
 
   <!-- Border glow blur (2px stdDev = 4px Figma blur) -->
@@ -516,9 +589,9 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
       text-anchor="middle" dominant-baseline="hanging"
       font-size="15"{sig}>
   <tspan fill="white">[ </tspan>
-  <tspan fill="{bracket_color}">{eb}</tspan>
+  <tspan fill="{bracket_fill}">{eb}</tspan>
   <tspan fill="white"> ] :// </tspan>
-  <tspan fill="{wallet_color}" font-size="14">{wallet_disp}</tspan>
+  <tspan fill="{wallet_fill}" font-size="14">{wallet_disp}</tspan>
 </text>''')
 
     # ---- Layer 13: Metric labels (EDGE / YIELD / GRAVITY) ----
@@ -547,17 +620,17 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ METRIC VALUES ══ -->
 <text x="{COL_EDGE}" y="{Y_METRIC_VALUES}"
       text-anchor="middle" dominant-baseline="hanging"
-      font-size="20" fill="{edge_color}"{sig}>
+      font-size="20" fill="{edge_val_fill}"{sig}>
   {edge}
 </text>
 <text x="{COL_YIELD}" y="{Y_METRIC_VALUES}"
       text-anchor="middle" dominant-baseline="hanging"
-      font-size="20" fill="{yield_color}"{sig}>
+      font-size="20" fill="{yld_val_fill}"{sig}>
   {yld}
 </text>
 <text x="{COL_GRAVITY}" y="{Y_METRIC_VALUES}"
       text-anchor="middle" dominant-baseline="hanging"
-      font-size="20" fill="{gravity_color}"{sig}>
+      font-size="20" fill="{grav_val_fill}"{sig}>
   {grav}
 </text>''')
 
@@ -566,7 +639,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ LOWER SEPARATOR (driven by GRAVITY = {grav}) ══ -->
 <line x1="{LOWER_SEP_X1}" y1="{Y_LOWER_SEP}"
       x2="{LOWER_SEP_X2}" y2="{Y_LOWER_SEP}"
-      stroke="{dotted_color}" stroke-width="2"
+      stroke="{dotted_fill}" stroke-width="2"
       stroke-dasharray="2 4"/>''')
 
     # ---- Layer 16: Footer (POLYMARKET GLOBAL RANK) ----
@@ -611,11 +684,11 @@ SAMPLE_DATA: Dict[str, Any] = {
     "primary_tag":       "CELEBRITIES",
     "primary_tag_color": "#51E147",
     "secondary_tag":     "NONE",
-    "entry_bracket":     "ORACLE",
+    "entry_bracket":     "ANOMALY",
     "proxy_wallet":      "0xBb8E703abc123def456",
     "edge":              "P99",
-    "yield":             "P90",
-    "gravity":           "P50",
+    "yield":             "P99",
+    "gravity":           "P99",
     "leaderboard_rank":  63564,
 }
 
