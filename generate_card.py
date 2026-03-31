@@ -81,6 +81,80 @@ DOT_RIGHT_X = 458
 DOT_Y       = 606
 DOT_SZ      = 4
 
+# ═══════════════════════════════════════════════════════════════════════════
+# GRADIENT ANGLES  — degrees from vertical  (0 = pure top→bottom)
+# Positive values tilt clockwise (gold shifts to top-left corner).
+# Each group is independent so you can tune them separately.
+# ═══════════════════════════════════════════════════════════════════════════
+
+GRAD_ANGLE_ANOMALY = 1.5  # [ BRACKET ] label
+GRAD_ANGLE_WALLET  = 1  # wallet address
+GRAD_ANGLE_P99     = 2.5  # EDGE / YIELD / GRAVITY metric values
+GRAD_ANGLE_BORDER  = 12   # card border glow rect
+
+
+def _grad_pts(cx: float, cy: float, hh: float, angle_deg: float = 0.0):
+    """Return (x1, y1, x2, y2) for a gradient centred at (cx, cy).
+
+    The gradient runs from top to bottom (gold→white) spanning ±hh pixels,
+    tilted *angle_deg* degrees from vertical (in screen-pixel space).
+    0° = pure vertical, positive = clockwise tilt.
+    """
+    hw = hh * math.tan(math.radians(angle_deg))
+    return round(cx - hw, 2), round(cy - hh, 2), round(cx + hw, 2), round(cy + hh, 2)
+
+
+def _bracket_line_pos(eb_name: str, wallet_disp: str) -> Dict[str, float]:
+    """Compute the absolute x position of every segment in the bracket line.
+
+    The line is:  "[ " + BRACKET + " ] :// " + wallet
+    Each segment gets an explicit tspan x= so the browser places it exactly,
+    independent of text-anchor or line composition.
+
+    Orbitron Bold advance-width model (fraction of em + letter-spacing 0.1 em):
+      uppercase / alpha   0.65 em + 0.10 em = 0.75 em/char
+      digits              0.60 em + 0.10 em = 0.70 em/char
+      punctuation / space 0.45 em + 0.10 em = 0.55 em/char  ([ ] : / . space)
+    """
+    def _adv(ch: str, fs: float) -> float:
+        ls = fs * 0.10
+        if ch in " []:/." :
+            return fs * 0.45 + ls
+        if ch.isdigit():
+            return fs * 0.60 + ls
+        return fs * 0.65 + ls
+
+    def _width(s: str, fs: float) -> float:
+        return sum(_adv(c, fs) for c in s)
+
+    FS_B = 15.0   # font-size for bracket + surrounding punctuation
+    FS_W = 14.0   # font-size for wallet address
+
+    w_prefix  = _width("[ ",        FS_B)
+    w_bracket = _width(eb_name,     FS_B)
+    w_mid     = _width(" ] :// ",   FS_B)
+    w_wallet  = _width(wallet_disp, FS_W)
+
+    total      = w_prefix + w_bracket + w_mid + w_wallet
+    line_start = DZ_CX - total / 2
+
+    bracket_x  = line_start  + w_prefix
+    bracket_cx = bracket_x   + w_bracket / 2
+    mid_x      = bracket_x   + w_bracket
+    wallet_x   = mid_x       + w_mid
+    wallet_cx  = wallet_x    + w_wallet  / 2
+
+    return {
+        "line_start": round(line_start, 1),
+        "bracket_x":  round(bracket_x,  1),
+        "bracket_cx": round(bracket_cx, 1),
+        "mid_x":      round(mid_x,      1),
+        "wallet_x":   round(wallet_x,   1),
+        "wallet_cx":  round(wallet_cx,  1),
+        "bracket_hw": round(w_bracket / 2, 1),
+        "wallet_hw":  round(w_wallet  / 2, 1),
+    }
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # COLOR SYSTEM (Section 4 of the spec)
@@ -123,6 +197,94 @@ def get_bracket_color(name: str) -> str:
 
 def get_ptier_color(tier: str) -> str:
     return PTIER_COLORS.get(tier.upper(), "#FFFFFF")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FIGMA GRADIENT → SVG CONVERSION
+# ═══════════════════════════════════════════════════════════════════════════
+
+def figma_gradient_to_svg(gradient: Dict[str, Any], grad_id: str) -> str:
+    """Convert a single Figma API gradient dict to an SVG gradient element.
+
+    Figma stores its gradient transform as a 2×3 affine matrix:
+        [[a, b, c],
+         [d, e, f]]
+
+    SVG's gradientTransform="matrix(...)" takes values in column-major order:
+        matrix(a, d, b, e, c, f)
+
+    Both linear and radial gradients use gradientUnits="objectBoundingBox" so
+    the matrix (which already operates in the 0–1 normalised layer space) maps
+    correctly without any additional scaling.
+
+    Default reference geometries (overridden by gradientTransform):
+      • GRADIENT_LINEAR  → x1=0 y1=0  x2=1 y2=0  (horizontal baseline)
+      • GRADIENT_RADIAL  → cx=0.5 cy=0.5 r=0.5   (centred unit circle)
+
+    Args:
+        gradient: dict with keys gradient_type, stops, gradient_transform
+        grad_id:  the id="" to assign to the produced SVG element
+
+    Returns:
+        A single SVG <linearGradient> or <radialGradient> element string.
+    """
+    gtype     = gradient.get("gradient_type", "GRADIENT_LINEAR")
+    stops     = gradient.get("stops", [])
+    transform = gradient.get("gradient_transform")
+
+    # Build <stop> children
+    stop_lines: list[str] = []
+    for s in stops:
+        offset  = s.get("offset", "0%")
+        color   = s.get("color", "#000000")
+        opacity = s.get("opacity", 1)
+        stop_lines.append(
+            f'  <stop offset="{offset}" stop-color="{color}" stop-opacity="{opacity}"/>'
+        )
+    stops_str = "\n".join(stop_lines)
+
+    # Convert Figma [[a,b,c],[d,e,f]] → SVG matrix(a, d, b, e, c, f)
+    transform_attr = ""
+    if (
+        transform
+        and len(transform) == 2
+        and len(transform[0]) == 3
+        and len(transform[1]) == 3
+    ):
+        a, b, c = transform[0]
+        d, e, f = transform[1]
+        transform_attr = f' gradientTransform="matrix({a}, {d}, {b}, {e}, {c}, {f})"'
+
+    if gtype == "GRADIENT_RADIAL":
+        return (
+            f'<radialGradient id="{grad_id}" gradientUnits="objectBoundingBox"\n'
+            f'                cx="0.5" cy="0.5" r="0.5"{transform_attr}>\n'
+            f'{stops_str}\n'
+            f'</radialGradient>'
+        )
+
+    return (
+        f'<linearGradient id="{grad_id}" gradientUnits="objectBoundingBox"\n'
+        f'                x1="0" y1="0" x2="1" y2="0"{transform_attr}>\n'
+        f'{stops_str}\n'
+        f'</linearGradient>'
+    )
+
+
+def figma_gradients_to_svg_defs(gradients: list[Dict[str, Any]]) -> str:
+    """Convert a list of Figma gradient dicts to a block of SVG gradient elements.
+
+    Each item in *gradients* must have a "layer_name" key that becomes the
+    gradient id (spaces replaced with hyphens, lowercased).
+
+    Returns a multi-line string suitable for insertion inside <defs>…</defs>.
+    """
+    parts: list[str] = []
+    for g in gradients:
+        raw_name = g.get("layer_name", f"grad-{len(parts)}")
+        grad_id  = raw_name.replace(" ", "-").lower()
+        parts.append(figma_gradient_to_svg(g, grad_id))
+    return "\n\n".join(parts)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -295,41 +457,52 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     image_url   = _to_data_uri(data.get("image_url", ""))
     logo_href   = _to_data_uri(LOGO_HREF)
     _is_grad = lambda c: "master-gradient" in c or "mg-" in c
-    bracket_fill  = "url(#mg-eb)"    if _is_grad(bracket_color) else bracket_color
-    wallet_fill   = "url(#mg-w)"     if _is_grad(wallet_color)  else wallet_color
-    edge_val_fill = "url(#mg-edge)"  if _is_grad(edge_color)    else edge_color
-    yld_val_fill  = "url(#mg-yield)" if _is_grad(yield_color)   else yield_color
+    bracket_fill  = "url(#mg-eb)"         if _is_grad(bracket_color) else bracket_color
+    wallet_fill   = "url(#mg-w)"          if _is_grad(wallet_color)  else wallet_color
+    edge_val_fill = "url(#mg-edge)"       if _is_grad(edge_color)    else edge_color
+    yld_val_fill  = "url(#mg-yield)"      if _is_grad(yield_color)   else yield_color
+    border_fill   = "url(#border-gradient)" if _is_grad(border_color) else border_color
     grav_val_fill = "url(#mg-grav)"  if _is_grad(gravity_color) else gravity_color
     dotted_fill   = "url(#mg-sep)"   if _is_grad(dotted_color)  else dotted_color
 
     sig = _sig_attrs(is_signal)
 
-    # ── 5b. Gradient coordinates — corner-to-corner diagonal across text bbox
-    # Matches reference: Gold at top-left → White at bottom-right
-    # Gradient runs from (cx - W/2, cy - H/2) → (cx + W/2, cy + H/2)
+    # ── 5b. Gradient coordinates — top-to-bottom vertical sweep per element.
+    #
+    # For a vertical gradient x1==x2 (x is irrelevant but set to column centre
+    # for clarity).  y spans the cap-height of the glyphs so the full rainbow
+    # (gold → white) maps exactly to the visible stroke of each letter.
+    #
+    # Orbitron Bold cap metrics (dominant-baseline="hanging"):
+    #   • The em-box top aligns with the specified y coordinate.
+    #   • Cap height ≈ 0.72 em  (visible stroke runs from ~top+1px to top+cap_h)
+    #
+    # font-size 20 px at Y_METRIC_VALUES=707:
+    #   cap top ≈ 708,  cap bottom ≈ 722  →  centre 715,  hh = 7
+    # font-size 15 px at Y_BRACKET=654:
+    #   cap top ≈ 655,  cap bottom ≈ 666  →  centre 660,  hh = 6
 
-    # P99 labels — font-size 20, "P99"/"P999" ≈ 50×20 px
-    p99_hw, p99_hh = 25, 10
-    p99_cy = Y_METRIC_VALUES + 10
-    edge_gx1, edge_gy1 = COL_EDGE - p99_hw,    p99_cy - p99_hh
-    edge_gx2, edge_gy2 = COL_EDGE + p99_hw,    p99_cy + p99_hh
-    yld_gx1,  yld_gy1  = COL_YIELD - p99_hw,   p99_cy - p99_hh
-    yld_gx2,  yld_gy2  = COL_YIELD + p99_hw,   p99_cy + p99_hh
-    grav_gx1, grav_gy1 = COL_GRAVITY - p99_hw,  p99_cy - p99_hh
-    grav_gx2, grav_gy2 = COL_GRAVITY + p99_hw,  p99_cy + p99_hh
+    _p_hh  = 7.5          # half cap-height for 20 px metric values
+    _eb_hh = 6.0          # half cap-height for 15 px bracket / 14 px wallet
 
-    # ANOMALY bracket — font-size 15, up to 9 chars ≈ 70×15 px
-    eb_hw, eb_hh = 35, 8
-    eb_cy = Y_BRACKET + 7
-    eb_x1, eb_y1 = DZ_CX - eb_hw,  eb_cy - eb_hh
-    eb_x2, eb_y2 = DZ_CX + eb_hw,  eb_cy + eb_hh
+    p99_cy = Y_METRIC_VALUES + 8   # ≈ 715 — vertical centre of 20 px caps
+    eb_cy  = Y_BRACKET    + 6     # ≈ 660 — vertical centre of 15 px caps
 
-    # Wallet label — font-size 14, ~13 chars ≈ 120×14 px
-    w_hw, w_hh = 60, 7
-    w_cx = DZ_CX + 70
-    w_cy = Y_BRACKET + 7
-    w_x1, w_y1 = w_cx - w_hw,  w_cy - w_hh
-    w_x2, w_y2 = w_cx + w_hw,  w_cy + w_hh
+    edge_gx1, edge_gy1, edge_gx2, edge_gy2 = _grad_pts(COL_EDGE,    p99_cy, _p_hh, GRAD_ANGLE_P99)
+    yld_gx1,  yld_gy1,  yld_gx2,  yld_gy2  = _grad_pts(COL_YIELD,   p99_cy, _p_hh, GRAD_ANGLE_P99)
+    grav_gx1, grav_gy1, grav_gx2, grav_gy2  = _grad_pts(COL_GRAVITY, p99_cy, _p_hh, GRAD_ANGLE_P99)
+
+    # Bracket / wallet — compute exact per-word x positions from font metrics
+    _blp = _bracket_line_pos(eb, wallet_disp)
+    eb_x1, eb_y1, eb_x2, eb_y2 = _grad_pts(_blp["bracket_cx"], eb_cy, _eb_hh, GRAD_ANGLE_ANOMALY)
+    w_x1,  w_y1,  w_x2,  w_y2  = _grad_pts(_blp["wallet_cx"],  eb_cy, _eb_hh, GRAD_ANGLE_WALLET)
+
+    # Border gradient — userSpaceOnUse so GRAD_ANGLE_BORDER means the same
+    # screen-pixel degrees as the text gradients above.
+    _brd_cx  = FRAME_X + FRAME_W / 2          # 258
+    _brd_cy  = FRAME_Y + FRAME_H / 2          # 401
+    _brd_hh  = FRAME_H / 2                    # 398
+    brd_gx1, brd_gy1, brd_gx2, brd_gy2 = _grad_pts(_brd_cx, _brd_cy, _brd_hh, GRAD_ANGLE_BORDER)
 
     # ── 6. Build SVG string ──────────────────────────────────────────
     font_b64 = _load_font_b64()
@@ -365,36 +538,62 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     }}
   </style>
 
-  <!-- P99 / Anomaly master gradient stops (Section 3) — Gold→Purple→Blue→Green→White -->
-  <linearGradient id="master-gradient">
+  <!-- ── ANOMALY bracket stops — edit colors/offsets here, angle = GRAD_ANGLE_ANOMALY -->
+  <linearGradient id="anomaly-stops">
     <stop offset="0%"   stop-color="#FFBF00"/>
-    <stop offset="25%"  stop-color="#8A2BE2"/>
-    <stop offset="50%"  stop-color="#0051FF"/>
-    <stop offset="75%"  stop-color="#51FF48"/>
+    <stop offset="50%"  stop-color="#8A2BE2"/>
+    <stop offset="70%"  stop-color="#0051FF"/>
+    <stop offset="100%" stop-color="#51FF48"/>
+  </linearGradient>
+
+  <!-- ── P99 metric value stops (EDGE / YIELD / GRAVITY) — angle = GRAD_ANGLE_P99 -->
+  <linearGradient id="p99-stops">
+    <stop offset="0%"   stop-color="#FFBF00"/>
+    <stop offset="50%"  stop-color="#8A2BE2"/>
+    <stop offset="75%"  stop-color="#0051FF"/>
+    <stop offset="100%" stop-color="#51FF48"/>
+  </linearGradient>
+
+  <!-- ── Wallet address stops — angle = GRAD_ANGLE_WALLET -->
+  <linearGradient id="wallet-stops">
+    <stop offset="0%"   stop-color="#FFBF00"/>
+    <stop offset="30%"  stop-color="#8A2BE2"/>
+    <stop offset="55%"  stop-color="#0051FF"/>
+    <stop offset="100%" stop-color="#51FF48"/>
+  </linearGradient>
+
+  <!-- ── Card border glow stops — angle = GRAD_ANGLE_BORDER -->
+  <linearGradient id="border-gradient" gradientUnits="userSpaceOnUse"
+                  x1="{brd_gx1}" y1="{brd_gy1}"
+                  x2="{brd_gx2}" y2="{brd_gy2}">
+    <stop offset="20%"   stop-color="#FFBF00"/>
+    <stop offset="40%"  stop-color="#8A2BE2"/>
+    <stop offset="60%"  stop-color="#0051FF"/>
+    <stop offset="80%" stop-color="#51FF48"/>
     <stop offset="100%" stop-color="#FFFFFF"/>
   </linearGradient>
 
-  <!-- Per-element text gradient instances (angle-specific, centered on own text) -->
+  <!-- Per-element gradient instances — inherit stops, apply their own coordinates -->
   <linearGradient id="mg-eb" gradientUnits="userSpaceOnUse"
                   x1="{eb_x1}" y1="{eb_y1}"
                   x2="{eb_x2}" y2="{eb_y2}"
-                  xlink:href="#master-gradient"/>
+                  xlink:href="#anomaly-stops"/>
   <linearGradient id="mg-w" gradientUnits="userSpaceOnUse"
                   x1="{w_x1}" y1="{w_y1}"
                   x2="{w_x2}" y2="{w_y2}"
-                  xlink:href="#master-gradient"/>
+                  xlink:href="#wallet-stops"/>
   <linearGradient id="mg-edge" gradientUnits="userSpaceOnUse"
                   x1="{edge_gx1}" y1="{edge_gy1}"
                   x2="{edge_gx2}" y2="{edge_gy2}"
-                  xlink:href="#master-gradient"/>
+                  xlink:href="#p99-stops"/>
   <linearGradient id="mg-yield" gradientUnits="userSpaceOnUse"
                   x1="{yld_gx1}" y1="{yld_gy1}"
                   x2="{yld_gx2}" y2="{yld_gy2}"
-                  xlink:href="#master-gradient"/>
+                  xlink:href="#p99-stops"/>
   <linearGradient id="mg-grav" gradientUnits="userSpaceOnUse"
                   x1="{grav_gx1}" y1="{grav_gy1}"
                   x2="{grav_gx2}" y2="{grav_gy2}"
-                  xlink:href="#master-gradient"/>
+                  xlink:href="#p99-stops"/>
 
   <!-- Lower dotted separator gradient — 90° horizontal -->
   <linearGradient id="mg-sep" gradientUnits="userSpaceOnUse"
@@ -473,7 +672,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <g filter="url(#glow)">
   <rect x="{FRAME_X}" y="{FRAME_Y}"
         width="{FRAME_W}" height="{FRAME_H}"
-        rx="{FRAME_RX}" fill="{border_color}"/>
+        rx="{FRAME_RX}" fill="{border_fill}"/>
 </g>''')
 
     # ---- Layer 3: Event image ----
@@ -583,6 +782,10 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 </text>''')
 
     # ---- Layer 12: Entry bracket + wallet ----
+    # Flowing tspans (no absolute x=) — the browser handles text layout, so
+    # [ ] always sit exactly around the bracket name regardless of its length.
+    # Gradients are vertical (colour by Y only) so the x position of each word
+    # is irrelevant for gradient rendering.
     parts.append(f'''
 <!-- ══ ENTRY BRACKET + WALLET ══ -->
 <text x="{DZ_CX}" y="{Y_BRACKET}"
@@ -654,7 +857,8 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
   </text>
   <text x="{UPPER_SEP_X2}" y="{Y_FOOTER}"
         text-anchor="end" dominant-baseline="hanging"
-        font-size="16" fill="white"{sig}>
+        font-size="16" fill="white"
+        stroke="#000000" stroke-width="2" paint-order="stroke fill"{sig}>
     {rank_str}
   </text>
 </g>''')
