@@ -797,7 +797,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
   </text>
 </g>''')
 
-    # ---- Layer 12: Entry bracket + wallet ----
+    # ---- Layer 12: Entry bracket +   ----
     # Flowing tspans (no absolute x=) — the browser handles text layout, so
     # [ ] always sit exactly around the bracket name regardless of its length.
     # Gradients are vertical (colour by Y only) so the x position of each word
@@ -933,7 +933,7 @@ if __name__ == "__main__":
 
     svg = generate_card_svg(card_data)
 
-    out_path = "output.svg"
+    out_path = "scripts/cardgen/output.svg"
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(svg)
 
