@@ -535,6 +535,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
       font-family: 'Orbitron', sans-serif;
       font-weight: 700;
       letter-spacing: 0.1em;
+      text-rendering: geometricPrecision;
     }}
   </style>
 
@@ -623,9 +624,9 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
                   gradientUnits="userSpaceOnUse"
                   gradientTransform="translate({DZ_CX} {Y_COG_TEL + 8}) scale(140 11.5)">
     <stop offset="0"    stop-color="#EFE2E2"/>
-    <stop offset="0.25" stop-color="#CDC2C2"/>
+    <stop offset="0.15" stop-color="#CDC2C2"/>
     <stop offset="0.50" stop-color="#ACA2A2"/>
-    <stop offset="0.75" stop-color="#8A8282"/>
+    <stop offset="0.85" stop-color="#8A8282"/>
     <stop offset="1"    stop-color="#686262"/>
   </radialGradient>
 
@@ -636,20 +637,33 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     <feGaussianBlur stdDeviation="2"/>
   </filter>
 
-  <!-- Drop shadow: 0 4px 4px rgba(0,0,0,0.25) -->
-  <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%"
+  <!--
+    Drop shadow — exact Figma settings: X=0 Y=4 Blur=4 Spread=0 #000000 25%
+    Figma blur → SVG stdDeviation = Figma_blur / 2 = 2.
+    The pipeline puts the blurred shadow beneath SourceGraphic so the
+    original <text> node is composited last and stays fully crisp.
+  -->
+  <filter id="shadow" x="-10%" y="-20%" width="120%" height="150%"
           color-interpolation-filters="sRGB">
-    <feFlood flood-opacity="0" result="bg"/>
-    <feColorMatrix in="SourceAlpha" type="matrix"
-        values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 127 0"
-        result="alpha"/>
-    <feOffset dy="4" result="off"/>
-    <feGaussianBlur in="off" stdDeviation="2" result="blur"/>
-    <feComposite in="blur" in2="alpha" operator="out" result="s"/>
-    <feColorMatrix in="s" type="matrix"
-        values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.25 0"/>
+    <feFlood flood-color="#000000" flood-opacity="0.25" result="flood"/>
+    <feComposite in="flood" in2="SourceAlpha" operator="in" result="shadow-shape"/>
+    <feOffset dx="0" dy="4" result="shadow-offset"/>
+    <feGaussianBlur in="shadow-offset" stdDeviation="2" result="shadow-blur"/>
     <feMerge>
-      <feMergeNode/>
+      <feMergeNode in="shadow-blur"/>
+      <feMergeNode in="SourceGraphic"/>
+    </feMerge>
+  </filter>
+
+  <!-- Same settings, applied to individual text elements in the data zone -->
+  <filter id="txt-shadow" x="-10%" y="-20%" width="120%" height="150%"
+          color-interpolation-filters="sRGB">
+    <feFlood flood-color="#000000" flood-opacity="0.25" result="flood"/>
+    <feComposite in="flood" in2="SourceAlpha" operator="in" result="shadow-shape"/>
+    <feOffset dx="0" dy="4" result="shadow-offset"/>
+    <feGaussianBlur in="shadow-offset" stdDeviation="2" result="shadow-blur"/>
+    <feMerge>
+      <feMergeNode in="shadow-blur"/>
       <feMergeNode in="SourceGraphic"/>
     </feMerge>
   </filter>
@@ -774,12 +788,14 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ---- Layer 11: COGNITIVE TELEMETRY ----
     parts.append(f'''
 <!-- ══ COGNITIVE TELEMETRY ══ -->
-<text x="{DZ_CX}" y="{Y_COG_TEL}"
-      text-anchor="middle" dominant-baseline="hanging"
-      font-size="20"
-      fill="url(#cognitive-gradient)"{sig}>
-  COGNITIVE TELEMETRY
-</text>''')
+<g filter="url(#txt-shadow)">
+  <text x="{DZ_CX}" y="{Y_COG_TEL}"
+        text-anchor="middle" dominant-baseline="hanging"
+        font-size="20"
+        fill="url(#cognitive-gradient)"{sig}>
+    COGNITIVE TELEMETRY
+  </text>
+</g>''')
 
     # ---- Layer 12: Entry bracket + wallet ----
     # Flowing tspans (no absolute x=) — the browser handles text layout, so
@@ -788,14 +804,16 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # is irrelevant for gradient rendering.
     parts.append(f'''
 <!-- ══ ENTRY BRACKET + WALLET ══ -->
-<text x="{DZ_CX}" y="{Y_BRACKET}"
-      text-anchor="middle" dominant-baseline="hanging"
-      font-size="15"{sig}>
-  <tspan fill="white">[ </tspan>
-  <tspan fill="{bracket_fill}">{eb}</tspan>
-  <tspan fill="white"> ] :// </tspan>
-  <tspan fill="{wallet_fill}" font-size="14">{wallet_disp}</tspan>
-</text>''')
+<g filter="url(#txt-shadow)">
+  <text x="{DZ_CX}" y="{Y_BRACKET}"
+        text-anchor="middle" dominant-baseline="hanging"
+        font-size="15"{sig}>
+    <tspan fill="white">[ </tspan>
+    <tspan fill="{bracket_fill}">{eb}</tspan>
+    <tspan fill="white"> ] :// </tspan>
+    <tspan fill="{wallet_fill}" font-size="14">{wallet_disp}</tspan>
+  </text>
+</g>''')
 
     # ---- Layer 13: Metric labels (EDGE / YIELD / GRAVITY) ----
     parts.append(f'''
@@ -821,21 +839,23 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ---- Layer 14: Metric values ----
     parts.append(f'''
 <!-- ══ METRIC VALUES ══ -->
-<text x="{COL_EDGE}" y="{Y_METRIC_VALUES}"
-      text-anchor="middle" dominant-baseline="hanging"
-      font-size="20" fill="{edge_val_fill}"{sig}>
-  {edge}
-</text>
-<text x="{COL_YIELD}" y="{Y_METRIC_VALUES}"
-      text-anchor="middle" dominant-baseline="hanging"
-      font-size="20" fill="{yld_val_fill}"{sig}>
-  {yld}
-</text>
-<text x="{COL_GRAVITY}" y="{Y_METRIC_VALUES}"
-      text-anchor="middle" dominant-baseline="hanging"
-      font-size="20" fill="{grav_val_fill}"{sig}>
-  {grav}
-</text>''')
+<g filter="url(#txt-shadow)">
+  <text x="{COL_EDGE}" y="{Y_METRIC_VALUES}"
+        text-anchor="middle" dominant-baseline="hanging"
+        font-size="20" fill="{edge_val_fill}"{sig}>
+    {edge}
+  </text>
+  <text x="{COL_YIELD}" y="{Y_METRIC_VALUES}"
+        text-anchor="middle" dominant-baseline="hanging"
+        font-size="20" fill="{yld_val_fill}"{sig}>
+    {yld}
+  </text>
+  <text x="{COL_GRAVITY}" y="{Y_METRIC_VALUES}"
+        text-anchor="middle" dominant-baseline="hanging"
+        font-size="20" fill="{grav_val_fill}"{sig}>
+    {grav}
+  </text>
+</g>''')
 
     # ---- Layer 15: Lower dotted separator (GRAVITY-colored, no filter) ----
     parts.append(f'''
