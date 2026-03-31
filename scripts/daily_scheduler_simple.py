@@ -65,7 +65,7 @@ from scripts.data_loading_manager import (
 )
 from scripts.ai import Agent1QuantCardGenerator, Agent2ColoristGenerator
 
-STANDARD_SEASON_TOTAL_SUPPLY_TEST = 10
+STANDARD_SEASON_TOTAL_SUPPLY_TEST = 400
 STANDARD_SEASON_ACTIVE_DAYS = 9
 STANDARD_SEASON_CYCLE_DAYS = 10
 ORIGIN_LOOKBACK_DAYS_STANDARD = 10
