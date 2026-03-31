@@ -152,6 +152,71 @@ function getInstanceFromRecurrence(recurrence: string | null): "FRACTAL" | "SING
   return "SINGULAR";
 }
 
+function updateNftCardTilt(target: HTMLElement, clientX: number, clientY: number) {
+  const rect = target.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const relativeX = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  const relativeY = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
+  const MAX_TILT = 20;
+  const rotateY = (relativeX - 0.5) * (MAX_TILT * 2);
+  const rotateX = (0.5 - relativeY) * (MAX_TILT * 2);
+  const tiltRatioX = (relativeY - 0.5) * 2;
+  const tiltRatioY = (relativeX - 0.5) * 2;
+
+  target.classList.add("nft-card-active");
+  target.parentElement?.classList.add("nft-card-wrapper-active");
+  target.style.setProperty("--nft-tilt-x", `${rotateX.toFixed(2)}deg`);
+  target.style.setProperty("--nft-tilt-y", `${rotateY.toFixed(2)}deg`);
+  target.style.setProperty("--pointer-x", `${(relativeX * 100).toFixed(2)}%`);
+  target.style.setProperty("--pointer-y", `${(relativeY * 100).toFixed(2)}%`);
+  target.style.setProperty("--tilt-ratio-x", tiltRatioX.toFixed(3));
+  target.style.setProperty("--tilt-ratio-y", tiltRatioY.toFixed(3));
+}
+
+function resetNftCardTilt(target: HTMLElement) {
+  target.classList.remove("nft-card-active");
+  target.parentElement?.classList.remove("nft-card-wrapper-active");
+  target.style.setProperty("--nft-tilt-x", "0deg");
+  target.style.setProperty("--nft-tilt-y", "0deg");
+  target.style.setProperty("--pointer-x", "50%");
+  target.style.setProperty("--pointer-y", "50%");
+  target.style.setProperty("--tilt-ratio-x", "0");
+  target.style.setProperty("--tilt-ratio-y", "0");
+}
+
+function handleCardBuilderPreviewMouseMove(event: React.MouseEvent<HTMLDivElement>) {
+  const PROXIMITY_PX = 10;
+  const clientX = event.clientX;
+  const clientY = event.clientY;
+  const wrappers = event.currentTarget.querySelectorAll<HTMLElement>(".nft-card-wrapper");
+
+  wrappers.forEach((wrapper) => {
+    const card = wrapper.querySelector<HTMLElement>(".nft-card-tilt");
+    if (!card) return;
+
+    const rect = card.getBoundingClientRect();
+    const isWithinProximity =
+      clientX >= rect.left - PROXIMITY_PX &&
+      clientX <= rect.right + PROXIMITY_PX &&
+      clientY >= rect.top - PROXIMITY_PX &&
+      clientY <= rect.bottom + PROXIMITY_PX;
+
+    if (!isWithinProximity) {
+      resetNftCardTilt(card);
+      return;
+    }
+
+    const clampedX = Math.min(rect.right, Math.max(rect.left, clientX));
+    const clampedY = Math.min(rect.bottom, Math.max(rect.top, clientY));
+    updateNftCardTilt(card, clampedX, clampedY);
+  });
+}
+
+function handleCardBuilderPreviewMouseLeave(event: React.MouseEvent<HTMLDivElement>) {
+  const cards = event.currentTarget.querySelectorAll<HTMLElement>(".nft-card-tilt");
+  cards.forEach((card) => resetNftCardTilt(card));
+}
+
 type EventCardForm = {
   event_id: string;
   card_title: string;
@@ -2514,11 +2579,29 @@ export default function HomePage() {
               ) : null}
             </div>
             {cardBuilderPreviewSvg ? (
-              <div style={{ width: 518, height: 804, border: "1px solid #334155", background: "transparent", overflow: "hidden" }}>
-                <div
-                  style={{ width: 518, height: 804, background: "transparent" }}
-                  dangerouslySetInnerHTML={{ __html: cardBuilderPreviewSvg }}
-                />
+              <div
+                className="card-builder-preview-stage"
+                onMouseMove={handleCardBuilderPreviewMouseMove}
+                onMouseLeave={handleCardBuilderPreviewMouseLeave}
+              >
+                <div className="nft-card-wrapper card-builder-preview-wrapper">
+                  <article className="nft-card nft-card-tilt theme-vivid card-builder-preview-card">
+                    <div className="card-builder-preview-svg-shell">
+                      <div
+                        className="card-builder-preview-svg-content"
+                        // Render preview at custom scale while keeping source SVG untouched.
+                        style={{
+                          width: 518,
+                          height: 804,
+                          background: "transparent",
+                          transform: "scale(0.6)",
+                          transformOrigin: "top left",
+                        }}
+                        dangerouslySetInnerHTML={{ __html: cardBuilderPreviewSvg }}
+                      />
+                    </div>
+                  </article>
+                </div>
               </div>
             ) : (
               <div className="muted">No preview yet.</div>
