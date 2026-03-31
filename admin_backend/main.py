@@ -42,6 +42,7 @@ if project_root not in sys.path:
 
 from scripts.data_loading_manager import DataLoadingManager
 from scripts.daily_scheduler_simple import SimplifiedScheduler
+from scripts.cardgen.generate_card import detect_pattern, generate_card_svg
 from scripts.season_manager import SeasonManager
 from scripts.solana_service import MintedNftResult, SolanaClient
 from scripts.zora_service import ZoraClient
@@ -157,6 +158,10 @@ class EventCardPromptPartsOverride(BaseModel):
 
 class EventCardRegenerateRequest(BaseModel):
     prompt_parts: Optional[EventCardPromptPartsOverride] = None
+
+
+class CardBuilderPreviewRequest(BaseModel):
+    payload: Dict[str, Any]
 
 
 class WsHub:
@@ -1907,6 +1912,15 @@ class SeasonWorkbenchService:
                 payload[key] = value.astimezone(timezone.utc).isoformat()
         return payload
 
+    @staticmethod
+    def _format_card_builder_candidate(row: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(row)
+        for key in ("window_start", "window_end", "snapshot_at", "event_card_generated_at", "event_card_updated_at"):
+            value = payload.get(key)
+            if isinstance(value, datetime):
+                payload[key] = value.astimezone(timezone.utc).isoformat()
+        return payload
+
     def list_winner_wallet_rows(self, season_id: Optional[int], limit: int) -> List[Dict[str, Any]]:
         safe_limit = min(max(limit, 1), 1000)
         conn = self.manager.get_connection()
@@ -1948,6 +1962,92 @@ class SeasonWorkbenchService:
                         (season_id, safe_limit),
                     )
                 return [self._format_winner_row(dict(row)) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def list_card_builder_candidates(
+        self,
+        *,
+        season_id: Optional[int],
+        limit: int,
+        search_query: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 1000)
+        normalized_query = (search_query or "").strip().lower()
+
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                where_parts: List[str] = [
+                    "w.event_id IS NOT NULL",
+                    "ec.manual_image_url IS NOT NULL",
+                    "BTRIM(ec.manual_image_url) <> ''",
+                ]
+                params: List[Any] = []
+
+                if season_id is not None:
+                    where_parts.append("w.season_id = %s")
+                    params.append(season_id)
+
+                if normalized_query:
+                    where_parts.append(
+                        """
+                        (
+                            LOWER(w.proxy_wallet) LIKE %s
+                            OR LOWER(COALESCE(w.event_id, '')) LIKE %s
+                            OR LOWER(COALESCE(w.event_slug, '')) LIKE %s
+                            OR LOWER(COALESCE(e.title, '')) LIKE %s
+                            OR LOWER(COALESCE(ec.primary_tag, '')) LIKE %s
+                            OR LOWER(COALESCE(ec.card_title, '')) LIKE %s
+                        )
+                        """
+                    )
+                    q = f"%{normalized_query}%"
+                    params.extend([q, q, q, q, q, q])
+
+                where_sql = f"WHERE {' AND '.join(where_parts)}"
+                cursor.execute(
+                    f"""
+                    SELECT
+                        w.id AS winner_row_id,
+                        w.season_id,
+                        s.type AS season_type,
+                        s.season_number,
+                        w.proxy_wallet,
+                        w.event_id,
+                        w.event_slug,
+                        e.title AS event_title,
+                        w.entry_bracket,
+                        w.edge,
+                        w.yield,
+                        w.gravity,
+                        w.rank,
+                        w.window_start,
+                        w.window_end,
+                        w.snapshot_at,
+                        ec.series_id,
+                        ec.reccurence,
+                        ec.manual_image_url,
+                        ec.card_title,
+                        ec.card_lore,
+                        ec.primary_tag,
+                        ec.secondary_tag,
+                        tp.hex_color AS primary_tag_hex_color,
+                        ec.generated_at AS event_card_generated_at,
+                        ec.updated_at AS event_card_updated_at
+                    FROM winner_wallets_nft_to_claim w
+                    JOIN event_cards ec ON ec.event_id = w.event_id
+                    LEFT JOIN events e ON e.id = w.event_id
+                    LEFT JOIN seasons s ON s.id = w.season_id
+                    LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+                    {where_sql}
+                    ORDER BY w.season_id DESC, w.rank ASC NULLS LAST, w.id DESC
+                    LIMIT %s
+                    """,
+                    (*params, safe_limit),
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+                return [self._format_card_builder_candidate(row) for row in rows]
         finally:
             conn.close()
 
@@ -2813,6 +2913,40 @@ def regenerate_event_card(event_id: str, req: Optional[EventCardRegenerateReques
 def event_card_prompt(event_id: str) -> Dict[str, Any]:
     try:
         return service.get_event_card_prompt_preview(event_id=event_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/card-builder/candidates")
+def get_card_builder_candidates(
+    season_id: Optional[int] = None,
+    limit: int = 200,
+    q: Optional[str] = None,
+) -> Dict[str, Any]:
+    try:
+        rows = service.list_card_builder_candidates(
+            season_id=season_id,
+            limit=limit,
+            search_query=q,
+        )
+        return {"rows": rows}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/card-builder/preview")
+def card_builder_preview(req: CardBuilderPreviewRequest) -> Dict[str, Any]:
+    try:
+        payload = dict(req.payload or {})
+        image_url = str(payload.get("image_url") or "").strip()
+        if not image_url:
+            raise ValueError("image_url is required and must come from manual_image_url")
+        payload["image_url"] = image_url
+        svg = generate_card_svg(payload)
+        return {
+            "svg": svg,
+            "pattern": detect_pattern(payload),
+        }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

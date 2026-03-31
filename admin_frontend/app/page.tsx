@@ -6,7 +6,7 @@ import { ArrowUpDown, Copy, Loader2, Pencil, RotateCcw } from "lucide-react";
 const RAW_API_BASE = process.env.NEXT_PUBLIC_SEASON_API_BASE_URL ?? "http://localhost:8001";
 const API_BASE = RAW_API_BASE === "/" ? "" : RAW_API_BASE.replace(/\/$/, "");
 
-type TabKey = "overview" | "eligibility" | "claims" | "seasonClaims" | "winners" | "eventCards" | "eventPictures" | "scenarios" | "reset";
+type TabKey = "overview" | "eligibility" | "claims" | "seasonClaims" | "winners" | "eventCards" | "eventPictures" | "cardBuilder" | "scenarios" | "reset";
 
 type Season = {
   id: number;
@@ -105,6 +105,53 @@ type EventCardRow = {
   updated_at: string;
 };
 
+type CardBuilderCandidate = {
+  winner_row_id: number;
+  season_id: number;
+  season_type?: string | null;
+  season_number?: number | null;
+  proxy_wallet: string;
+  event_id: string;
+  event_slug?: string | null;
+  event_title?: string | null;
+  entry_bracket?: string | null;
+  edge?: string | null;
+  yield?: string | null;
+  gravity?: string | null;
+  rank?: number | null;
+  reccurence?: string | null;
+  manual_image_url?: string | null;
+  card_title?: string | null;
+  card_lore?: string | null;
+  primary_tag?: string | null;
+  secondary_tag?: string | null;
+  primary_tag_hex_color?: string | null;
+};
+
+type CardBuilderPayload = {
+  season_type: string;
+  season_number: number;
+  recurrence: string | null;
+  claim_type: string;
+  image_url: string;
+  card_title: string;
+  primary_tag: string;
+  primary_tag_color: string;
+  secondary_tag: string;
+  entry_bracket: string;
+  proxy_wallet: string;
+  edge: string;
+  yield: string;
+  gravity: string;
+  leaderboard_rank: number;
+};
+
+function getInstanceFromRecurrence(recurrence: string | null): "FRACTAL" | "SINGULAR" {
+  const value = String(recurrence ?? "").trim().toLowerCase();
+  if (value && value !== "null" && value !== "none") return "FRACTAL";
+  return "SINGULAR";
+}
+
 type EventCardForm = {
   event_id: string;
   card_title: string;
@@ -172,9 +219,15 @@ const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "winners", label: "Winner Wallets" },
   { key: "eventCards", label: "Event Cards" },
   { key: "eventPictures", label: "Event Pictures" },
+  { key: "cardBuilder", label: "Card Builder" },
   { key: "scenarios", label: "Scenarios" },
   { key: "reset", label: "Reset" },
 ];
+
+const cardSeasonTypeOptions = ["standard", "genesis"] as const;
+const cardClaimTypeOptions = ["looter", "origin"] as const;
+const cardEntryBracketOptions = ["ANOMALY", "ORACLE", "OUTLIER", "VECTOR", "HARVESTER"] as const;
+const cardTierOptions = ["P99", "P95", "P70", "P50", "BASE"] as const;
 
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -331,6 +384,14 @@ export default function HomePage() {
   const [eventCardRegeneratingEventId, setEventCardRegeneratingEventId] = useState("");
   const [eventPictureUploadingEventId, setEventPictureUploadingEventId] = useState("");
   const [eventPictureDeletingEventId, setEventPictureDeletingEventId] = useState("");
+  const [cardBuilderRows, setCardBuilderRows] = useState<CardBuilderCandidate[]>([]);
+  const [cardBuilderSeasonFilterId, setCardBuilderSeasonFilterId] = useState<number>(0);
+  const [cardBuilderSearch, setCardBuilderSearch] = useState("");
+  const [cardBuilderSelectedWinnerRowId, setCardBuilderSelectedWinnerRowId] = useState<number | null>(null);
+  const [cardBuilderPayload, setCardBuilderPayload] = useState<CardBuilderPayload | null>(null);
+  const [cardBuilderPreviewSvg, setCardBuilderPreviewSvg] = useState("");
+  const [cardBuilderPattern, setCardBuilderPattern] = useState("");
+  const [cardBuilderPreviewBusy, setCardBuilderPreviewBusy] = useState(false);
   const [eventCardForm, setEventCardForm] = useState<EventCardForm>({
     event_id: "",
     card_title: "",
@@ -496,6 +557,29 @@ export default function HomePage() {
     status: row.status ?? "ok",
     error_text: row.error_text ?? "",
   });
+  const buildCardBuilderPayloadFromRow = (row: CardBuilderCandidate): CardBuilderPayload => ({
+    season_type: String(row.season_type ?? "standard"),
+    season_number: Number(row.season_number ?? 1),
+    recurrence: row.reccurence ? String(row.reccurence) : null,
+    claim_type: "looter",
+    image_url: String(row.manual_image_url ?? ""),
+    card_title: String(row.card_title ?? ""),
+    primary_tag: String(row.primary_tag ?? "UNKNOWN"),
+    primary_tag_color: String(row.primary_tag_hex_color ?? "#FFFFFF"),
+    secondary_tag: String(row.secondary_tag ?? "NONE"),
+    entry_bracket: String(row.entry_bracket ?? "HARVESTER"),
+    proxy_wallet: String(row.proxy_wallet ?? ""),
+    edge: String(row.edge ?? "BASE"),
+    yield: String(row.yield ?? "BASE"),
+    gravity: String(row.gravity ?? "BASE"),
+    leaderboard_rank: Number(row.rank ?? 0),
+  });
+  const applyCardBuilderRow = (row: CardBuilderCandidate) => {
+    setCardBuilderSelectedWinnerRowId(row.winner_row_id);
+    setCardBuilderPayload(buildCardBuilderPayloadFromRow(row));
+    setCardBuilderPreviewSvg("");
+    setCardBuilderPattern("");
+  };
   const getEventCardsSortValue = (row: EventCardRow, key: EventCardsSortKey): string => {
     const value = row[key];
     if (value == null) return "";
@@ -725,6 +809,44 @@ export default function HomePage() {
     setEventCardRows(data.rows);
     setEventCardsPage(1);
   };
+  const refreshCardBuilderRows = async () => {
+    const params = new URLSearchParams();
+    params.set("limit", "300");
+    if (cardBuilderSeasonFilterId) params.set("season_id", String(cardBuilderSeasonFilterId));
+    if (cardBuilderSearch.trim()) params.set("q", cardBuilderSearch.trim());
+    const data = await fetchJSON<{ rows: CardBuilderCandidate[] }>(`/api/card-builder/candidates?${params.toString()}`);
+    setCardBuilderRows(data.rows);
+    if (data.rows.length === 0) {
+      setCardBuilderSelectedWinnerRowId(null);
+      setCardBuilderPayload(null);
+      setCardBuilderPreviewSvg("");
+      setCardBuilderPattern("");
+      return;
+    }
+    const selected = data.rows.find((row) => row.winner_row_id === cardBuilderSelectedWinnerRowId);
+    if (selected) return;
+    applyCardBuilderRow(data.rows[0]);
+  };
+  const previewCardBuilderPayload = async (payloadOverride?: CardBuilderPayload) => {
+    const payload = payloadOverride ?? cardBuilderPayload;
+    if (!payload) {
+      throw new Error("Select a winner row first");
+    }
+    if (!payload.image_url.trim()) {
+      throw new Error("manual_image_url is required; rows without it are excluded");
+    }
+    setCardBuilderPreviewBusy(true);
+    try {
+      const out = await fetchJSON<{ svg: string; pattern: string }>("/api/card-builder/preview", {
+        method: "POST",
+        body: JSON.stringify({ payload }),
+      });
+      setCardBuilderPreviewSvg(out.svg);
+      setCardBuilderPattern(out.pattern);
+    } finally {
+      setCardBuilderPreviewBusy(false);
+    }
+  };
 
   const refreshEventCardPrompt = async (eventIdRaw?: string) => {
     const eventId = (eventIdRaw ?? eventCardForm.event_id).trim();
@@ -867,6 +989,30 @@ export default function HomePage() {
     // Auto-refresh when dropdown filters change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, eventCardsStatusFilter, eventCardsSnapshotScope]);
+
+  useEffect(() => {
+    if (tab !== "cardBuilder") return;
+    void run(async () => {
+      if (!cardBuilderSeasonFilterId) {
+        const seedSeasonId = winnerSeasonFilterId || claimSeasonId || choosePreferredSeasonId(seasons) || 0;
+        if (seedSeasonId) setCardBuilderSeasonFilterId(seedSeasonId);
+      }
+      await refreshCardBuilderRows();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, cardBuilderSeasonFilterId]);
+
+  useEffect(() => {
+    if (tab !== "cardBuilder") return;
+    if (!cardBuilderPayload) return;
+    const timer = window.setTimeout(() => {
+      void previewCardBuilderPayload().catch(() => {
+        // manual refresh button surfaces errors through global run
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, cardBuilderPayload]);
 
   useEffect(() => {
     if (eventCardsPage > eventCardsTotalPages) {
@@ -2124,6 +2270,259 @@ export default function HomePage() {
                 Next
               </button>
             </div>
+          </div>
+        </section>
+      ) : null}
+
+      {tab === "cardBuilder" ? (
+        <section className="panel">
+          <div className="row">
+            <label>Season filter</label>
+            <select value={cardBuilderSeasonFilterId} onChange={(e) => setCardBuilderSeasonFilterId(Number(e.target.value))}>
+              {seasonOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <label>search</label>
+            <input
+              value={cardBuilderSearch}
+              onChange={(e) => setCardBuilderSearch(e.target.value)}
+              placeholder="wallet / event_id / slug / tag / title"
+              style={{ minWidth: 300 }}
+            />
+            <button onClick={() => void run(refreshCardBuilderRows)}>Refresh candidates</button>
+            <button onClick={() => void run(() => previewCardBuilderPayload())} disabled={!cardBuilderPayload || cardBuilderPreviewBusy}>
+              {cardBuilderPreviewBusy ? "Rendering..." : "Render preview"}
+            </button>
+            <span className="muted">
+              Uses `event_cards.manual_image_url` only. Null manual image rows are excluded.
+            </span>
+          </div>
+
+          <div className="event-cards-top-grid">
+            <div className="panel">
+              <div className="muted">Eligible candidates ({cardBuilderRows.length})</div>
+              <div className="overflow-auto rounded-xl border border-slate-700 bg-slate-900 shadow-sm" style={{ maxHeight: 430 }}>
+                <table className="event-cards-table w-full border-collapse text-xs text-slate-200">
+                  <thead className="sticky top-0 z-30 bg-slate-800">
+                    <tr>
+                      <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">select</th>
+                      <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">season</th>
+                      <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">wallet</th>
+                      <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">event_id</th>
+                      <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">reccurence</th>
+                      <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">title</th>
+                      <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">primary_tag</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cardBuilderRows.map((row, idx) => {
+                      const stripe = idx % 2 === 0 ? "bg-slate-900" : "bg-slate-800/60";
+                      const selected = cardBuilderSelectedWinnerRowId === row.winner_row_id;
+                      return (
+                        <tr
+                          key={`builder-${row.winner_row_id}`}
+                          className={`${stripe} cursor-pointer ${selected ? "ring-1 ring-cyan-500" : ""}`}
+                          onClick={() => applyCardBuilderRow(row)}
+                        >
+                          <td className="border-b border-slate-700 px-3 py-2">{selected ? "✓" : ""}</td>
+                          <td className="border-b border-slate-700 px-3 py-2">
+                            {row.season_type ?? "standard"}#{row.season_number ?? "?"}
+                          </td>
+                          <td className="border-b border-slate-700 px-3 py-2">
+                            <div className="max-w-[180px] truncate" title={row.proxy_wallet}>{row.proxy_wallet}</div>
+                          </td>
+                          <td className="border-b border-slate-700 px-3 py-2">
+                            <div className="max-w-[180px] truncate" title={row.event_id}>{row.event_id}</div>
+                          </td>
+                          <td className="border-b border-slate-700 px-3 py-2">
+                            <div className="max-w-[130px] truncate" title={row.reccurence ?? ""}>{row.reccurence ?? ""}</div>
+                          </td>
+                          <td className="border-b border-slate-700 px-3 py-2">
+                            <div className="max-w-[240px] truncate" title={row.event_title ?? ""}>{row.event_title ?? ""}</div>
+                          </td>
+                          <td className="border-b border-slate-700 px-3 py-2">
+                            <span
+                              className="inline-flex rounded-full border px-2 py-1 text-[11px] font-medium"
+                              style={tagChipStyle(row.primary_tag_hex_color)}
+                            >
+                              {row.primary_tag ?? "UNKNOWN"}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="panel">
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <div className="muted">Card payload</div>
+                {cardBuilderPayload ? (
+                  <button onClick={() => void copyText(JSON.stringify(cardBuilderPayload, null, 2))}>
+                    Copy JSON payload
+                  </button>
+                ) : null}
+              </div>
+              {cardBuilderPayload ? (
+                <>
+                  <div className="muted" style={{ marginBottom: 6 }}>Meta</div>
+                  <div className="row" style={{ alignItems: "center" }}>
+                    <label>season_type</label>
+                    <select
+                      value={cardBuilderPayload.season_type}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, season_type: e.target.value } : prev)}
+                    >
+                      {cardSeasonTypeOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+                    </select>
+                    <label>season_number</label>
+                    <input
+                      type="number"
+                      value={cardBuilderPayload.season_number}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, season_number: Number(e.target.value) || 1 } : prev)}
+                      style={{ width: 110 }}
+                    />
+                    <label>claim_type</label>
+                    <select
+                      value={cardBuilderPayload.claim_type}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, claim_type: e.target.value } : prev)}
+                    >
+                      {cardClaimTypeOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+                    </select>
+                    <label>instance</label>
+                    <select
+                      value={getInstanceFromRecurrence(cardBuilderPayload.recurrence)}
+                      onChange={(e) => setCardBuilderPayload((prev) => {
+                        if (!prev) return prev;
+                        return { ...prev, recurrence: e.target.value === "FRACTAL" ? (prev.recurrence || "fractal") : null };
+                      })}
+                    >
+                      <option value="SINGULAR">SINGULAR</option>
+                      <option value="FRACTAL">FRACTAL</option>
+                    </select>
+                    <label>reccurence</label>
+                    <input
+                      value={cardBuilderPayload.recurrence ?? ""}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, recurrence: e.target.value || null } : prev)}
+                      placeholder="null/empty => SINGULAR"
+                      style={{ minWidth: 160 }}
+                    />
+                  </div>
+
+                  <div className="muted" style={{ marginTop: 8, marginBottom: 6 }}>Visual</div>
+                  <div className="row" style={{ alignItems: "center" }}>
+                    <label>image_url</label>
+                    <input
+                      value={cardBuilderPayload.image_url}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, image_url: e.target.value } : prev)}
+                      style={{ minWidth: 620 }}
+                    />
+                  </div>
+                  <div className="row" style={{ alignItems: "center" }}>
+                    <label>card_title</label>
+                    <input
+                      value={cardBuilderPayload.card_title}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, card_title: e.target.value } : prev)}
+                      style={{ minWidth: 520 }}
+                    />
+                  </div>
+                  <div className="row" style={{ alignItems: "center" }}>
+                    <label>primary_tag</label>
+                    <input
+                      value={cardBuilderPayload.primary_tag}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, primary_tag: e.target.value } : prev)}
+                    />
+                    <label>primary_tag_color</label>
+                    <input
+                      type="color"
+                      value={/^#[0-9a-fA-F]{6}$/.test(cardBuilderPayload.primary_tag_color) ? cardBuilderPayload.primary_tag_color : "#ffffff"}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, primary_tag_color: e.target.value } : prev)}
+                      style={{ width: 50, minWidth: 50, padding: 0, border: "none", background: "transparent" }}
+                    />
+                    <input
+                      value={cardBuilderPayload.primary_tag_color}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, primary_tag_color: e.target.value } : prev)}
+                      style={{ width: 110 }}
+                    />
+                    <label>secondary_tag</label>
+                    <input
+                      value={cardBuilderPayload.secondary_tag}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, secondary_tag: e.target.value } : prev)}
+                    />
+                  </div>
+
+                  <div className="muted" style={{ marginTop: 8, marginBottom: 6 }}>Trader Metrics</div>
+                  <div className="row" style={{ alignItems: "center" }}>
+                    <label>entry_bracket</label>
+                    <select
+                      value={cardBuilderPayload.entry_bracket}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, entry_bracket: e.target.value } : prev)}
+                    >
+                      {cardEntryBracketOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+                    </select>
+                    <label>proxy_wallet</label>
+                    <input
+                      value={cardBuilderPayload.proxy_wallet}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, proxy_wallet: e.target.value } : prev)}
+                      style={{ minWidth: 260 }}
+                    />
+                    <label>rank</label>
+                    <input
+                      type="number"
+                      value={cardBuilderPayload.leaderboard_rank}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, leaderboard_rank: Number(e.target.value) || 0 } : prev)}
+                      style={{ width: 100 }}
+                    />
+                  </div>
+                  <div className="row" style={{ alignItems: "center" }}>
+                    <label>edge</label>
+                    <select
+                      value={cardBuilderPayload.edge}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, edge: e.target.value } : prev)}
+                    >
+                      {cardTierOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+                    </select>
+                    <label>yield</label>
+                    <select
+                      value={cardBuilderPayload.yield}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, yield: e.target.value } : prev)}
+                    >
+                      {cardTierOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+                    </select>
+                    <label>gravity</label>
+                    <select
+                      value={cardBuilderPayload.gravity}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, gravity: e.target.value } : prev)}
+                    >
+                      {cardTierOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+                    </select>
+                  </div>
+                </>
+              ) : (
+                <div className="muted">Pick a row from the candidates table.</div>
+              )}
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="row">
+              <span className="muted">Preview pattern: {cardBuilderPattern || "n/a"}</span>
+              {cardBuilderPayload?.image_url ? (
+                <a href={cardBuilderPayload.image_url} target="_blank" rel="noreferrer">
+                  Open source image
+                </a>
+              ) : null}
+            </div>
+            {cardBuilderPreviewSvg ? (
+              <div style={{ width: 518, height: 804, border: "1px solid #334155", background: "transparent", overflow: "hidden" }}>
+                <div
+                  style={{ width: 518, height: 804, background: "transparent" }}
+                  dangerouslySetInnerHTML={{ __html: cardBuilderPreviewSvg }}
+                />
+              </div>
+            ) : (
+              <div className="muted">No preview yet.</div>
+            )}
           </div>
         </section>
       ) : null}
