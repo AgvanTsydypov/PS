@@ -869,17 +869,12 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     parts.append(f'''
 <!-- ══ FOOTER ══ -->
 <g filter="url(#shadow)">
-  <text x="{UPPER_SEP_X1}" y="{Y_FOOTER}"
-        dominant-baseline="hanging"
+  <text x="{DZ_CX}" y="{Y_FOOTER}"
+        text-anchor="middle" dominant-baseline="hanging"
         font-size="16"{sig}>
     <tspan fill="#2E5CFF">POLYMARKET</tspan>
     <tspan fill="white"> GLOBAL RANK:</tspan>
-  </text>
-  <text x="{UPPER_SEP_X2}" y="{Y_FOOTER}"
-        text-anchor="end" dominant-baseline="hanging"
-        font-size="16" fill="white"
-        stroke="#000000" stroke-width="2" paint-order="stroke fill"{sig}>
-    {rank_str}
+    <tspan fill="white" stroke="#000000" stroke-width="2" paint-order="stroke fill"> {rank_str}</tspan>
   </text>
 </g>''')
 
