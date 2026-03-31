@@ -576,7 +576,7 @@ function detectPattern(data):
   "season_number":      3,
   "recurrence":         "null | daily | weekly | monthly",
   "claim_type":         "origin | looter",
-  "image_url":          "https://storage.example.com/events/abc123.png",
+  "image_url":          "https://pub-c88ecf8bdbaf40c088df5b1c7ffe2f7b.r2.dev/prod/event-images/194107/c2e16d6bb8b44bd598141542c8dd82bd.jpg",
   "card_title":         "ZELENSKYY SUIT WATCH JUN 2025",
   "primary_tag":        "CELEBRITIES",
   "primary_tag_color":  "#51E147",
