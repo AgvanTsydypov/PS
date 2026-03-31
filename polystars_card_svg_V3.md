@@ -56,7 +56,7 @@ Case:       ALL CAPS — enforced programmatically
 
 ---
 
-## 3. The Master Gradient
+## 3. The Master а
 
 Reused for the highest rarity tier (Anomaly / P99). Appears conditionally.
 
