@@ -44,6 +44,7 @@ import time
 import argparse
 import tempfile
 import requests
+from collections import defaultdict
 from datetime import datetime, date, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from pathlib import Path
@@ -1169,26 +1170,9 @@ class SimplifiedScheduler:
             ),
             candidate_participants AS (
                 SELECT
-                    p.*
-                FROM participants p
-                WHERE p.proxy_wallet IS NOT NULL
-                  AND EXISTS (
-                      SELECT 1
-                      FROM working_events we
-                      WHERE (
-                          we.event_id IS NOT NULL
-                          AND p.event_id = we.event_id
-                      ) OR (
-                          we.event_slug IS NOT NULL
-                          AND p.event_slug = we.event_slug
-                      )
-                  )
-            ),
-            per_wallet_random AS (
-                SELECT DISTINCT ON (LOWER(p.proxy_wallet))
                     LOWER(p.proxy_wallet) AS proxy_wallet,
-                    p.event_id,
-                    p.event_slug,
+                    COALESCE(p.event_id, we.event_id) AS event_id,
+                    COALESCE(p.event_slug, we.event_slug) AS event_slug,
                     p.entry_cwap,
                     p.total_volume,
                     p.total_pnl,
@@ -1197,16 +1181,230 @@ class SimplifiedScheduler:
                     p.edge,
                     p.yield,
                     p.gravity,
-                    p.rank
-                FROM candidate_participants p
-                ORDER BY LOWER(p.proxy_wallet), RANDOM()
+                    p.rank,
+                    COALESCE(e.volume, 0) AS event_volume,
+                    RANDOM() AS random_key
+                FROM participants p
+                JOIN working_events we
+                  ON (
+                    (we.event_id IS NOT NULL AND p.event_id = we.event_id)
+                    OR (we.event_slug IS NOT NULL AND p.event_slug = we.event_slug)
+                  )
+                LEFT JOIN events e
+                  ON e.id = COALESCE(p.event_id, we.event_id)
+                WHERE p.proxy_wallet IS NOT NULL
             ),
-            sampled AS (
-                SELECT *
-                FROM per_wallet_random
-                ORDER BY RANDOM()
-                LIMIT %s
+            per_wallet_per_event_random AS (
+                SELECT DISTINCT ON (proxy_wallet, COALESCE(event_id, event_slug))
+                    proxy_wallet,
+                    event_id,
+                    event_slug,
+                    entry_cwap,
+                    total_volume,
+                    total_pnl,
+                    roi_percentage,
+                    entry_bracket,
+                    edge,
+                    yield,
+                    gravity,
+                    rank,
+                    event_volume,
+                    random_key
+                FROM candidate_participants
+                WHERE event_id IS NOT NULL OR event_slug IS NOT NULL
+                ORDER BY proxy_wallet, COALESCE(event_id, event_slug), random_key
             )
+            SELECT
+                proxy_wallet,
+                event_id,
+                event_slug,
+                entry_cwap,
+                total_volume,
+                total_pnl,
+                roi_percentage,
+                entry_bracket,
+                edge,
+                yield,
+                gravity,
+                rank,
+                event_volume,
+                random_key
+            FROM per_wallet_per_event_random
+            ORDER BY random_key
+            """,
+            (
+                use_resolution_anchor,
+                use_resolution_anchor,
+                window_start,
+                window_end,
+                use_resolution_anchor,
+                window_start,
+                window_end,
+            ),
+        )
+        candidate_rows = [dict(row) for row in (cursor.fetchall() or [])]
+        if not candidate_rows:
+            return 0
+
+        # Group candidates by event and preserve one unique wallet max per season.
+        event_candidates: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        event_volume_by_key: Dict[str, float] = {}
+        seen_wallet_event: set[tuple[str, str]] = set()
+
+        for row in candidate_rows:
+            wallet = str(row.get("proxy_wallet") or "").strip().lower()
+            if not wallet:
+                continue
+            event_id = str(row.get("event_id") or "").strip() or None
+            event_slug = str(row.get("event_slug") or "").strip() or None
+            if not event_id and not event_slug:
+                continue
+            event_key = event_id or f"slug:{event_slug}"
+            wallet_event_key = (wallet, event_key)
+            if wallet_event_key in seen_wallet_event:
+                continue
+            seen_wallet_event.add(wallet_event_key)
+
+            raw_event_volume = row.get("event_volume")
+            try:
+                event_volume = float(raw_event_volume or 0)
+            except Exception:
+                event_volume = 0.0
+            event_volume_by_key[event_key] = max(event_volume_by_key.get(event_key, 0.0), max(event_volume, 0.0))
+            event_candidates[event_key].append(row)
+
+        event_keys = [key for key, rows in event_candidates.items() if rows]
+        if not event_keys:
+            return 0
+
+        # Guarantee every event in the season snapshot receives coverage.
+        # If requested N is too small, raise effective target to number of events.
+        effective_limit = rank_limit
+        if effective_limit < len(event_keys):
+            print(
+                f"⚠️ Snapshot target {rank_limit} is smaller than event count {len(event_keys)}; "
+                f"raising target to {len(event_keys)} to guarantee event coverage"
+            )
+            effective_limit = len(event_keys)
+
+        # Allocate per-event quotas proportionally to event volume share.
+        base_quota = {key: 1 for key in event_keys}
+        remaining_slots = max(0, effective_limit - len(event_keys))
+        positive_total_volume = sum(v for key, v in event_volume_by_key.items() if key in event_keys and v > 0)
+
+        if positive_total_volume > 0:
+            exact_extras: Dict[str, float] = {
+                key: remaining_slots * (event_volume_by_key.get(key, 0.0) / positive_total_volume)
+                for key in event_keys
+            }
+        else:
+            exact_extras = {key: (remaining_slots / len(event_keys)) for key in event_keys}
+
+        floor_extras = {key: int(exact_extras[key]) for key in event_keys}
+        quotas = {key: base_quota[key] + floor_extras[key] for key in event_keys}
+        leftover = remaining_slots - sum(floor_extras.values())
+        if leftover > 0:
+            remainders = sorted(
+                event_keys,
+                key=lambda key: (exact_extras[key] - floor_extras[key], event_volume_by_key.get(key, 0.0)),
+                reverse=True,
+            )
+            for key in remainders[:leftover]:
+                quotas[key] += 1
+
+        # Randomized per-event pools are already shuffled by random_key in SQL output.
+        event_index = {key: 0 for key in event_keys}
+        used_wallets: set[str] = set()
+        selected_rows: List[Dict[str, Any]] = []
+
+        def _take_next_for_event(event_key: str) -> Optional[Dict[str, Any]]:
+            pool = event_candidates[event_key]
+            idx = event_index[event_key]
+            while idx < len(pool):
+                row = pool[idx]
+                idx += 1
+                wallet = str(row.get("proxy_wallet") or "").strip().lower()
+                if not wallet or wallet in used_wallets:
+                    continue
+                event_index[event_key] = idx
+                return row
+            event_index[event_key] = idx
+            return None
+
+        # Pass 1: guarantee at least one row per event whenever possible.
+        for key in event_keys:
+            row = _take_next_for_event(key)
+            if row is None:
+                quotas[key] = 0
+                continue
+            wallet = str(row.get("proxy_wallet") or "").strip().lower()
+            used_wallets.add(wallet)
+            selected_rows.append(row)
+            quotas[key] = max(0, quotas[key] - 1)
+
+        # Pass 2: fill remaining quota per event proportionally.
+        while len(selected_rows) < effective_limit:
+            progress = False
+            ranked_keys = sorted(event_keys, key=lambda key: (quotas.get(key, 0), event_volume_by_key.get(key, 0.0)), reverse=True)
+            for key in ranked_keys:
+                if quotas.get(key, 0) <= 0:
+                    continue
+                row = _take_next_for_event(key)
+                if row is None:
+                    quotas[key] = 0
+                    continue
+                wallet = str(row.get("proxy_wallet") or "").strip().lower()
+                used_wallets.add(wallet)
+                selected_rows.append(row)
+                quotas[key] = max(0, quotas[key] - 1)
+                progress = True
+                if len(selected_rows) >= effective_limit:
+                    break
+            if not progress:
+                break
+
+        # Pass 3: if quota fill was blocked by wallet overlap / sparse pools,
+        # backfill from any remaining candidates with unused wallets.
+        if len(selected_rows) < effective_limit:
+            for key in sorted(event_keys, key=lambda k: event_volume_by_key.get(k, 0.0), reverse=True):
+                while len(selected_rows) < effective_limit:
+                    row = _take_next_for_event(key)
+                    if row is None:
+                        break
+                    wallet = str(row.get("proxy_wallet") or "").strip().lower()
+                    used_wallets.add(wallet)
+                    selected_rows.append(row)
+                if len(selected_rows) >= effective_limit:
+                    break
+
+        if not selected_rows:
+            return 0
+
+        insert_values = []
+        for row in selected_rows:
+            insert_values.append(
+                (
+                    season_id,
+                    str(row.get("proxy_wallet") or "").strip().lower(),
+                    source,
+                    window_start,
+                    window_end,
+                    row.get("event_id"),
+                    row.get("event_slug"),
+                    row.get("entry_cwap"),
+                    row.get("total_volume"),
+                    row.get("total_pnl"),
+                    row.get("roi_percentage"),
+                    row.get("entry_bracket"),
+                    row.get("edge"),
+                    row.get("yield"),
+                    row.get("gravity"),
+                    row.get("rank"),
+                )
+            )
+
+        cursor.executemany(
+            """
             INSERT INTO winner_wallets_nft_to_claim (
                 season_id,
                 proxy_wallet,
@@ -1226,42 +1424,14 @@ class SimplifiedScheduler:
                 gravity,
                 rank
             )
-            SELECT
-                %s AS season_id,
-                s.proxy_wallet,
-                %s::TEXT AS source,
-                %s AS window_start,
-                %s AS window_end,
-                NOW() AS snapshot_at,
-                s.event_id,
-                s.event_slug,
-                s.entry_cwap,
-                s.total_volume,
-                s.total_pnl,
-                s.roi_percentage,
-                s.entry_bracket,
-                s.edge,
-                s.yield,
-                s.gravity,
-                s.rank
-            FROM sampled s
+            VALUES (
+                %s, %s, %s, %s, %s, NOW(),
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
             """,
-            (
-                use_resolution_anchor,
-                use_resolution_anchor,
-                window_start,
-                window_end,
-                use_resolution_anchor,
-                window_start,
-                window_end,
-                rank_limit,
-                season_id,
-                source,
-                window_start,
-                window_end,
-            ),
+            insert_values,
         )
-        return int(cursor.rowcount or 0)
+        return int(cursor.rowcount or len(insert_values))
 
     def ensure_genesis_season(self, cursor, now: datetime):
         """
