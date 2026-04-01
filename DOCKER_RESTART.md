@@ -3,6 +3,8 @@ http://localhost:8088	web стек (Next.js + FastAPI через nginx)
 http://localhost:8089	user web стек (то же, второй стек)
 http://localhost:5050	pgAdmin (UI для PostgreSQL)
 
+docker exec polystars_scheduler python /app/scripts/backfill_event_cards.py --retry-errors --limit 500 --batch-size 25
+
 # Перезапуск Docker и работа с внешней БД
 
 ## 🔄 Быстрый перезапуск

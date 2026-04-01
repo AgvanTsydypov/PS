@@ -82,6 +82,19 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if not value:
+        return default
+    return int(value)
+
+
+GENESIS_BOOTSTRAP_BUFFER_DAYS = _env_int("POLYSTARS_GENESIS_BUFFER_DAYS", 10)
+
+
 # ==========================================
 # LOGGING SETUP
 # ==========================================
@@ -1061,7 +1074,7 @@ class SimplifiedScheduler:
 
         Rules:
         - standard: [season_start - ORIGIN_SNAPSHOT_OFFSET_DAYS - 10d, season_start - ORIGIN_SNAPSHOT_OFFSET_DAYS)
-                    bound by event resolution anchor (resolution_ready_at/closed_time), not end_date
+                    bound by event resolution anchor (resolution_ready_at), not end_date
         - genesis: [GENESIS_START_DATE, GENESIS_END_DATE + 1 day)
         - derive working events from positions in the selected window
         - sample random participant rows from participants for those events
@@ -1080,6 +1093,28 @@ class SimplifiedScheduler:
         )
         season_row = cursor.fetchone()
         season_type = (season_row or {}).get("type") if isinstance(season_row, dict) else (season_row[0] if season_row else None)
+        first_standard_season_id: Optional[int] = None
+        if season_type == "standard":
+            cursor.execute(
+                """
+                SELECT id
+                FROM seasons
+                WHERE type = 'standard'
+                ORDER BY start_date ASC, id ASC
+                LIMIT 1
+                """
+            )
+            first_standard_row = cursor.fetchone()
+            if first_standard_row:
+                if isinstance(first_standard_row, dict):
+                    first_standard_season_id = int(first_standard_row.get("id"))
+                else:
+                    first_standard_season_id = int(first_standard_row[0])
+        is_first_standard_season = bool(
+            season_type == "standard"
+            and first_standard_season_id is not None
+            and int(season_id) == int(first_standard_season_id)
+        )
 
         if season_type == "standard":
             # Snapshot window is season-driven: previous cycle boundary.
@@ -1110,63 +1145,38 @@ class SimplifiedScheduler:
         )
         cursor.execute(
             """
-            WITH position_base AS (
-                SELECT
-                    LOWER(ucp.proxy_wallet) AS proxy_wallet,
-                    COALESCE(
-                        ucp.end_date_parsed,
-                        ucp.timestamp_human,
-                        TO_TIMESTAMP(ucp.timestamp_unix)
-                    ) AS position_time,
-                    COALESCE(
-                        ucp.event_id,
-                        e_by_slug.id
-                    ) AS event_id,
-                    COALESCE(ucp.event_slug, e_by_id.slug, e_by_slug.slug) AS event_slug
-                FROM user_closed_positions ucp
-                LEFT JOIN events e_by_id
-                    ON ucp.event_id IS NOT NULL
-                   AND e_by_id.id = ucp.event_id
-                LEFT JOIN LATERAL (
-                    SELECT e.id, e.slug
-                    FROM events e
-                    WHERE ucp.event_slug IS NOT NULL
-                      AND e.slug = ucp.event_slug
-                    LIMIT 1
-                ) e_by_slug
-                    ON TRUE
-                WHERE ucp.proxy_wallet IS NOT NULL
-            ),
-            resolved_positions AS (
-                SELECT
-                    pb.proxy_wallet,
-                    pb.event_id,
-                    pb.event_slug,
-                    CASE
-                        WHEN %s = TRUE THEN COALESCE(erq.resolution_ready_at, erq.closed_time)
-                        ELSE pb.position_time
-                    END AS season_anchor_at
-                FROM position_base pb
+            WITH
+            working_events AS (
+                SELECT DISTINCT
+                    e.id AS event_id,
+                    e.slug AS event_slug,
+                    COALESCE(e.volume, 0) AS event_volume
+                FROM events e
                 LEFT JOIN event_resolution_queue erq
-                  ON erq.event_id = pb.event_id
+                  ON erq.event_id = e.id
                 WHERE (
                     %s = TRUE
-                    AND pb.event_id IS NOT NULL
                     AND COALESCE(erq.closed, FALSE) = TRUE
-                    AND COALESCE(erq.resolution_ready_at, erq.closed_time) IS NOT NULL
-                    AND COALESCE(erq.resolution_ready_at, erq.closed_time) >= %s
-                    AND COALESCE(erq.resolution_ready_at, erq.closed_time) < %s
+                    AND erq.resolution_ready_at IS NOT NULL
+                    AND (
+                        (
+                            erq.resolution_ready_at >= %s
+                            AND erq.resolution_ready_at < %s
+                        )
+                        OR (
+                            %s = TRUE
+                            AND erq.resolution_ready_at < %s
+                            AND NOT (
+                                COALESCE(e.end_date::date, e.creation_date::date, e.start_date::date)
+                                BETWEEN %s AND %s
+                            )
+                        )
+                    )
                 ) OR (
                     %s = FALSE
-                    AND pb.position_time IS NOT NULL
-                    AND pb.position_time >= %s
-                    AND pb.position_time < %s
+                    AND COALESCE(e.end_date, e.creation_date, e.start_date) >= %s
+                    AND COALESCE(e.end_date, e.creation_date, e.start_date) < %s
                 )
-            ),
-            working_events AS (
-                SELECT DISTINCT event_id, event_slug
-                FROM resolved_positions
-                WHERE event_id IS NOT NULL OR event_slug IS NOT NULL
             ),
             candidate_participants AS (
                 SELECT
@@ -1182,7 +1192,7 @@ class SimplifiedScheduler:
                     p.yield,
                     p.gravity,
                     p.rank,
-                    COALESCE(e.volume, 0) AS event_volume,
+                    COALESCE(e.volume, we.event_volume, 0) AS event_volume,
                     RANDOM() AS random_key
                 FROM participants p
                 JOIN working_events we
@@ -1234,9 +1244,12 @@ class SimplifiedScheduler:
             """,
             (
                 use_resolution_anchor,
-                use_resolution_anchor,
                 window_start,
                 window_end,
+                is_first_standard_season,
+                window_start,
+                GENESIS_START_DATE,
+                GENESIS_END_DATE,
                 use_resolution_anchor,
                 window_start,
                 window_end,
@@ -1459,9 +1472,16 @@ class SimplifiedScheduler:
         max_row = cursor.fetchone()
         next_season_number = int(max_row["max_season_number"]) + 1
 
+        genesis_start = self._utc_day_start(
+            datetime.combine(
+                GENESIS_END_DATE + timedelta(days=GENESIS_BOOTSTRAP_BUFFER_DAYS),
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            )
+        )
         new_genesis_id = self._create_genesis_season(
             cursor,
-            start_date=self._utc_day_start(now),
+            start_date=genesis_start,
             season_number=next_season_number,
         )
         return new_genesis_id, True
@@ -1613,22 +1633,81 @@ class SimplifiedScheduler:
                         print("=" * 70)
                         return
 
-                    print("\nℹ️ No standard season found. Bootstrapping Standard #1...")
-                    cursor.execute(
-                        """
-                        SELECT id, season_number
-                        FROM seasons
-                        WHERE type = 'standard'
-                          AND (start_date = %s OR season_number = 1)
-                        ORDER BY id DESC
-                        LIMIT 1
-                        """,
-                        (season_start,),
-                    )
-                    existing_for_start = cursor.fetchone()
-                    if existing_for_start:
-                        new_season_id = int(existing_for_start["id"])
-                        new_season_number = int(existing_for_start["season_number"])
+                    print("\nℹ️ No standard season found. Bootstrapping all standard seasons up to now...")
+                    bootstrap_start = season_start
+                    bootstrap_number = 1
+                    created_count = 0
+                    reused_count = 0
+                    snapped_count = 0
+                    current_season_id: Optional[int] = None
+                    current_season_number: Optional[int] = None
+                    current_season_start: Optional[datetime] = None
+                    latest_cursor_start = bootstrap_start
+                    while latest_cursor_start <= now:
+                        cursor.execute(
+                            """
+                            SELECT id, season_number
+                            FROM seasons
+                            WHERE type = 'standard'
+                              AND (start_date = %s OR season_number = %s)
+                            ORDER BY id DESC
+                            LIMIT 1
+                            """,
+                            (latest_cursor_start, bootstrap_number),
+                        )
+                        existing_for_start = cursor.fetchone()
+                        if existing_for_start:
+                            season_id_for_step = int(existing_for_start["id"])
+                            season_number_for_step = int(existing_for_start["season_number"])
+                            reused_count += 1
+                        else:
+                            season_id_for_step = self._create_standard_season(
+                                cursor,
+                                latest_cursor_start,
+                                bootstrap_number,
+                            )
+                            season_number_for_step = bootstrap_number
+                            created_count += 1
+                        cursor.execute(
+                            """
+                            SELECT COUNT(*)
+                            FROM winner_wallets_nft_to_claim
+                            WHERE season_id = %s
+                            """,
+                            (season_id_for_step,),
+                        )
+                        snapshot_row = cursor.fetchone() or {}
+                        if isinstance(snapshot_row, dict):
+                            snapshot_count = int(snapshot_row.get("count", 0))
+                        else:
+                            snapshot_count = int(snapshot_row[0] if snapshot_row else 0)
+                        if snapshot_count == 0:
+                            self._snapshot_origin_wallets_for_season(
+                                cursor,
+                                season_id_for_step,
+                                latest_cursor_start,
+                            )
+                            snapped_count += 1
+                        step_end = latest_cursor_start + timedelta(days=STANDARD_SEASON_CYCLE_DAYS)
+                        if step_end <= now:
+                            cursor.execute(
+                                """
+                                UPDATE seasons
+                                SET is_active = FALSE,
+                                    is_completed = TRUE,
+                                    updated_at = NOW()
+                                WHERE id = %s
+                                """,
+                                (season_id_for_step,),
+                            )
+                        elif latest_cursor_start <= now < step_end:
+                            current_season_id = season_id_for_step
+                            current_season_number = season_number_for_step
+                            current_season_start = latest_cursor_start
+                        latest_cursor_start = step_end
+                        bootstrap_number += 1
+
+                    if current_season_id is not None:
                         cursor.execute(
                             """
                             UPDATE seasons
@@ -1637,29 +1716,29 @@ class SimplifiedScheduler:
                                 updated_at = NOW()
                             WHERE id = %s
                             """,
-                            (new_season_id,),
+                            (current_season_id,),
                         )
-                        print(
-                            f"\n♻️ Reusing existing Standard Season "
-                            f"#{new_season_number} (id={new_season_id}) for start={season_start.isoformat()}"
-                        )
-                    else:
-                        new_season_id = self._create_standard_season(cursor, season_start, 1)
-                        new_season_number = 1
-                    origins_count = self._snapshot_origin_wallets_for_season(cursor, new_season_id, season_start)
+
                     conn.commit()
-                    self.manager.log_season_update(
-                        event_name="new_standard_season_started",
-                        season_id=new_season_id,
-                        details=(
-                            f"season_number={new_season_number} "
-                            f"start_date={season_start.isoformat()} "
-                            f"supply={STANDARD_SEASON_TOTAL_SUPPLY_TEST} "
-                            f"origin_snapshot_count={origins_count}"
-                        ),
+                    if current_season_id is not None and current_season_number is not None and current_season_start is not None:
+                        self.manager.log_season_update(
+                            event_name="standard_bootstrap_catchup_completed",
+                            season_id=current_season_id,
+                            details=(
+                                f"active_season_number={current_season_number} "
+                                f"active_start_date={current_season_start.isoformat()} "
+                                f"created={created_count} reused={reused_count} snapshots_filled={snapped_count}"
+                            ),
+                        )
+                    print(
+                        f"\n✅ Standard bootstrap catch-up completed: created={created_count}, "
+                        f"reused={reused_count}, snapshots_filled={snapped_count}"
                     )
-                    print(f"\n🎮 Created/ensured Standard Season #{new_season_number} (id={new_season_id})")
-                    print(f"   🏛️  Origin snapshot saved: {origins_count} wallets")
+                    if current_season_id is not None and current_season_number is not None:
+                        print(
+                            f"   🎮 Active Standard Season #{current_season_number} "
+                            f"(id={current_season_id})"
+                        )
                     print("=" * 70)
                     return
 
@@ -2721,47 +2800,33 @@ class SimplifiedScheduler:
                 continue  # Skip other steps if events failed
             
             # STEP 2-4: Redemptions, Positions, Leaderboard
-            # Check if data is ready (DATA_LAG_DAYS lag for finalization)
-            today = date.today()
-            days_since_event = (today - missing_date).days
-            
-            # Only load redemptions if:
-            # 1. Event ended >= DATA_LAG_DAYS ago (data is finalized)
-            # 2. Event is after Genesis period (avoid duplicates)
-            if missing_date <= GENESIS_END_DATE:
-                print(f"\n⏭️  Skipping redemptions/positions/leaderboard for {missing_date}")
-                print(f"   Reason: Date is within Genesis period (already loaded)")
-            elif days_since_event < DATA_LAG_DAYS:
-                print(f"\n⏳ Skipping redemptions/positions/leaderboard for {missing_date}")
-                print(f"   Reason: Event ended only {days_since_event} day(s) ago (need {DATA_LAG_DAYS} days)")
-                print(f"   Will be available on: {missing_date + timedelta(days=DATA_LAG_DAYS)}")
-            else:
-                print(f"\n2️⃣ Redemptions/Positions/Leaderboard for {missing_date}")
-                print(f"   ℹ️  Event ended {days_since_event} days ago - data is finalized")
-                
-                # Configure for this date
-                self.configure_for_date(missing_date, is_genesis=False)
-                downstream_success = True
-                downstream_counts = {'redemptions': 0, 'positions': 0, 'leaderboard': 0}
-                
-                for script_key in ['redemptions', 'positions', 'leaderboard']:
-                    result = self.run_script(script_key, target_date=None)
-                    if result['success']:
-                        downstream_counts[script_key] = int(result.get('records', 0))
-                    else:
-                        error_msg = result.get('error', 'Script execution failed')
-                        print(f"  ⚠️  {self.scripts[script_key]['name']} failed (continuing...)")
-                        downstream_success = False
-                if downstream_success:
-                    participants_refresh_needed = True
-
-                # In closed-time mode, keep queue statuses consistent during catch-up too.
-                if self.use_closed_time_pipeline and downstream_success:
-                    ready_for_day = self.manager.get_ready_resolution_event_ids_for_event_date(
-                        load_date=missing_date,
-                        as_of=datetime.utcnow(),
+            if self.use_closed_time_pipeline:
+                # Catch-up in closed-time mode must follow queue readiness exactly,
+                # same principle as --run, but scoped to this missing events date.
+                ready_for_day = self.manager.get_ready_resolution_event_ids_for_event_date(
+                    load_date=missing_date,
+                    as_of=datetime.utcnow(),
+                )
+                if not ready_for_day:
+                    print(
+                        f"\n⏳ No ready events for downstream on {missing_date} "
+                        f"(rule: resolution_ready_at <= now)"
                     )
-                    if ready_for_day:
+                else:
+                    print(f"\n2️⃣ Redemptions/Positions/Leaderboard for {missing_date}")
+                    print(f"   🎯 Ready events for this date: {len(ready_for_day):,}")
+                    self.configure_for_date(missing_date, is_genesis=False)
+                    downstream_success = True
+                    downstream_counts = {'redemptions': 0, 'positions': 0, 'leaderboard': 0}
+                    for script_key in ['redemptions', 'positions', 'leaderboard']:
+                        result = self.run_script(script_key, target_date=None)
+                        if result['success']:
+                            downstream_counts[script_key] = int(result.get('records', 0))
+                        else:
+                            print(f"  ⚠️  {self.scripts[script_key]['name']} failed (continuing...)")
+                            downstream_success = False
+                    if downstream_success:
+                        participants_refresh_needed = True
                         run_id = self.manager.start_downstream_run(
                             trigger_type='catch_up',
                             events_load_date=missing_date,
@@ -2802,9 +2867,30 @@ class SimplifiedScheduler:
                             run_id,
                             processed,
                         )
-                        print(
-                            f"✅ Marked {processed:,} ready event(s) as processed for {missing_date}"
+                        print(f"✅ Marked {processed:,} ready event(s) as processed for {missing_date}")
+                    else:
+                        self.manager.mark_resolution_events_downstream_attempt(
+                            ready_for_day,
+                            error_text="catch_up downstream steps failed",
                         )
+                        print("⚠️  Some downstream scripts failed; ready events remain unprocessed for retry")
+            else:
+                # Legacy date-based mode keeps lag guard.
+                today = date.today()
+                days_since_event = (today - missing_date).days
+                if missing_date <= GENESIS_END_DATE:
+                    print(f"\n⏭️  Skipping redemptions/positions/leaderboard for {missing_date}")
+                    print(f"   Reason: Date is within Genesis period (already loaded)")
+                elif days_since_event < DATA_LAG_DAYS:
+                    print(f"\n⏳ Skipping redemptions/positions/leaderboard for {missing_date}")
+                    print(f"   Reason: Event ended only {days_since_event} day(s) ago (need {DATA_LAG_DAYS} days)")
+                    print(f"   Will be available on: {missing_date + timedelta(days=DATA_LAG_DAYS)}")
+                else:
+                    print(f"\n2️⃣ Redemptions/Positions/Leaderboard for {missing_date}")
+                    print(f"   ℹ️  Event ended {days_since_event} days ago - data is finalized")
+                    self.configure_for_date(missing_date, is_genesis=False)
+                    for script_key in ['redemptions', 'positions', 'leaderboard']:
+                        self.run_script(script_key, target_date=None)
             
             results[str(missing_date)] = {'success': True}
             
