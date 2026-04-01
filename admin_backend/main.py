@@ -198,7 +198,10 @@ class SeasonWorkbenchService:
         self._r2_client: Any = None
         # Wallet list is mostly stable within a season. Cache for 10 days by default.
         self.wallets_cache_ttl_seconds = int(os.getenv("WALLETS_CACHE_TTL_SECONDS", "864000"))
-        self.origin_snapshot_offset_days = int(os.getenv("POLYSTARS_ORIGIN_SNAPSHOT_OFFSET_DAYS", "10"))
+        # Keep admin snapshot filters aligned with scheduler standard-window logic.
+        self.origin_snapshot_offset_days = int(
+            os.getenv("POLYSTARS_ORIGIN_SNAPSHOT_OFFSET_DAYS_STANDARD", "0")
+        )
         self.origin_lookback_days_standard = int(os.getenv("POLYSTARS_ORIGIN_LOOKBACK_DAYS_STANDARD", "10"))
         self._wallets_cache: Dict[tuple[int, str, bool, int], tuple[float, List[str]]] = {}
         self.ensure_claims_schema_for_mint()
@@ -2277,6 +2280,7 @@ class SeasonWorkbenchService:
                                 FROM seasons s
                                 LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
                                 WHERE s.type = 'standard'
+                                  AND erq.status = 'processed'
                                   AND erq.resolution_ready_at IS NOT NULL
                                   AND erq.resolution_ready_at >= (
                                       s.start_date
@@ -2293,6 +2297,7 @@ class SeasonWorkbenchService:
                                     SELECT 1
                                     FROM event_resolution_queue erq
                                     WHERE erq.event_id = ec.event_id
+                                      AND erq.status = 'processed'
                                       AND erq.resolution_ready_at IS NOT NULL
                                       AND erq.resolution_ready_at < (
                                           SELECT
@@ -2334,6 +2339,7 @@ class SeasonWorkbenchService:
                                 LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
                                 WHERE s.type = 'standard'
                                   AND s.id = %s
+                                  AND erq.status = 'processed'
                                   AND erq.resolution_ready_at IS NOT NULL
                                   AND erq.resolution_ready_at >= (
                                       s.start_date
@@ -2350,6 +2356,7 @@ class SeasonWorkbenchService:
                                     SELECT 1
                                     FROM event_resolution_queue erq
                                     WHERE erq.event_id = ec.event_id
+                                      AND erq.status = 'processed'
                                       AND erq.resolution_ready_at IS NOT NULL
                                       AND erq.resolution_ready_at < (
                                           SELECT
@@ -2412,7 +2419,8 @@ class SeasonWorkbenchService:
                                 LIMIT 1
                             ) nw
                             LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
-                            WHERE erq.resolution_ready_at IS NOT NULL
+                            WHERE erq.status = 'processed'
+                              AND erq.resolution_ready_at IS NOT NULL
                               AND erq.resolution_ready_at >= nw.window_start
                               AND erq.resolution_ready_at < nw.window_end
                         )
