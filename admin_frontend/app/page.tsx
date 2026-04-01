@@ -512,7 +512,7 @@ export default function HomePage() {
       { value: "all", label: "all" },
       { value: "genesis", label: "genesis snapshot" },
       ...standardSeasonOptions,
-      { value: "next_window", label: "next window (future season)" },
+      { value: "next_window", label: "future window" },
     ];
   }, [seasons]);
   const claimSeasonInfoLines = useMemo(() => claimSeasonInfo.split("\n"), [claimSeasonInfo]);

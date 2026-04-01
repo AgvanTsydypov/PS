@@ -62,7 +62,6 @@ from scripts.data_loading_manager import (
     DATA_LAG_DAYS,
     EVENTS_LAG_DAYS,
     RESOLUTION_READY_OFFSET_DAYS,
-    ORIGIN_SNAPSHOT_OFFSET_DAYS,
 )
 from scripts.ai import Agent1QuantCardGenerator, Agent2ColoristGenerator
 
@@ -70,6 +69,7 @@ STANDARD_SEASON_TOTAL_SUPPLY_TEST = 400
 STANDARD_SEASON_ACTIVE_DAYS = 9
 STANDARD_SEASON_CYCLE_DAYS = 10
 ORIGIN_LOOKBACK_DAYS_STANDARD = 10
+FIRST_STANDARD_BOOTSTRAP_DELAY_DAYS = DATA_LAG_DAYS
 GENESIS_SEASON_TOTAL_SUPPLY_TEST = 2000
 GENESIS_SEASON_FAR_FUTURE_END = datetime(9999, 12, 31, tzinfo=timezone.utc)
 GAMMA_API_BASE_URL = "https://gamma-api.polymarket.com"
@@ -92,7 +92,14 @@ def _env_int(name: str, default: int) -> int:
     return int(value)
 
 
-GENESIS_BOOTSTRAP_BUFFER_DAYS = _env_int("POLYSTARS_GENESIS_BUFFER_DAYS", 10)
+# Standard snapshot window defaults to previous 10 days:
+# [start - 10d, start) with defaults offset=0/lookback=10.
+STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS = _env_int(
+    "POLYSTARS_ORIGIN_SNAPSHOT_OFFSET_DAYS_STANDARD",
+    0,
+)
+
+GENESIS_START_OFFSET_FROM_END_DAYS = 10
 
 
 # ==========================================
@@ -1073,7 +1080,8 @@ class SimplifiedScheduler:
         Freeze season winners snapshot at season start into winner_wallets_nft_to_claim.
 
         Rules:
-        - standard: [season_start - ORIGIN_SNAPSHOT_OFFSET_DAYS - 10d, season_start - ORIGIN_SNAPSHOT_OFFSET_DAYS)
+        - standard: [season_start - STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS - 10d,
+                     season_start - STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS)
                     bound by event resolution anchor (resolution_ready_at), not end_date
         - genesis: [GENESIS_START_DATE, GENESIS_END_DATE + 1 day)
         - derive working events from positions in the selected window
@@ -1094,10 +1102,11 @@ class SimplifiedScheduler:
         season_row = cursor.fetchone()
         season_type = (season_row or {}).get("type") if isinstance(season_row, dict) else (season_row[0] if season_row else None)
         first_standard_season_id: Optional[int] = None
+        first_standard_window_start: Optional[datetime] = None
         if season_type == "standard":
             cursor.execute(
                 """
-                SELECT id
+                SELECT id, start_date
                 FROM seasons
                 WHERE type = 'standard'
                 ORDER BY start_date ASC, id ASC
@@ -1108,17 +1117,24 @@ class SimplifiedScheduler:
             if first_standard_row:
                 if isinstance(first_standard_row, dict):
                     first_standard_season_id = int(first_standard_row.get("id"))
+                    first_standard_start_date = self._utc_day_start(first_standard_row.get("start_date"))
                 else:
                     first_standard_season_id = int(first_standard_row[0])
+                    first_standard_start_date = self._utc_day_start(first_standard_row[1])
+                first_standard_window_start = (
+                    first_standard_start_date
+                    - timedelta(days=STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS)
+                    - timedelta(days=ORIGIN_LOOKBACK_DAYS_STANDARD)
+                )
         is_first_standard_season = bool(
             season_type == "standard"
             and first_standard_season_id is not None
             and int(season_id) == int(first_standard_season_id)
+            and first_standard_window_start is not None
         )
-
         if season_type == "standard":
             # Snapshot window is season-driven: previous cycle boundary.
-            window_end = season_start_date - timedelta(days=ORIGIN_SNAPSHOT_OFFSET_DAYS)
+            window_end = season_start_date - timedelta(days=STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS)
             window_start = window_end - timedelta(days=ORIGIN_LOOKBACK_DAYS_STANDARD)
             source = "participants_randomized_resolution_ready_standard"
             rank_limit = STANDARD_SEASON_TOTAL_SUPPLY_TEST
@@ -1155,27 +1171,39 @@ class SimplifiedScheduler:
                 LEFT JOIN event_resolution_queue erq
                   ON erq.event_id = e.id
                 WHERE (
-                    %s = TRUE
-                    AND COALESCE(erq.closed, FALSE) = TRUE
-                    AND erq.resolution_ready_at IS NOT NULL
-                    AND (
-                        (
-                            erq.resolution_ready_at >= %s
-                            AND erq.resolution_ready_at < %s
-                        )
-                        OR (
-                            %s = TRUE
-                            AND erq.resolution_ready_at < %s
-                            AND NOT (
-                                COALESCE(e.end_date::date, e.creation_date::date, e.start_date::date)
-                                BETWEEN %s AND %s
+                    (
+                        %s = TRUE
+                        AND COALESCE(erq.closed, FALSE) = TRUE
+                        AND erq.status = 'processed'
+                        AND erq.resolution_ready_at IS NOT NULL
+                        AND (
+                            (
+                                erq.resolution_ready_at >= %s
+                                AND erq.resolution_ready_at < %s
+                            )
+                            OR (
+                                %s = TRUE
+                                AND erq.resolution_ready_at < %s
+                                AND NOT (
+                                    COALESCE(e.end_date::date, e.creation_date::date, e.start_date::date)
+                                    BETWEEN %s AND %s
+                                )
                             )
                         )
+                    ) OR (
+                        %s = FALSE
+                        AND COALESCE(e.end_date, e.creation_date, e.start_date) >= %s
+                        AND COALESCE(e.end_date, e.creation_date, e.start_date) < %s
                     )
-                ) OR (
-                    %s = FALSE
-                    AND COALESCE(e.end_date, e.creation_date, e.start_date) >= %s
-                    AND COALESCE(e.end_date, e.creation_date, e.start_date) < %s
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM winner_wallets_nft_to_claim ww
+                    WHERE ww.season_id <> %s
+                      AND (
+                          (e.id IS NOT NULL AND ww.event_id = e.id)
+                          OR (e.slug IS NOT NULL AND ww.event_slug = e.slug)
+                      )
                 )
             ),
             candidate_participants AS (
@@ -1247,12 +1275,13 @@ class SimplifiedScheduler:
                 window_start,
                 window_end,
                 is_first_standard_season,
-                window_start,
+                first_standard_window_start,
                 GENESIS_START_DATE,
                 GENESIS_END_DATE,
                 use_resolution_anchor,
                 window_start,
                 window_end,
+                season_id,
             ),
         )
         candidate_rows = [dict(row) for row in (cursor.fetchall() or [])]
@@ -1474,7 +1503,7 @@ class SimplifiedScheduler:
 
         genesis_start = self._utc_day_start(
             datetime.combine(
-                GENESIS_END_DATE + timedelta(days=GENESIS_BOOTSTRAP_BUFFER_DAYS),
+                GENESIS_END_DATE + timedelta(days=GENESIS_START_OFFSET_FROM_END_DAYS),
                 datetime.min.time(),
                 tzinfo=timezone.utc,
             )
@@ -1490,7 +1519,7 @@ class SimplifiedScheduler:
         """
         Manage standard season lifecycle:
         - Auto-create first season if none exists
-        - First standard season starts at genesis_start + 10 days
+        - First standard season starts at genesis_start + DATA_LAG_DAYS
         - Hard Stop burn at day 9 if supply remains
         - Ghost State wait if sold out early
         - Start next season exactly at day 10 boundary
@@ -1621,14 +1650,15 @@ class SimplifiedScheduler:
                             f"Genesis season {genesis_id} not found while bootstrapping standard season"
                         )
                     genesis_start = self._utc_day_start(genesis_row["start_date"])
-                    season_start = genesis_start + timedelta(days=STANDARD_SEASON_CYCLE_DAYS)
+                    season_start = genesis_start + timedelta(days=FIRST_STANDARD_BOOTSTRAP_DELAY_DAYS)
 
                     if now < season_start:
                         print(
                             "\nℹ️ No standard season found yet. "
-                            "Waiting for genesis+10d boundary to start Standard #1..."
+                            "Waiting for genesis+DATA_LAG_DAYS boundary to start Standard #1..."
                         )
                         print(f"   genesis_start={genesis_start.isoformat()}")
+                        print(f"   data_lag_days={DATA_LAG_DAYS}")
                         print(f"   standard_start_at={season_start.isoformat()}")
                         print("=" * 70)
                         return
