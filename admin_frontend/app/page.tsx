@@ -292,7 +292,17 @@ const tabs: Array<{ key: TabKey; label: string }> = [
 const cardSeasonTypeOptions = ["standard", "genesis"] as const;
 const cardClaimTypeOptions = ["looter", "origin"] as const;
 const cardEntryBracketOptions = ["ANOMALY", "ORACLE", "OUTLIER", "VECTOR", "HARVESTER"] as const;
-const cardTierOptions = ["P99", "P95", "P70", "P50", "BASE"] as const;
+const cardTierOptions = ["P99", "P90", "P70", "P50", "BASE"] as const;
+
+function normalizeChoice<T extends readonly string[]>(
+  raw: string | null | undefined,
+  options: T,
+  fallback: T[number],
+): T[number] {
+  const value = String(raw ?? "").trim().toUpperCase();
+  const match = options.find((option) => option.toUpperCase() === value);
+  return (match ?? fallback) as T[number];
+}
 
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -623,7 +633,7 @@ export default function HomePage() {
     error_text: row.error_text ?? "",
   });
   const buildCardBuilderPayloadFromRow = (row: CardBuilderCandidate): CardBuilderPayload => ({
-    season_type: String(row.season_type ?? "standard"),
+    season_type: normalizeChoice(row.season_type, cardSeasonTypeOptions, "standard").toLowerCase(),
     season_number: Number(row.season_number ?? 1),
     recurrence: row.reccurence ? String(row.reccurence) : null,
     claim_type: "looter",
@@ -632,11 +642,11 @@ export default function HomePage() {
     primary_tag: String(row.primary_tag ?? "UNKNOWN"),
     primary_tag_color: String(row.primary_tag_hex_color ?? "#FFFFFF"),
     secondary_tag: String(row.secondary_tag ?? "NONE"),
-    entry_bracket: String(row.entry_bracket ?? "HARVESTER"),
+    entry_bracket: normalizeChoice(row.entry_bracket, cardEntryBracketOptions, "HARVESTER"),
     proxy_wallet: String(row.proxy_wallet ?? ""),
-    edge: String(row.edge ?? "BASE"),
-    yield: String(row.yield ?? "BASE"),
-    gravity: String(row.gravity ?? "BASE"),
+    edge: normalizeChoice(row.edge, cardTierOptions, "BASE"),
+    yield: normalizeChoice(row.yield, cardTierOptions, "BASE"),
+    gravity: normalizeChoice(row.gravity, cardTierOptions, "BASE"),
     leaderboard_rank: Number(row.rank ?? 0),
   });
   const applyCardBuilderRow = (row: CardBuilderCandidate) => {
