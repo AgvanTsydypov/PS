@@ -40,7 +40,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from scripts.data_loading_manager import DataLoadingManager
+from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE, GENESIS_END_DATE
 from scripts.daily_scheduler_simple import SimplifiedScheduler
 from scripts.cardgen.generate_card import detect_pattern, generate_card_svg
 from scripts.season_manager import SeasonManager
@@ -2263,50 +2263,133 @@ class SeasonWorkbenchService:
                 if snapshot_scope_filter == "genesis":
                     where_parts.append(
                         """
-                        EXISTS (
-                            SELECT 1
-                            FROM winner_wallets_nft_to_claim w
-                            JOIN seasons s ON s.id = w.season_id
-                            LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
-                            LEFT JOIN events e2 ON e2.id = ec.event_id
-                            WHERE s.type = 'genesis'
-                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) >= w.window_start
-                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) < w.window_end
-                        )
+                        COALESCE(e.end_date::date, e.creation_date::date, e.start_date::date)
+                        BETWEEN %s AND %s
                         """
                     )
+                    params.extend([GENESIS_START_DATE, GENESIS_END_DATE])
                 elif snapshot_scope_filter == "standard":
                     where_parts.append(
                         """
-                        EXISTS (
-                            SELECT 1
-                            FROM winner_wallets_nft_to_claim w
-                            JOIN seasons s ON s.id = w.season_id
-                            LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
-                            LEFT JOIN events e2 ON e2.id = ec.event_id
-                            WHERE s.type = 'standard'
-                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) >= w.window_start
-                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) < w.window_end
+                        (
+                            EXISTS (
+                                SELECT 1
+                                FROM seasons s
+                                LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
+                                WHERE s.type = 'standard'
+                                  AND erq.resolution_ready_at IS NOT NULL
+                                  AND erq.resolution_ready_at >= (
+                                      s.start_date
+                                      - make_interval(days => %s)
+                                      - make_interval(days => %s)
+                                  )
+                                  AND erq.resolution_ready_at < (
+                                      s.start_date
+                                      - make_interval(days => %s)
+                                  )
+                            )
+                            OR (
+                                EXISTS (
+                                    SELECT 1
+                                    FROM event_resolution_queue erq
+                                    WHERE erq.event_id = ec.event_id
+                                      AND erq.resolution_ready_at IS NOT NULL
+                                      AND erq.resolution_ready_at < (
+                                          SELECT
+                                              s1.start_date
+                                              - make_interval(days => %s)
+                                              - make_interval(days => %s)
+                                          FROM seasons s1
+                                          WHERE s1.type = 'standard'
+                                          ORDER BY s1.start_date ASC, s1.id ASC
+                                          LIMIT 1
+                                      )
+                                )
+                                AND NOT (
+                                    COALESCE(e.end_date::date, e.creation_date::date, e.start_date::date)
+                                    BETWEEN %s AND %s
+                                )
+                            )
                         )
                         """
+                    )
+                    params.extend(
+                        [
+                            self.origin_snapshot_offset_days,
+                            self.origin_lookback_days_standard,
+                            self.origin_snapshot_offset_days,
+                            self.origin_snapshot_offset_days,
+                            self.origin_lookback_days_standard,
+                            GENESIS_START_DATE,
+                            GENESIS_END_DATE,
+                        ]
                     )
                 elif snapshot_scope_filter == "standard_season":
                     where_parts.append(
                         """
-                        EXISTS (
-                            SELECT 1
-                            FROM winner_wallets_nft_to_claim w
-                            JOIN seasons s ON s.id = w.season_id
-                            LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
-                            LEFT JOIN events e2 ON e2.id = ec.event_id
-                            WHERE s.type = 'standard'
-                              AND s.id = %s
-                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) >= w.window_start
-                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) < w.window_end
+                        (
+                            EXISTS (
+                                SELECT 1
+                                FROM seasons s
+                                LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
+                                WHERE s.type = 'standard'
+                                  AND s.id = %s
+                                  AND erq.resolution_ready_at IS NOT NULL
+                                  AND erq.resolution_ready_at >= (
+                                      s.start_date
+                                      - make_interval(days => %s)
+                                      - make_interval(days => %s)
+                                  )
+                                  AND erq.resolution_ready_at < (
+                                      s.start_date
+                                      - make_interval(days => %s)
+                                  )
+                            )
+                            OR (
+                                EXISTS (
+                                    SELECT 1
+                                    FROM event_resolution_queue erq
+                                    WHERE erq.event_id = ec.event_id
+                                      AND erq.resolution_ready_at IS NOT NULL
+                                      AND erq.resolution_ready_at < (
+                                          SELECT
+                                              s1.start_date
+                                              - make_interval(days => %s)
+                                              - make_interval(days => %s)
+                                          FROM seasons s1
+                                          WHERE s1.type = 'standard'
+                                          ORDER BY s1.start_date ASC, s1.id ASC
+                                          LIMIT 1
+                                      )
+                                )
+                                AND %s = (
+                                    SELECT s0.id
+                                    FROM seasons s0
+                                    WHERE s0.type = 'standard'
+                                    ORDER BY s0.start_date ASC, s0.id ASC
+                                    LIMIT 1
+                                )
+                                AND NOT (
+                                    COALESCE(e.end_date::date, e.creation_date::date, e.start_date::date)
+                                    BETWEEN %s AND %s
+                                )
+                            )
                         )
                         """
                     )
-                    params.append(standard_snapshot_season_id)
+                    params.extend(
+                        [
+                            standard_snapshot_season_id,
+                            self.origin_snapshot_offset_days,
+                            self.origin_lookback_days_standard,
+                            self.origin_snapshot_offset_days,
+                            self.origin_snapshot_offset_days,
+                            self.origin_lookback_days_standard,
+                            standard_snapshot_season_id,
+                            GENESIS_START_DATE,
+                            GENESIS_END_DATE,
+                        ]
+                    )
                 elif snapshot_scope_filter == "next_window":
                     where_parts.append(
                         """
@@ -2329,9 +2412,9 @@ class SeasonWorkbenchService:
                                 LIMIT 1
                             ) nw
                             LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
-                            LEFT JOIN events e2 ON e2.id = ec.event_id
-                            WHERE COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) >= nw.window_start
-                              AND COALESCE(erq.resolution_ready_at, erq.closed_time, e2.end_date, e2.creation_date, e2.start_date) < nw.window_end
+                            WHERE erq.resolution_ready_at IS NOT NULL
+                              AND erq.resolution_ready_at >= nw.window_start
+                              AND erq.resolution_ready_at < nw.window_end
                         )
                         """
                     )
