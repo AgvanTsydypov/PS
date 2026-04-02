@@ -16,7 +16,7 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1018,6 +1018,182 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _approx_wrap_text(text: str, max_chars: int) -> List[str]:
+    words = [w for w in str(text or "").replace("\n", " ").split(" ") if w]
+    if not words:
+        return []
+    lines: List[str] = []
+    cur = words[0]
+    for w in words[1:]:
+        candidate = f"{cur} {w}"
+        if len(candidate) <= max_chars:
+            cur = candidate
+        else:
+            lines.append(cur)
+            cur = w
+    lines.append(cur)
+    return lines
+
+
+def _wrap_text_by_width(text: str, max_px: float, font_size: float) -> List[str]:
+    words = [w for w in str(text or "").replace("\n", " ").split(" ") if w]
+    if not words:
+        return []
+    lines: List[str] = []
+    cur = words[0]
+    for w in words[1:]:
+        candidate = f"{cur} {w}"
+        if _orbitron_width(candidate, font_size) <= max_px:
+            cur = candidate
+        else:
+            lines.append(cur)
+            cur = w
+    lines.append(cur)
+    return lines
+
+
+def _format_archetype_math_lines(raw: str) -> List[str]:
+    chunks = [c.strip() for c in str(raw or "").split("|") if c.strip()]
+    if not chunks:
+        return []
+    lines: List[str] = []
+    for chunk in chunks:
+        lines.extend(_approx_wrap_text(chunk, 44) or [chunk])
+    return lines
+
+
+def generate_card_back_svg(data: Dict[str, Any]) -> str:
+    """Build back-of-card SVG."""
+    archetype_raw = str(data.get("archetype", "") or "").strip().upper() or "THE OPERATOR"
+    dz_fill, _, _ = dz_style(archetype_raw)
+    yld = str(data.get("yield", "BASE") or "BASE").upper()
+    yield_color = get_ptier_color(yld)
+    border_fill = "url(#border-gradient)" if "url(" in yield_color else yield_color
+
+    lore = _esc(str(data.get("card_lore", "") or "No topology data available."))
+    archetype_desc = _esc(str(data.get("archetype_description", "") or "No archetype description."))
+    archetype_math = str(data.get("archetype_math", "") or "No statistical pattern.")
+    archetype_math_lines = [_esc(s) for s in _format_archetype_math_lines(archetype_math)]
+    if not archetype_math_lines:
+        archetype_math_lines = ["No statistical pattern."]
+
+    font_b64 = _load_font_b64()
+    if font_b64:
+        font_css = (
+            f"@font-face {{\n"
+            f"      font-family: 'Orbitron';\n"
+            f"      font-style: normal;\n"
+            f"      font-weight: 700;\n"
+            f"      src: url('data:font/woff2;base64,{font_b64}') format('woff2');\n"
+            f"    }}"
+        )
+    else:
+        font_css = "@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700&amp;display=swap');"
+
+    lore_lines = _wrap_text_by_width(lore, 408, 14.0)
+    desc_lines = _wrap_text_by_width(archetype_desc, 363, 14.0)
+
+    lore_svg = "".join(
+        f'<tspan x="55" dy="{0 if i == 0 else 18}">{line}</tspan>'
+        for i, line in enumerate(lore_lines)
+    )
+    desc_svg = "".join(
+        f'<tspan x="55" dy="{0 if i == 0 else 18}">{line}</tspan>'
+        for i, line in enumerate(desc_lines)
+    )
+
+    math_chunks = [_esc(c.strip()) for c in str(archetype_math or "").split("|") if c.strip()]
+    if not math_chunks:
+        math_chunks = archetype_math_lines[:]
+    if not math_chunks:
+        math_chunks = ["No statistical pattern."]
+    archetype_line_text = _esc(f"ARCHETYPE: {archetype_raw}")
+    stat_header = "STATISTICAL PATTERN:"
+    metric_line_blocks: List[tuple[float, str]] = []
+    y_cursor = 578.0
+    for idx, chunk in enumerate(math_chunks):
+        wrapped = _wrap_text_by_width(chunk, 406, 14.0) or [chunk]
+        for line in wrapped:
+            if y_cursor > 760:
+                break
+            metric_line_blocks.append((y_cursor, line))
+            y_cursor += 18
+        if idx < len(math_chunks) - 1:
+            y_cursor += 2
+    if not metric_line_blocks:
+        metric_line_blocks = [(578.0, "No statistical pattern.")]
+    metrics_svg = "".join(
+        f'<text x="57" y="{round(y,1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white">{txt}</text>'
+        for y, txt in metric_line_blocks
+    )
+
+    return f'''<svg width="{CANVAS_W}" height="{CANVAS_H}"
+    viewBox="0 0 {CANVAS_W} {CANVAS_H}"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <style>
+    {font_css}
+    text {{
+      font-family: 'Orbitron', sans-serif;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-rendering: geometricPrecision;
+    }}
+  </style>
+  <linearGradient id="uniform-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="15%" stop-color="#28AEAE"/>
+    <stop offset="30%" stop-color="#4A99BB"/>
+    <stop offset="45%" stop-color="#8C92D1"/>
+    <stop offset="60%" stop-color="#C38CCE"/>
+    <stop offset="75%" stop-color="#BB7382"/>
+    <stop offset="90%" stop-color="#C5CC84"/>
+  </linearGradient>
+  <linearGradient id="signal-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%" stop-color="#0A2A2A"/>
+    <stop offset="50%" stop-color="#0A2A2A"/>
+    <stop offset="100%" stop-color="#134E4E"/>
+  </linearGradient>
+  <linearGradient id="amasser-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%" stop-color="#554467"/>
+    <stop offset="50%" stop-color="#554467"/>
+    <stop offset="100%" stop-color="#7C6C8D"/>
+  </linearGradient>
+  <linearGradient id="vector-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%" stop-color="#996C2C"/>
+    <stop offset="50%" stop-color="#996C2C"/>
+    <stop offset="100%" stop-color="#33240F"/>
+  </linearGradient>
+  <linearGradient id="border-gradient" gradientUnits="userSpaceOnUse" x1="170.904" y1="3" x2="345.096" y2="799">
+    <stop offset="0.2" stop-color="#FFBF00"/>
+    <stop offset="0.4" stop-color="#8A2BE2"/>
+    <stop offset="0.6" stop-color="#0051FF"/>
+    <stop offset="0.8" stop-color="#51FF48"/>
+    <stop offset="1" stop-color="white"/>
+  </linearGradient>
+</defs>
+<rect width="{CANVAS_W}" height="{CANVAS_H}" fill="#0B0C10"/>
+<rect x="{FRAME_X}" y="{FRAME_Y}" width="{FRAME_W}" height="{FRAME_H}" fill="{border_fill}"/>
+<rect x="14.5" y="12.5" width="489" height="776" fill="{dz_fill}" stroke="black"/>
+
+<text x="56" y="40" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black">[ EVENT TOPOLOGY ]</text>
+<text x="55" y="85" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white">{lore_svg}</text>
+
+<line x1="60" y1="215" x2="460" y2="215" stroke="#333333" stroke-width="2"/>
+<rect x="56" y="213" width="4" height="4" fill="#333333"/>
+<rect x="460" y="213" width="4" height="4" fill="#333333"/>
+
+<text x="56" y="235" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black">[ BEHAVIORAL SIGNATURE ]</text>
+<text x="55" y="272" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" text-decoration="underline" style="text-decoration-thickness:1px; text-underline-offset:1.66px">{archetype_line_text}</text>
+<text x="55" y="304" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white">{desc_svg}</text>
+
+<text x="57" y="542" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="black" text-decoration="underline" style="text-decoration-thickness:1px; text-underline-offset:1.66px">{stat_header}</text>
+{metrics_svg}
+
+<rect x="1.5" y="1.5" width="513" height="799" stroke="#333333" stroke-width="3"/>
+</svg>'''
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # SAMPLE DATA (mirrors the data contract in Section 11)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1038,6 +1214,9 @@ SAMPLE_DATA: Dict[str, Any] = {
     "yield":             "P99",
     "gravity":           "P99",
     "archetype":         "THE ANOMALY",
+    "card_lore":         "Standard edition pricing breach at triple digits signals industry inflection. Historical AAA launch data suggests $69.99 baseline holds. Resolution hinges on store listings by Feb 2026 deadline.",
+    "archetype_description": "Systemic resonance detected. This entity represents a mathematical impossibility on the ledger. Their capital mass, execution velocity, and predictive accuracy have scaled in absolute algorithmic unison with their implied probability bracket. They do not merely trade the market; they mirror its optimal mathematical structure. Perfect calibration. Zero systemic drag.",
+    "archetype_math":    "P(E) ∉ [0.80 - 0.97] | Edge, Yield, and Gravity percentiles perfectly match the Entry probability tier.",
     "leaderboard_rank":  63564,
 }
 
@@ -1057,11 +1236,16 @@ if __name__ == "__main__":
         print("Using built-in sample data")
 
     svg = generate_card_svg(card_data)
+    svg_back = generate_card_back_svg(card_data)
 
     out_path = "scripts/cardgen/output.svg"
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(svg)
+    out_back_path = "scripts/cardgen/output_back.svg"
+    with open(out_back_path, "w", encoding="utf-8") as f:
+        f.write(svg_back)
 
     detected = detect_pattern(card_data)
     print(f"Pattern detected: {detected}")
     print(f"SVG written to:   {out_path}")
+    print(f"Back SVG written: {out_back_path}")
