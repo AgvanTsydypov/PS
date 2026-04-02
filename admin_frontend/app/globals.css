@@ -150,6 +150,7 @@ table:not(.event-cards-table) td {
   overflow: visible;
   width: 100%;
   display: flex;
+  gap: 80px;
   justify-content: center;
   align-items: center;
   padding-bottom: 96px;
