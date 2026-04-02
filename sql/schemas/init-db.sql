@@ -895,15 +895,14 @@ WITH event_aggregates AS (
     -- Step 1: Calculate the core metrics per wallet, per event
     SELECT
         proxy_wallet,
-        event_id,
-        MAX(event_slug) AS event_slug,
+        MAX(event_id) AS event_id,
+        event_slug,
         SUM(avg_price * total_bought) AS event_volume_usdc,
         SUM(realized_pnl) AS event_pnl,
         SUM(avg_price * (avg_price * total_bought)) / NULLIF(SUM(avg_price * total_bought), 0) AS capital_weighted_vwap,
         SUM(realized_pnl) / NULLIF(SUM(avg_price * total_bought), 0) AS event_roi
     FROM user_closed_positions
-    WHERE event_id IS NOT NULL
-    GROUP BY proxy_wallet, event_id
+    GROUP BY proxy_wallet, event_slug
 ),
 filtered_traders AS (
     -- Step 2: Expand the funnel, remove glitches, and filter out late-stage bots (0.97+)
@@ -916,9 +915,9 @@ ranked_traders AS (
     -- Step 3: Calculate dynamic percentiles for relative metrics
     SELECT
         *,
-        PERCENT_RANK() OVER (PARTITION BY event_id ORDER BY event_roi ASC) AS roi_percentile,
-        PERCENT_RANK() OVER (PARTITION BY event_id ORDER BY event_volume_usdc ASC) AS volume_percentile,
-        PERCENT_RANK() OVER (PARTITION BY event_id ORDER BY capital_weighted_vwap ASC) AS vwap_percentile
+        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_roi ASC) AS roi_percentile,
+        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_volume_usdc ASC) AS volume_percentile,
+        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY capital_weighted_vwap ASC) AS vwap_percentile
     FROM filtered_traders
 ),
 mapped_traders AS (
@@ -1065,8 +1064,8 @@ FROM archetyped_traders at
 LEFT JOIN leaderboard_latest ll
     ON ll.proxy_wallet = at.proxy_wallet;
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_participants_proxy_wallet_event_id
-    ON participants(proxy_wallet, event_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_participants_proxy_wallet_event_slug
+    ON participants(proxy_wallet, event_slug);
 CREATE INDEX IF NOT EXISTS idx_participants_event_slug ON participants(event_slug);
 CREATE INDEX IF NOT EXISTS idx_participants_event_id ON participants(event_id);
 CREATE INDEX IF NOT EXISTS idx_participants_proxy_wallet ON participants(proxy_wallet);

@@ -196,9 +196,9 @@ _GRAD = "url(#master-gradient)"
 ENTRY_BRACKET_COLORS: Dict[str, str] = {
     "[0.00 - 0.20]": _GRAD,
     "[0.20 - 0.40]": "#FFBF00",
-    "[0.40 - 0.60]": "#0051FF",
-    "[0.60 - 0.80]": "#00FF2F",
-    "[0.80 - 0.97]": "#FFFFFF",
+    "[0.40 - 0.60]": "#265DD2",
+    "[0.60 - 0.80]": "#38BE50",
+    "[0.80 - 0.97]": "#B6BBC8",
 }
 
 PTIER_COLORS: Dict[str, str] = {
@@ -206,10 +206,10 @@ PTIER_COLORS: Dict[str, str] = {
     "P99":  _GRAD,
     "P95":  "#FFBF00",
     "P90":  "#FFBF00",
-    "P80":  "#0051FF",
-    "P70":  "#0051FF",
-    "P50":  "#00FF2F",
-    "BASE": "#FFFFFF",
+    "P80":  "#265DD2",
+    "P70":  "#265DD2",
+    "P50":  "#38BE50",
+    "BASE": "#B6BBC8",
 }
 
 # Entry bracket → equivalent P-Tier position (for UNIFORM detection)
@@ -398,14 +398,14 @@ def detect_pattern(data: Dict[str, Any]) -> str:
 _DZ_ARCHETYPE_STYLES: Dict[str, Tuple[str, str, bool]] = {
     #                     (fill,                        stroke,    is_signal)
     "THE ANOMALY":     ("url(#uniform-gradient)",      "#000000", False),
-    "THE HARVESTER":   ("#474332",                     "#000000", False),
+    "THE HARVESTER":   ("#1C1B1B",                     "#000000", False),
     "THE EQUILIBRIUM": ("#CDD2DE",                     "#000000", True),
     "THE MARTYR":      ("#1B1D3A",                     "#000000", False),
     "THE SIGNAL":      ("url(#signal-gradient)",       "#000000", False),
     "THE AMASSER":     ("url(#amasser-gradient)",      "#000000", False),
     "THE VECTOR":      ("url(#vector-gradient)",       "#000000", False),
     "THE OPERATOR":    ("#625F5F",                     "#000000", False),
-    "THE SUBSTRATE":   ("#1C1B1B",                     "#000000", False),
+    "THE SUBSTRATE":   ("#474332",                     "#000000", False),
 }
 
 

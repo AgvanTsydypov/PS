@@ -2043,9 +2043,27 @@ class SeasonWorkbenchService:
                         ec.updated_at AS event_card_updated_at
                     FROM winner_wallets_nft_to_claim w
                     JOIN event_cards ec ON ec.event_id = w.event_id
-                    LEFT JOIN participants p
-                      ON p.event_id = w.event_id
-                     AND LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            p.archetype,
+                            p.archetype_description,
+                            p.archetype_math
+                        FROM participants p
+                        WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
+                          AND (
+                              (w.event_id IS NOT NULL AND p.event_id = w.event_id)
+                              OR
+                              (w.event_slug IS NOT NULL AND p.event_slug = w.event_slug)
+                          )
+                        ORDER BY
+                            CASE
+                                WHEN w.event_id IS NOT NULL AND p.event_id = w.event_id THEN 0
+                                WHEN w.event_slug IS NOT NULL AND p.event_slug = w.event_slug THEN 1
+                                ELSE 2
+                            END,
+                            p.rank ASC NULLS LAST
+                        LIMIT 1
+                    ) p ON TRUE
                     LEFT JOIN events e ON e.id = w.event_id
                     LEFT JOIN seasons s ON s.id = w.season_id
                     LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
