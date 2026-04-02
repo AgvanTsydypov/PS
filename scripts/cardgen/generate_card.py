@@ -26,25 +26,25 @@ from typing import Any, Dict, Tuple
 CANVAS_W, CANVAS_H = 516, 802
 
 # Border glow rect (filled with YIELD color, blurred)
-FRAME_X, FRAME_Y, FRAME_W, FRAME_H, FRAME_RX = 3, 3, 510, 796, 30
+FRAME_X, FRAME_Y, FRAME_W, FRAME_H, FRAME_RX = 3, 3, 510, 796, 0
 
 # Event image
-IMG_X, IMG_Y, IMG_W, IMG_H, IMG_RX = 13, 13, 490, 490, 23
+IMG_X, IMG_Y, IMG_W, IMG_H, IMG_RX = 13, 13, 490, 490, 0
 
 # Logo overlay (top-left of image zone)
-LOGO_X, LOGO_Y, LOGO_W, LOGO_H = 19, 19, 62, 67
+LOGO_X, LOGO_Y, LOGO_W, LOGO_H = 20, 20, 48, 48
 LOGO_HREF = "logo.svg"
 
 # Metadata badge (top-right)
-BADGE_X, BADGE_Y, BADGE_W, BADGE_H, BADGE_RX = 314, 22, 180, 62, 10
+BADGE_X, BADGE_Y, BADGE_W, BADGE_H, BADGE_RX = 314, 22, 180, 62, 0
 BADGE_CX = BADGE_X + BADGE_W // 2  # 404
 
 # Title bar (overlaps image/data boundary)
-TB_X, TB_Y, TB_W, TB_H, TB_RX = 29, 472, 458, 61, 9
+TB_X, TB_Y, TB_W, TB_H, TB_RX = 29, 472, 458, 61, 0
 TB_CX = TB_X + TB_W // 2  # 258
 
 # Data zone
-DZ_X, DZ_Y, DZ_W, DZ_H, DZ_RX = 13, 503, 490, 286, 22
+DZ_X, DZ_Y, DZ_W, DZ_H, DZ_RX = 13, 503, 490, 286, 0
 DZ_CX = DZ_X + DZ_W // 2  # 258
 
 # Metric column centers — computed from Figma label+value bounding boxes
@@ -57,29 +57,49 @@ Y_SEASON        = 31
 Y_INSTANCE      = 47
 Y_OWNERSHIP     = 63
 Y_TITLE_TEXT    = 495   # vertically centered in 61px title bar: 472 + (61-16)/2 ≈ 495
-Y_SECTOR        = 548
-Y_NODE          = 579
-Y_UPPER_SEP     = 608   # verified against all 3 reference SVGs
-Y_COG_TEL       = 617
-Y_BRACKET       = 654
-Y_WALLET        = 655
-Y_METRIC_LABELS = 686
-Y_METRIC_VALUES = 707
-Y_LOWER_SEP     = 743   # verified against all 3 reference SVGs
+Y_SECTOR        = 538
+Y_NODE          = 565
+Y_UPPER_SEP     = 589
+Y_BRACKET       = 611
+Y_METRIC_LABELS = 649
+Y_METRIC_VALUES = 667
+Y_LOWER_SEP     = 743
+Y_ARCHETYPE     = 729
 Y_FOOTER        = 754
+Y_POLYSTARS     = 777
 
 # Separator endpoints (from reference SVGs)
-UPPER_SEP_X1, UPPER_SEP_X2 = 58, 458
+UPPER_SEP_X1, UPPER_SEP_X2 = 56, 464
 LOWER_SEP_X1, LOWER_SEP_X2 = 57, 457
 
 # Orbitron Bold WOFF2 — resolved relative to this script
 _FONT_PATH = Path(__file__).resolve().parent / "orbitron-bold.woff2"
 
-# Corner dots flanking the upper separator
-DOT_LEFT_X  = 54
-DOT_RIGHT_X = 458
-DOT_Y       = 606
-DOT_SZ      = 4
+# DATA ZONE fixed anchors from latest JSON layout
+X_SECTOR_LABEL = 127
+X_SECTOR_VALUE = 232
+X_NODE         = 202
+X_WALLET       = 57
+X_PE           = 273
+X_PE_DIVIDER   = 258.5
+Y_PE_DIVIDER_1 = 606
+Y_PE_DIVIDER_2 = 630
+X_EDGE_LABEL   = 72
+X_YIELD_LABEL  = 212
+X_GRAV_LABEL   = 339
+X_EDGE_VALUE   = 94
+X_YIELD_VALUE  = 227
+X_GRAV_VALUE   = 355
+X_ARCH_LABEL   = 59
+X_ARCH_VALUE   = 229
+Y_ARCH_VALUE   = 706
+X_FOOTER_LABEL = 58
+X_FOOTER_RANK  = 373
+X_POLYSTARS    = 240
+DOT_LEFT_X     = 56
+DOT_RIGHT_X    = 460
+DOT_Y          = 589
+DOT_SZ         = 4
 
 # ═══════════════════════════════════════════════════════════════════════════
 # GRADIENT ANGLES  — degrees from vertical  (0 = pure top→bottom)
@@ -163,11 +183,11 @@ def _bracket_line_pos(eb_name: str, wallet_disp: str) -> Dict[str, float]:
 _GRAD = "url(#master-gradient)"
 
 ENTRY_BRACKET_COLORS: Dict[str, str] = {
-    "ANOMALY":   _GRAD,
-    "ORACLE":    "#FFBF00",
-    "OUTLIER":   "#0051FF",
-    "VECTOR":    "#00FF2F",
-    "HARVESTER": "#FFFFFF",
+    "[0.00 - 0.20]": _GRAD,
+    "[0.20 - 0.40]": "#FFBF00",
+    "[0.40 - 0.60]": "#0051FF",
+    "[0.60 - 0.80]": "#00FF2F",
+    "[0.80 - 0.97]": "#FFFFFF",
 }
 
 PTIER_COLORS: Dict[str, str] = {
@@ -183,16 +203,37 @@ PTIER_COLORS: Dict[str, str] = {
 
 # Entry bracket → equivalent P-Tier position (for UNIFORM detection)
 _BRACKET_EQUIV: Dict[str, str] = {
-    "ANOMALY":   "P99",
-    "ORACLE":    "P90",
-    "OUTLIER":   "P70",
-    "VECTOR":    "P50",
-    "HARVESTER": "BASE",
+    "[0.00 - 0.20]": "P99",
+    "[0.20 - 0.40]": "P90",
+    "[0.40 - 0.60]": "P70",
+    "[0.60 - 0.80]": "P50",
+    "[0.80 - 0.97]": "BASE",
 }
 
 
+_LEGACY_TO_INTERVAL: Dict[str, str] = {
+    "ANOMALY": "[0.00 - 0.20]",
+    "ORACLE": "[0.20 - 0.40]",
+    "OUTLIER": "[0.40 - 0.60]",
+    "VECTOR": "[0.60 - 0.80]",
+    "HARVESTER": "[0.80 - 0.97]",
+}
+
+
+def normalize_entry_bracket(raw: Any) -> str:
+    v = str(raw or "").strip().upper()
+    if not v:
+        return "[0.80 - 0.97]"
+    if v in _LEGACY_TO_INTERVAL:
+        return _LEGACY_TO_INTERVAL[v]
+    for interval in ENTRY_BRACKET_COLORS:
+        if v == interval.upper():
+            return interval
+    return "[0.80 - 0.97]"
+
+
 def get_bracket_color(name: str) -> str:
-    return ENTRY_BRACKET_COLORS.get(name.upper(), "#FFFFFF")
+    return ENTRY_BRACKET_COLORS.get(normalize_entry_bracket(name), "#FFFFFF")
 
 
 def get_ptier_color(tier: str) -> str:
@@ -293,12 +334,25 @@ def figma_gradients_to_svg_defs(gradients: list[Dict[str, Any]]) -> str:
 
 def detect_pattern(data: Dict[str, Any]) -> str:
     """Return the data-zone background pattern name. Priority order per spec."""
-    eb   = data.get("entry_bracket", "").upper()
+    eb   = normalize_entry_bracket(data.get("entry_bracket", ""))
+    archetype = str(data.get("archetype", "") or "").strip().upper()
     edge = data.get("edge", "").upper()
     yld  = data.get("yield", "").upper()
     grav = data.get("gravity", "").upper()
 
     bp = _BRACKET_EQUIV.get(eb, "BASE")
+
+    # If backend already computed archetype, trust it as primary signal.
+    archetype_to_pattern = {
+        "THE ANOMALY": "UNIFORM",
+        "THE SIGNAL": "SIGNAL",
+        "THE VECTOR": "CONTRARIAN",
+        "THE EQUILIBRIUM": "EQUILIBRIUM",
+        "THE HARVESTER": "LIQUIDATOR",
+        "THE SUBSTRATE": "LIQUIDATOR",
+    }
+    if archetype in archetype_to_pattern:
+        return archetype_to_pattern[archetype]
 
     # Priority 1 — UNIFORM: all 4 axes at same equivalent tier, tier ≠ Base
     if bp != "BASE" and edge == bp and yld == bp and grav == bp:
@@ -306,11 +360,11 @@ def detect_pattern(data: Dict[str, Any]) -> str:
 
     # Priority 2 — SIGNAL
     high = ("P99", "P90")
-    if eb in ("ANOMALY", "ORACLE") and edge in high and yld in high:
+    if eb in ("[0.00 - 0.20]", "[0.20 - 0.40]") and edge in high and yld in high:
         return "SIGNAL"
 
     # Priority 3 — CONTRARIAN
-    if eb == "OUTLIER" and edge in high and yld in high:
+    if eb == "[0.40 - 0.60]" and edge in high and yld in high:
         return "CONTRARIAN"
 
     # Priority 4 — EQUILIBRIUM
@@ -320,7 +374,7 @@ def detect_pattern(data: Dict[str, Any]) -> str:
 
     # Priority 5 — LIQUIDATOR
     low = ("BASE", "P50")
-    if eb in ("VECTOR", "HARVESTER") and grav in high and edge in low and yld in low:
+    if eb in ("[0.60 - 0.80]", "[0.80 - 0.97]") and grav in high and edge in low and yld in low:
         return "LIQUIDATOR"
 
     return "DEFAULT"
@@ -371,7 +425,9 @@ def _ownership(data: Dict[str, Any]) -> Tuple[str, str]:
 
 
 def _wallet_display(addr: str) -> str:
-    return (addr[:9] + "...") if len(addr) > 9 else addr
+    # New display format: 0xaaaaaaaaaaa...
+    value = str(addr)
+    return (value[:13] + "...") if len(value) > 13 else value
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -408,11 +464,14 @@ def _load_font_b64() -> str:
 def _to_data_uri(href: str) -> str:
     """Convert a local file path to a base64 data URI for inline embedding.
     Returns the original href unchanged if the file doesn't exist or is already a URL."""
+    href = str(href or "").strip()
+    if not href:
+        return ""
     if href.startswith(("http://", "https://", "data:")):
         return href
     p = _SCRIPT_DIR / href
     if not p.exists():
-        return href
+        return ""
     mime = _MIME_MAP.get(p.suffix.lower(), "application/octet-stream")
     b64 = base64.b64encode(p.read_bytes()).decode("ascii")
     return f"data:{mime};base64,{b64}"
@@ -426,7 +485,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     dz_fill, dz_stroke, is_signal = dz_style(pattern)
 
     # ── 2. Resolve tier colors ────────────────────────────────────────
-    eb   = data.get("entry_bracket", "HARVESTER").upper()
+    eb   = normalize_entry_bracket(data.get("entry_bracket", "[0.80 - 0.97]"))
     edge = data.get("edge", "BASE").upper()
     yld  = data.get("yield", "BASE").upper()
     grav = data.get("gravity", "BASE").upper()
@@ -452,6 +511,18 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     sector_clr  = data.get("primary_tag_color", "#FFFFFF")
     node        = _esc(data.get("secondary_tag", "NONE").upper())
     wallet_disp = _esc(_wallet_display(data.get("proxy_wallet", "0x00000000")))
+    archetype   = _esc(str(data.get("archetype", "") or "").upper())
+    if not archetype:
+        inferred = {
+            "UNIFORM": "THE ANOMALY",
+            "SIGNAL": "THE SIGNAL",
+            "CONTRARIAN": "THE VECTOR",
+            "EQUILIBRIUM": "THE EQUILIBRIUM",
+            "LIQUIDATOR": "THE HARVESTER",
+            "DEFAULT": "THE OPERATOR",
+        }
+        archetype = inferred.get(pattern, "THE OPERATOR")
+    archetype_fill = "url(#archetype-gradient)" if archetype == "THE ANOMALY" else "white"
     rank        = data.get("leaderboard_rank", 0)
     rank_str    = _esc(f"#{rank}")
     image_url   = _to_data_uri(data.get("image_url", ""))
@@ -598,8 +669,8 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 
   <!-- Lower dotted separator gradient — 90° horizontal -->
   <linearGradient id="mg-sep" gradientUnits="userSpaceOnUse"
-                  x1="{LOWER_SEP_X1}" y1="{Y_LOWER_SEP}"
-                  x2="{LOWER_SEP_X2}" y2="{Y_LOWER_SEP}">
+                  x1="{LOWER_SEP_X1}" y1="{Y_LOWER_SEP + 1.5}"
+                  x2="{LOWER_SEP_X2}" y2="{Y_LOWER_SEP + 1.5}">
     <stop offset="0%"   stop-color="#E7FDFD"/>
     <stop offset="50%"  stop-color="#66FB39"/>
     <stop offset="75%"  stop-color="#DDDD03"/>
@@ -617,16 +688,16 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     <stop offset="90%" stop-color="#C5CC84"/>
   </linearGradient>
 
-  <!-- COGNITIVE TELEMETRY radial gradient (Section 7.3) — horizontally stretched ellipse
+  <!-- Archetype radial gradient (transferred from former COGNITIVE TELEMETRY effect)
        Center: rgba(239,226,226) #EFE2E2 / Edge: rgba(104,98,98) #686262
        Intermediate stops at 25%, 50%, 75% per spec -->
-  <radialGradient id="cognitive-gradient" cx="0" cy="0" r="1"
+  <radialGradient id="archetype-gradient" cx="0" cy="0" r="1"
                   gradientUnits="userSpaceOnUse"
-                  gradientTransform="translate({DZ_CX} {Y_COG_TEL + 8}) scale(140 11.5)">
+                  gradientTransform="translate(341 718) scale(120 12)">
     <stop offset="0"    stop-color="#EFE2E2"/>
-    <stop offset="0.15" stop-color="#CDC2C2"/>
+    <stop offset="0.10" stop-color="#CDC2C2"/>
     <stop offset="0.50" stop-color="#ACA2A2"/>
-    <stop offset="0.85" stop-color="#8A8282"/>
+    <stop offset="0.90" stop-color="#8A8282"/>
     <stop offset="1"    stop-color="#686262"/>
   </radialGradient>
 
@@ -678,7 +749,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ---- Layer 1: Background canvas ----
     parts.append(f'''
 <!-- ══ BACKGROUND ══ -->
-<rect width="{CANVAS_W}" height="{CANVAS_H}" rx="33" fill="#0B0C10"/>''')
+<rect width="{CANVAS_W}" height="{CANVAS_H}" rx="0" fill="#0B0C10"/>''')
 
     # ---- Layer 2: Border glow (YIELD color, blurred) ----
     parts.append(f'''
@@ -690,11 +761,22 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 </g>''')
 
     # ---- Layer 3: Event image ----
-    parts.append(f'''
+    if image_url:
+        parts.append(f'''
 <!-- ══ EVENT IMAGE ══ -->
 <image x="{IMG_X}" y="{IMG_Y}" width="{IMG_W}" height="{IMG_H}"
        href="{image_url}" clip-path="url(#img-clip)"
        preserveAspectRatio="xMidYMid slice"/>''')
+    else:
+        parts.append(f'''
+<!-- ══ EVENT IMAGE FALLBACK ══ -->
+<rect x="{IMG_X}" y="{IMG_Y}" width="{IMG_W}" height="{IMG_H}"
+      fill="#111111"/>''')
+    parts.append(f'''
+<!-- ══ EVENT IMAGE STROKE (matched to DATA ZONE) ══ -->
+<rect x="{IMG_X + 0.5}" y="{IMG_Y + 0.5}"
+      width="{IMG_W - 1}" height="{IMG_H - 1}"
+      rx="{IMG_RX}" fill="none" stroke="{dz_stroke}"/>''')
 
     # ---- Layer 4: Logo overlay ----
     parts.append(f'''
@@ -755,11 +837,15 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     parts.append(f'''
 <!-- ══ SECTOR ══ -->
 <g filter="url(#shadow)">
-  <text x="{DZ_CX}" y="{Y_SECTOR}"
-        text-anchor="middle" dominant-baseline="hanging"
-        font-size="18"{sig}>
-    <tspan fill="white">SECTOR: </tspan>
-    <tspan fill="{sector_clr}">{sector}</tspan>
+  <text x="{X_SECTOR_LABEL}" y="{Y_SECTOR}"
+        text-anchor="start" dominant-baseline="hanging"
+        font-size="18" fill="white"{sig}>
+    SECTOR:
+  </text>
+  <text x="{X_SECTOR_VALUE}" y="{Y_SECTOR}"
+        text-anchor="start" dominant-baseline="hanging"
+        font-size="18" fill="{sector_clr}"{sig}>
+    {sector}
   </text>
 </g>''')
 
@@ -767,97 +853,80 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     parts.append(f'''
 <!-- ══ NODE ══ -->
 <g filter="url(#shadow)">
-  <text x="{DZ_CX}" y="{Y_NODE}"
-        text-anchor="middle" dominant-baseline="hanging"
-        font-size="16" fill="#888888" letter-spacing="0"{sig}>
+  <text x="{X_NODE}" y="{Y_NODE}"
+        text-anchor="start" dominant-baseline="hanging"
+        font-size="16" fill="#888888" style="letter-spacing:0em"{sig}>
     NODE: {node}
   </text>
 </g>''')
 
-    # ---- Layer 10: Upper separator + corner dots ----
+    # ---- Layer 10: Upper separator (exact Frame 95 geometry) ----
     parts.append(f'''
 <!-- ══ UPPER SEPARATOR ══ -->
-<line x1="{UPPER_SEP_X1}" y1="{Y_UPPER_SEP}"
-      x2="{UPPER_SEP_X2}" y2="{Y_UPPER_SEP}"
-      stroke="#333333" stroke-width="2"/>
-<rect x="{DOT_LEFT_X}" y="{DOT_Y}"
-      width="{DOT_SZ}" height="{DOT_SZ}" fill="#333333"/>
-<rect x="{DOT_RIGHT_X}" y="{DOT_Y}"
-      width="{DOT_SZ}" height="{DOT_SZ}" fill="#333333"/>''')
+<path d="M60 590H460V589H464V593H460V592H60V593H56V589H60V590Z" fill="#333333"/>''')
 
-    # ---- Layer 11: COGNITIVE TELEMETRY ----
+    # ---- Layer 11: Wallet + P(E) bracket ----
     parts.append(f'''
-<!-- ══ COGNITIVE TELEMETRY ══ -->
+<!-- ══ WALLET + PROBABILITY BRACKET ══ -->
 <g filter="url(#txt-shadow)">
-  <text x="{DZ_CX}" y="{Y_COG_TEL}"
-        text-anchor="middle" dominant-baseline="hanging"
-        font-size="20"
-        fill="url(#cognitive-gradient)"{sig}>
-    COGNITIVE TELEMETRY
+  <line x1="{X_PE_DIVIDER}" y1="{Y_PE_DIVIDER_1}" x2="{X_PE_DIVIDER}" y2="{Y_PE_DIVIDER_2}"
+        stroke="white" stroke-width="1"/>
+  <text x="{X_WALLET}" y="{Y_BRACKET}"
+        text-anchor="start" dominant-baseline="hanging"
+        font-size="15" fill="{wallet_fill}"{sig}>
+    {wallet_disp}
   </text>
-</g>''')
-
-    # ---- Layer 12: Entry bracket +   ----
-    # Flowing tspans (no absolute x=) — the browser handles text layout, so
-    # [ ] always sit exactly around the bracket name regardless of its length.
-    # Gradients are vertical (colour by Y only) so the x position of each word
-    # is irrelevant for gradient rendering.
-    parts.append(f'''
-<!-- ══ ENTRY BRACKET + WALLET ══ -->
-<g filter="url(#txt-shadow)">
-  <text x="{DZ_CX}" y="{Y_BRACKET}"
-        text-anchor="middle" dominant-baseline="hanging"
+  <text x="{X_PE}" y="{Y_BRACKET}"
+        text-anchor="start" dominant-baseline="hanging"
         font-size="15"{sig}>
-    <tspan fill="white">[ </tspan>
+    <tspan fill="white">P(E) ∈ </tspan>
     <tspan fill="{bracket_fill}">{eb}</tspan>
-    <tspan fill="white"> ] :// </tspan>
-    <tspan fill="{wallet_fill}" font-size="14">{wallet_disp}</tspan>
   </text>
 </g>''')
 
-    # ---- Layer 13: Metric labels (EDGE / YIELD / GRAVITY) ----
+    # ---- Layer 12: Metric labels (EDGE / YIELD / GRAVITY) ----
     parts.append(f'''
 <!-- ══ METRIC LABELS ══ -->
 <g filter="url(#shadow)">
-  <text x="{COL_EDGE}" y="{Y_METRIC_LABELS}"
-        text-anchor="middle" dominant-baseline="hanging"
+  <text x="{X_EDGE_LABEL}" y="{Y_METRIC_LABELS}"
+        text-anchor="start" dominant-baseline="hanging"
         font-size="12" fill="white"{sig}>
     EDGE:
   </text>
-  <text x="{COL_YIELD}" y="{Y_METRIC_LABELS}"
-        text-anchor="middle" dominant-baseline="hanging"
+  <text x="{X_YIELD_LABEL}" y="{Y_METRIC_LABELS}"
+        text-anchor="start" dominant-baseline="hanging"
         font-size="12" fill="white"{sig}>
     YIELD:
   </text>
-  <text x="{COL_GRAVITY}" y="{Y_METRIC_LABELS}"
-        text-anchor="middle" dominant-baseline="hanging"
+  <text x="{X_GRAV_LABEL}" y="{Y_METRIC_LABELS}"
+        text-anchor="start" dominant-baseline="hanging"
         font-size="12" fill="white"{sig}>
     GRAVITY:
   </text>
 </g>''')
 
-    # ---- Layer 14: Metric values ----
+    # ---- Layer 13: Metric values ----
     parts.append(f'''
 <!-- ══ METRIC VALUES ══ -->
 <g filter="url(#txt-shadow)">
-  <text x="{COL_EDGE}" y="{Y_METRIC_VALUES}"
-        text-anchor="middle" dominant-baseline="hanging"
+  <text x="{X_EDGE_VALUE}" y="{Y_METRIC_VALUES}"
+        text-anchor="start" dominant-baseline="hanging"
         font-size="20" fill="{edge_val_fill}"{sig}>
     {edge}
   </text>
-  <text x="{COL_YIELD}" y="{Y_METRIC_VALUES}"
-        text-anchor="middle" dominant-baseline="hanging"
+  <text x="{X_YIELD_VALUE}" y="{Y_METRIC_VALUES}"
+        text-anchor="start" dominant-baseline="hanging"
         font-size="20" fill="{yld_val_fill}"{sig}>
     {yld}
   </text>
-  <text x="{COL_GRAVITY}" y="{Y_METRIC_VALUES}"
-        text-anchor="middle" dominant-baseline="hanging"
+  <text x="{X_GRAV_VALUE}" y="{Y_METRIC_VALUES}"
+        text-anchor="start" dominant-baseline="hanging"
         font-size="20" fill="{grav_val_fill}"{sig}>
     {grav}
   </text>
 </g>''')
 
-    # ---- Layer 15: Lower dotted separator (GRAVITY-colored, no filter) ----
+    # ---- Layer 14: Lower dotted separator (GRAVITY-colored, no filter) ----
     parts.append(f'''
 <!-- ══ LOWER SEPARATOR (driven by GRAVITY = {grav}) ══ -->
 <line x1="{LOWER_SEP_X1}" y1="{Y_LOWER_SEP}"
@@ -865,23 +934,42 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
       stroke="{dotted_fill}" stroke-width="2"
       stroke-dasharray="2 4"/>''')
 
+    # ---- Layer 15: Archetype row ----
+    parts.append(f'''
+<!-- ══ ARCHETYPE ══ -->
+<g filter="url(#txt-shadow)">
+  <text x="{DZ_CX}" y="{Y_ARCHETYPE}"
+        text-anchor="middle" dominant-baseline="alphabetic"{sig}>
+    <tspan font-size="18" fill="white">ARCHETYPE: </tspan>
+    <tspan font-size="20" fill="{archetype_fill}">{archetype}</tspan>
+  </text>
+</g>''')
+
     # ---- Layer 16: Footer (POLYMARKET GLOBAL RANK) ----
     parts.append(f'''
 <!-- ══ FOOTER ══ -->
 <g filter="url(#shadow)">
-  <text x="{DZ_CX}" y="{Y_FOOTER}"
-        text-anchor="middle" dominant-baseline="hanging"
+  <text x="{X_FOOTER_LABEL}" y="{Y_FOOTER}"
+        text-anchor="start" dominant-baseline="hanging"
         font-size="16"{sig}>
-    <tspan fill="#2E5CFF">POLYMARKET</tspan>
-    <tspan fill="white"> GLOBAL RANK:</tspan>
-    <tspan fill="white" stroke="#000000" stroke-width="2" paint-order="stroke fill"> {rank_str}</tspan>
+    <tspan fill="#2E5CFF">POLYMARKET</tspan><tspan fill="#828181"> GLOBAL RANK:</tspan>
   </text>
-</g>''')
+  <text x="{X_FOOTER_RANK}" y="{Y_FOOTER}"
+        text-anchor="start" dominant-baseline="hanging"
+        font-size="16" fill="#FFFFFF"
+        stroke="#000000" stroke-width="1" paint-order="stroke fill"{sig}>{rank_str}</text>
+</g>
+
+<text x="{X_POLYSTARS}" y="{Y_POLYSTARS}"
+      text-anchor="start" dominant-baseline="hanging"
+      font-size="6" fill="#5289BC">
+  POLYSTARS
+</text>''')
 
     # ---- Layer 17: Structural outer border (always #333333) ----
     parts.append(f'''
 <!-- ══ STRUCTURAL BORDER ══ -->
-<rect x="1.5" y="1.5" width="513" height="799" rx="31.5"
+<rect x="1.5" y="1.5" width="513" height="799" rx="0"
       stroke="#333333" stroke-width="3" fill="none"/>
 
 </svg>''')
@@ -903,11 +991,12 @@ SAMPLE_DATA: Dict[str, Any] = {
     "primary_tag":       "CELEBRITIES",
     "primary_tag_color": "#51E147",
     "secondary_tag":     "NONE",
-    "entry_bracket":     "ANOMALY",
+    "entry_bracket":     "[0.00 - 0.20]",
     "proxy_wallet":      "0xBb8E703abc123def456",
     "edge":              "P99",
     "yield":             "P99",
     "gravity":           "P99",
+    "archetype":         "THE ANOMALY",
     "leaderboard_rank":  63564,
 }
 
