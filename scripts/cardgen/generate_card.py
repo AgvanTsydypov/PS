@@ -795,14 +795,12 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ BACKGROUND ══ -->
 <rect width="{CANVAS_W}" height="{CANVAS_H}" rx="0" fill="#0B0C10"/>''')
 
-    # ---- Layer 2: Border glow (YIELD color, blurred) ----
+    # ---- Layer 2: Border base (no darkening blur) ----
     parts.append(f'''
 <!-- ══ BORDER GLOW (driven by YIELD = {yld}) ══ -->
-<g filter="url(#glow)">
-  <rect x="{FRAME_X}" y="{FRAME_Y}"
-        width="{FRAME_W}" height="{FRAME_H}"
-        rx="{FRAME_RX}" fill="{border_fill}"/>
-</g>''')
+<rect x="{FRAME_X}" y="{FRAME_Y}"
+      width="{FRAME_W}" height="{FRAME_H}"
+      rx="{FRAME_RX}" fill="{border_fill}"/>''')
 
     # ---- Layer 3: Event image ----
     if image_url:
@@ -820,7 +818,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ EVENT IMAGE STROKE (matched to DATA ZONE) ══ -->
 <rect x="{IMG_X + 0.5}" y="{IMG_Y + 0.5}"
       width="{IMG_W - 1}" height="{IMG_H - 1}"
-      rx="{IMG_RX}" fill="none"/>''')
+      rx="{IMG_RX}" fill="none" stroke="#000000"/>''')
 
     # ---- Layer 4: Logo overlay ----
     parts.append(f'''
@@ -862,7 +860,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ DATA ZONE (pattern: {pattern}) ══ -->
 <rect x="{DZ_X + 0.5}" y="{DZ_Y + 0.5}"
       width="{DZ_W - 1}" height="{DZ_H - 1}"
-      rx="{DZ_RX - 0.5}" fill="{dz_fill}"/>''')
+      rx="{DZ_RX - 0.5}" fill="{dz_fill}" stroke="#000000"/>''')
     parts.append(f'''
 <!-- ══ DATA ZONE CORNER PINS ══ -->
 <circle cx="{DZ_X + DZ_PIN_INSET}" cy="{DZ_Y + DZ_PIN_INSET}" r="{DZ_PIN_R}" fill="{DZ_PIN_COLOR}"/>
@@ -875,7 +873,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ TITLE BAR ══ -->
 <rect x="{TB_X}" y="{TB_Y}" width="{TB_W}" height="{TB_H}"
       rx="{TB_RX}" fill="#171717" fill-opacity="0.95"
-      />
+      stroke="#333333" stroke-width="2"/>
 
 <text x="{TB_CX}" y="{Y_TITLE_TEXT}"
       text-anchor="middle" dominant-baseline="hanging"
@@ -887,15 +885,11 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     parts.append(f'''
 <!-- ══ SECTOR ══ -->
 <g filter="url(#shadow)">
-  <text x="{X_SECTOR_LABEL}" y="{Y_SECTOR}"
-        text-anchor="start" dominant-baseline="hanging"
-        font-size="18" fill="white"{sig}>
-    SECTOR:
-  </text>
-  <text x="{X_SECTOR_VALUE}" y="{Y_SECTOR}"
-        text-anchor="start" dominant-baseline="hanging"
-        font-size="18" fill="{sector_clr}"{sig}>
-    {sector}
+  <text x="{DZ_CX}" y="{Y_SECTOR}"
+        text-anchor="middle" dominant-baseline="hanging"
+        font-size="18"{sig}>
+    <tspan fill="white">SECTOR: </tspan>
+    <tspan fill="{sector_clr}">{sector}</tspan>
   </text>
 </g>''')
 
@@ -1017,7 +1011,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     parts.append(f'''
 <!-- ══ STRUCTURAL BORDER ══ -->
 <rect x="1.5" y="1.5" width="513" height="799" rx="0"
-      fill="none"/>
+      fill="none" stroke="#333333" stroke-width="3"/>
 
 </svg>''')
 
@@ -1043,7 +1037,7 @@ SAMPLE_DATA: Dict[str, Any] = {
     "edge":              "P99",
     "yield":             "P99",
     "gravity":           "P99",
-    "archetype":         "THE SUBSTRATE",
+    "archetype":         "THE ANOMALY",
     "leaderboard_rank":  63564,
 }
 

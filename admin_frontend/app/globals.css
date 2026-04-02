@@ -167,14 +167,14 @@ table:not(.event-cards-table) td {
 .nft-card.card-builder-preview-card {
   border: none;
   background: transparent;
-  border-radius: 19.8px;
+  border-radius: 0;
   overflow: visible;
 }
 
 .card-builder-preview-svg-shell {
   width: 310.8px;
   height: 482.4px;
-  border-radius: 19.8px;
+  border-radius: 0;
   overflow: hidden;
 }
 
