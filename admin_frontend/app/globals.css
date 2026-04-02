@@ -170,6 +170,11 @@ table:not(.event-cards-table) td {
   background: transparent;
   border-radius: 0;
   overflow: visible;
+  cursor: pointer;
+}
+
+.nft-card.card-builder-preview-card.card-builder-preview-card-flipping {
+  pointer-events: none;
 }
 
 .card-builder-preview-svg-shell {
@@ -177,6 +182,33 @@ table:not(.event-cards-table) td {
   height: 482.4px;
   border-radius: 0;
   overflow: hidden;
+}
+
+.card-builder-flip-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  transition: transform 720ms cubic-bezier(0.22, 0.8, 0.24, 1);
+}
+
+.card-builder-flip-inner.is-flipping {
+  will-change: transform;
+}
+
+.card-builder-flip-inner.is-flipped {
+  transform: rotateY(180deg);
+}
+
+.card-builder-flip-face {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.card-builder-flip-face-back {
+  transform: rotateY(180deg);
 }
 
 .card-builder-preview-svg-content {
