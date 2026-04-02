@@ -200,6 +200,10 @@ function handleCardBuilderPreviewMouseMove(event: React.MouseEvent<HTMLDivElemen
   wrappers.forEach((wrapper) => {
     const card = wrapper.querySelector<HTMLElement>(".nft-card-tilt");
     if (!card) return;
+    if (card.classList.contains("card-builder-preview-card-flipping")) {
+      resetNftCardTilt(card);
+      return;
+    }
 
     const rect = card.getBoundingClientRect();
     const isWithinProximity =
@@ -557,6 +561,12 @@ export default function HomePage() {
   const [cardBuilderPreviewBackSvg, setCardBuilderPreviewBackSvg] = useState("");
   const [cardBuilderPattern, setCardBuilderPattern] = useState("");
   const [cardBuilderPreviewBusy, setCardBuilderPreviewBusy] = useState(false);
+  const [cardBuilderFrontFlipped, setCardBuilderFrontFlipped] = useState(false);
+  const [cardBuilderBackFlipped, setCardBuilderBackFlipped] = useState(true);
+  const [cardBuilderFrontAnimating, setCardBuilderFrontAnimating] = useState(false);
+  const [cardBuilderBackAnimating, setCardBuilderBackAnimating] = useState(false);
+  const cardBuilderFrontFlipTimerRef = useRef<number | null>(null);
+  const cardBuilderBackFlipTimerRef = useRef<number | null>(null);
   const [eventCardForm, setEventCardForm] = useState<EventCardForm>({
     event_id: "",
     card_title: "",
@@ -782,6 +792,30 @@ export default function HomePage() {
     await navigator.clipboard.writeText(value);
     setOk(`Copied: ${value}`);
   };
+  const triggerCardBuilderFlip = (
+    side: "front" | "back",
+    target: HTMLElement,
+  ) => {
+    resetNftCardTilt(target);
+    const isFront = side === "front";
+    const timerRef = isFront ? cardBuilderFrontFlipTimerRef : cardBuilderBackFlipTimerRef;
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    if (isFront) {
+      setCardBuilderFrontAnimating(true);
+      setCardBuilderFrontFlipped((prev) => !prev);
+    } else {
+      setCardBuilderBackAnimating(true);
+      setCardBuilderBackFlipped((prev) => !prev);
+    }
+    timerRef.current = window.setTimeout(() => {
+      if (isFront) {
+        setCardBuilderFrontAnimating(false);
+      } else {
+        setCardBuilderBackAnimating(false);
+      }
+      timerRef.current = null;
+    }, 720);
+  };
   const uploadEventPicture = async (eventId: string, file: File) => {
     const formData = new FormData();
     formData.append("file", file);
@@ -1004,6 +1038,8 @@ export default function HomePage() {
       setCardBuilderPayload(null);
       setCardBuilderPreviewSvg("");
       setCardBuilderPreviewBackSvg("");
+      setCardBuilderFrontFlipped(false);
+      setCardBuilderBackFlipped(true);
       setCardBuilderPattern("");
       return;
     }
@@ -1027,6 +1063,8 @@ export default function HomePage() {
       });
       setCardBuilderPreviewSvg(out.svg);
       setCardBuilderPreviewBackSvg(out.back_svg);
+      setCardBuilderFrontFlipped(false);
+      setCardBuilderBackFlipped(true);
       setCardBuilderPattern(out.pattern);
     } finally {
       setCardBuilderPreviewBusy(false);
@@ -1198,6 +1236,13 @@ export default function HomePage() {
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, cardBuilderPayload]);
+
+  useEffect(() => {
+    return () => {
+      if (cardBuilderFrontFlipTimerRef.current) window.clearTimeout(cardBuilderFrontFlipTimerRef.current);
+      if (cardBuilderBackFlipTimerRef.current) window.clearTimeout(cardBuilderBackFlipTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (eventCardsPage > eventCardsTotalPages) {
@@ -2712,38 +2757,82 @@ export default function HomePage() {
                 onMouseLeave={handleCardBuilderPreviewMouseLeave}
               >
                 <div className="nft-card-wrapper card-builder-preview-wrapper">
-                  <article className="nft-card nft-card-tilt theme-vivid card-builder-preview-card">
-                    <div className="card-builder-preview-svg-shell">
-                      <div
-                        className="card-builder-preview-svg-content"
-                        // Render preview at custom scale while keeping source SVG untouched.
-                        style={{
-                          width: 518,
-                          height: 804,
-                          background: "transparent",
-                          transform: "scale(0.6)",
-                          transformOrigin: "top left",
-                        }}
-                        dangerouslySetInnerHTML={{ __html: cardBuilderPreviewSvg }}
-                      />
+                  <article
+                    className={`nft-card nft-card-tilt theme-vivid card-builder-preview-card ${cardBuilderFrontAnimating ? "card-builder-preview-card-flipping" : ""}`}
+                    onClick={(e) => triggerCardBuilderFlip("front", e.currentTarget)}
+                  >
+                    <div className={`card-builder-flip-inner ${cardBuilderFrontFlipped ? "is-flipped" : ""} ${cardBuilderFrontAnimating ? "is-flipping" : ""}`}>
+                      <div className="card-builder-flip-face card-builder-flip-face-front">
+                        <div className="card-builder-preview-svg-shell">
+                          <div
+                            className="card-builder-preview-svg-content"
+                            // Render preview at custom scale while keeping source SVG untouched.
+                            style={{
+                              width: 518,
+                              height: 804,
+                              background: "transparent",
+                              transform: "scale(0.6)",
+                              transformOrigin: "top left",
+                            }}
+                            dangerouslySetInnerHTML={{ __html: cardBuilderPreviewSvg }}
+                          />
+                        </div>
+                      </div>
+                      <div className="card-builder-flip-face card-builder-flip-face-back">
+                        <div className="card-builder-preview-svg-shell">
+                          <div
+                            className="card-builder-preview-svg-content"
+                            style={{
+                              width: 518,
+                              height: 804,
+                              background: "transparent",
+                              transform: "scale(0.6)",
+                              transformOrigin: "top left",
+                            }}
+                            dangerouslySetInnerHTML={{ __html: cardBuilderPreviewBackSvg }}
+                          />
+                        </div>
+                      </div>
                     </div>
                   </article>
                 </div>
                 {cardBuilderPreviewBackSvg ? (
                   <div className="nft-card-wrapper card-builder-preview-wrapper">
-                    <article className="nft-card nft-card-tilt theme-vivid card-builder-preview-card">
-                      <div className="card-builder-preview-svg-shell">
-                        <div
-                          className="card-builder-preview-svg-content"
-                          style={{
-                            width: 518,
-                            height: 804,
-                            background: "transparent",
-                            transform: "scale(0.6)",
-                            transformOrigin: "top left",
-                          }}
-                          dangerouslySetInnerHTML={{ __html: cardBuilderPreviewBackSvg }}
-                        />
+                    <article
+                      className={`nft-card nft-card-tilt theme-vivid card-builder-preview-card ${cardBuilderBackAnimating ? "card-builder-preview-card-flipping" : ""}`}
+                      onClick={(e) => triggerCardBuilderFlip("back", e.currentTarget)}
+                    >
+                      <div className={`card-builder-flip-inner ${cardBuilderBackFlipped ? "is-flipped" : ""} ${cardBuilderBackAnimating ? "is-flipping" : ""}`}>
+                        <div className="card-builder-flip-face card-builder-flip-face-front">
+                          <div className="card-builder-preview-svg-shell">
+                            <div
+                              className="card-builder-preview-svg-content"
+                              style={{
+                                width: 518,
+                                height: 804,
+                                background: "transparent",
+                                transform: "scale(0.6)",
+                                transformOrigin: "top left",
+                              }}
+                              dangerouslySetInnerHTML={{ __html: cardBuilderPreviewSvg }}
+                            />
+                          </div>
+                        </div>
+                        <div className="card-builder-flip-face card-builder-flip-face-back">
+                          <div className="card-builder-preview-svg-shell">
+                            <div
+                              className="card-builder-preview-svg-content"
+                              style={{
+                                width: 518,
+                                height: 804,
+                                background: "transparent",
+                                transform: "scale(0.6)",
+                                transformOrigin: "top left",
+                              }}
+                              dangerouslySetInnerHTML={{ __html: cardBuilderPreviewBackSvg }}
+                            />
+                          </div>
+                        </div>
                       </div>
                     </article>
                   </div>
