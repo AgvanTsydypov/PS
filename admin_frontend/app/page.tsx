@@ -115,6 +115,7 @@ type CardBuilderCandidate = {
   event_slug?: string | null;
   event_title?: string | null;
   entry_bracket?: string | null;
+  archetype?: string | null;
   edge?: string | null;
   yield?: string | null;
   gravity?: string | null;
@@ -139,6 +140,7 @@ type CardBuilderPayload = {
   primary_tag_color: string;
   secondary_tag: string;
   entry_bracket: string;
+  archetype: string;
   proxy_wallet: string;
   edge: string;
   yield: string;
@@ -291,8 +293,33 @@ const tabs: Array<{ key: TabKey; label: string }> = [
 
 const cardSeasonTypeOptions = ["standard", "genesis"] as const;
 const cardClaimTypeOptions = ["looter", "origin"] as const;
-const cardEntryBracketOptions = ["ANOMALY", "ORACLE", "OUTLIER", "VECTOR", "HARVESTER"] as const;
+const cardEntryBracketOptions = [
+  "[0.00 - 0.20]",
+  "[0.20 - 0.40]",
+  "[0.40 - 0.60]",
+  "[0.60 - 0.80]",
+  "[0.80 - 0.97]",
+] as const;
 const cardTierOptions = ["P99", "P90", "P70", "P50", "BASE"] as const;
+const cardArchetypeOptions = [
+  "THE ANOMALY",
+  "THE SIGNAL",
+  "THE VECTOR",
+  "THE EQUILIBRIUM",
+  "THE HARVESTER",
+  "THE MARTYR",
+  "THE AMASSER",
+  "THE SUBSTRATE",
+  "THE OPERATOR",
+] as const;
+
+const legacyEntryBracketMap: Record<string, typeof cardEntryBracketOptions[number]> = {
+  ANOMALY: "[0.00 - 0.20]",
+  ORACLE: "[0.20 - 0.40]",
+  OUTLIER: "[0.40 - 0.60]",
+  VECTOR: "[0.60 - 0.80]",
+  HARVESTER: "[0.80 - 0.97]",
+};
 
 function normalizeChoice<T extends readonly string[]>(
   raw: string | null | undefined,
@@ -302,6 +329,63 @@ function normalizeChoice<T extends readonly string[]>(
   const value = String(raw ?? "").trim().toUpperCase();
   const match = options.find((option) => option.toUpperCase() === value);
   return (match ?? fallback) as T[number];
+}
+
+function normalizeEntryBracket(raw: string | null | undefined): typeof cardEntryBracketOptions[number] {
+  const value = String(raw ?? "").trim().toUpperCase();
+  if (legacyEntryBracketMap[value]) return legacyEntryBracketMap[value];
+  return normalizeChoice(value, cardEntryBracketOptions, "[0.80 - 0.97]");
+}
+
+function inferArchetypeFromMetrics(
+  entryBracket: string,
+  edgeRaw: string | null | undefined,
+  yieldRaw: string | null | undefined,
+  gravityRaw: string | null | undefined,
+): typeof cardArchetypeOptions[number] {
+  const edge = normalizeChoice(edgeRaw, cardTierOptions, "BASE");
+  const yld = normalizeChoice(yieldRaw, cardTierOptions, "BASE");
+  const grav = normalizeChoice(gravityRaw, cardTierOptions, "BASE");
+
+  if (
+    entryBracket !== "[0.80 - 0.97]" &&
+    (
+      (entryBracket === "[0.00 - 0.20]" && edge === "P99" && yld === "P99" && grav === "P99") ||
+      (entryBracket === "[0.20 - 0.40]" && edge === "P90" && yld === "P90" && grav === "P90") ||
+      (entryBracket === "[0.40 - 0.60]" && edge === "P70" && yld === "P70" && grav === "P70") ||
+      (entryBracket === "[0.60 - 0.80]" && edge === "P50" && yld === "P50" && grav === "P50")
+    )
+  ) return "THE ANOMALY";
+  if (
+    (entryBracket === "[0.00 - 0.20]" || entryBracket === "[0.20 - 0.40]") &&
+    (edge === "P99" || edge === "P90") &&
+    (yld === "P99" || yld === "P90")
+  ) return "THE SIGNAL";
+  if (entryBracket === "[0.40 - 0.60]" && (edge === "P99" || edge === "P90") && (yld === "P99" || yld === "P90")) return "THE VECTOR";
+  if (
+    (edge === "P99" || edge === "P90" || edge === "P70") &&
+    (yld === "P99" || yld === "P90" || yld === "P70") &&
+    (grav === "P99" || grav === "P90" || grav === "P70")
+  ) return "THE EQUILIBRIUM";
+  if (
+    (entryBracket === "[0.60 - 0.80]" || entryBracket === "[0.80 - 0.97]") &&
+    (grav === "P99" || grav === "P90") &&
+    (edge === "BASE" || edge === "P50") &&
+    (yld === "BASE" || yld === "P50")
+  ) return "THE HARVESTER";
+  if (
+    (entryBracket === "[0.00 - 0.20]" || entryBracket === "[0.20 - 0.40]") &&
+    (edge === "P99" || edge === "P90" || edge === "P70") &&
+    (yld === "BASE" || yld === "P50")
+  ) return "THE MARTYR";
+  if (grav === "P99" || grav === "P90") return "THE AMASSER";
+  if (
+    (entryBracket === "[0.60 - 0.80]" || entryBracket === "[0.80 - 0.97]") &&
+    (edge === "BASE" || edge === "P50") &&
+    (yld === "BASE" || yld === "P50") &&
+    (grav === "BASE" || grav === "P50" || grav === "P70")
+  ) return "THE SUBSTRATE";
+  return "THE OPERATOR";
 }
 
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
@@ -633,6 +717,25 @@ export default function HomePage() {
     error_text: row.error_text ?? "",
   });
   const buildCardBuilderPayloadFromRow = (row: CardBuilderCandidate): CardBuilderPayload => ({
+    // Keep builder payload aligned with generate_card.py contract.
+    ...(() => {
+      const normalizedEntryBracket = normalizeEntryBracket(row.entry_bracket);
+      const normalizedEdge = normalizeChoice(row.edge, cardTierOptions, "BASE");
+      const normalizedYield = normalizeChoice(row.yield, cardTierOptions, "BASE");
+      const normalizedGravity = normalizeChoice(row.gravity, cardTierOptions, "BASE");
+      const normalizedArchetype = normalizeChoice(
+        row.archetype,
+        cardArchetypeOptions,
+        inferArchetypeFromMetrics(normalizedEntryBracket, normalizedEdge, normalizedYield, normalizedGravity),
+      );
+      return {
+        entry_bracket: normalizedEntryBracket,
+        edge: normalizedEdge,
+        yield: normalizedYield,
+        gravity: normalizedGravity,
+        archetype: normalizedArchetype,
+      };
+    })(),
     season_type: normalizeChoice(row.season_type, cardSeasonTypeOptions, "standard").toLowerCase(),
     season_number: Number(row.season_number ?? 1),
     recurrence: row.reccurence ? String(row.reccurence) : null,
@@ -642,11 +745,7 @@ export default function HomePage() {
     primary_tag: String(row.primary_tag ?? "UNKNOWN"),
     primary_tag_color: String(row.primary_tag_hex_color ?? "#FFFFFF"),
     secondary_tag: String(row.secondary_tag ?? "NONE"),
-    entry_bracket: normalizeChoice(row.entry_bracket, cardEntryBracketOptions, "HARVESTER"),
     proxy_wallet: String(row.proxy_wallet ?? ""),
-    edge: normalizeChoice(row.edge, cardTierOptions, "BASE"),
-    yield: normalizeChoice(row.yield, cardTierOptions, "BASE"),
-    gravity: normalizeChoice(row.gravity, cardTierOptions, "BASE"),
     leaderboard_rank: Number(row.rank ?? 0),
   });
   const applyCardBuilderRow = (row: CardBuilderCandidate) => {
@@ -2535,11 +2634,18 @@ export default function HomePage() {
                     >
                       {cardEntryBracketOptions.map((value) => <option key={value} value={value}>{value}</option>)}
                     </select>
+                    <label>archetype</label>
+                    <select
+                      value={cardBuilderPayload.archetype}
+                      onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, archetype: e.target.value } : prev)}
+                    >
+                      {cardArchetypeOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+                    </select>
                     <label>proxy_wallet</label>
                     <input
                       value={cardBuilderPayload.proxy_wallet}
                       onChange={(e) => setCardBuilderPayload((prev) => prev ? { ...prev, proxy_wallet: e.target.value } : prev)}
-                      style={{ minWidth: 260 }}
+                      style={{ minWidth: 220 }}
                     />
                     <label>rank</label>
                     <input

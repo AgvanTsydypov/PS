@@ -171,11 +171,9 @@
 <rect width="516" height="802" rx="0" fill="#0B0C10"/>
 
 <!-- ══ BORDER GLOW (driven by YIELD = P99) ══ -->
-<g filter="url(#glow)">
-  <rect x="3" y="3"
-        width="510" height="796"
-        rx="0" fill="url(#border-gradient)"/>
-</g>
+<rect x="3" y="3"
+      width="510" height="796"
+      rx="0" fill="url(#border-gradient)"/>
 
 <!-- ══ EVENT IMAGE ══ -->
 <image x="13" y="13" width="490" height="490"
@@ -185,7 +183,7 @@
 <!-- ══ EVENT IMAGE STROKE (matched to DATA ZONE) ══ -->
 <rect x="13.5" y="13.5"
       width="489" height="489"
-      rx="0" fill="none"/>
+      rx="0" fill="none" stroke="#000000"/>
 
 <!-- ══ LOGO ══ -->
 <image x="20" y="20" width="48" height="48"
@@ -218,10 +216,10 @@
   <tspan fill="white"> ]</tspan>
 </text>
 
-<!-- ══ DATA ZONE (pattern: LIQUIDATOR) ══ -->
+<!-- ══ DATA ZONE (pattern: UNIFORM) ══ -->
 <rect x="13.5" y="503.5"
       width="489" height="285"
-      rx="-0.5" fill="#1C1B1B"/>
+      rx="-0.5" fill="url(#uniform-gradient)" stroke="#000000"/>
 
 <!-- ══ DATA ZONE CORNER PINS ══ -->
 <circle cx="28" cy="518" r="3.5" fill="#978E8E"/>
@@ -232,7 +230,7 @@
 <!-- ══ TITLE BAR ══ -->
 <rect x="29" y="472" width="458" height="61"
       rx="0" fill="#171717" fill-opacity="0.95"
-      />
+      stroke="#333333" stroke-width="2"/>
 
 <text x="258" y="495"
       text-anchor="middle" dominant-baseline="hanging"
@@ -242,15 +240,11 @@
 
 <!-- ══ SECTOR ══ -->
 <g filter="url(#shadow)">
-  <text x="127" y="538"
-        text-anchor="start" dominant-baseline="hanging"
-        font-size="18" fill="white">
-    SECTOR:
-  </text>
-  <text x="232" y="538"
-        text-anchor="start" dominant-baseline="hanging"
-        font-size="18" fill="#51E147">
-    CELEBRITIES
+  <text x="258" y="538"
+        text-anchor="middle" dominant-baseline="hanging"
+        font-size="18">
+    <tspan fill="white">SECTOR: </tspan>
+    <tspan fill="#51E147">CELEBRITIES</tspan>
   </text>
 </g>
 
@@ -329,7 +323,7 @@
   <text x="258" y="729"
         text-anchor="middle" dominant-baseline="alphabetic">
     <tspan font-size="18" fill="white">ARCHETYPE: </tspan>
-    <tspan font-size="20" fill="url(#archetype-gradient)">THE SUBSTRATE</tspan>
+    <tspan font-size="20" fill="url(#archetype-gradient)">THE ANOMALY</tspan>
   </text>
 </g>
 
@@ -354,6 +348,6 @@
 
 <!-- ══ STRUCTURAL BORDER ══ -->
 <rect x="1.5" y="1.5" width="513" height="799" rx="0"
-      fill="none"/>
+      fill="none" stroke="#333333" stroke-width="3"/>
 
 </svg>
