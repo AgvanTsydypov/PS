@@ -57,7 +57,7 @@ Y_SEASON        = 31
 Y_INSTANCE      = 47
 Y_OWNERSHIP     = 63
 Y_TITLE_TEXT    = 495   # vertically centered in 61px title bar: 472 + (61-16)/2 ≈ 495
-Y_SECTOR        = 538
+Y_SECTOR        = 542
 Y_NODE          = 565
 Y_UPPER_SEP     = 589
 Y_BRACKET       = 611
@@ -78,7 +78,7 @@ _FONT_PATH = Path(__file__).resolve().parent / "orbitron-bold.woff2"
 # DATA ZONE fixed anchors from latest JSON layout
 X_SECTOR_LABEL = 127
 X_SECTOR_VALUE = 232
-X_NODE         = 202
+X_NODE         = DZ_CX
 X_WALLET_GAP   = 15
 X_PE_GAP       = 15
 X_PE_DIVIDER   = 258.5
@@ -898,7 +898,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ NODE ══ -->
 <g filter="url(#shadow)">
   <text x="{X_NODE}" y="{Y_NODE}"
-        text-anchor="start" dominant-baseline="hanging"
+        text-anchor="middle" dominant-baseline="hanging"
         font-size="16" fill="#888888" style="letter-spacing:0em"{sig}>
     NODE: {node}
   </text>
@@ -990,15 +990,11 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     parts.append(f'''
 <!-- ══ FOOTER ══ -->
 <g filter="url(#shadow)">
-  <text x="{X_FOOTER_LABEL}" y="{Y_FOOTER}"
-        text-anchor="start" dominant-baseline="hanging"
+  <text x="{DZ_CX}" y="{Y_FOOTER}"
+        text-anchor="middle" dominant-baseline="hanging"
         font-size="16"{sig}>
-    <tspan fill="#2E5CFF">POLYMARKET</tspan><tspan fill="#828181"> GLOBAL RANK:</tspan>
+    <tspan fill="#2E5CFF">POLYMARKET</tspan><tspan fill="#828181"> GLOBAL RANK: </tspan><tspan fill="#FFFFFF" stroke="#000000" stroke-width="1" paint-order="stroke fill">{rank_str}</tspan>
   </text>
-  <text x="{X_FOOTER_RANK}" y="{Y_FOOTER}"
-        text-anchor="start" dominant-baseline="hanging"
-        font-size="16" fill="#FFFFFF"
-        stroke="#000000" stroke-width="1" paint-order="stroke fill">{rank_str}</text>
 </g>
 
 <text x="{X_POLYSTARS}" y="{Y_POLYSTARS}"
@@ -1110,7 +1106,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     archetype_line_text = _esc(f"ARCHETYPE: {archetype_raw}")
     stat_header = "STATISTICAL PATTERN:"
     metric_line_blocks: List[tuple[float, str]] = []
-    y_cursor = 578.0
+    y_cursor = 586.0
     for idx, chunk in enumerate(math_chunks):
         wrapped = _wrap_text_by_width(chunk, 406, 14.0) or [chunk]
         for line in wrapped:
@@ -1121,7 +1117,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
         if idx < len(math_chunks) - 1:
             y_cursor += 2
     if not metric_line_blocks:
-        metric_line_blocks = [(578.0, "No statistical pattern.")]
+        metric_line_blocks = [(586.0, "No statistical pattern.")]
     metrics_svg = "".join(
         f'<text x="57" y="{round(y,1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white">{txt}</text>'
         for y, txt in metric_line_blocks
@@ -1187,7 +1183,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 <text x="55" y="272" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" text-decoration="underline" style="text-decoration-thickness:1px; text-underline-offset:1.66px">{archetype_line_text}</text>
 <text x="55" y="304" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white">{desc_svg}</text>
 
-<text x="57" y="542" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="black" text-decoration="underline" style="text-decoration-thickness:1px; text-underline-offset:1.66px">{stat_header}</text>
+<text x="57" y="550" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="black" text-decoration="underline" style="text-decoration-thickness:1px; text-underline-offset:1.66px">{stat_header}</text>
 {metrics_svg}
 
 <rect x="1.5" y="1.5" width="513" height="799" stroke="#333333" stroke-width="3"/>
