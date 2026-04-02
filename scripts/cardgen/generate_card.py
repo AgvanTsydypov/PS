@@ -79,11 +79,16 @@ _FONT_PATH = Path(__file__).resolve().parent / "orbitron-bold.woff2"
 X_SECTOR_LABEL = 127
 X_SECTOR_VALUE = 232
 X_NODE         = 202
-X_WALLET       = 57
-X_PE           = 273
+X_WALLET_GAP   = 15
+X_PE_GAP       = 15
 X_PE_DIVIDER   = 258.5
 Y_PE_DIVIDER_1 = 606
 Y_PE_DIVIDER_2 = 630
+# Wallet text block (left half of wallet/P(E) row). mg-w rotates around this block center.
+WALLET_BLOCK_X1 = 57
+WALLET_BLOCK_X2 = X_PE_DIVIDER
+WALLET_BLOCK_Y1 = 611
+WALLET_BLOCK_H  = 15
 X_EDGE_LABEL   = 72
 X_YIELD_LABEL  = 212
 X_GRAV_LABEL   = 339
@@ -100,6 +105,9 @@ DOT_LEFT_X     = 56
 DOT_RIGHT_X    = 460
 DOT_Y          = 589
 DOT_SZ         = 4
+DZ_PIN_COLOR   = "#978E8E"
+DZ_PIN_R       = 3.5
+DZ_PIN_INSET   = 15
 
 # ═══════════════════════════════════════════════════════════════════════════
 # GRADIENT ANGLES  — degrees from vertical  (0 = pure top→bottom)
@@ -107,8 +115,8 @@ DOT_SZ         = 4
 # Each group is independent so you can tune them separately.
 # ═══════════════════════════════════════════════════════════════════════════
 
-GRAD_ANGLE_ANOMALY = 1.5  # [ BRACKET ] label
-GRAD_ANGLE_WALLET  = 1  # wallet address
+GRAD_ANGLE_ANOMALY = 3.5  # [ BRACKET ] label
+GRAD_ANGLE_WALLET  = 3.5  # wallet address (matched to reference tilt)
 GRAD_ANGLE_P99     = 2.5  # EDGE / YIELD / GRAVITY metric values
 GRAD_ANGLE_BORDER  = 12   # card border glow rect
 
@@ -124,6 +132,20 @@ def _grad_pts(cx: float, cy: float, hh: float, angle_deg: float = 0.0):
     return round(cx - hw, 2), round(cy - hh, 2), round(cx + hw, 2), round(cy + hh, 2)
 
 
+def _orbitron_adv(ch: str, fs: float) -> float:
+    """Approximate Orbitron Bold glyph advance with global 0.1em tracking."""
+    ls = fs * 0.10
+    if ch in " []:/.-()∈":
+        return fs * 0.45 + ls
+    if ch.isdigit():
+        return fs * 0.60 + ls
+    return fs * 0.65 + ls
+
+
+def _orbitron_width(s: str, fs: float) -> float:
+    return sum(_orbitron_adv(c, fs) for c in s)
+
+
 def _bracket_line_pos(eb_name: str, wallet_disp: str) -> Dict[str, float]:
     """Compute the absolute x position of every segment in the bracket line.
 
@@ -136,24 +158,13 @@ def _bracket_line_pos(eb_name: str, wallet_disp: str) -> Dict[str, float]:
       digits              0.60 em + 0.10 em = 0.70 em/char
       punctuation / space 0.45 em + 0.10 em = 0.55 em/char  ([ ] : / . space)
     """
-    def _adv(ch: str, fs: float) -> float:
-        ls = fs * 0.10
-        if ch in " []:/." :
-            return fs * 0.45 + ls
-        if ch.isdigit():
-            return fs * 0.60 + ls
-        return fs * 0.65 + ls
-
-    def _width(s: str, fs: float) -> float:
-        return sum(_adv(c, fs) for c in s)
-
     FS_B = 15.0   # font-size for bracket + surrounding punctuation
     FS_W = 14.0   # font-size for wallet address
 
-    w_prefix  = _width("[ ",        FS_B)
-    w_bracket = _width(eb_name,     FS_B)
-    w_mid     = _width(" ] :// ",   FS_B)
-    w_wallet  = _width(wallet_disp, FS_W)
+    w_prefix  = _orbitron_width("[ ",        FS_B)
+    w_bracket = _orbitron_width(eb_name,     FS_B)
+    w_mid     = _orbitron_width(" ] :// ",   FS_B)
+    w_wallet  = _orbitron_width(wallet_disp, FS_W)
 
     total      = w_prefix + w_bracket + w_mid + w_wallet
     line_start = DZ_CX - total / 2
@@ -381,23 +392,26 @@ def detect_pattern(data: Dict[str, Any]) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# DATA ZONE STYLE RESOLUTION (Section 10.2)
+# DATA ZONE STYLE RESOLUTION (Archetype-driven)
 # ═══════════════════════════════════════════════════════════════════════════
 
-_DZ_STYLES: Dict[str, Tuple[str, str, bool]] = {
-    #               (fill,                       stroke,    is_signal)
-    "DEFAULT":     ("#1C1B1B",                   "#FFFFFF", False),
-    "LIQUIDATOR":  ("#3B2647",                   "#FFFFFF", False),
-    "EQUILIBRIUM": ("#474332",                   "#FFFFFF", False),
-    "SIGNAL":      ("#CDD2DE",                   "#000000", True),
-    "CONTRARIAN":  ("#0A2A2A",                   "#FFFFFF", False),
-    "UNIFORM":     ("url(#uniform-gradient)",    "#000000", False),
+_DZ_ARCHETYPE_STYLES: Dict[str, Tuple[str, str, bool]] = {
+    #                     (fill,                        stroke,    is_signal)
+    "THE ANOMALY":     ("url(#uniform-gradient)",      "#000000", False),
+    "THE HARVESTER":   ("#474332",                     "#000000", False),
+    "THE EQUILIBRIUM": ("#CDD2DE",                     "#000000", True),
+    "THE MARTYR":      ("#1B1D3A",                     "#000000", False),
+    "THE SIGNAL":      ("url(#signal-gradient)",       "#000000", False),
+    "THE AMASSER":     ("url(#amasser-gradient)",      "#000000", False),
+    "THE VECTOR":      ("url(#vector-gradient)",       "#000000", False),
+    "THE OPERATOR":    ("#625F5F",                     "#000000", False),
+    "THE SUBSTRATE":   ("#1C1B1B",                     "#000000", False),
 }
 
 
-def dz_style(pattern: str) -> Tuple[str, str, bool]:
-    """Return (fill, stroke, is_signal) for the data zone background."""
-    return _DZ_STYLES.get(pattern, _DZ_STYLES["DEFAULT"])
+def dz_style(archetype: str) -> Tuple[str, str, bool]:
+    """Return (fill, stroke, is_signal) for data zone by archetype."""
+    return _DZ_ARCHETYPE_STYLES.get(archetype, _DZ_ARCHETYPE_STYLES["THE OPERATOR"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -420,8 +434,8 @@ def _instance(data: Dict[str, Any]) -> Tuple[str, str]:
 
 def _ownership(data: Dict[str, Any]) -> Tuple[str, str]:
     if data.get("claim_type", "").lower() == "origin":
-        return "ORIGIN SECURED", "#06EE6E"
-    return "HOSTILE TAKEOVER", "#FF007F"
+        return "ORIGIN SECURED", "#FF007F"
+    return "LOOTER TAKEOVER", "#40E288"
 
 
 def _wallet_display(addr: str) -> str:
@@ -440,8 +454,8 @@ def _esc(text: str) -> str:
 
 
 def _sig_attrs(is_signal: bool) -> str:
-    """Extra stroke for text legibility on SIGNAL's light background."""
-    return ' stroke="black" stroke-width="0.5" paint-order="stroke"' if is_signal else ""
+    """Stroke is disabled globally; kept only for rank text."""
+    return ""
 
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -480,9 +494,20 @@ def _to_data_uri(href: str) -> str:
 def generate_card_svg(data: Dict[str, Any]) -> str:
     """Build a complete front-of-card SVG string from a card data dict."""
 
-    # ── 1. Resolve pattern & data zone style ──────────────────────────
+    # ── 1. Resolve pattern/archetype and data zone style ──────────────
     pattern = detect_pattern(data)
-    dz_fill, dz_stroke, is_signal = dz_style(pattern)
+    archetype_raw = str(data.get("archetype", "") or "").strip().upper()
+    if not archetype_raw:
+        inferred = {
+            "UNIFORM": "THE ANOMALY",
+            "SIGNAL": "THE SIGNAL",
+            "CONTRARIAN": "THE VECTOR",
+            "EQUILIBRIUM": "THE EQUILIBRIUM",
+            "LIQUIDATOR": "THE HARVESTER",
+            "DEFAULT": "THE OPERATOR",
+        }
+        archetype_raw = inferred.get(pattern, "THE OPERATOR")
+    dz_fill, dz_stroke, is_signal = dz_style(archetype_raw)
 
     # ── 2. Resolve tier colors ────────────────────────────────────────
     eb   = normalize_entry_bracket(data.get("entry_bracket", "[0.80 - 0.97]"))
@@ -491,6 +516,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     grav = data.get("gravity", "BASE").upper()
 
     bracket_color = get_bracket_color(eb)
+    eb_inner = eb[1:-1].strip() if eb.startswith("[") and eb.endswith("]") else eb
     edge_color    = get_ptier_color(edge)
     yield_color   = get_ptier_color(yld)
     gravity_color = get_ptier_color(grav)
@@ -511,18 +537,8 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     sector_clr  = data.get("primary_tag_color", "#FFFFFF")
     node        = _esc(data.get("secondary_tag", "NONE").upper())
     wallet_disp = _esc(_wallet_display(data.get("proxy_wallet", "0x00000000")))
-    archetype   = _esc(str(data.get("archetype", "") or "").upper())
-    if not archetype:
-        inferred = {
-            "UNIFORM": "THE ANOMALY",
-            "SIGNAL": "THE SIGNAL",
-            "CONTRARIAN": "THE VECTOR",
-            "EQUILIBRIUM": "THE EQUILIBRIUM",
-            "LIQUIDATOR": "THE HARVESTER",
-            "DEFAULT": "THE OPERATOR",
-        }
-        archetype = inferred.get(pattern, "THE OPERATOR")
-    archetype_fill = "url(#archetype-gradient)" if archetype == "THE ANOMALY" else "white"
+    archetype   = _esc(archetype_raw)
+    archetype_fill = "url(#archetype-gradient)"
     rank        = data.get("leaderboard_rank", 0)
     rank_str    = _esc(f"#{rank}")
     image_url   = _to_data_uri(data.get("image_url", ""))
@@ -537,6 +553,14 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     dotted_fill   = "url(#mg-sep)"   if _is_grad(dotted_color)  else dotted_color
 
     sig = _sig_attrs(is_signal)
+    dotted_rects = []
+    x = LOWER_SEP_X1
+    while x <= LOWER_SEP_X2 - 2:
+        dotted_rects.append(
+            f'<rect x="{x}" y="{Y_LOWER_SEP}" width="2" height="2" fill="{dotted_fill}"/>'
+        )
+        x += 6
+    dotted_separator_svg = "".join(dotted_rects)
 
     # ── 5b. Gradient coordinates — top-to-bottom vertical sweep per element.
     #
@@ -563,10 +587,19 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     yld_gx1,  yld_gy1,  yld_gx2,  yld_gy2  = _grad_pts(COL_YIELD,   p99_cy, _p_hh, GRAD_ANGLE_P99)
     grav_gx1, grav_gy1, grav_gx2, grav_gy2  = _grad_pts(COL_GRAVITY, p99_cy, _p_hh, GRAD_ANGLE_P99)
 
-    # Bracket / wallet — compute exact per-word x positions from font metrics
-    _blp = _bracket_line_pos(eb, wallet_disp)
-    eb_x1, eb_y1, eb_x2, eb_y2 = _grad_pts(_blp["bracket_cx"], eb_cy, _eb_hh, GRAD_ANGLE_ANOMALY)
-    w_x1,  w_y1,  w_x2,  w_y2  = _grad_pts(_blp["wallet_cx"],  eb_cy, _eb_hh, GRAD_ANGLE_WALLET)
+    # Bracket gradient center: geometric center of the inner [entry_bracket] text block.
+    fs_bracket = 15.0
+    prefix = "P(E) ∈ ["
+    bracket_block_x = X_PE_DIVIDER + X_PE_GAP + _orbitron_width(prefix, fs_bracket)
+    bracket_block_w = _orbitron_width(eb_inner, fs_bracket)
+    bracket_block_cx = bracket_block_x + (bracket_block_w / 2)
+    bracket_block_cy = Y_BRACKET + 7.5
+    # mg-eb: midpoint locked to geometric center of bracket text block (without [ ]).
+    eb_x1, eb_y1, eb_x2, eb_y2 = _grad_pts(bracket_block_cx, bracket_block_cy, 7.5, GRAD_ANGLE_ANOMALY)
+    wallet_block_cx = (WALLET_BLOCK_X1 + WALLET_BLOCK_X2) / 2
+    wallet_block_cy = WALLET_BLOCK_Y1 + (WALLET_BLOCK_H / 2)
+    # mg-w: midpoint locked to geometric center of wallet block; angle rotates around this center.
+    w_x1,  w_y1,  w_x2,  w_y2  = _grad_pts(wallet_block_cx, wallet_block_cy, WALLET_BLOCK_H / 2, GRAD_ANGLE_WALLET)
 
     # Border gradient — userSpaceOnUse so GRAD_ANGLE_BORDER means the same
     # screen-pixel degrees as the text gradients above.
@@ -612,9 +645,9 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 
   <!-- ── ANOMALY bracket stops — edit colors/offsets here, angle = GRAD_ANGLE_ANOMALY -->
   <linearGradient id="anomaly-stops">
-    <stop offset="0%"   stop-color="#FFBF00"/>
-    <stop offset="50%"  stop-color="#8A2BE2"/>
-    <stop offset="70%"  stop-color="#0051FF"/>
+    <stop offset="0%"  stop-color="#FFBF00"/>
+    <stop offset="33%"  stop-color="#8A2BE2"/>
+    <stop offset="66%"  stop-color="#0051FF"/>
     <stop offset="100%" stop-color="#51FF48"/>
   </linearGradient>
 
@@ -628,10 +661,11 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 
   <!-- ── Wallet address stops — angle = GRAD_ANGLE_WALLET -->
   <linearGradient id="wallet-stops">
-    <stop offset="0%"   stop-color="#FFBF00"/>
-    <stop offset="30%"  stop-color="#8A2BE2"/>
-    <stop offset="55%"  stop-color="#0051FF"/>
-    <stop offset="100%" stop-color="#51FF48"/>
+    <stop offset="0%"  stop-color="#FFBF00"/>
+    <stop offset="25%"  stop-color="#8A2BE2"/>
+    <stop offset="50%"  stop-color="#0051FF"/>
+    <stop offset="75%" stop-color="#51FF48"/>
+    <stop offset="100%" stop-color="#FFFFFF"/>
   </linearGradient>
 
   <!-- ── Card border glow stops — angle = GRAD_ANGLE_BORDER -->
@@ -687,17 +721,27 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     <stop offset="75%" stop-color="#BB7382"/>
     <stop offset="90%" stop-color="#C5CC84"/>
   </linearGradient>
+  <linearGradient id="signal-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%"  stop-color="#0A2A2A"/>
+    <stop offset="50%" stop-color="#0A2A2A"/>
+    <stop offset="100%" stop-color="#134E4E"/>
+  </linearGradient>
+  <linearGradient id="amasser-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%"  stop-color="#554467"/>
+    <stop offset="50%" stop-color="#554467"/>
+    <stop offset="100%" stop-color="#7C6C8D"/>
+  </linearGradient>
+  <linearGradient id="vector-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%"  stop-color="#996C2C"/>
+    <stop offset="50%" stop-color="#996C2C"/>
+    <stop offset="100%" stop-color="#33240F"/>
+  </linearGradient>
 
-  <!-- Archetype radial gradient (transferred from former COGNITIVE TELEMETRY effect)
-       Center: rgba(239,226,226) #EFE2E2 / Edge: rgba(104,98,98) #686262
-       Intermediate stops at 25%, 50%, 75% per spec -->
+  <!-- Archetype radial gradient (lightened to match reference) -->
   <radialGradient id="archetype-gradient" cx="0" cy="0" r="1"
                   gradientUnits="userSpaceOnUse"
-                  gradientTransform="translate(341 718) scale(120 12)">
+                  gradientTransform="translate(338 721.5) scale(94 12.5)">
     <stop offset="0"    stop-color="#EFE2E2"/>
-    <stop offset="0.10" stop-color="#CDC2C2"/>
-    <stop offset="0.50" stop-color="#ACA2A2"/>
-    <stop offset="0.90" stop-color="#8A8282"/>
     <stop offset="1"    stop-color="#686262"/>
   </radialGradient>
 
@@ -776,7 +820,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ EVENT IMAGE STROKE (matched to DATA ZONE) ══ -->
 <rect x="{IMG_X + 0.5}" y="{IMG_Y + 0.5}"
       width="{IMG_W - 1}" height="{IMG_H - 1}"
-      rx="{IMG_RX}" fill="none" stroke="{dz_stroke}"/>''')
+      rx="{IMG_RX}" fill="none"/>''')
 
     # ---- Layer 4: Logo overlay ----
     parts.append(f'''
@@ -789,7 +833,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ METADATA BADGE ══ -->
 <rect opacity="0.7" x="{BADGE_X + 0.5}" y="{BADGE_Y + 0.5}"
       width="{BADGE_W - 1}" height="{BADGE_H - 1}"
-      rx="{BADGE_RX - 0.5}" fill="black" stroke="#666666"/>
+      rx="{BADGE_RX - 0.5}" fill="black"/>
 
 <text x="{BADGE_CX}" y="{Y_SEASON}"
       text-anchor="middle" dominant-baseline="hanging"
@@ -818,14 +862,20 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ DATA ZONE (pattern: {pattern}) ══ -->
 <rect x="{DZ_X + 0.5}" y="{DZ_Y + 0.5}"
       width="{DZ_W - 1}" height="{DZ_H - 1}"
-      rx="{DZ_RX - 0.5}" fill="{dz_fill}" stroke="{dz_stroke}"/>''')
+      rx="{DZ_RX - 0.5}" fill="{dz_fill}"/>''')
+    parts.append(f'''
+<!-- ══ DATA ZONE CORNER PINS ══ -->
+<circle cx="{DZ_X + DZ_PIN_INSET}" cy="{DZ_Y + DZ_PIN_INSET}" r="{DZ_PIN_R}" fill="{DZ_PIN_COLOR}"/>
+<circle cx="{DZ_X + DZ_W - DZ_PIN_INSET}" cy="{DZ_Y + DZ_PIN_INSET}" r="{DZ_PIN_R}" fill="{DZ_PIN_COLOR}"/>
+<circle cx="{DZ_X + DZ_PIN_INSET}" cy="{DZ_Y + DZ_H - DZ_PIN_INSET}" r="{DZ_PIN_R}" fill="{DZ_PIN_COLOR}"/>
+<circle cx="{DZ_X + DZ_W - DZ_PIN_INSET}" cy="{DZ_Y + DZ_H - DZ_PIN_INSET}" r="{DZ_PIN_R}" fill="{DZ_PIN_COLOR}"/>''')
 
     # ---- Layer 7: Title bar ----
     parts.append(f'''
 <!-- ══ TITLE BAR ══ -->
 <rect x="{TB_X}" y="{TB_Y}" width="{TB_W}" height="{TB_H}"
       rx="{TB_RX}" fill="#171717" fill-opacity="0.95"
-      stroke="#333333" stroke-width="2"/>
+      />
 
 <text x="{TB_CX}" y="{Y_TITLE_TEXT}"
       text-anchor="middle" dominant-baseline="hanging"
@@ -869,18 +919,18 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     parts.append(f'''
 <!-- ══ WALLET + PROBABILITY BRACKET ══ -->
 <g filter="url(#txt-shadow)">
-  <line x1="{X_PE_DIVIDER}" y1="{Y_PE_DIVIDER_1}" x2="{X_PE_DIVIDER}" y2="{Y_PE_DIVIDER_2}"
-        stroke="white" stroke-width="1"/>
-  <text x="{X_WALLET}" y="{Y_BRACKET}"
-        text-anchor="start" dominant-baseline="hanging"
+  <rect x="{X_PE_DIVIDER}" y="{Y_PE_DIVIDER_1}" width="1" height="{Y_PE_DIVIDER_2 - Y_PE_DIVIDER_1}" fill="white"/>
+  <text x="{X_PE_DIVIDER - X_WALLET_GAP}" y="{Y_BRACKET}"
+        text-anchor="end" dominant-baseline="hanging"
         font-size="15" fill="{wallet_fill}"{sig}>
     {wallet_disp}
   </text>
-  <text x="{X_PE}" y="{Y_BRACKET}"
+  <text x="{X_PE_DIVIDER + X_PE_GAP}" y="{Y_BRACKET}"
         text-anchor="start" dominant-baseline="hanging"
         font-size="15"{sig}>
-    <tspan fill="white">P(E) ∈ </tspan>
-    <tspan fill="{bracket_fill}">{eb}</tspan>
+    <tspan fill="white">P(E) ∈ [</tspan>
+    <tspan fill="{bracket_fill}">{eb_inner}</tspan>
+    <tspan fill="white">]</tspan>
   </text>
 </g>''')
 
@@ -888,18 +938,18 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     parts.append(f'''
 <!-- ══ METRIC LABELS ══ -->
 <g filter="url(#shadow)">
-  <text x="{X_EDGE_LABEL}" y="{Y_METRIC_LABELS}"
-        text-anchor="start" dominant-baseline="hanging"
+  <text x="{COL_EDGE}" y="{Y_METRIC_LABELS}"
+        text-anchor="middle" dominant-baseline="hanging"
         font-size="12" fill="white"{sig}>
     EDGE:
   </text>
-  <text x="{X_YIELD_LABEL}" y="{Y_METRIC_LABELS}"
-        text-anchor="start" dominant-baseline="hanging"
+  <text x="{COL_YIELD}" y="{Y_METRIC_LABELS}"
+        text-anchor="middle" dominant-baseline="hanging"
         font-size="12" fill="white"{sig}>
     YIELD:
   </text>
-  <text x="{X_GRAV_LABEL}" y="{Y_METRIC_LABELS}"
-        text-anchor="start" dominant-baseline="hanging"
+  <text x="{COL_GRAVITY}" y="{Y_METRIC_LABELS}"
+        text-anchor="middle" dominant-baseline="hanging"
         font-size="12" fill="white"{sig}>
     GRAVITY:
   </text>
@@ -909,18 +959,18 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     parts.append(f'''
 <!-- ══ METRIC VALUES ══ -->
 <g filter="url(#txt-shadow)">
-  <text x="{X_EDGE_VALUE}" y="{Y_METRIC_VALUES}"
-        text-anchor="start" dominant-baseline="hanging"
+  <text x="{COL_EDGE}" y="{Y_METRIC_VALUES}"
+        text-anchor="middle" dominant-baseline="hanging"
         font-size="20" fill="{edge_val_fill}"{sig}>
     {edge}
   </text>
-  <text x="{X_YIELD_VALUE}" y="{Y_METRIC_VALUES}"
-        text-anchor="start" dominant-baseline="hanging"
+  <text x="{COL_YIELD}" y="{Y_METRIC_VALUES}"
+        text-anchor="middle" dominant-baseline="hanging"
         font-size="20" fill="{yld_val_fill}"{sig}>
     {yld}
   </text>
-  <text x="{X_GRAV_VALUE}" y="{Y_METRIC_VALUES}"
-        text-anchor="start" dominant-baseline="hanging"
+  <text x="{COL_GRAVITY}" y="{Y_METRIC_VALUES}"
+        text-anchor="middle" dominant-baseline="hanging"
         font-size="20" fill="{grav_val_fill}"{sig}>
     {grav}
   </text>
@@ -929,10 +979,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ---- Layer 14: Lower dotted separator (GRAVITY-colored, no filter) ----
     parts.append(f'''
 <!-- ══ LOWER SEPARATOR (driven by GRAVITY = {grav}) ══ -->
-<line x1="{LOWER_SEP_X1}" y1="{Y_LOWER_SEP}"
-      x2="{LOWER_SEP_X2}" y2="{Y_LOWER_SEP}"
-      stroke="{dotted_fill}" stroke-width="2"
-      stroke-dasharray="2 4"/>''')
+{dotted_separator_svg}''')
 
     # ---- Layer 15: Archetype row ----
     parts.append(f'''
@@ -957,7 +1004,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
   <text x="{X_FOOTER_RANK}" y="{Y_FOOTER}"
         text-anchor="start" dominant-baseline="hanging"
         font-size="16" fill="#FFFFFF"
-        stroke="#000000" stroke-width="1" paint-order="stroke fill"{sig}>{rank_str}</text>
+        stroke="#000000" stroke-width="1" paint-order="stroke fill">{rank_str}</text>
 </g>
 
 <text x="{X_POLYSTARS}" y="{Y_POLYSTARS}"
@@ -970,7 +1017,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     parts.append(f'''
 <!-- ══ STRUCTURAL BORDER ══ -->
 <rect x="1.5" y="1.5" width="513" height="799" rx="0"
-      stroke="#333333" stroke-width="3" fill="none"/>
+      fill="none"/>
 
 </svg>''')
 
@@ -985,7 +1032,7 @@ SAMPLE_DATA: Dict[str, Any] = {
     "season_type":       "standard",
     "season_number":     3,
     "recurrence":        None,
-    "claim_type":        "looter",
+    "claim_type":        "origin",
     "image_url":         "sample.jpg",
     "card_title":        "ZELENSKYY SUIT WATCH JUN 2025",
     "primary_tag":       "CELEBRITIES",
@@ -996,7 +1043,7 @@ SAMPLE_DATA: Dict[str, Any] = {
     "edge":              "P99",
     "yield":             "P99",
     "gravity":           "P99",
-    "archetype":         "THE ANOMALY",
+    "archetype":         "THE SUBSTRATE",
     "leaderboard_rank":  63564,
 }
 
