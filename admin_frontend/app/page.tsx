@@ -124,6 +124,8 @@ type CardBuilderCandidate = {
   manual_image_url?: string | null;
   card_title?: string | null;
   card_lore?: string | null;
+  archetype_description?: string | null;
+  archetype_math?: string | null;
   primary_tag?: string | null;
   secondary_tag?: string | null;
   primary_tag_hex_color?: string | null;
@@ -136,11 +138,14 @@ type CardBuilderPayload = {
   claim_type: string;
   image_url: string;
   card_title: string;
+  card_lore: string;
   primary_tag: string;
   primary_tag_color: string;
   secondary_tag: string;
   entry_bracket: string;
   archetype: string;
+  archetype_description: string;
+  archetype_math: string;
   proxy_wallet: string;
   edge: string;
   yield: string;
@@ -549,6 +554,7 @@ export default function HomePage() {
   const [cardBuilderSelectedWinnerRowId, setCardBuilderSelectedWinnerRowId] = useState<number | null>(null);
   const [cardBuilderPayload, setCardBuilderPayload] = useState<CardBuilderPayload | null>(null);
   const [cardBuilderPreviewSvg, setCardBuilderPreviewSvg] = useState("");
+  const [cardBuilderPreviewBackSvg, setCardBuilderPreviewBackSvg] = useState("");
   const [cardBuilderPattern, setCardBuilderPattern] = useState("");
   const [cardBuilderPreviewBusy, setCardBuilderPreviewBusy] = useState(false);
   const [eventCardForm, setEventCardForm] = useState<EventCardForm>({
@@ -734,6 +740,8 @@ export default function HomePage() {
         yield: normalizedYield,
         gravity: normalizedGravity,
         archetype: normalizedArchetype,
+        archetype_description: String(row.archetype_description ?? ""),
+        archetype_math: String(row.archetype_math ?? ""),
       };
     })(),
     season_type: normalizeChoice(row.season_type, cardSeasonTypeOptions, "standard").toLowerCase(),
@@ -742,6 +750,7 @@ export default function HomePage() {
     claim_type: "looter",
     image_url: String(row.manual_image_url ?? ""),
     card_title: String(row.card_title ?? ""),
+    card_lore: String(row.card_lore ?? ""),
     primary_tag: String(row.primary_tag ?? "UNKNOWN"),
     primary_tag_color: String(row.primary_tag_hex_color ?? "#FFFFFF"),
     secondary_tag: String(row.secondary_tag ?? "NONE"),
@@ -994,6 +1003,7 @@ export default function HomePage() {
       setCardBuilderSelectedWinnerRowId(null);
       setCardBuilderPayload(null);
       setCardBuilderPreviewSvg("");
+      setCardBuilderPreviewBackSvg("");
       setCardBuilderPattern("");
       return;
     }
@@ -1011,11 +1021,12 @@ export default function HomePage() {
     }
     setCardBuilderPreviewBusy(true);
     try {
-      const out = await fetchJSON<{ svg: string; pattern: string }>("/api/card-builder/preview", {
+      const out = await fetchJSON<{ svg: string; back_svg: string; pattern: string }>("/api/card-builder/preview", {
         method: "POST",
         body: JSON.stringify({ payload }),
       });
       setCardBuilderPreviewSvg(out.svg);
+      setCardBuilderPreviewBackSvg(out.back_svg);
       setCardBuilderPattern(out.pattern);
     } finally {
       setCardBuilderPreviewBusy(false);
@@ -2718,6 +2729,25 @@ export default function HomePage() {
                     </div>
                   </article>
                 </div>
+                {cardBuilderPreviewBackSvg ? (
+                  <div className="nft-card-wrapper card-builder-preview-wrapper">
+                    <article className="nft-card nft-card-tilt theme-vivid card-builder-preview-card">
+                      <div className="card-builder-preview-svg-shell">
+                        <div
+                          className="card-builder-preview-svg-content"
+                          style={{
+                            width: 518,
+                            height: 804,
+                            background: "transparent",
+                            transform: "scale(0.6)",
+                            transformOrigin: "top left",
+                          }}
+                          dangerouslySetInnerHTML={{ __html: cardBuilderPreviewBackSvg }}
+                        />
+                      </div>
+                    </article>
+                  </div>
+                ) : null}
               </div>
             ) : (
               <div className="muted">No preview yet.</div>

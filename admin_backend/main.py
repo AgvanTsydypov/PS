@@ -42,7 +42,7 @@ if project_root not in sys.path:
 
 from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE, GENESIS_END_DATE
 from scripts.daily_scheduler_simple import SimplifiedScheduler
-from scripts.cardgen.generate_card import detect_pattern, generate_card_svg
+from scripts.cardgen.generate_card import detect_pattern, generate_card_back_svg, generate_card_svg
 from scripts.season_manager import SeasonManager
 from scripts.solana_service import MintedNftResult, SolanaClient
 from scripts.zora_service import ZoraClient
@@ -2021,6 +2021,9 @@ class SeasonWorkbenchService:
                         w.event_slug,
                         e.title AS event_title,
                         w.entry_bracket,
+                        p.archetype,
+                        p.archetype_description,
+                        p.archetype_math,
                         w.edge,
                         w.yield,
                         w.gravity,
@@ -2040,6 +2043,9 @@ class SeasonWorkbenchService:
                         ec.updated_at AS event_card_updated_at
                     FROM winner_wallets_nft_to_claim w
                     JOIN event_cards ec ON ec.event_id = w.event_id
+                    LEFT JOIN participants p
+                      ON p.event_id = w.event_id
+                     AND LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
                     LEFT JOIN events e ON e.id = w.event_id
                     LEFT JOIN seasons s ON s.id = w.season_id
                     LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
@@ -3034,8 +3040,10 @@ def card_builder_preview(req: CardBuilderPreviewRequest) -> Dict[str, Any]:
             raise ValueError("image_url is required and must come from manual_image_url")
         payload["image_url"] = image_url
         svg = generate_card_svg(payload)
+        back_svg = generate_card_back_svg(payload)
         return {
             "svg": svg,
+            "back_svg": back_svg,
             "pattern": detect_pattern(payload),
         }
     except Exception as exc:
