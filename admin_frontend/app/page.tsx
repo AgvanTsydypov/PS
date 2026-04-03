@@ -572,6 +572,8 @@ export default function HomePage() {
   const cardBuilderFrontFlipTimerRef = useRef<number | null>(null);
   const cardBuilderBackFlipTimerRef = useRef<number | null>(null);
   const cardBuilderPreviewCacheRef = useRef<Map<string, { svg: string; back_svg: string; pattern: string }>>(new Map());
+  const cardBuilderSelectionRequestRef = useRef(0);
+  const cardBuilderPreviewRequestRef = useRef(0);
   const [eventCardForm, setEventCardForm] = useState<EventCardForm>({
     event_id: "",
     card_title: "",
@@ -781,18 +783,32 @@ export default function HomePage() {
     leaderboard_rank: Number(row.rank ?? 0),
   });
   const applyCardBuilderRow = async (row: CardBuilderCandidate) => {
-    if (cardBuilderSelectedWinnerRowId === row.winner_row_id && cardBuilderPayload) return;
+    if (cardBuilderSelectedWinnerRowId === row.winner_row_id && (cardBuilderPayload || cardBuilderDetailBusy || cardBuilderPreviewBusy)) return;
+    const requestId = cardBuilderSelectionRequestRef.current + 1;
+    cardBuilderSelectionRequestRef.current = requestId;
+    cardBuilderPreviewRequestRef.current += 1;
     setCardBuilderSelectedWinnerRowId(row.winner_row_id);
+    setCardBuilderPayload(null);
+    setCardBuilderPreviewBusy(false);
+    setCardBuilderPreviewSvg("");
+    setCardBuilderPreviewBackSvg("");
+    setCardBuilderFrontFlipped(false);
+    setCardBuilderBackFlipped(true);
+    setCardBuilderPattern("");
     setCardBuilderDetailBusy(true);
     try {
       const data = await fetchJSON<{ row: CardBuilderCandidate }>(`/api/card-builder/candidates/${row.winner_row_id}`);
-      setCardBuilderPayload(buildCardBuilderPayloadFromRow(data.row));
-    } finally {
+      if (cardBuilderSelectionRequestRef.current !== requestId) return;
+      const payload = buildCardBuilderPayloadFromRow(data.row);
+      setCardBuilderPayload(payload);
       setCardBuilderDetailBusy(false);
+      await previewCardBuilderPayload(payload);
+      return;
+    } finally {
+      if (cardBuilderSelectionRequestRef.current === requestId) {
+        setCardBuilderDetailBusy(false);
+      }
     }
-    setCardBuilderPreviewSvg("");
-    setCardBuilderPreviewBackSvg("");
-    setCardBuilderPattern("");
   };
   const getEventCardsSortValue = (row: EventCardRow, key: EventCardsSortKey): string => {
     const value = row[key];
@@ -1095,7 +1111,10 @@ export default function HomePage() {
     }
     const cacheKey = JSON.stringify(payload);
     const cached = cardBuilderPreviewCacheRef.current.get(cacheKey);
+    const previewRequestId = cardBuilderPreviewRequestRef.current + 1;
+    cardBuilderPreviewRequestRef.current = previewRequestId;
     if (cached) {
+      if (cardBuilderPreviewRequestRef.current !== previewRequestId) return;
       setCardBuilderPreviewSvg(cached.svg);
       setCardBuilderPreviewBackSvg(cached.back_svg);
       setCardBuilderFrontFlipped(false);
@@ -1109,6 +1128,7 @@ export default function HomePage() {
         method: "POST",
         body: JSON.stringify({ payload }),
       });
+      if (cardBuilderPreviewRequestRef.current !== previewRequestId) return;
       cardBuilderPreviewCacheRef.current.set(cacheKey, out);
       setCardBuilderPreviewSvg(out.svg);
       setCardBuilderPreviewBackSvg(out.back_svg);
@@ -1116,7 +1136,9 @@ export default function HomePage() {
       setCardBuilderBackFlipped(true);
       setCardBuilderPattern(out.pattern);
     } finally {
-      setCardBuilderPreviewBusy(false);
+      if (cardBuilderPreviewRequestRef.current === previewRequestId) {
+        setCardBuilderPreviewBusy(false);
+      }
     }
   };
 
@@ -2594,10 +2616,10 @@ export default function HomePage() {
             />
             <button onClick={() => void run(refreshCardBuilderRows)}>Refresh candidates</button>
             <button onClick={() => void run(() => previewCardBuilderPayload())} disabled={!cardBuilderPayload || cardBuilderPreviewBusy || cardBuilderDetailBusy}>
-              {cardBuilderPreviewBusy ? "Rendering..." : "Render preview"}
+              {cardBuilderPreviewBusy ? "Rendering..." : "Re-render preview"}
             </button>
             <span className="muted">
-              Uses `event_cards.manual_image_url` only. Select a row, then render preview.
+              Uses `event_cards.manual_image_url` only. Click a row to render; use re-render after manual payload edits.
             </span>
           </div>
 
@@ -2845,7 +2867,20 @@ export default function HomePage() {
                 </a>
               ) : null}
             </div>
-            {cardBuilderPreviewSvg ? (
+            {cardBuilderDetailBusy || cardBuilderPreviewBusy ? (
+              <div className="card-builder-preview-stage">
+                {[0, 1].map((idx) => (
+                  <div key={`card-builder-loading-${idx}`} className="card-builder-preview-wrapper">
+                    <div className="card-builder-preview-loading">
+                      <div className="card-builder-preview-loading-spinner" />
+                      <div className="muted">
+                        {cardBuilderDetailBusy ? "Loading card data..." : "Rendering preview..."}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : cardBuilderPreviewSvg ? (
               <div
                 className="card-builder-preview-stage"
                 onMouseMove={handleCardBuilderPreviewMouseMove}
@@ -2934,7 +2969,7 @@ export default function HomePage() {
                 ) : null}
               </div>
             ) : (
-              <div className="muted">No preview yet.</div>
+              <div className="muted">{cardBuilderSelectedWinnerRowId ? "Render cleared. Select a row to render again." : "No preview yet."}</div>
             )}
           </div>
         </section>
