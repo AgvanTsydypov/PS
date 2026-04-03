@@ -2014,27 +2014,6 @@ class SeasonWorkbenchService:
                 from_sql = f"""
                     FROM winner_wallets_nft_to_claim w
                     JOIN event_cards ec ON ec.event_id = w.event_id
-                    LEFT JOIN LATERAL (
-                        SELECT
-                            p.archetype,
-                            p.archetype_description,
-                            p.archetype_math
-                        FROM participants p
-                        WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
-                          AND (
-                              (w.event_id IS NOT NULL AND p.event_id = w.event_id)
-                              OR
-                              (w.event_slug IS NOT NULL AND p.event_slug = w.event_slug)
-                          )
-                        ORDER BY
-                            CASE
-                                WHEN w.event_id IS NOT NULL AND p.event_id = w.event_id THEN 0
-                                WHEN w.event_slug IS NOT NULL AND p.event_slug = w.event_slug THEN 1
-                                ELSE 2
-                            END,
-                            p.rank ASC NULLS LAST
-                        LIMIT 1
-                    ) p ON TRUE
                     LEFT JOIN events e ON e.id = w.event_id
                     LEFT JOIN seasons s ON s.id = w.season_id
                     LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
@@ -2051,6 +2030,42 @@ class SeasonWorkbenchService:
                 total = int(total_row.get("total") or 0) if isinstance(total_row, dict) else int(total_row[0] or 0)
                 cursor.execute(
                     f"""
+                    SELECT
+                        w.id AS winner_row_id,
+                        w.season_id,
+                        s.type AS season_type,
+                        s.season_number,
+                        w.proxy_wallet,
+                        w.event_id,
+                        w.event_slug,
+                        e.title AS event_title,
+                        ec.series_id,
+                        ec.reccurence,
+                        ec.primary_tag,
+                        tp.hex_color AS primary_tag_hex_color
+                    {from_sql}
+                    ORDER BY w.season_id DESC, w.rank ASC NULLS LAST, w.id DESC
+                    LIMIT %s
+                    OFFSET %s
+                    """,
+                    (*params, safe_limit, safe_offset),
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+                return {
+                    "rows": [self._format_card_builder_candidate(row) for row in rows],
+                    "total": total,
+                }
+        finally:
+            conn.close()
+
+    def get_card_builder_candidate(self, winner_row_id: int) -> Dict[str, Any]:
+        if winner_row_id <= 0:
+            raise ValueError("winner_row_id must be positive")
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(
+                    """
                     SELECT
                         w.id AS winner_row_id,
                         w.season_id,
@@ -2081,18 +2096,41 @@ class SeasonWorkbenchService:
                         tp.hex_color AS primary_tag_hex_color,
                         ec.generated_at AS event_card_generated_at,
                         ec.updated_at AS event_card_updated_at
-                    {from_sql}
-                    ORDER BY w.season_id DESC, w.rank ASC NULLS LAST, w.id DESC
-                    LIMIT %s
-                    OFFSET %s
+                    FROM winner_wallets_nft_to_claim w
+                    JOIN event_cards ec ON ec.event_id = w.event_id
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            p.archetype,
+                            p.archetype_description,
+                            p.archetype_math
+                        FROM participants p
+                        WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
+                          AND (
+                              (w.event_id IS NOT NULL AND p.event_id = w.event_id)
+                              OR
+                              (w.event_slug IS NOT NULL AND p.event_slug = w.event_slug)
+                          )
+                        ORDER BY
+                            CASE
+                                WHEN w.event_id IS NOT NULL AND p.event_id = w.event_id THEN 0
+                                WHEN w.event_slug IS NOT NULL AND p.event_slug = w.event_slug THEN 1
+                                ELSE 2
+                            END,
+                            p.rank ASC NULLS LAST
+                        LIMIT 1
+                    ) p ON TRUE
+                    LEFT JOIN events e ON e.id = w.event_id
+                    LEFT JOIN seasons s ON s.id = w.season_id
+                    LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+                    WHERE w.id = %s
+                    LIMIT 1
                     """,
-                    (*params, safe_limit, safe_offset),
+                    (winner_row_id,),
                 )
-                rows = [dict(row) for row in cursor.fetchall()]
-                return {
-                    "rows": [self._format_card_builder_candidate(row) for row in rows],
-                    "total": total,
-                }
+                row = cursor.fetchone()
+                if not row:
+                    raise ValueError(f"Card builder candidate with row_id={winner_row_id} not found")
+                return self._format_card_builder_candidate(dict(row))
         finally:
             conn.close()
 
@@ -3083,6 +3121,15 @@ def get_card_builder_candidates(
             search_query=q,
         )
         return payload
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/card-builder/candidates/{winner_row_id}")
+def get_card_builder_candidate(winner_row_id: int) -> Dict[str, Any]:
+    try:
+        row = service.get_card_builder_candidate(winner_row_id=winner_row_id)
+        return {"row": row}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
