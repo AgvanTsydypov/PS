@@ -545,6 +545,7 @@ export default function HomePage() {
   const [eventCardsLimit, setEventCardsLimit] = useState("500");
   const [eventCardsStatusFilter, setEventCardsStatusFilter] = useState("all");
   const [eventCardsSnapshotScope, setEventCardsSnapshotScope] = useState("all");
+  const [eventCardsFutureStandardFiltered, setEventCardsFutureStandardFiltered] = useState(false);
   const [eventCardsEventIdFilter, setEventCardsEventIdFilter] = useState("");
   const [eventCardsPage, setEventCardsPage] = useState(1);
   const [eventCardsSortKey, setEventCardsSortKey] = useState<EventCardsSortKey>("generated_at");
@@ -555,6 +556,8 @@ export default function HomePage() {
   const [cardBuilderRows, setCardBuilderRows] = useState<CardBuilderCandidate[]>([]);
   const [cardBuilderSeasonFilterId, setCardBuilderSeasonFilterId] = useState<number>(0);
   const [cardBuilderSearch, setCardBuilderSearch] = useState("");
+  const [cardBuilderPage, setCardBuilderPage] = useState(1);
+  const [cardBuilderTotalRows, setCardBuilderTotalRows] = useState(0);
   const [cardBuilderSelectedWinnerRowId, setCardBuilderSelectedWinnerRowId] = useState<number | null>(null);
   const [cardBuilderPayload, setCardBuilderPayload] = useState<CardBuilderPayload | null>(null);
   const [cardBuilderPreviewSvg, setCardBuilderPreviewSvg] = useState("");
@@ -598,6 +601,8 @@ export default function HomePage() {
     secondary_tag: true,
   });
   const eventCardsRowsPerPage = 20;
+  const cardBuilderRowsPerPage = 200;
+  const cardBuilderTotalPages = Math.max(1, Math.ceil(cardBuilderTotalRows / cardBuilderRowsPerPage));
 
   const seasonOptions = useMemo(() => seasons.map((s) => ({ value: s.id, label: `id=${s.id} | ${s.type}#${s.season_number}` })), [seasons]);
   const eventCardsSnapshotOptions = useMemo(() => {
@@ -608,13 +613,19 @@ export default function HomePage() {
         value: `standard_season:${s.id}`,
         label: `standard#${s.season_number} snapshot (id=${s.id})`,
       }));
+    if (eventCardsFutureStandardFiltered) {
+      return [
+        ...standardSeasonOptions,
+        { value: "next_window", label: "future window" },
+      ];
+    }
     return [
       { value: "all", label: "all" },
       { value: "genesis", label: "genesis snapshot" },
       ...standardSeasonOptions,
       { value: "next_window", label: "future window" },
     ];
-  }, [seasons]);
+  }, [seasons, eventCardsFutureStandardFiltered]);
   const claimSeasonInfoLines = useMemo(() => claimSeasonInfo.split("\n"), [claimSeasonInfo]);
   const liveCountdown = useMemo<LocalCountdownItem[]>(() => {
     if (syncedNowMs == null) return [];
@@ -1017,10 +1028,19 @@ export default function HomePage() {
 
   const refreshEventCardRows = async () => {
     const safeLimit = Math.max(1, Number(eventCardsLimit) || 500);
+    const useFutureStandardFiltered = (
+      eventCardsFutureStandardFiltered &&
+      (eventCardsSnapshotScope === "next_window" || eventCardsSnapshotScope.startsWith("standard_season:"))
+    );
     const params = new URLSearchParams();
     params.set("limit", String(safeLimit));
     if (eventCardsStatusFilter !== "all") params.set("status", eventCardsStatusFilter);
-    if (eventCardsSnapshotScope !== "all") params.set("snapshot_scope", eventCardsSnapshotScope);
+    if (useFutureStandardFiltered) {
+      params.set("future_standard_filtered", "true");
+      params.set("snapshot_scope", eventCardsSnapshotScope);
+    } else if (eventCardsSnapshotScope !== "all") {
+      params.set("snapshot_scope", eventCardsSnapshotScope);
+    }
     if (eventCardsEventIdFilter.trim()) params.set("event_id", eventCardsEventIdFilter.trim());
     const data = await fetchJSON<{ rows: EventCardRow[] }>(`/api/event-cards?${params.toString()}`);
     setEventCardRows(data.rows);
@@ -1028,11 +1048,13 @@ export default function HomePage() {
   };
   const refreshCardBuilderRows = async () => {
     const params = new URLSearchParams();
-    params.set("limit", "300");
+    params.set("limit", String(cardBuilderRowsPerPage));
+    params.set("offset", String((cardBuilderPage - 1) * cardBuilderRowsPerPage));
     if (cardBuilderSeasonFilterId) params.set("season_id", String(cardBuilderSeasonFilterId));
     if (cardBuilderSearch.trim()) params.set("q", cardBuilderSearch.trim());
-    const data = await fetchJSON<{ rows: CardBuilderCandidate[] }>(`/api/card-builder/candidates?${params.toString()}`);
+    const data = await fetchJSON<{ rows: CardBuilderCandidate[]; total: number }>(`/api/card-builder/candidates?${params.toString()}`);
     setCardBuilderRows(data.rows);
+    setCardBuilderTotalRows(Math.max(0, Number(data.total) || 0));
     if (data.rows.length === 0) {
       setCardBuilderSelectedWinnerRowId(null);
       setCardBuilderPayload(null);
@@ -1211,7 +1233,13 @@ export default function HomePage() {
     void run(refreshEventCardRows);
     // Auto-refresh when dropdown filters change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, eventCardsStatusFilter, eventCardsSnapshotScope]);
+  }, [tab, eventCardsStatusFilter, eventCardsSnapshotScope, eventCardsFutureStandardFiltered]);
+
+  useEffect(() => {
+    if (!eventCardsFutureStandardFiltered) return;
+    if (eventCardsSnapshotScope === "next_window" || eventCardsSnapshotScope.startsWith("standard_season:")) return;
+    setEventCardsSnapshotScope("next_window");
+  }, [eventCardsSnapshotScope, eventCardsFutureStandardFiltered]);
 
   useEffect(() => {
     if (tab !== "cardBuilder") return;
@@ -1223,7 +1251,7 @@ export default function HomePage() {
       await refreshCardBuilderRows();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, cardBuilderSeasonFilterId]);
+  }, [tab, cardBuilderSeasonFilterId, cardBuilderPage]);
 
   useEffect(() => {
     if (tab !== "cardBuilder") return;
@@ -1261,6 +1289,16 @@ export default function HomePage() {
       setEventCardsSnapshotScope("all");
     }
   }, [eventCardsSnapshotScope, seasons]);
+
+  useEffect(() => {
+    setCardBuilderPage(1);
+  }, [cardBuilderSeasonFilterId, cardBuilderSearch]);
+
+  useEffect(() => {
+    if (cardBuilderPage > cardBuilderTotalPages) {
+      setCardBuilderPage(cardBuilderTotalPages);
+    }
+  }, [cardBuilderPage, cardBuilderTotalPages]);
 
   useEffect(() => {
     const wsUrl = API_BASE.replace(/^http/, "ws") + "/ws/events";
@@ -1758,9 +1796,30 @@ export default function HomePage() {
               <option value="error">error</option>
             </select>
             <label>snapshot</label>
-            <select value={eventCardsSnapshotScope} onChange={(e) => setEventCardsSnapshotScope(e.target.value)}>
+            <select
+              value={eventCardsSnapshotScope}
+              onChange={(e) => setEventCardsSnapshotScope(e.target.value)}
+            >
               {eventCardsSnapshotOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
+            <label className="inline-flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={eventCardsFutureStandardFiltered}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setEventCardsFutureStandardFiltered(checked);
+                  if (
+                    checked &&
+                    eventCardsSnapshotScope !== "next_window" &&
+                    !eventCardsSnapshotScope.startsWith("standard_season:")
+                  ) {
+                    setEventCardsSnapshotScope("next_window");
+                  }
+                }}
+              />
+              TOP20TAG5
+            </label>
             <label>event_id</label>
             <input
               value={eventCardsEventIdFilter}
@@ -2529,7 +2588,7 @@ export default function HomePage() {
 
           <div className="event-cards-top-grid">
             <div className="panel">
-              <div className="muted">Eligible candidates ({cardBuilderRows.length})</div>
+              <div className="muted">Eligible candidates ({cardBuilderTotalRows})</div>
               <div className="overflow-auto rounded-xl border border-slate-700 bg-slate-900 shadow-sm" style={{ maxHeight: 430 }}>
                 <table className="event-cards-table w-full border-collapse text-xs text-slate-200">
                   <thead className="sticky top-0 z-30 bg-slate-800">
@@ -2582,6 +2641,25 @@ export default function HomePage() {
                     })}
                   </tbody>
                 </table>
+              </div>
+              <div className="row" style={{ justifyContent: "space-between", marginTop: 12 }}>
+                <span className="muted">
+                  Rows: {cardBuilderTotalRows} | Page {cardBuilderPage}/{cardBuilderTotalPages} | {cardBuilderRowsPerPage} per page
+                </span>
+                <div className="row" style={{ marginBottom: 0 }}>
+                  <button
+                    onClick={() => setCardBuilderPage((prev) => Math.max(1, prev - 1))}
+                    disabled={cardBuilderPage <= 1}
+                  >
+                    Prev
+                  </button>
+                  <button
+                    onClick={() => setCardBuilderPage((prev) => Math.min(cardBuilderTotalPages, prev + 1))}
+                    disabled={cardBuilderPage >= cardBuilderTotalPages}
+                  >
+                    Next
+                  </button>
+                </div>
               </div>
             </div>
 

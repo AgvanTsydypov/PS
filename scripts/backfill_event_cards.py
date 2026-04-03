@@ -238,6 +238,7 @@ def _upsert_ok(
                 event_id,
                 series_id,
                 reccurence,
+                manual_image_url,
                 card_title,
                 card_lore,
                 primary_tag,
@@ -258,11 +259,22 @@ def _upsert_ok(
                     LEFT JOIN series s ON s.id = e.series_id
                     WHERE e.id = %s
                 ),
+                (
+                    SELECT ec_existing.manual_image_url
+                    FROM event_cards ec_existing
+                    WHERE ec_existing.series_id = (SELECT e.series_id FROM events e WHERE e.id = %s)
+                      AND ec_existing.event_id <> %s
+                      AND ec_existing.manual_image_url IS NOT NULL
+                      AND BTRIM(ec_existing.manual_image_url) <> ''
+                    ORDER BY ec_existing.updated_at DESC NULLS LAST, ec_existing.generated_at DESC NULLS LAST, ec_existing.event_id ASC
+                    LIMIT 1
+                ),
                 %s, %s, %s, %s, %s, %s, %s, 'ok', NULL, NOW(), NOW()
             )
             ON CONFLICT (event_id) DO UPDATE SET
                 series_id = EXCLUDED.series_id,
                 reccurence = EXCLUDED.reccurence,
+                manual_image_url = COALESCE(event_cards.manual_image_url, EXCLUDED.manual_image_url),
                 card_title = EXCLUDED.card_title,
                 card_lore = EXCLUDED.card_lore,
                 primary_tag = EXCLUDED.primary_tag,
@@ -276,6 +288,8 @@ def _upsert_ok(
                 updated_at = NOW()
             """,
             (
+                event_id,
+                event_id,
                 event_id,
                 event_id,
                 event_id,
@@ -310,6 +324,7 @@ def _upsert_error(
                 event_id,
                 series_id,
                 reccurence,
+                manual_image_url,
                 card_title,
                 card_lore,
                 primary_tag,
@@ -330,11 +345,22 @@ def _upsert_error(
                     LEFT JOIN series s ON s.id = e.series_id
                     WHERE e.id = %s
                 ),
+                (
+                    SELECT ec_existing.manual_image_url
+                    FROM event_cards ec_existing
+                    WHERE ec_existing.series_id = (SELECT e.series_id FROM events e WHERE e.id = %s)
+                      AND ec_existing.event_id <> %s
+                      AND ec_existing.manual_image_url IS NOT NULL
+                      AND BTRIM(ec_existing.manual_image_url) <> ''
+                    ORDER BY ec_existing.updated_at DESC NULLS LAST, ec_existing.generated_at DESC NULLS LAST, ec_existing.event_id ASC
+                    LIMIT 1
+                ),
                 NULL, NULL, NULL, NULL, %s, %s, %s, 'error', %s, NOW(), NOW()
             )
             ON CONFLICT (event_id) DO UPDATE SET
                 series_id = EXCLUDED.series_id,
                 reccurence = EXCLUDED.reccurence,
+                manual_image_url = COALESCE(event_cards.manual_image_url, EXCLUDED.manual_image_url),
                 status = 'error',
                 error_text = EXCLUDED.error_text,
                 agent_name = EXCLUDED.agent_name,
@@ -342,7 +368,7 @@ def _upsert_error(
                 prompt_version = EXCLUDED.prompt_version,
                 updated_at = NOW()
             """,
-            (event_id, event_id, event_id, agent_name, model_name, prompt_version, err),
+            (event_id, event_id, event_id, event_id, event_id, agent_name, model_name, prompt_version, err),
         )
     _sync_event_tag_primary_flags(conn, event_id=event_id, primary_tag=None)
     conn.commit()

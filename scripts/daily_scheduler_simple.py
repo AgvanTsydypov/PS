@@ -70,6 +70,8 @@ STANDARD_SEASON_ACTIVE_DAYS = 9
 STANDARD_SEASON_CYCLE_DAYS = 10
 ORIGIN_LOOKBACK_DAYS_STANDARD = 10
 FIRST_STANDARD_BOOTSTRAP_DELAY_DAYS = DATA_LAG_DAYS
+STANDARD_SNAPSHOT_PRIMARY_TAG_CAP = 5
+STANDARD_SNAPSHOT_EVENT_LIMIT = 20
 GENESIS_SEASON_TOTAL_SUPPLY_TEST = 2000
 GENESIS_SEASON_FAR_FUTURE_END = datetime(9999, 12, 31, tzinfo=timezone.utc)
 GAMMA_API_BASE_URL = "https://gamma-api.polymarket.com"
@@ -424,6 +426,252 @@ class SimplifiedScheduler:
         except Exception:
             return None
 
+    def _get_standard_filtered_event_ids(self, cursor: Any, season_id: Optional[int] = None) -> List[str]:
+        if season_id is None:
+            cursor.execute(
+                """
+                WITH next_window AS (
+                    SELECT
+                        (
+                            s.end_date
+                            - make_interval(days => %s)
+                            - make_interval(days => %s)
+                        ) AS window_start,
+                        (
+                            s.end_date
+                            - make_interval(days => %s)
+                        ) AS window_end
+                    FROM seasons s
+                    WHERE s.type = 'standard'
+                    ORDER BY s.start_date DESC, s.id DESC
+                    LIMIT 1
+                ),
+                working_events AS (
+                    SELECT
+                        e.id AS event_id,
+                        e.slug AS event_slug,
+                        COALESCE(erq.resolution_ready_at, erq.closed_time) AS season_anchor_at,
+                        COALESCE(e.volume, 0) AS event_volume,
+                        COALESCE(NULLIF(BTRIM(ec.primary_tag), ''), '__UNTAGGED__') AS primary_tag
+                    FROM events e
+                    JOIN next_window nw ON TRUE
+                    LEFT JOIN event_resolution_queue erq
+                      ON erq.event_id = e.id
+                    LEFT JOIN event_cards ec
+                      ON ec.event_id = e.id
+                    WHERE erq.status = 'processed'
+                      AND erq.resolution_ready_at IS NOT NULL
+                      AND erq.resolution_ready_at >= nw.window_start
+                      AND erq.resolution_ready_at < nw.window_end
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM winner_wallets_nft_to_claim ww
+                          WHERE (
+                              (e.id IS NOT NULL AND ww.event_id = e.id)
+                              OR (e.slug IS NOT NULL AND ww.event_slug = e.slug)
+                          )
+                      )
+                ),
+                tag_capped_events AS (
+                    SELECT
+                        ranked.event_id,
+                        ranked.event_slug,
+                        ranked.season_anchor_at,
+                        ranked.event_volume
+                    FROM (
+                        SELECT
+                            we.*,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY we.primary_tag
+                                ORDER BY
+                                    we.event_volume DESC,
+                                    we.season_anchor_at DESC NULLS LAST,
+                                    COALESCE(we.event_id, we.event_slug) ASC
+                            ) AS primary_tag_rank
+                        FROM working_events we
+                    ) ranked
+                    WHERE ranked.primary_tag_rank <= %s
+                ),
+                final_events AS (
+                    SELECT
+                        ranked.event_id,
+                        ranked.overall_rank
+                    FROM (
+                        SELECT
+                            tce.event_id,
+                            ROW_NUMBER() OVER (
+                                ORDER BY
+                                    tce.event_volume DESC,
+                                    tce.season_anchor_at DESC NULLS LAST,
+                                    COALESCE(tce.event_id, tce.event_slug) ASC
+                            ) AS overall_rank
+                        FROM tag_capped_events tce
+                    ) ranked
+                    WHERE ranked.overall_rank <= %s
+                )
+                SELECT event_id
+                FROM final_events
+                WHERE event_id IS NOT NULL
+                ORDER BY overall_rank
+                """,
+                (
+                    STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS,
+                    ORIGIN_LOOKBACK_DAYS_STANDARD,
+                    STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS,
+                    STANDARD_SNAPSHOT_PRIMARY_TAG_CAP,
+                    STANDARD_SNAPSHOT_EVENT_LIMIT,
+                ),
+            )
+        else:
+            cursor.execute(
+                """
+                WITH season_target AS (
+                    SELECT id, start_date
+                    FROM seasons
+                    WHERE id = %s
+                      AND type = 'standard'
+                    LIMIT 1
+                ),
+                first_standard AS (
+                    SELECT
+                        s.id,
+                        s.start_date,
+                        (
+                            s.start_date
+                            - make_interval(days => %s)
+                            - make_interval(days => %s)
+                        ) AS window_start
+                    FROM seasons s
+                    WHERE s.type = 'standard'
+                    ORDER BY s.start_date ASC, s.id ASC
+                    LIMIT 1
+                ),
+                bounds AS (
+                    SELECT
+                        st.id AS season_id,
+                        (
+                            st.start_date
+                            - make_interval(days => %s)
+                            - make_interval(days => %s)
+                        ) AS window_start,
+                        (
+                            st.start_date
+                            - make_interval(days => %s)
+                        ) AS window_end,
+                        CASE
+                            WHEN fs.id IS NOT NULL AND fs.id = st.id THEN TRUE
+                            ELSE FALSE
+                        END AS is_first_standard,
+                        fs.window_start AS first_standard_window_start
+                    FROM season_target st
+                    LEFT JOIN first_standard fs ON TRUE
+                ),
+                working_events AS (
+                    SELECT
+                        e.id AS event_id,
+                        e.slug AS event_slug,
+                        MAX(COALESCE(erq.resolution_ready_at, erq.closed_time)) AS season_anchor_at,
+                        COALESCE(e.volume, 0) AS event_volume,
+                        COALESCE(NULLIF(BTRIM(ec.primary_tag), ''), '__UNTAGGED__') AS primary_tag
+                    FROM events e
+                    JOIN bounds b ON TRUE
+                    LEFT JOIN event_resolution_queue erq
+                      ON erq.event_id = e.id
+                    LEFT JOIN event_cards ec
+                      ON ec.event_id = e.id
+                    WHERE (
+                        (
+                            COALESCE(erq.closed, FALSE) = TRUE
+                            AND erq.status = 'processed'
+                            AND erq.resolution_ready_at IS NOT NULL
+                            AND erq.resolution_ready_at >= b.window_start
+                            AND erq.resolution_ready_at < b.window_end
+                        ) OR (
+                            b.is_first_standard = TRUE
+                            AND erq.status = 'processed'
+                            AND erq.resolution_ready_at IS NOT NULL
+                            AND erq.resolution_ready_at < b.first_standard_window_start
+                            AND NOT (
+                                COALESCE(e.end_date::date, e.creation_date::date, e.start_date::date)
+                                BETWEEN %s AND %s
+                            )
+                        )
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM winner_wallets_nft_to_claim ww
+                        WHERE ww.season_id <> b.season_id
+                          AND (
+                              (e.id IS NOT NULL AND ww.event_id = e.id)
+                              OR (e.slug IS NOT NULL AND ww.event_slug = e.slug)
+                          )
+                    )
+                    GROUP BY e.id, e.slug, e.volume, COALESCE(NULLIF(BTRIM(ec.primary_tag), ''), '__UNTAGGED__')
+                ),
+                tag_capped_events AS (
+                    SELECT
+                        ranked.event_id,
+                        ranked.event_slug,
+                        ranked.season_anchor_at,
+                        ranked.event_volume
+                    FROM (
+                        SELECT
+                            we.*,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY we.primary_tag
+                                ORDER BY
+                                    we.event_volume DESC,
+                                    we.season_anchor_at DESC NULLS LAST,
+                                    COALESCE(we.event_id, we.event_slug) ASC
+                            ) AS primary_tag_rank
+                        FROM working_events we
+                    ) ranked
+                    WHERE ranked.primary_tag_rank <= %s
+                ),
+                final_events AS (
+                    SELECT
+                        ranked.event_id,
+                        ranked.overall_rank
+                    FROM (
+                        SELECT
+                            tce.event_id,
+                            ROW_NUMBER() OVER (
+                                ORDER BY
+                                    tce.event_volume DESC,
+                                    tce.season_anchor_at DESC NULLS LAST,
+                                    COALESCE(tce.event_id, tce.event_slug) ASC
+                            ) AS overall_rank
+                        FROM tag_capped_events tce
+                    ) ranked
+                    WHERE ranked.overall_rank <= %s
+                )
+                SELECT event_id
+                FROM final_events
+                WHERE event_id IS NOT NULL
+                ORDER BY overall_rank
+                """,
+                (
+                    season_id,
+                    STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS,
+                    ORIGIN_LOOKBACK_DAYS_STANDARD,
+                    STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS,
+                    ORIGIN_LOOKBACK_DAYS_STANDARD,
+                    STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS,
+                    GENESIS_START_DATE,
+                    GENESIS_END_DATE,
+                    STANDARD_SNAPSHOT_PRIMARY_TAG_CAP,
+                    STANDARD_SNAPSHOT_EVENT_LIMIT,
+                ),
+            )
+        rows = cursor.fetchall() or []
+        event_ids: List[str] = []
+        for row in rows:
+            value = row.get("event_id") if isinstance(row, dict) else row[0]
+            event_id = str(value or "").strip()
+            if event_id:
+                event_ids.append(event_id)
+        return event_ids
+
     def _fetch_event_status_from_api(self, event_id: str) -> Dict[str, Optional[object]]:
         """
         Fetch event status from Gamma API.
@@ -677,6 +925,7 @@ class SimplifiedScheduler:
                 event_id,
                 series_id,
                 reccurence,
+                manual_image_url,
                 card_title,
                 card_lore,
                 primary_tag,
@@ -697,11 +946,22 @@ class SimplifiedScheduler:
                     LEFT JOIN series s ON s.id = e.series_id
                     WHERE e.id = %s
                 ),
+                (
+                    SELECT ec_existing.manual_image_url
+                    FROM event_cards ec_existing
+                    WHERE ec_existing.series_id = (SELECT e.series_id FROM events e WHERE e.id = %s)
+                      AND ec_existing.event_id <> %s
+                      AND ec_existing.manual_image_url IS NOT NULL
+                      AND BTRIM(ec_existing.manual_image_url) <> ''
+                    ORDER BY ec_existing.updated_at DESC NULLS LAST, ec_existing.generated_at DESC NULLS LAST, ec_existing.event_id ASC
+                    LIMIT 1
+                ),
                 %s, %s, %s, %s, %s, %s, %s, 'ok', NULL, NOW(), NOW()
             )
             ON CONFLICT (event_id) DO UPDATE SET
                 series_id = EXCLUDED.series_id,
                 reccurence = EXCLUDED.reccurence,
+                manual_image_url = COALESCE(event_cards.manual_image_url, EXCLUDED.manual_image_url),
                 card_title = EXCLUDED.card_title,
                 card_lore = EXCLUDED.card_lore,
                 primary_tag = EXCLUDED.primary_tag,
@@ -715,6 +975,8 @@ class SimplifiedScheduler:
                 updated_at = NOW()
             """,
             (
+                event_id,
+                event_id,
                 event_id,
                 event_id,
                 event_id,
@@ -744,6 +1006,7 @@ class SimplifiedScheduler:
                 event_id,
                 series_id,
                 reccurence,
+                manual_image_url,
                 card_title,
                 card_lore,
                 primary_tag,
@@ -764,11 +1027,22 @@ class SimplifiedScheduler:
                     LEFT JOIN series s ON s.id = e.series_id
                     WHERE e.id = %s
                 ),
+                (
+                    SELECT ec_existing.manual_image_url
+                    FROM event_cards ec_existing
+                    WHERE ec_existing.series_id = (SELECT e.series_id FROM events e WHERE e.id = %s)
+                      AND ec_existing.event_id <> %s
+                      AND ec_existing.manual_image_url IS NOT NULL
+                      AND BTRIM(ec_existing.manual_image_url) <> ''
+                    ORDER BY ec_existing.updated_at DESC NULLS LAST, ec_existing.generated_at DESC NULLS LAST, ec_existing.event_id ASC
+                    LIMIT 1
+                ),
                 NULL, NULL, NULL, NULL, %s, %s, %s, 'error', %s, NOW(), NOW()
             )
             ON CONFLICT (event_id) DO UPDATE SET
                 series_id = EXCLUDED.series_id,
                 reccurence = EXCLUDED.reccurence,
+                manual_image_url = COALESCE(event_cards.manual_image_url, EXCLUDED.manual_image_url),
                 status = 'error',
                 error_text = EXCLUDED.error_text,
                 agent_name = EXCLUDED.agent_name,
@@ -777,6 +1051,8 @@ class SimplifiedScheduler:
                 updated_at = NOW()
             """,
             (
+                event_id,
+                event_id,
                 event_id,
                 event_id,
                 event_id,
@@ -1163,9 +1439,10 @@ class SimplifiedScheduler:
             """
             WITH
             working_events AS (
-                SELECT DISTINCT
+                SELECT
                     e.id AS event_id,
                     e.slug AS event_slug,
+                    MAX(COALESCE(erq.resolution_ready_at, erq.closed_time)) AS season_anchor_at,
                     COALESCE(e.volume, 0) AS event_volume
                 FROM events e
                 LEFT JOIN event_resolution_queue erq
@@ -1205,6 +1482,56 @@ class SimplifiedScheduler:
                           OR (e.slug IS NOT NULL AND ww.event_slug = e.slug)
                       )
                 )
+                GROUP BY e.id, e.slug, e.volume
+            ),
+            working_events_enriched AS (
+                SELECT
+                    we.event_id,
+                    we.event_slug,
+                    we.season_anchor_at,
+                    we.event_volume,
+                    COALESCE(NULLIF(BTRIM(ec.primary_tag), ''), '__UNTAGGED__') AS primary_tag
+                FROM working_events we
+                LEFT JOIN event_cards ec
+                  ON ec.event_id = we.event_id
+            ),
+            working_events_tag_capped AS (
+                SELECT
+                    ranked.event_id,
+                    ranked.event_slug,
+                    ranked.season_anchor_at,
+                    ranked.event_volume
+                FROM (
+                    SELECT
+                        we.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY we.primary_tag
+                            ORDER BY
+                                we.event_volume DESC,
+                                we.season_anchor_at DESC NULLS LAST,
+                                COALESCE(we.event_id, we.event_slug) ASC
+                        ) AS primary_tag_rank
+                    FROM working_events_enriched we
+                ) ranked
+                WHERE %s = FALSE OR ranked.primary_tag_rank <= %s
+            ),
+            working_events_selected AS (
+                SELECT
+                    ranked.event_id,
+                    ranked.event_slug,
+                    ranked.event_volume
+                FROM (
+                    SELECT
+                        we.*,
+                        ROW_NUMBER() OVER (
+                            ORDER BY
+                                we.event_volume DESC,
+                                we.season_anchor_at DESC NULLS LAST,
+                                COALESCE(we.event_id, we.event_slug) ASC
+                        ) AS season_event_rank
+                    FROM working_events_tag_capped we
+                ) ranked
+                WHERE %s = FALSE OR ranked.season_event_rank <= %s
             ),
             candidate_participants AS (
                 SELECT
@@ -1223,7 +1550,7 @@ class SimplifiedScheduler:
                     COALESCE(e.volume, we.event_volume, 0) AS event_volume,
                     RANDOM() AS random_key
                 FROM participants p
-                JOIN working_events we
+                JOIN working_events_selected we
                   ON (
                     (we.event_id IS NOT NULL AND p.event_id = we.event_id)
                     OR (we.event_slug IS NOT NULL AND p.event_slug = we.event_slug)
@@ -1282,6 +1609,10 @@ class SimplifiedScheduler:
                 window_start,
                 window_end,
                 season_id,
+                use_resolution_anchor,
+                STANDARD_SNAPSHOT_PRIMARY_TAG_CAP,
+                use_resolution_anchor,
+                STANDARD_SNAPSHOT_EVENT_LIMIT,
             ),
         )
         candidate_rows = [dict(row) for row in (cursor.fetchall() or [])]
