@@ -1973,9 +1973,11 @@ class SeasonWorkbenchService:
         *,
         season_id: Optional[int],
         limit: int,
+        offset: int,
         search_query: Optional[str],
-    ) -> List[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         safe_limit = min(max(limit, 1), 1000)
+        safe_offset = max(offset, 0)
         normalized_query = (search_query or "").strip().lower()
 
         conn = self.manager.get_connection()
@@ -2009,6 +2011,44 @@ class SeasonWorkbenchService:
                     params.extend([q, q, q, q, q, q])
 
                 where_sql = f"WHERE {' AND '.join(where_parts)}"
+                from_sql = f"""
+                    FROM winner_wallets_nft_to_claim w
+                    JOIN event_cards ec ON ec.event_id = w.event_id
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            p.archetype,
+                            p.archetype_description,
+                            p.archetype_math
+                        FROM participants p
+                        WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
+                          AND (
+                              (w.event_id IS NOT NULL AND p.event_id = w.event_id)
+                              OR
+                              (w.event_slug IS NOT NULL AND p.event_slug = w.event_slug)
+                          )
+                        ORDER BY
+                            CASE
+                                WHEN w.event_id IS NOT NULL AND p.event_id = w.event_id THEN 0
+                                WHEN w.event_slug IS NOT NULL AND p.event_slug = w.event_slug THEN 1
+                                ELSE 2
+                            END,
+                            p.rank ASC NULLS LAST
+                        LIMIT 1
+                    ) p ON TRUE
+                    LEFT JOIN events e ON e.id = w.event_id
+                    LEFT JOIN seasons s ON s.id = w.season_id
+                    LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+                    {where_sql}
+                """
+                cursor.execute(
+                    f"""
+                    SELECT COUNT(*) AS total
+                    {from_sql}
+                    """,
+                    tuple(params),
+                )
+                total_row = cursor.fetchone() or {}
+                total = int(total_row.get("total") or 0) if isinstance(total_row, dict) else int(total_row[0] or 0)
                 cursor.execute(
                     f"""
                     SELECT
@@ -2041,40 +2081,18 @@ class SeasonWorkbenchService:
                         tp.hex_color AS primary_tag_hex_color,
                         ec.generated_at AS event_card_generated_at,
                         ec.updated_at AS event_card_updated_at
-                    FROM winner_wallets_nft_to_claim w
-                    JOIN event_cards ec ON ec.event_id = w.event_id
-                    LEFT JOIN LATERAL (
-                        SELECT
-                            p.archetype,
-                            p.archetype_description,
-                            p.archetype_math
-                        FROM participants p
-                        WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
-                          AND (
-                              (w.event_id IS NOT NULL AND p.event_id = w.event_id)
-                              OR
-                              (w.event_slug IS NOT NULL AND p.event_slug = w.event_slug)
-                          )
-                        ORDER BY
-                            CASE
-                                WHEN w.event_id IS NOT NULL AND p.event_id = w.event_id THEN 0
-                                WHEN w.event_slug IS NOT NULL AND p.event_slug = w.event_slug THEN 1
-                                ELSE 2
-                            END,
-                            p.rank ASC NULLS LAST
-                        LIMIT 1
-                    ) p ON TRUE
-                    LEFT JOIN events e ON e.id = w.event_id
-                    LEFT JOIN seasons s ON s.id = w.season_id
-                    LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
-                    {where_sql}
+                    {from_sql}
                     ORDER BY w.season_id DESC, w.rank ASC NULLS LAST, w.id DESC
                     LIMIT %s
+                    OFFSET %s
                     """,
-                    (*params, safe_limit),
+                    (*params, safe_limit, safe_offset),
                 )
                 rows = [dict(row) for row in cursor.fetchall()]
-                return [self._format_card_builder_candidate(row) for row in rows]
+                return {
+                    "rows": [self._format_card_builder_candidate(row) for row in rows],
+                    "total": total,
+                }
         finally:
             conn.close()
 
@@ -2257,6 +2275,7 @@ class SeasonWorkbenchService:
         status: Optional[str],
         event_id: Optional[str],
         snapshot_scope: Optional[str],
+        future_standard_filtered: bool = False,
     ) -> List[Dict[str, Any]]:
         safe_limit = min(max(limit, 1), 2000)
         status_filter = (status or "").strip().lower()
@@ -2281,6 +2300,21 @@ class SeasonWorkbenchService:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 where_parts: List[str] = []
                 params: List[Any] = []
+                if future_standard_filtered:
+                    if snapshot_scope_filter == "next_window":
+                        filtered_event_ids = self.scheduler._get_standard_filtered_event_ids(cursor)
+                    elif snapshot_scope_filter == "standard_season" and standard_snapshot_season_id is not None:
+                        filtered_event_ids = self.scheduler._get_standard_filtered_event_ids(
+                            cursor,
+                            season_id=standard_snapshot_season_id,
+                        )
+                    else:
+                        return []
+                    if not filtered_event_ids:
+                        return []
+                    where_parts.append("ec.event_id = ANY(%s)")
+                    params.append(filtered_event_ids)
+                    snapshot_scope_filter = "all"
                 if event_id_filter:
                     where_parts.append("ec.event_id = %s")
                     params.append(event_id_filter)
@@ -2971,6 +3005,7 @@ def get_event_cards(
     status: Optional[str] = None,
     event_id: Optional[str] = None,
     snapshot_scope: Optional[str] = "all",
+    future_standard_filtered: bool = False,
 ) -> Dict[str, Any]:
     try:
         rows = service.list_event_cards(
@@ -2978,6 +3013,7 @@ def get_event_cards(
             status=status,
             event_id=event_id,
             snapshot_scope=snapshot_scope,
+            future_standard_filtered=future_standard_filtered,
         )
         return {"rows": rows}
     except Exception as exc:
@@ -3036,15 +3072,17 @@ def event_card_prompt(event_id: str) -> Dict[str, Any]:
 def get_card_builder_candidates(
     season_id: Optional[int] = None,
     limit: int = 200,
+    offset: int = 0,
     q: Optional[str] = None,
 ) -> Dict[str, Any]:
     try:
-        rows = service.list_card_builder_candidates(
+        payload = service.list_card_builder_candidates(
             season_id=season_id,
             limit=limit,
+            offset=offset,
             search_query=q,
         )
-        return {"rows": rows}
+        return payload
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
