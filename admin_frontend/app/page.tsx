@@ -560,6 +560,7 @@ export default function HomePage() {
   const [cardBuilderTotalRows, setCardBuilderTotalRows] = useState(0);
   const [cardBuilderSelectedWinnerRowId, setCardBuilderSelectedWinnerRowId] = useState<number | null>(null);
   const [cardBuilderPayload, setCardBuilderPayload] = useState<CardBuilderPayload | null>(null);
+  const [cardBuilderDetailBusy, setCardBuilderDetailBusy] = useState(false);
   const [cardBuilderPreviewSvg, setCardBuilderPreviewSvg] = useState("");
   const [cardBuilderPreviewBackSvg, setCardBuilderPreviewBackSvg] = useState("");
   const [cardBuilderPattern, setCardBuilderPattern] = useState("");
@@ -570,6 +571,7 @@ export default function HomePage() {
   const [cardBuilderBackAnimating, setCardBuilderBackAnimating] = useState(false);
   const cardBuilderFrontFlipTimerRef = useRef<number | null>(null);
   const cardBuilderBackFlipTimerRef = useRef<number | null>(null);
+  const cardBuilderPreviewCacheRef = useRef<Map<string, { svg: string; back_svg: string; pattern: string }>>(new Map());
   const [eventCardForm, setEventCardForm] = useState<EventCardForm>({
     event_id: "",
     card_title: "",
@@ -778,10 +780,18 @@ export default function HomePage() {
     proxy_wallet: String(row.proxy_wallet ?? ""),
     leaderboard_rank: Number(row.rank ?? 0),
   });
-  const applyCardBuilderRow = (row: CardBuilderCandidate) => {
+  const applyCardBuilderRow = async (row: CardBuilderCandidate) => {
+    if (cardBuilderSelectedWinnerRowId === row.winner_row_id && cardBuilderPayload) return;
     setCardBuilderSelectedWinnerRowId(row.winner_row_id);
-    setCardBuilderPayload(buildCardBuilderPayloadFromRow(row));
+    setCardBuilderDetailBusy(true);
+    try {
+      const data = await fetchJSON<{ row: CardBuilderCandidate }>(`/api/card-builder/candidates/${row.winner_row_id}`);
+      setCardBuilderPayload(buildCardBuilderPayloadFromRow(data.row));
+    } finally {
+      setCardBuilderDetailBusy(false);
+    }
     setCardBuilderPreviewSvg("");
+    setCardBuilderPreviewBackSvg("");
     setCardBuilderPattern("");
   };
   const getEventCardsSortValue = (row: EventCardRow, key: EventCardsSortKey): string => {
@@ -1067,7 +1077,13 @@ export default function HomePage() {
     }
     const selected = data.rows.find((row) => row.winner_row_id === cardBuilderSelectedWinnerRowId);
     if (selected) return;
-    applyCardBuilderRow(data.rows[0]);
+    setCardBuilderSelectedWinnerRowId(null);
+    setCardBuilderPayload(null);
+    setCardBuilderPreviewSvg("");
+    setCardBuilderPreviewBackSvg("");
+    setCardBuilderFrontFlipped(false);
+    setCardBuilderBackFlipped(true);
+    setCardBuilderPattern("");
   };
   const previewCardBuilderPayload = async (payloadOverride?: CardBuilderPayload) => {
     const payload = payloadOverride ?? cardBuilderPayload;
@@ -1077,12 +1093,23 @@ export default function HomePage() {
     if (!payload.image_url.trim()) {
       throw new Error("manual_image_url is required; rows without it are excluded");
     }
+    const cacheKey = JSON.stringify(payload);
+    const cached = cardBuilderPreviewCacheRef.current.get(cacheKey);
+    if (cached) {
+      setCardBuilderPreviewSvg(cached.svg);
+      setCardBuilderPreviewBackSvg(cached.back_svg);
+      setCardBuilderFrontFlipped(false);
+      setCardBuilderBackFlipped(true);
+      setCardBuilderPattern(cached.pattern);
+      return;
+    }
     setCardBuilderPreviewBusy(true);
     try {
       const out = await fetchJSON<{ svg: string; back_svg: string; pattern: string }>("/api/card-builder/preview", {
         method: "POST",
         body: JSON.stringify({ payload }),
       });
+      cardBuilderPreviewCacheRef.current.set(cacheKey, out);
       setCardBuilderPreviewSvg(out.svg);
       setCardBuilderPreviewBackSvg(out.back_svg);
       setCardBuilderFrontFlipped(false);
@@ -1252,18 +1279,6 @@ export default function HomePage() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, cardBuilderSeasonFilterId, cardBuilderPage]);
-
-  useEffect(() => {
-    if (tab !== "cardBuilder") return;
-    if (!cardBuilderPayload) return;
-    const timer = window.setTimeout(() => {
-      void previewCardBuilderPayload().catch(() => {
-        // manual refresh button surfaces errors through global run
-      });
-    }, 250);
-    return () => window.clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, cardBuilderPayload]);
 
   useEffect(() => {
     return () => {
@@ -2578,17 +2593,19 @@ export default function HomePage() {
               style={{ minWidth: 300 }}
             />
             <button onClick={() => void run(refreshCardBuilderRows)}>Refresh candidates</button>
-            <button onClick={() => void run(() => previewCardBuilderPayload())} disabled={!cardBuilderPayload || cardBuilderPreviewBusy}>
+            <button onClick={() => void run(() => previewCardBuilderPayload())} disabled={!cardBuilderPayload || cardBuilderPreviewBusy || cardBuilderDetailBusy}>
               {cardBuilderPreviewBusy ? "Rendering..." : "Render preview"}
             </button>
             <span className="muted">
-              Uses `event_cards.manual_image_url` only. Null manual image rows are excluded.
+              Uses `event_cards.manual_image_url` only. Select a row, then render preview.
             </span>
           </div>
 
           <div className="event-cards-top-grid">
             <div className="panel">
-              <div className="muted">Eligible candidates ({cardBuilderTotalRows})</div>
+              <div className="muted">
+                Eligible candidates ({cardBuilderTotalRows}){cardBuilderDetailBusy ? " | loading selected row..." : ""}
+              </div>
               <div className="overflow-auto rounded-xl border border-slate-700 bg-slate-900 shadow-sm" style={{ maxHeight: 430 }}>
                 <table className="event-cards-table w-full border-collapse text-xs text-slate-200">
                   <thead className="sticky top-0 z-30 bg-slate-800">
@@ -2610,7 +2627,7 @@ export default function HomePage() {
                         <tr
                           key={`builder-${row.winner_row_id}`}
                           className={`${stripe} cursor-pointer ${selected ? "ring-1 ring-cyan-500" : ""}`}
-                          onClick={() => applyCardBuilderRow(row)}
+                          onClick={() => void run(() => applyCardBuilderRow(row))}
                         >
                           <td className="border-b border-slate-700 px-3 py-2">{selected ? "✓" : ""}</td>
                           <td className="border-b border-slate-700 px-3 py-2">
