@@ -184,6 +184,37 @@ table:not(.event-cards-table) td {
   overflow: hidden;
 }
 
+.card-builder-preview-loading {
+  width: 310.8px;
+  height: 482.4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  border: 1px solid #334155;
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.92) 0%, rgba(2, 6, 23, 0.98) 100%);
+}
+
+.card-builder-preview-loading-spinner {
+  width: 36px;
+  height: 36px;
+  border-radius: 9999px;
+  border: 3px solid rgba(148, 163, 184, 0.25);
+  border-top-color: #22d3ee;
+  animation: card-builder-spin 0.9s linear infinite;
+}
+
+@keyframes card-builder-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .card-builder-flip-inner {
   position: relative;
   width: 100%;
