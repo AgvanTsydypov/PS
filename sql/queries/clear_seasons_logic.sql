@@ -72,7 +72,11 @@ DELETE FROM season_events_log;
 DO $$
 BEGIN
   IF to_regclass('public.winner_wallets_nft_to_claim') IS NOT NULL THEN
-    TRUNCATE TABLE claims, seasons, season_events_log, winner_wallets_nft_to_claim RESTART IDENTITY;
+    IF to_regclass('public.user_generated_cards') IS NOT NULL THEN
+      TRUNCATE TABLE claims, seasons, season_events_log, user_generated_cards, winner_wallets_nft_to_claim RESTART IDENTITY;
+    ELSE
+      TRUNCATE TABLE claims, seasons, season_events_log, winner_wallets_nft_to_claim RESTART IDENTITY;
+    END IF;
   ELSIF to_regclass('public.season_origin_wallets') IS NOT NULL THEN
     TRUNCATE TABLE claims, seasons, season_events_log, season_origin_wallets RESTART IDENTITY;
   ELSE

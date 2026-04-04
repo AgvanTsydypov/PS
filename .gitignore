@@ -76,3 +76,4 @@ my-keypair.json
 .env.prod
 
 GeminiWatermarkTool
+user_web_backend/generated_cards/

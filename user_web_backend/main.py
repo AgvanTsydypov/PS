@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import mimetypes
 import os
 import secrets
 import sys
@@ -19,6 +21,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import jwt
 import psycopg2
+import psycopg2.extras
+try:
+    import boto3
+    from botocore.config import Config
+except Exception:  # pragma: no cover - keep import resilient in minimal envs
+    boto3 = None
+    Config = None
 from dotenv import load_dotenv
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -46,6 +55,7 @@ if project_root not in sys.path:
 
 from scripts.season_manager import SeasonManager
 from admin_backend.main import BLOCKCHAIN_BASE_ZORA, MintClaimRequest, SeasonWorkbenchService
+from scripts.cardgen.generate_card import detect_pattern, generate_card_back_svg, generate_card_svg
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +118,14 @@ class UserMintResponse(BaseModel):
     failed_claims: List[Dict[str, Any]]
 
 
+class UserGeneratedCardResponse(BaseModel):
+    status: str
+    message: str
+    card: Dict[str, Any]
+    remaining_available: int
+    total_available: int
+
+
 class RateLimitConfig(BaseModel):
     window_seconds: int
     max_requests: int
@@ -163,6 +181,14 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
         max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_NFTS_MAX", "30")),
     ),
+    "/api/me/cards": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_USER_CARDS_MAX", "30")),
+    ),
+    "/api/cards/get": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_GET_CARD_MAX", "20")),
+    ),
     "/api/wallet-ticker": RateLimitConfig(
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
         max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_TICKER_MAX", "30")),
@@ -198,6 +224,35 @@ BLOCKSCOUT_REQUEST_HEADERS: Dict[str, str] = {
 }
 _nft_cache_lock = threading.Lock()
 _nft_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_r2_client: Any = None
+
+CARD_SEASON_TYPE_OPTIONS = ("standard", "genesis")
+CARD_ENTRY_BRACKET_OPTIONS = (
+    "[0.00 - 0.20]",
+    "[0.20 - 0.40]",
+    "[0.40 - 0.60]",
+    "[0.60 - 0.80]",
+    "[0.80 - 0.97]",
+)
+CARD_TIER_OPTIONS = ("P99", "P90", "P70", "P50", "BASE")
+CARD_ARCHETYPE_OPTIONS = (
+    "THE ANOMALY",
+    "THE SIGNAL",
+    "THE VECTOR",
+    "THE EQUILIBRIUM",
+    "THE HARVESTER",
+    "THE MARTYR",
+    "THE AMASSER",
+    "THE SUBSTRATE",
+    "THE OPERATOR",
+)
+LEGACY_ENTRY_BRACKET_MAP: Dict[str, str] = {
+    "ANOMALY": "[0.00 - 0.20]",
+    "ORACLE": "[0.20 - 0.40]",
+    "OUTLIER": "[0.40 - 0.60]",
+    "VECTOR": "[0.60 - 0.80]",
+    "HARVESTER": "[0.80 - 0.97]",
+}
 
 
 def _cleanup_expired_challenges() -> None:
@@ -316,6 +371,479 @@ def _warn_if_claims_uniqueness_index_missing() -> None:
         logger.exception("Could not verify presence of index %s", CLAIMS_UNIQUENESS_INDEX_NAME)
     finally:
         conn.close()
+
+
+def _ensure_user_generated_cards_schema() -> None:
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_generated_cards (
+                    id BIGSERIAL PRIMARY KEY,
+                    slug TEXT NOT NULL UNIQUE,
+                    owner_wallet VARCHAR(42) NOT NULL,
+                    owner_proxy_wallet TEXT,
+                    winner_row_id BIGINT NOT NULL UNIQUE,
+                    season_id INTEGER NOT NULL,
+                    event_id TEXT,
+                    event_slug TEXT,
+                    card_title TEXT,
+                    primary_tag TEXT,
+                    secondary_tag TEXT,
+                    pattern TEXT,
+                    front_image_path TEXT NOT NULL,
+                    back_image_path TEXT NOT NULL,
+                    card_payload_json JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT fk_generated_card_winner_row
+                        FOREIGN KEY (winner_row_id) REFERENCES winner_wallets_nft_to_claim(id) ON DELETE CASCADE,
+                    CONSTRAINT fk_generated_card_season
+                        FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
+                    CONSTRAINT generated_card_owner_wallet_format_check
+                        CHECK (owner_wallet ~* '^0x[a-f0-9]{40}$')
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_generated_cards_owner_wallet_lower
+                ON user_generated_cards(LOWER(owner_wallet), created_at DESC)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_generated_cards_created_at
+                ON user_generated_cards(created_at DESC)
+                """
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("Failed to ensure user_generated_cards schema")
+        raise
+    finally:
+        conn.close()
+
+
+def _r2_required_env() -> Dict[str, str]:
+    endpoint = str(os.getenv("R2_ENDPOINT", "")).strip()
+    bucket = str(os.getenv("R2_BUCKET", "")).strip()
+    access_key = str(os.getenv("R2_ACCESS_KEY_ID", "")).strip()
+    secret_key = str(os.getenv("R2_SECRET_ACCESS_KEY", "")).strip()
+    public_base_url = str(os.getenv("R2_PUBLIC_BASE_URL", "")).strip().rstrip("/")
+    if not endpoint:
+        raise ValueError("R2_ENDPOINT is required")
+    if not bucket:
+        raise ValueError("R2_BUCKET is required")
+    if not access_key:
+        raise ValueError("R2_ACCESS_KEY_ID is required")
+    if not secret_key:
+        raise ValueError("R2_SECRET_ACCESS_KEY is required")
+    if not public_base_url:
+        raise ValueError("R2_PUBLIC_BASE_URL is required")
+    return {
+        "endpoint": endpoint,
+        "bucket": bucket,
+        "access_key": access_key,
+        "secret_key": secret_key,
+        "public_base_url": public_base_url,
+    }
+
+
+def _get_r2_client() -> Any:
+    global _r2_client
+    if boto3 is None or Config is None:
+        raise ValueError("R2 upload dependencies are missing. Install boto3 and botocore.")
+    if _r2_client is not None:
+        return _r2_client
+    cfg = _r2_required_env()
+    _r2_client = boto3.client(
+        "s3",
+        endpoint_url=cfg["endpoint"],
+        aws_access_key_id=cfg["access_key"],
+        aws_secret_access_key=cfg["secret_key"],
+        region_name="auto",
+        config=Config(signature_version="s3v4"),
+    )
+    return _r2_client
+
+
+def _generated_card_r2_key(slug: str, side: str) -> str:
+    prefix = str(os.getenv("R2_PREFIX", "dev")).strip().strip("/")
+    safe_slug = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(slug or "").strip())
+    safe_side = "front" if side == "front" else "back"
+    if prefix:
+        return f"{prefix}/cards-images/{safe_slug}/{safe_side}.svg"
+    return f"cards-images/{safe_slug}/{safe_side}.svg"
+
+
+def _extract_r2_key_from_public_url(public_base_url: str, url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    base = public_base_url.rstrip("/")
+    value = str(url).strip()
+    if not value.startswith(base + "/"):
+        return None
+    return value[len(base) + 1 :]
+
+
+def _delete_r2_object_by_key(key: Optional[str]) -> None:
+    if not key:
+        return
+    try:
+        cfg = _r2_required_env()
+        _get_r2_client().delete_object(Bucket=cfg["bucket"], Key=key)
+    except Exception:
+        logger.warning("Could not delete generated card asset from R2 key=%s", key, exc_info=True)
+
+
+def _upload_generated_card_assets_to_r2(slug: str, front_svg: str, back_svg: str) -> Tuple[str, str, str, str]:
+    cfg = _r2_required_env()
+    front_key = _generated_card_r2_key(slug, "front")
+    back_key = _generated_card_r2_key(slug, "back")
+    client = _get_r2_client()
+    common_kwargs = {
+        "Bucket": cfg["bucket"],
+        "ContentType": "image/svg+xml",
+        "CacheControl": "public, max-age=31536000, immutable",
+    }
+    client.put_object(Key=front_key, Body=front_svg.encode("utf-8"), **common_kwargs)
+    client.put_object(Key=back_key, Body=back_svg.encode("utf-8"), **common_kwargs)
+    return (
+        f"{cfg['public_base_url']}/{front_key}",
+        f"{cfg['public_base_url']}/{back_key}",
+        front_key,
+        back_key,
+    )
+
+
+def _update_generated_card_asset_urls(slug: str, front_url: str, back_url: str) -> None:
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE user_generated_cards
+                SET front_image_path = %s,
+                    back_image_path = %s
+                WHERE slug = %s
+                """,
+                (front_url, back_url, slug),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("Failed to update generated card asset urls slug=%s", slug)
+        raise
+    finally:
+        conn.close()
+
+
+def _normalize_choice(raw: Optional[str], options: Tuple[str, ...], fallback: str) -> str:
+    value = str(raw or "").strip().upper()
+    for option in options:
+        if option.upper() == value:
+            return option
+    return fallback
+
+
+def _normalize_entry_bracket(raw: Optional[str]) -> str:
+    value = str(raw or "").strip().upper()
+    if value in LEGACY_ENTRY_BRACKET_MAP:
+        return LEGACY_ENTRY_BRACKET_MAP[value]
+    return _normalize_choice(value, CARD_ENTRY_BRACKET_OPTIONS, "[0.80 - 0.97]")
+
+
+def _infer_archetype_from_metrics(
+    entry_bracket: str,
+    edge_raw: Optional[str],
+    yield_raw: Optional[str],
+    gravity_raw: Optional[str],
+) -> str:
+    edge = _normalize_choice(edge_raw, CARD_TIER_OPTIONS, "BASE")
+    yld = _normalize_choice(yield_raw, CARD_TIER_OPTIONS, "BASE")
+    grav = _normalize_choice(gravity_raw, CARD_TIER_OPTIONS, "BASE")
+
+    if (
+        entry_bracket != "[0.80 - 0.97]"
+        and (
+            (entry_bracket == "[0.00 - 0.20]" and edge == "P99" and yld == "P99" and grav == "P99")
+            or (entry_bracket == "[0.20 - 0.40]" and edge == "P90" and yld == "P90" and grav == "P90")
+            or (entry_bracket == "[0.40 - 0.60]" and edge == "P70" and yld == "P70" and grav == "P70")
+            or (entry_bracket == "[0.60 - 0.80]" and edge == "P50" and yld == "P50" and grav == "P50")
+        )
+    ):
+        return "THE ANOMALY"
+    if (
+        (entry_bracket == "[0.00 - 0.20]" or entry_bracket == "[0.20 - 0.40]")
+        and (edge == "P99" or edge == "P90")
+        and (yld == "P99" or yld == "P90")
+    ):
+        return "THE SIGNAL"
+    if entry_bracket == "[0.40 - 0.60]" and (edge == "P99" or edge == "P90") and (yld == "P99" or yld == "P90"):
+        return "THE VECTOR"
+    if (
+        (edge == "P99" or edge == "P90" or edge == "P70")
+        and (yld == "P99" or yld == "P90" or yld == "P70")
+        and (grav == "P99" or grav == "P90" or grav == "P70")
+    ):
+        return "THE EQUILIBRIUM"
+    if (
+        (entry_bracket == "[0.60 - 0.80]" or entry_bracket == "[0.80 - 0.97]")
+        and (grav == "P99" or grav == "P90")
+        and (edge == "BASE" or edge == "P50")
+        and (yld == "BASE" or yld == "P50")
+    ):
+        return "THE HARVESTER"
+    if (
+        (entry_bracket == "[0.00 - 0.20]" or entry_bracket == "[0.20 - 0.40]")
+        and (edge == "P99" or edge == "P90" or edge == "P70")
+        and (yld == "BASE" or yld == "P50")
+    ):
+        return "THE MARTYR"
+    if grav == "P99" or grav == "P90":
+        return "THE AMASSER"
+    if (
+        (entry_bracket == "[0.60 - 0.80]" or entry_bracket == "[0.80 - 0.97]")
+        and (edge == "BASE" or edge == "P50")
+        and (yld == "BASE" or yld == "P50")
+        and (grav == "BASE" or grav == "P50" or grav == "P70")
+    ):
+        return "THE SUBSTRATE"
+    return "THE OPERATOR"
+
+
+def _build_card_payload_from_source_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    normalized_entry_bracket = _normalize_entry_bracket(row.get("entry_bracket"))
+    normalized_edge = _normalize_choice(row.get("edge"), CARD_TIER_OPTIONS, "BASE")
+    normalized_yield = _normalize_choice(row.get("yield"), CARD_TIER_OPTIONS, "BASE")
+    normalized_gravity = _normalize_choice(row.get("gravity"), CARD_TIER_OPTIONS, "BASE")
+    inferred_archetype = _infer_archetype_from_metrics(
+        normalized_entry_bracket,
+        normalized_edge,
+        normalized_yield,
+        normalized_gravity,
+    )
+    normalized_archetype = _normalize_choice(row.get("archetype"), CARD_ARCHETYPE_OPTIONS, inferred_archetype)
+    return {
+        "season_type": _normalize_choice(row.get("season_type"), CARD_SEASON_TYPE_OPTIONS, "standard").lower(),
+        "season_number": int(row.get("season_number") or 1),
+        "recurrence": str(row.get("reccurence")) if row.get("reccurence") else None,
+        "claim_type": "looter",
+        "image_url": str(row.get("manual_image_url") or "").strip(),
+        "card_title": str(row.get("card_title") or "").strip(),
+        "card_lore": str(row.get("card_lore") or "").strip(),
+        "primary_tag": str(row.get("primary_tag") or "UNKNOWN").strip() or "UNKNOWN",
+        "primary_tag_color": str(row.get("primary_tag_hex_color") or "#FFFFFF").strip() or "#FFFFFF",
+        "secondary_tag": str(row.get("secondary_tag") or "NONE").strip() or "NONE",
+        "entry_bracket": normalized_entry_bracket,
+        "archetype": normalized_archetype,
+        "archetype_description": str(row.get("archetype_description") or "").strip(),
+        "archetype_math": str(row.get("archetype_math") or "").strip(),
+        "proxy_wallet": str(row.get("proxy_wallet") or "").strip(),
+        "edge": normalized_edge,
+        "yield": normalized_yield,
+        "gravity": normalized_gravity,
+        "leaderboard_rank": int(row.get("rank") or 0),
+    }
+
+
+def _generated_card_slug(season_type: Optional[str], season_number: Any) -> str:
+    normalized_type = "".join(
+        ch.lower() if ch.isalnum() else "-"
+        for ch in str(season_type or "season").strip()
+    ).strip("-") or "season"
+    try:
+        normalized_number = str(int(season_number))
+    except Exception:
+        normalized_number = "0"
+    random_chunk = secrets.token_hex(16)
+    uuid_chunk = uuid.uuid4().hex
+    return f"card-{normalized_type}-s{normalized_number}-{random_chunk}-{uuid_chunk}"
+
+
+def _absolute_asset_url(request: Request, asset_path: str) -> str:
+    if asset_path.startswith("http://") or asset_path.startswith("https://"):
+        return asset_path
+    return urllib.parse.urljoin(str(request.base_url), asset_path.lstrip("/"))
+
+
+def _remote_image_to_data_uri(image_url: str) -> str:
+    normalized = str(image_url or "").strip()
+    if not normalized or normalized.startswith("data:"):
+        return normalized
+    if not normalized.startswith(("http://", "https://")):
+        return normalized
+
+    req = urllib.request.Request(
+        normalized,
+        method="GET",
+        headers={
+            "Accept": "image/*,*/*;q=0.8",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+        },
+    )
+    with urllib.request.urlopen(req, timeout=POLYMARKET_REQUEST_TIMEOUT_SECONDS) as response:
+        raw = response.read()
+        if not raw:
+            raise ValueError("Downloaded image is empty")
+        content_type = str(response.headers.get_content_type() or "").strip().lower()
+
+    guessed_type, _ = mimetypes.guess_type(normalized)
+    mime_type = content_type if content_type and content_type != "application/octet-stream" else (guessed_type or "image/jpeg")
+    encoded = base64.b64encode(raw).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _build_render_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    render_payload = dict(payload or {})
+    image_url = str(render_payload.get("image_url") or "").strip()
+    if image_url.startswith(("http://", "https://")):
+        try:
+            render_payload["image_url"] = _remote_image_to_data_uri(image_url)
+        except Exception:
+            logger.exception("Failed to embed generated card image url=%s", image_url)
+    return render_payload
+
+
+def _ensure_generated_card_assets_on_r2(row: Dict[str, Any]) -> Dict[str, Any]:
+    slug = str(row.get("slug") or "").strip()
+    if not slug:
+        return row
+    cfg = _r2_required_env()
+    current_front = str(row.get("front_image_path") or "").strip()
+    current_back = str(row.get("back_image_path") or "").strip()
+    front_key = _extract_r2_key_from_public_url(cfg["public_base_url"], current_front)
+    back_key = _extract_r2_key_from_public_url(cfg["public_base_url"], current_back)
+    if front_key and back_key:
+        return row
+
+    payload_raw = row.get("card_payload_json")
+    if isinstance(payload_raw, str):
+        try:
+            payload_raw = json.loads(payload_raw)
+        except json.JSONDecodeError:
+            payload_raw = {}
+    if not isinstance(payload_raw, dict):
+        return row
+
+    render_payload = _build_render_payload(payload_raw)
+    front_svg = generate_card_svg(render_payload)
+    back_svg = generate_card_back_svg(render_payload)
+    front_url, back_url, _, _ = _upload_generated_card_assets_to_r2(slug, front_svg, back_svg)
+    _update_generated_card_asset_urls(slug, front_url, back_url)
+    row["front_image_path"] = front_url
+    row["back_image_path"] = back_url
+    return row
+
+
+def _load_card_source_row(cursor: Any, winner_row_id: int) -> Optional[Dict[str, Any]]:
+    cursor.execute(
+        """
+        SELECT
+            w.id AS winner_row_id,
+            w.season_id,
+            s.type AS season_type,
+            s.season_number,
+            w.proxy_wallet,
+            w.event_id,
+            w.event_slug,
+            e.title AS event_title,
+            w.entry_bracket,
+            p.archetype,
+            p.archetype_description,
+            p.archetype_math,
+            w.edge,
+            w.yield,
+            w.gravity,
+            w.rank,
+            ec.reccurence,
+            ec.manual_image_url,
+            ec.card_title,
+            ec.card_lore,
+            ec.primary_tag,
+            ec.secondary_tag,
+            tp.hex_color AS primary_tag_hex_color
+        FROM winner_wallets_nft_to_claim w
+        JOIN event_cards ec ON ec.event_id = w.event_id
+        LEFT JOIN LATERAL (
+            SELECT
+                p.archetype,
+                p.archetype_description,
+                p.archetype_math
+            FROM participants p
+            WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
+              AND (
+                  (w.event_id IS NOT NULL AND p.event_id = w.event_id)
+                  OR
+                  (w.event_slug IS NOT NULL AND p.event_slug = w.event_slug)
+              )
+            ORDER BY
+                CASE
+                    WHEN w.event_id IS NOT NULL AND p.event_id = w.event_id THEN 0
+                    WHEN w.event_slug IS NOT NULL AND p.event_slug = w.event_slug THEN 1
+                    ELSE 2
+                END,
+                p.rank ASC NULLS LAST
+            LIMIT 1
+        ) p ON TRUE
+        LEFT JOIN events e ON e.id = w.event_id
+        LEFT JOIN seasons s ON s.id = w.season_id
+        LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+        WHERE w.id = %s
+          AND ec.manual_image_url IS NOT NULL
+          AND BTRIM(ec.manual_image_url) <> ''
+        LIMIT 1
+        """,
+        (winner_row_id,),
+    )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def _generated_cards_supply_counts(cursor: Any) -> Tuple[int, int]:
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS total_count
+        FROM winner_wallets_nft_to_claim w
+        JOIN event_cards ec ON ec.event_id = w.event_id
+        WHERE ec.manual_image_url IS NOT NULL
+          AND BTRIM(ec.manual_image_url) <> ''
+        """
+    )
+    total_row = cursor.fetchone()
+    total_available = int(
+        (total_row.get("total_count") if isinstance(total_row, dict) else total_row[0]) if total_row else 0
+    )
+    cursor.execute("SELECT COUNT(*) AS claimed_count FROM user_generated_cards")
+    claimed_row = cursor.fetchone()
+    claimed_count = int(
+        (claimed_row.get("claimed_count") if isinstance(claimed_row, dict) else claimed_row[0]) if claimed_row else 0
+    )
+    remaining_available = max(total_available - claimed_count, 0)
+    return total_available, remaining_available
+
+
+def _format_generated_card_row(row: Dict[str, Any], request: Request, include_payload: bool = True) -> Dict[str, Any]:
+    payload = _ensure_generated_card_assets_on_r2(dict(row))
+    created_at = payload.get("created_at")
+    if isinstance(created_at, datetime):
+        payload["created_at"] = created_at.astimezone(timezone.utc).isoformat()
+    payload["front_image_url"] = _absolute_asset_url(request, str(payload.get("front_image_path") or ""))
+    payload["back_image_url"] = _absolute_asset_url(request, str(payload.get("back_image_path") or ""))
+    if isinstance(payload.get("card_payload_json"), str):
+        try:
+            payload["card_payload_json"] = json.loads(payload["card_payload_json"])
+        except json.JSONDecodeError:
+            payload["card_payload_json"] = {}
+    if not include_payload:
+        payload.pop("card_payload_json", None)
+    return payload
 
 
 def _fetch_polymarket_public_profile(wallet_address: str) -> Dict[str, Any]:
@@ -829,6 +1357,7 @@ async def rate_limit_middleware(request: Request, call_next):
 @app.on_event("startup")
 def startup_checks() -> None:
     _warn_if_claims_uniqueness_index_missing()
+    _ensure_user_generated_cards_schema()
 
 
 @app.get("/api/health")
@@ -1148,6 +1677,245 @@ def me_nfts(request: Request) -> Dict[str, Any]:
     if not Web3.is_address(connected_wallet):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
     return _get_user_nfts_cached(connected_wallet)
+
+
+@app.get("/api/me/cards")
+def me_cards(request: Request) -> Dict[str, Any]:
+    connected_wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(connected_wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+
+    conn = _get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    id,
+                    slug,
+                    owner_wallet,
+                    owner_proxy_wallet,
+                    winner_row_id,
+                    season_id,
+                    event_id,
+                    event_slug,
+                    card_title,
+                    primary_tag,
+                    secondary_tag,
+                    pattern,
+                    front_image_path,
+                    back_image_path,
+                    card_payload_json,
+                    created_at
+                FROM user_generated_cards
+                WHERE LOWER(owner_wallet) = LOWER(%s)
+                ORDER BY created_at DESC, id DESC
+                """,
+                (connected_wallet,),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+            total_available, remaining_available = _generated_cards_supply_counts(cursor)
+    except Exception:
+        logger.exception("Failed to load generated cards for wallet=%s", connected_wallet)
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    finally:
+        conn.close()
+
+    return {
+        "wallet_address": connected_wallet,
+        "items": [_format_generated_card_row(row, request=request, include_payload=True) for row in rows],
+        "total": len(rows),
+        "total_available": total_available,
+        "remaining_available": remaining_available,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/cards/{slug}")
+def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
+    normalized_slug = str(slug or "").strip()
+    if not normalized_slug:
+        raise HTTPException(status_code=400, detail="Card slug is required")
+
+    conn = _get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    id,
+                    slug,
+                    owner_wallet,
+                    owner_proxy_wallet,
+                    winner_row_id,
+                    season_id,
+                    event_id,
+                    event_slug,
+                    card_title,
+                    primary_tag,
+                    secondary_tag,
+                    pattern,
+                    front_image_path,
+                    back_image_path,
+                    card_payload_json,
+                    created_at
+                FROM user_generated_cards
+                WHERE slug = %s
+                LIMIT 1
+                """,
+                (normalized_slug,),
+            )
+            row = cursor.fetchone()
+    except Exception:
+        logger.exception("Failed to load generated card slug=%s", normalized_slug)
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Card not found")
+    return {"card": _format_generated_card_row(dict(row), request=request, include_payload=True)}
+
+
+@app.post("/api/cards/get")
+def get_card(request: Request) -> UserGeneratedCardResponse:
+    owner_wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(owner_wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+    owner_proxy_wallet = _load_proxy_wallet_for_user_wallet(owner_wallet)
+
+    slug: Optional[str] = None
+    uploaded_front_key: Optional[str] = None
+    uploaded_back_key: Optional[str] = None
+    conn = _get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT w.id
+                FROM winner_wallets_nft_to_claim w
+                JOIN event_cards ec ON ec.event_id = w.event_id
+                LEFT JOIN user_generated_cards gc ON gc.winner_row_id = w.id
+                WHERE ec.manual_image_url IS NOT NULL
+                  AND BTRIM(ec.manual_image_url) <> ''
+                  AND gc.id IS NULL
+                ORDER BY RANDOM()
+                FOR UPDATE OF w SKIP LOCKED
+                LIMIT 1
+                """
+            )
+            winner_row = cursor.fetchone()
+            if not winner_row:
+                total_available, _ = _generated_cards_supply_counts(cursor)
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "All cards have already been generated."
+                        if total_available > 0
+                        else "No card-builder rows with manual images are available yet."
+                    ),
+                )
+
+            winner_row_id = int(winner_row["id"])
+            source_row = _load_card_source_row(cursor, winner_row_id=winner_row_id)
+            if not source_row:
+                raise HTTPException(status_code=400, detail="Selected row has no renderable card payload")
+
+            payload = _build_card_payload_from_source_row(source_row)
+            slug = _generated_card_slug(payload.get("season_type"), payload.get("season_number"))
+            image_url = str(payload.get("image_url") or "").strip()
+            if not image_url:
+                raise HTTPException(status_code=400, detail="Selected row is missing manual image URL")
+
+            render_payload = _build_render_payload(payload)
+            front_svg = generate_card_svg(render_payload)
+            back_svg = generate_card_back_svg(render_payload)
+            pattern = detect_pattern(payload)
+            front_image_path, back_image_path, uploaded_front_key, uploaded_back_key = _upload_generated_card_assets_to_r2(
+                slug,
+                front_svg,
+                back_svg,
+            )
+
+            cursor.execute(
+                """
+                INSERT INTO user_generated_cards (
+                    slug,
+                    owner_wallet,
+                    owner_proxy_wallet,
+                    winner_row_id,
+                    season_id,
+                    event_id,
+                    event_slug,
+                    card_title,
+                    primary_tag,
+                    secondary_tag,
+                    pattern,
+                    front_image_path,
+                    back_image_path,
+                    card_payload_json
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+                )
+                RETURNING
+                    id,
+                    slug,
+                    owner_wallet,
+                    owner_proxy_wallet,
+                    winner_row_id,
+                    season_id,
+                    event_id,
+                    event_slug,
+                    card_title,
+                    primary_tag,
+                    secondary_tag,
+                    pattern,
+                    front_image_path,
+                    back_image_path,
+                    card_payload_json,
+                    created_at
+                """,
+                (
+                    slug,
+                    owner_wallet,
+                    owner_proxy_wallet,
+                    winner_row_id,
+                    int(source_row.get("season_id") or 0),
+                    source_row.get("event_id"),
+                    source_row.get("event_slug"),
+                    str(payload.get("card_title") or ""),
+                    str(payload.get("primary_tag") or ""),
+                    str(payload.get("secondary_tag") or ""),
+                    pattern,
+                    front_image_path,
+                    back_image_path,
+                    json.dumps(payload),
+                ),
+            )
+            created_row = cursor.fetchone()
+            total_available, remaining_available = _generated_cards_supply_counts(cursor)
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        _delete_r2_object_by_key(uploaded_front_key)
+        _delete_r2_object_by_key(uploaded_back_key)
+        raise
+    except Exception:
+        conn.rollback()
+        _delete_r2_object_by_key(uploaded_front_key)
+        _delete_r2_object_by_key(uploaded_back_key)
+        logger.exception("Failed to generate card for wallet=%s", owner_wallet)
+        raise HTTPException(status_code=503, detail="Failed to generate card. Please retry shortly.")
+    finally:
+        conn.close()
+
+    return UserGeneratedCardResponse(
+        status="ok",
+        message="Card generated successfully",
+        card=_format_generated_card_row(dict(created_row), request=request, include_payload=True),
+        remaining_available=remaining_available,
+        total_available=total_available,
+    )
 
 
 @app.post("/api/mint/base-sepolia")

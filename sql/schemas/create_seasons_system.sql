@@ -374,6 +374,36 @@ COMMENT ON COLUMN winner_wallets_nft_to_claim.event_slug IS 'Participant event s
 
 DO $$ BEGIN RAISE NOTICE '✅ winner_wallets_nft_to_claim table created'; END $$;
 
+CREATE TABLE IF NOT EXISTS user_generated_cards (
+    id BIGSERIAL PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    owner_wallet VARCHAR(42) NOT NULL,
+    owner_proxy_wallet TEXT,
+    winner_row_id BIGINT NOT NULL UNIQUE,
+    season_id INTEGER NOT NULL,
+    event_id TEXT,
+    event_slug TEXT,
+    card_title TEXT,
+    primary_tag TEXT,
+    secondary_tag TEXT,
+    pattern TEXT,
+    front_image_path TEXT NOT NULL,
+    back_image_path TEXT NOT NULL,
+    card_payload_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_generated_card_winner_row
+        FOREIGN KEY (winner_row_id) REFERENCES winner_wallets_nft_to_claim(id) ON DELETE CASCADE,
+    CONSTRAINT fk_generated_card_season
+        FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
+    CONSTRAINT generated_card_owner_wallet_format_check
+        CHECK (owner_wallet ~* '^0x[a-f0-9]{40}$')
+);
+
+CREATE INDEX IF NOT EXISTS idx_generated_cards_owner_wallet_lower
+    ON user_generated_cards(LOWER(owner_wallet), created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_generated_cards_created_at
+    ON user_generated_cards(created_at DESC);
+
 -- Performance indexes for wallet lookup paths used by /api/wallets.
 CREATE INDEX IF NOT EXISTS idx_claims_season_user_wallet_lower
     ON claims(season_id, LOWER(user_wallet));
