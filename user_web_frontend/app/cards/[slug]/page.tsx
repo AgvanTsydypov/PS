@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import SiteLogoLink from "../../../components/SiteLogoLink";
+
 type GeneratedCardPayload = {
   card_title?: string;
   primary_tag?: string;
@@ -95,9 +97,12 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
 
   return (
     <main className="card-detail-page">
-      <Link href="/" className="card-detail-backlink">
-        Back to user site
-      </Link>
+      <div className="card-detail-backlinks">
+        <SiteLogoLink className="card-detail-logo-link" />
+        <Link href="/me" className="card-detail-backlink card-detail-backlink-secondary">
+          My dashboard
+        </Link>
+      </div>
 
       <section className="card-detail-shell">
         {loading ? (
