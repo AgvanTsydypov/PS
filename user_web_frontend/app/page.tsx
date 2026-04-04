@@ -136,6 +136,53 @@ type WalletTickerResponse = {
   fetched_at: string;
 };
 
+type GeneratedCardPayload = {
+  card_title?: string;
+  primary_tag?: string;
+  secondary_tag?: string;
+  season_type?: string;
+  season_number?: number;
+  archetype?: string;
+  leaderboard_rank?: number;
+  [key: string]: unknown;
+};
+
+type GeneratedCardItem = {
+  id: number;
+  slug: string;
+  owner_wallet: string;
+  owner_proxy_wallet?: string | null;
+  winner_row_id: number;
+  season_id: number;
+  event_id?: string | null;
+  event_slug?: string | null;
+  card_title?: string | null;
+  primary_tag?: string | null;
+  secondary_tag?: string | null;
+  pattern?: string | null;
+  front_image_url: string;
+  back_image_url: string;
+  card_payload_json?: GeneratedCardPayload;
+  created_at: string;
+};
+
+type GeneratedCardsResponse = {
+  wallet_address: string;
+  items: GeneratedCardItem[];
+  total: number;
+  total_available: number;
+  remaining_available: number;
+  fetched_at: string;
+};
+
+type GeneratedCardCreateResponse = {
+  status: string;
+  message: string;
+  card: GeneratedCardItem;
+  total_available: number;
+  remaining_available: number;
+};
+
 const apiBase =
   process.env.NEXT_PUBLIC_USER_API_BASE_URL ??
   (process.env.NODE_ENV === "development" ? "http://localhost:8011" : "/");
@@ -228,8 +275,22 @@ export default function HomePage() {
   const [myNftsLoading, setMyNftsLoading] = useState(false);
   const [myNftsError, setMyNftsError] = useState("");
   const [myNftsFetchedAt, setMyNftsFetchedAt] = useState<string | null>(null);
+  const [myCards, setMyCards] = useState<GeneratedCardItem[]>([]);
+  const [myCardsLoading, setMyCardsLoading] = useState(false);
+  const [myCardsError, setMyCardsError] = useState("");
+  const [myCardsFetchedAt, setMyCardsFetchedAt] = useState<string | null>(null);
+  const [generatedCardsTotalAvailable, setGeneratedCardsTotalAvailable] = useState(0);
+  const [generatedCardsRemainingAvailable, setGeneratedCardsRemainingAvailable] = useState(0);
+  const [getCardLoading, setGetCardLoading] = useState(false);
+  const [getCardResultText, setGetCardResultText] = useState("");
+  const [flippedCardSlugs, setFlippedCardSlugs] = useState<Record<string, boolean>>({});
+  const [animatingCardSlugs, setAnimatingCardSlugs] = useState<Record<string, boolean>>({});
+  const generatedCardFlipTimerRef = useRef<Record<string, number | null>>({});
   const [tickerWallets, setTickerWallets] = useState<string[]>([]);
   const [isWalletButtonHovered, setIsWalletButtonHovered] = useState(false);
+  const [isWalletPanelHovered, setIsWalletPanelHovered] = useState(false);
+  const [isWalletPanelCollapsed, setIsWalletPanelCollapsed] = useState(false);
+  const walletPanelCollapseTimerRef = useRef<number | null>(null);
 
   // Wallet that was selected by the user in the picker — used for sign-in
   const selectedProviderRef = useRef<EthProvider | null>(null);
@@ -349,10 +410,50 @@ export default function HomePage() {
       setMyNfts([]);
       setMyNftsError("");
       setMyNftsFetchedAt(null);
+      setMyCards([]);
+      setMyCardsError("");
+      setMyCardsFetchedAt(null);
+      setGeneratedCardsTotalAvailable(0);
+      setGeneratedCardsRemainingAvailable(0);
+      setFlippedCardSlugs({});
       return;
     }
     void refreshMyNfts();
+    void refreshMyCards();
   }, [isSignedIn, accessToken, walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (walletPanelCollapseTimerRef.current) {
+      window.clearTimeout(walletPanelCollapseTimerRef.current);
+      walletPanelCollapseTimerRef.current = null;
+    }
+
+    if (isWalletPanelHovered || showPicker) {
+      setIsWalletPanelCollapsed(false);
+      return;
+    }
+
+    walletPanelCollapseTimerRef.current = window.setTimeout(() => {
+      setIsWalletPanelCollapsed(true);
+      walletPanelCollapseTimerRef.current = null;
+    }, 750);
+
+    return () => {
+      if (walletPanelCollapseTimerRef.current) {
+        window.clearTimeout(walletPanelCollapseTimerRef.current);
+        walletPanelCollapseTimerRef.current = null;
+      }
+    };
+  }, [isWalletPanelHovered, showPicker]);
+
+  useEffect(() => {
+    const flipTimers = generatedCardFlipTimerRef.current;
+    return () => {
+      Object.values(flipTimers).forEach((timerId) => {
+        if (timerId) window.clearTimeout(timerId);
+      });
+    };
+  }, []);
 
   // Build the list of wallet options shown in the picker.
   const walletOptions = useMemo<WalletOption[]>(() => {
@@ -474,6 +575,10 @@ export default function HomePage() {
     wrappers.forEach((wrapper) => {
       const card = wrapper.querySelector<HTMLElement>(".nft-card-tilt");
       if (!card) return;
+      if (card.classList.contains("generated-card-preview-card-flipping")) {
+        resetNftCardTilt(card);
+        return;
+      }
       // Use the transformed card bounds so scaled edges remain interactive.
       const rect = card.getBoundingClientRect();
       const isWithinProximity =
@@ -521,7 +626,13 @@ export default function HomePage() {
           setTraderRank(null);
           setStatusText("Session expired. Please connect wallet again.");
           setMyNfts([]);
+          setMyNftsError("");
           setMyNftsFetchedAt(null);
+          setMyCards([]);
+          setMyCardsError("");
+          setMyCardsFetchedAt(null);
+          setGeneratedCardsTotalAvailable(0);
+          setGeneratedCardsRemainingAvailable(0);
           window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
         }
@@ -538,6 +649,58 @@ export default function HomePage() {
       setMyNftsFetchedAt(null);
     } finally {
       setMyNftsLoading(false);
+    }
+  }
+
+  async function refreshMyCards() {
+    if (!accessToken || !isSignedIn) {
+      setMyCards([]);
+      setMyCardsError("");
+      setMyCardsFetchedAt(null);
+      setGeneratedCardsTotalAvailable(0);
+      setGeneratedCardsRemainingAvailable(0);
+      return;
+    }
+
+    setMyCardsLoading(true);
+    setMyCardsError("");
+    try {
+      const res = await fetch(buildApiUrl("/api/me/cards"), {
+        method: "GET",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        if (res.status === 401) {
+          setIsSignedIn(false);
+          setAccessToken("");
+          setProxyWallet(null);
+          setTraderRank(null);
+          setStatusText("Session expired. Please connect wallet again.");
+          setMyNfts([]);
+          setMyNftsFetchedAt(null);
+          setMyCards([]);
+          setMyCardsFetchedAt(null);
+          window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+          clearStoredSessionMeta();
+        }
+        const text = await res.text();
+        throw new Error(text || "Failed to load generated cards");
+      }
+      const payload = (await res.json()) as GeneratedCardsResponse;
+      setMyCards(Array.isArray(payload.items) ? payload.items : []);
+      setMyCardsFetchedAt(String(payload.fetched_at ?? ""));
+      setGeneratedCardsTotalAvailable(Number(payload.total_available) || 0);
+      setGeneratedCardsRemainingAvailable(Number(payload.remaining_available) || 0);
+      setMyCardsError("");
+    } catch (error) {
+      setMyCardsError(extractErrorMessage(error));
+      setMyCards([]);
+      setMyCardsFetchedAt(null);
+      setGeneratedCardsTotalAvailable(0);
+      setGeneratedCardsRemainingAvailable(0);
+      setFlippedCardSlugs({});
+    } finally {
+      setMyCardsLoading(false);
     }
   }
 
@@ -563,15 +726,50 @@ export default function HomePage() {
     setMyNfts([]);
     setMyNftsError("");
     setMyNftsFetchedAt(null);
+    setMyCards([]);
+    setMyCardsError("");
+    setMyCardsFetchedAt(null);
+    setGeneratedCardsTotalAvailable(0);
+    setGeneratedCardsRemainingAvailable(0);
+    setFlippedCardSlugs({});
     setEligibilitySummary("");
     setEligibilityChecked(false);
     setCanMintNow(false);
     setMintResultText("");
+    setGetCardResultText("");
     setStatusText("Logged out");
     setIsWalletButtonHovered(false);
     selectedProviderRef.current = null;
     window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
     clearStoredSessionMeta();
+  }
+
+  function toggleGeneratedCardFlip(slug: string) {
+    setFlippedCardSlugs((prev) => ({
+      ...prev,
+      [slug]: !prev[slug],
+    }));
+  }
+
+  function triggerGeneratedCardFlip(slug: string, target: HTMLElement) {
+    resetNftCardTilt(target);
+    const existingTimer = generatedCardFlipTimerRef.current[slug];
+    if (existingTimer) window.clearTimeout(existingTimer);
+    setAnimatingCardSlugs((prev) => ({
+      ...prev,
+      [slug]: true,
+    }));
+    setFlippedCardSlugs((prev) => ({
+      ...prev,
+      [slug]: !prev[slug],
+    }));
+    generatedCardFlipTimerRef.current[slug] = window.setTimeout(() => {
+      setAnimatingCardSlugs((prev) => ({
+        ...prev,
+        [slug]: false,
+      }));
+      generatedCardFlipTimerRef.current[slug] = null;
+    }, 720);
   }
 
   function handleAuthButtonClick() {
@@ -631,6 +829,7 @@ export default function HomePage() {
       setEligibilityChecked(false);
       setCanMintNow(false);
       setMintResultText("");
+      setGetCardResultText("");
       const resolvedProxyWallet = String(verify.proxy_wallet ?? "").trim() || null;
       const resolvedTraderRank = String(verify.trader_rank ?? "").trim() || null;
       setProxyWallet(null);
@@ -657,6 +856,11 @@ export default function HomePage() {
         setMyNfts([]);
         setMyNftsError("");
         setMyNftsFetchedAt(null);
+        setMyCards([]);
+        setMyCardsError("");
+        setMyCardsFetchedAt(null);
+        setGeneratedCardsTotalAvailable(0);
+        setGeneratedCardsRemainingAvailable(0);
         clearStoredSessionMeta();
       }
     } catch (error) {
@@ -668,9 +872,15 @@ export default function HomePage() {
       setMyNfts([]);
       setMyNftsError("");
       setMyNftsFetchedAt(null);
+      setMyCards([]);
+      setMyCardsError("");
+      setMyCardsFetchedAt(null);
+      setGeneratedCardsTotalAvailable(0);
+      setGeneratedCardsRemainingAvailable(0);
       setEligibilityChecked(false);
       setCanMintNow(false);
       setMintResultText("");
+      setGetCardResultText("");
       window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
       clearStoredSessionMeta();
     } finally {
@@ -710,9 +920,15 @@ export default function HomePage() {
       setMyNfts([]);
       setMyNftsError("");
       setMyNftsFetchedAt(null);
+      setMyCards([]);
+      setMyCardsError("");
+      setMyCardsFetchedAt(null);
+      setGeneratedCardsTotalAvailable(0);
+      setGeneratedCardsRemainingAvailable(0);
       setEligibilityChecked(false);
       setCanMintNow(false);
       setMintResultText("");
+      setGetCardResultText("");
       window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
       clearStoredSessionMeta();
       await signInWith(provider, address, name);
@@ -760,6 +976,11 @@ export default function HomePage() {
           setMyNfts([]);
           setMyNftsError("");
           setMyNftsFetchedAt(null);
+          setMyCards([]);
+          setMyCardsError("");
+          setMyCardsFetchedAt(null);
+          setGeneratedCardsTotalAvailable(0);
+          setGeneratedCardsRemainingAvailable(0);
           setStatusText("Session expired. Please connect wallet again.");
           window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
@@ -826,6 +1047,11 @@ export default function HomePage() {
           setMyNfts([]);
           setMyNftsError("");
           setMyNftsFetchedAt(null);
+          setMyCards([]);
+          setMyCardsError("");
+          setMyCardsFetchedAt(null);
+          setGeneratedCardsTotalAvailable(0);
+          setGeneratedCardsRemainingAvailable(0);
           setStatusText("Session expired. Please connect wallet again.");
           window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
@@ -877,6 +1103,62 @@ export default function HomePage() {
       setMintResultText(`Mint failed: ${extractErrorMessage(error)}`);
     } finally {
       setMintLoading(false);
+    }
+  }
+
+  async function getGeneratedCard() {
+    if (!accessToken) {
+      setGetCardResultText("Get card failed: Please sign in again.");
+      return;
+    }
+    setGetCardLoading(true);
+    setGetCardResultText("");
+    try {
+      const res = await fetch(buildApiUrl("/api/cards/get"), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        if (res.status === 401) {
+          setIsSignedIn(false);
+          setAccessToken("");
+          setProxyWallet(null);
+          setTraderRank(null);
+          setMyNfts([]);
+          setMyNftsError("");
+          setMyNftsFetchedAt(null);
+          setMyCards([]);
+          setMyCardsError("");
+          setMyCardsFetchedAt(null);
+          setGeneratedCardsTotalAvailable(0);
+          setGeneratedCardsRemainingAvailable(0);
+          setStatusText("Session expired. Please connect wallet again.");
+          window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+          clearStoredSessionMeta();
+        }
+        const text = await res.text();
+        throw new Error(text || "Get card failed");
+      }
+      const payload = (await res.json()) as GeneratedCardCreateResponse;
+      const createdCard = payload.card;
+      const title =
+        String(createdCard.card_title ?? createdCard.card_payload_json?.card_title ?? "").trim() ||
+        "Untitled card";
+      setGeneratedCardsTotalAvailable(Number(payload.total_available) || 0);
+      setGeneratedCardsRemainingAvailable(Number(payload.remaining_available) || 0);
+      setGetCardResultText(
+        [
+          payload.message || "Card generated",
+          `slug: ${createdCard.slug}`,
+          `title: ${title}`,
+          `remaining_available: ${Number(payload.remaining_available) || 0} / ${Number(payload.total_available) || 0}`,
+        ].join("\n")
+      );
+      await refreshMyCards();
+    } catch (error) {
+      setGetCardResultText(`Get card failed: ${extractErrorMessage(error)}`);
+    } finally {
+      setGetCardLoading(false);
     }
   }
 
@@ -949,7 +1231,12 @@ export default function HomePage() {
         </div>
       )}
 
-      <aside className="auth-info-panel" aria-live="polite">
+      <aside
+        className={`auth-info-panel ${isWalletPanelCollapsed ? "is-collapsed" : ""}`}
+        aria-live="polite"
+        onMouseEnter={() => setIsWalletPanelHovered(true)}
+        onMouseLeave={() => setIsWalletPanelHovered(false)}
+      >
         <div className="auth-info-title">Wallet</div>
         <button
           className={`auth-connect-btn ${isSignedIn ? "connected" : ""}`}
@@ -1037,6 +1324,10 @@ export default function HomePage() {
           </p>
         ) : (
           <div className="season-board-actions">
+            <div className="season-board-stats">
+              <span>Test cards remaining</span>
+              <strong>{generatedCardsRemainingAvailable} / {generatedCardsTotalAvailable}</strong>
+            </div>
             <button onClick={() => void checkMintEligibility()} disabled={eligibilityLoading}>
               {eligibilityLoading ? "Checking..." : "Check mint eligibility"}
             </button>
@@ -1045,11 +1336,24 @@ export default function HomePage() {
                 {mintLoading ? "Minting on Base Sepolia..." : "Mint on Base Sepolia"}
               </button>
             ) : null}
+            <button
+              onClick={() => void getGeneratedCard()}
+              disabled={getCardLoading || generatedCardsRemainingAvailable <= 0}
+            >
+              {getCardLoading
+                ? "Generating card..."
+                : generatedCardsRemainingAvailable <= 0
+                  ? "All cards claimed"
+                  : "Get card"}
+            </button>
             {eligibilitySummary ? (
               <pre className="eligibility-output">{eligibilitySummary}</pre>
             ) : null}
             {mintResultText ? (
               <pre className="eligibility-output">{mintResultText}</pre>
+            ) : null}
+            {getCardResultText ? (
+              <pre className="eligibility-output">{getCardResultText}</pre>
             ) : null}
           </div>
         )}
@@ -1070,6 +1374,79 @@ export default function HomePage() {
           </div>
         </section>
       ) : null}
+
+      <section className="season-board season-board-standalone nft-board-horizontal">
+        <div className="season-board-title">My Cards</div>
+        {!isSignedIn ? (
+          <div className="season-board-muted">Sign in to generate and view your test cards.</div>
+        ) : (
+          <>
+            <div className="nft-actions">
+              <button onClick={() => void refreshMyCards()} disabled={myCardsLoading}>
+                {myCardsLoading ? "Loading cards..." : "Reload my cards"}
+              </button>
+              {myCardsFetchedAt ? (
+                <span className="nft-fetched-at">
+                  Updated: {new Date(myCardsFetchedAt).toLocaleString()}
+                </span>
+              ) : null}
+            </div>
+            {myCardsError ? (
+              <pre className="eligibility-output">Card load failed: {myCardsError}</pre>
+            ) : null}
+            {!myCardsLoading && !myCardsError && myCards.length === 0 ? (
+              <div className="season-board-muted">No generated cards in this wallet yet.</div>
+            ) : null}
+            <div className="nft-grid-wrap">
+              <div
+                className="nft-grid generated-card-grid"
+                onMouseMove={handleNftGridMouseMove}
+                onMouseLeave={handleNftGridMouseLeave}
+              >
+                {myCards.map((item) => {
+                  const isFlipped = Boolean(flippedCardSlugs[item.slug]);
+                  const isAnimating = Boolean(animatingCardSlugs[item.slug]);
+                  return (
+                    <div
+                      key={item.slug}
+                      className="generated-card-wrapper"
+                    >
+                      <div className="nft-card-wrapper generated-card-preview-wrapper">
+                        <article
+                          className={`nft-card nft-card-tilt theme-vivid generated-card-shell generated-card-preview-card ${isAnimating ? "generated-card-preview-card-flipping" : ""}`}
+                          onClick={(e) => triggerGeneratedCardFlip(item.slug, e.currentTarget)}
+                        >
+                          <div className={`generated-card-flip-inner ${isFlipped ? "is-flipped" : ""}`}>
+                            <div className="generated-card-flip-face generated-card-flip-face-front">
+                              {item.front_image_url ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img className="generated-card-image" src={item.front_image_url} alt={item.slug} />
+                              ) : (
+                                <div className="generated-card-image nft-image-empty">No preview</div>
+                              )}
+                            </div>
+                            <div className="generated-card-flip-face generated-card-flip-face-back">
+                              {item.back_image_url ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img className="generated-card-image" src={item.back_image_url} alt={`${item.slug} back`} />
+                              ) : (
+                                <div className="generated-card-image nft-image-empty">No back preview</div>
+                              )}
+                            </div>
+                          </div>
+                        </article>
+                      </div>
+                      <div className="generated-card-description">
+                        <a href={`/cards/${item.slug}`}>Open card page</a>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </>
+        )}
+      </section>
 
       <section className="season-board season-board-standalone nft-board-horizontal">
         <div className="season-board-title">My NFT Collection (on-chain)</div>
