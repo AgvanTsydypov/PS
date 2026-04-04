@@ -189,6 +189,10 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
         max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_GET_CARD_MAX", "20")),
     ),
+    "/api/cards/ticker": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_CARDS_TICKER_MAX", "40")),
+    ),
     "/api/wallet-ticker": RateLimitConfig(
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
         max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_TICKER_MAX", "30")),
@@ -1727,6 +1731,66 @@ def me_cards(request: Request) -> Dict[str, Any]:
         "total": len(rows),
         "total_available": total_available,
         "remaining_available": remaining_available,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/cards/ticker")
+def generated_cards_ticker(request: Request, limit: Optional[int] = None) -> Dict[str, Any]:
+    """Public random sample of generated card fronts for the home ticker (no auth)."""
+    env_default = int(os.getenv("USER_WEB_CARDS_TICKER_SAMPLE_SIZE", "40"))
+    ticker_default = max(1, min(env_default, 48))
+    if limit is None:
+        safe_limit = ticker_default
+    else:
+        try:
+            safe_limit = max(1, min(int(limit), 48))
+        except (TypeError, ValueError):
+            safe_limit = ticker_default
+
+    conn = _get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT slug, card_title, front_image_path, created_at
+                FROM user_generated_cards
+                ORDER BY RANDOM()
+                LIMIT %s
+                """,
+                (safe_limit,),
+            )
+            rows = cursor.fetchall()
+    except Exception:
+        logger.exception("Failed to load generated cards ticker")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    finally:
+        conn.close()
+
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        r = dict(row)
+        slug = str(r.get("slug") or "").strip()
+        if not slug:
+            continue
+        path = str(r.get("front_image_path") or "").strip()
+        title = str(r.get("card_title") or "").strip()
+        created_at = r.get("created_at")
+        created_iso: Optional[str] = None
+        if isinstance(created_at, datetime):
+            created_iso = created_at.astimezone(timezone.utc).isoformat()
+        items.append(
+            {
+                "slug": slug,
+                "card_title": title,
+                "front_image_url": _absolute_asset_url(request, path),
+                "created_at": created_iso,
+            }
+        )
+
+    return {
+        "items": items,
+        "total": len(items),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
 
