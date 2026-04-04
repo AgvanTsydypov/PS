@@ -474,7 +474,7 @@ main {
   white-space: nowrap;
   width: max-content;
   will-change: transform;
-  animation: cardTickerScroll 30s linear infinite;
+  animation: cardTickerScroll 70s linear infinite;
 }
 
 .card-ticker-strip:hover .card-ticker-track {
