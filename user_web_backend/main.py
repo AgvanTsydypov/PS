@@ -55,7 +55,7 @@ if project_root not in sys.path:
 
 from scripts.season_manager import SeasonManager
 from admin_backend.main import BLOCKCHAIN_BASE_ZORA, MintClaimRequest, SeasonWorkbenchService
-from scripts.cardgen.generate_card import detect_pattern, generate_card_back_svg, generate_card_svg
+from scripts.cardgen.generate_card import generate_card_back_svg, generate_card_svg
 
 logger = logging.getLogger(__name__)
 
@@ -1894,7 +1894,6 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
             render_payload = _build_render_payload(payload)
             front_svg = generate_card_svg(render_payload)
             back_svg = generate_card_back_svg(render_payload)
-            pattern = detect_pattern(payload)
             front_image_path, back_image_path, uploaded_front_key, uploaded_back_key = _upload_generated_card_assets_to_r2(
                 slug,
                 front_svg,
@@ -1950,7 +1949,7 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
                     str(payload.get("card_title") or ""),
                     str(payload.get("primary_tag") or ""),
                     str(payload.get("secondary_tag") or ""),
-                    pattern,
+                    None,
                     front_image_path,
                     back_image_path,
                     json.dumps(payload),

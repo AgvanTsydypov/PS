@@ -212,15 +212,6 @@ PTIER_COLORS: Dict[str, str] = {
     "BASE": "#B6BBC8",
 }
 
-# Entry bracket → equivalent P-Tier position (for UNIFORM detection)
-_BRACKET_EQUIV: Dict[str, str] = {
-    "[0.00 - 0.20]": "P99",
-    "[0.20 - 0.40]": "P90",
-    "[0.40 - 0.60]": "P70",
-    "[0.60 - 0.80]": "P50",
-    "[0.80 - 0.97]": "BASE",
-}
-
 
 _LEGACY_TO_INTERVAL: Dict[str, str] = {
     "ANOMALY": "[0.00 - 0.20]",
@@ -338,59 +329,6 @@ def figma_gradients_to_svg_defs(gradients: list[Dict[str, Any]]) -> str:
         parts.append(figma_gradient_to_svg(g, grad_id))
     return "\n\n".join(parts)
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# PATTERN DETECTION (Section 10.4)
-# ═══════════════════════════════════════════════════════════════════════════
-
-def detect_pattern(data: Dict[str, Any]) -> str:
-    """Return the data-zone background pattern name. Priority order per spec."""
-    eb   = normalize_entry_bracket(data.get("entry_bracket", ""))
-    archetype = str(data.get("archetype", "") or "").strip().upper()
-    edge = data.get("edge", "").upper()
-    yld  = data.get("yield", "").upper()
-    grav = data.get("gravity", "").upper()
-
-    bp = _BRACKET_EQUIV.get(eb, "BASE")
-
-    # If backend already computed archetype, trust it as primary signal.
-    archetype_to_pattern = {
-        "THE ANOMALY": "UNIFORM",
-        "THE SIGNAL": "SIGNAL",
-        "THE VECTOR": "CONTRARIAN",
-        "THE EQUILIBRIUM": "EQUILIBRIUM",
-        "THE HARVESTER": "LIQUIDATOR",
-        "THE SUBSTRATE": "LIQUIDATOR",
-    }
-    if archetype in archetype_to_pattern:
-        return archetype_to_pattern[archetype]
-
-    # Priority 1 — UNIFORM: all 4 axes at same equivalent tier, tier ≠ Base
-    if bp != "BASE" and edge == bp and yld == bp and grav == bp:
-        return "UNIFORM"
-
-    # Priority 2 — SIGNAL
-    high = ("P99", "P90")
-    if eb in ("[0.00 - 0.20]", "[0.20 - 0.40]") and edge in high and yld in high:
-        return "SIGNAL"
-
-    # Priority 3 — CONTRARIAN
-    if eb == "[0.40 - 0.60]" and edge in high and yld in high:
-        return "CONTRARIAN"
-
-    # Priority 4 — EQUILIBRIUM
-    top3 = ("P99", "P90", "P70")
-    if edge in top3 and yld in top3 and grav in top3:
-        return "EQUILIBRIUM"
-
-    # Priority 5 — LIQUIDATOR
-    low = ("BASE", "P50")
-    if eb in ("[0.60 - 0.80]", "[0.80 - 0.97]") and grav in high and edge in low and yld in low:
-        return "LIQUIDATOR"
-
-    return "DEFAULT"
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # DATA ZONE STYLE RESOLUTION (Archetype-driven)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -494,19 +432,10 @@ def _to_data_uri(href: str) -> str:
 def generate_card_svg(data: Dict[str, Any]) -> str:
     """Build a complete front-of-card SVG string from a card data dict."""
 
-    # ── 1. Resolve pattern/archetype and data zone style ──────────────
-    pattern = detect_pattern(data)
+    # ── 1. Data zone style from archetype (pattern detection removed) ─
     archetype_raw = str(data.get("archetype", "") or "").strip().upper()
     if not archetype_raw:
-        inferred = {
-            "UNIFORM": "THE ANOMALY",
-            "SIGNAL": "THE SIGNAL",
-            "CONTRARIAN": "THE VECTOR",
-            "EQUILIBRIUM": "THE EQUILIBRIUM",
-            "LIQUIDATOR": "THE HARVESTER",
-            "DEFAULT": "THE OPERATOR",
-        }
-        archetype_raw = inferred.get(pattern, "THE OPERATOR")
+        archetype_raw = "THE OPERATOR"
     dz_fill, dz_stroke, is_signal = dz_style(archetype_raw)
 
     # ── 2. Resolve tier colors ────────────────────────────────────────
@@ -857,7 +786,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 
     # ---- Layer 6: Data zone background ----
     parts.append(f'''
-<!-- ══ DATA ZONE (pattern: {pattern}) ══ -->
+<!-- ══ DATA ZONE (archetype: {archetype_raw}) ══ -->
 <rect x="{DZ_X + 0.5}" y="{DZ_Y + 0.5}"
       width="{DZ_W - 1}" height="{DZ_H - 1}"
       rx="{DZ_RX - 0.5}" fill="{dz_fill}" stroke="#000000"/>''')
@@ -1241,7 +1170,7 @@ if __name__ == "__main__":
     with open(out_back_path, "w", encoding="utf-8") as f:
         f.write(svg_back)
 
-    detected = detect_pattern(card_data)
-    print(f"Pattern detected: {detected}")
+    arch = str(card_data.get("archetype", "") or "").strip().upper() or "THE OPERATOR"
+    print(f"Archetype: {arch}")
     print(f"SVG written to:   {out_path}")
     print(f"Back SVG written: {out_back_path}")

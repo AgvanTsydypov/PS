@@ -39,6 +39,7 @@ Docker:
 
 import os
 import sys
+import math
 import subprocess
 import time
 import argparse
@@ -65,7 +66,7 @@ from scripts.data_loading_manager import (
 )
 from scripts.ai import Agent1QuantCardGenerator, Agent2ColoristGenerator
 
-STANDARD_SEASON_TOTAL_SUPPLY_TEST = 400
+STANDARD_SEASON_TOTAL_SUPPLY_TEST = 333
 STANDARD_SEASON_ACTIVE_DAYS = 9
 STANDARD_SEASON_CYCLE_DAYS = 10
 ORIGIN_LOOKBACK_DAYS_STANDARD = 10
@@ -92,6 +93,20 @@ def _env_int(name: str, default: int) -> int:
     if not value:
         return default
     return int(value)
+
+
+def _snapshot_max_single_event_share() -> float:
+    """Upper bound on one event's share of winner snapshot rows (default 0.5)."""
+    raw = os.getenv("POLYSTARS_SNAPSHOT_MAX_SINGLE_EVENT_SHARE")
+    if raw is None or not str(raw).strip():
+        return 0.5
+    try:
+        v = float(str(raw).strip())
+    except ValueError:
+        return 0.5
+    if v <= 0 or v > 1:
+        return 0.5
+    return v
 
 
 # Standard snapshot window defaults to previous 10 days:
@@ -1364,6 +1379,8 @@ class SimplifiedScheduler:
         - sample random participant rows from participants for those events
         - enforce unique wallet per season (one proxy wallet max)
         - sample size follows season NFT supply (standard/genesis)
+        - no single event may exceed a capped share of rows (default 50% of target N);
+          slots cut from capped events are re-split by volume among events still under the cap
         """
         season_start_date = self._utc_day_start(season_start_date)
 
@@ -1685,10 +1702,65 @@ class SimplifiedScheduler:
             for key in remainders[:leftover]:
                 quotas[key] += 1
 
+        max_share = _snapshot_max_single_event_share()
+        if effective_limit <= 1:
+            per_event_cap = 1
+        else:
+            per_event_cap = max(1, int(math.floor(effective_limit * max_share + 1e-15)))
+        for key in event_keys:
+            quotas[key] = min(quotas[key], per_event_cap)
+        # Slots freed by the per-event cap go back proportionally to volume among
+        # events that still have room below the cap (not all to the single largest).
+        while sum(quotas.values()) < effective_limit:
+            deficit = effective_limit - sum(quotas.values())
+            eligible = [k for k in event_keys if quotas[k] < per_event_cap]
+            if deficit <= 0 or not eligible:
+                break
+            rooms = {k: per_event_cap - quotas[k] for k in eligible}
+            total_room = sum(rooms.values())
+            if total_room <= 0:
+                break
+            to_add_total = min(deficit, total_room)
+            positive_redist = sum(max(event_volume_by_key.get(k, 0.0), 0.0) for k in eligible)
+            if positive_redist > 0:
+                redist_exact = {
+                    k: to_add_total * (max(event_volume_by_key.get(k, 0.0), 0.0) / positive_redist)
+                    for k in eligible
+                }
+            else:
+                redist_exact = {k: float(to_add_total) / len(eligible) for k in eligible}
+            redist_floor: Dict[str, int] = {}
+            for k in eligible:
+                redist_floor[k] = min(max(int(redist_exact[k]), 0), rooms[k])
+            leftover_redist = to_add_total - sum(redist_floor.values())
+            if leftover_redist > 0:
+                remainders_redist = sorted(
+                    eligible,
+                    key=lambda k: (
+                        redist_exact[k] - redist_floor[k],
+                        event_volume_by_key.get(k, 0.0),
+                        k,
+                    ),
+                    reverse=True,
+                )
+                for k in remainders_redist:
+                    if leftover_redist <= 0:
+                        break
+                    if redist_floor[k] >= rooms[k]:
+                        continue
+                    redist_floor[k] += 1
+                    leftover_redist -= 1
+            added = sum(redist_floor.values())
+            if added == 0:
+                break
+            for k in eligible:
+                quotas[k] += redist_floor[k]
+
         # Randomized per-event pools are already shuffled by random_key in SQL output.
         event_index = {key: 0 for key in event_keys}
         used_wallets: set[str] = set()
         selected_rows: List[Dict[str, Any]] = []
+        selected_count_by_key: Dict[str, int] = defaultdict(int)
 
         def _take_next_for_event(event_key: str) -> Optional[Dict[str, Any]]:
             pool = event_candidates[event_key]
@@ -1713,6 +1785,7 @@ class SimplifiedScheduler:
             wallet = str(row.get("proxy_wallet") or "").strip().lower()
             used_wallets.add(wallet)
             selected_rows.append(row)
+            selected_count_by_key[key] += 1
             quotas[key] = max(0, quotas[key] - 1)
 
         # Pass 2: fill remaining quota per event proportionally.
@@ -1722,6 +1795,9 @@ class SimplifiedScheduler:
             for key in ranked_keys:
                 if quotas.get(key, 0) <= 0:
                     continue
+                if selected_count_by_key[key] >= per_event_cap:
+                    quotas[key] = 0
+                    continue
                 row = _take_next_for_event(key)
                 if row is None:
                     quotas[key] = 0
@@ -1729,6 +1805,7 @@ class SimplifiedScheduler:
                 wallet = str(row.get("proxy_wallet") or "").strip().lower()
                 used_wallets.add(wallet)
                 selected_rows.append(row)
+                selected_count_by_key[key] += 1
                 quotas[key] = max(0, quotas[key] - 1)
                 progress = True
                 if len(selected_rows) >= effective_limit:
@@ -1741,12 +1818,15 @@ class SimplifiedScheduler:
         if len(selected_rows) < effective_limit:
             for key in sorted(event_keys, key=lambda k: event_volume_by_key.get(k, 0.0), reverse=True):
                 while len(selected_rows) < effective_limit:
+                    if selected_count_by_key[key] >= per_event_cap:
+                        break
                     row = _take_next_for_event(key)
                     if row is None:
                         break
                     wallet = str(row.get("proxy_wallet") or "").strip().lower()
                     used_wallets.add(wallet)
                     selected_rows.append(row)
+                    selected_count_by_key[key] += 1
                 if len(selected_rows) >= effective_limit:
                     break
 
