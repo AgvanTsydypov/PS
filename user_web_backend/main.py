@@ -2055,9 +2055,11 @@ def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
                     e.closed AS event_closed,
                     e.start_date AS event_start_date,
                     e.end_date AS event_end_date,
-                    e.closed_time AS event_closed_time
+                    e.closed_time AS event_closed_time,
+                    wwin.proxy_wallet AS winner_proxy_wallet
                 FROM user_generated_cards gc
                 LEFT JOIN events e ON e.id = gc.event_id
+                LEFT JOIN winner_wallets_nft_to_claim wwin ON wwin.id = gc.winner_row_id
                 WHERE gc.slug = %s
                 LIMIT 1
                 """,

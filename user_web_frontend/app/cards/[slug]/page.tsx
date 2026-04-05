@@ -23,6 +23,8 @@ type GeneratedCardItem = {
   slug: string;
   owner_wallet: string;
   owner_proxy_wallet?: string | null;
+  /** Polymarket proxy on the allocation row (winner_wallets_nft_to_claim.proxy_wallet). */
+  winner_proxy_wallet?: string | null;
   winner_row_id: number;
   season_id: number;
   event_id?: string | null;
@@ -170,6 +172,8 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                     <dd>{card.owner_wallet}</dd>
                     <dt>Proxy wallet</dt>
                     <dd>{card.owner_proxy_wallet ?? "Not found"}</dd>
+                    <dt>Winner proxy wallet</dt>
+                    <dd>{card.winner_proxy_wallet ?? "N/A"}</dd>
                     <dt>Event title</dt>
                     <dd>{event.title ?? "N/A"}</dd>
                     <dt>Event ID</dt>
