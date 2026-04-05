@@ -654,7 +654,60 @@ def _infer_archetype_from_metrics(
     return "THE OPERATOR"
 
 
-def _build_card_payload_from_source_row(row: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_proxy_wallet_for_compare(addr: Optional[str]) -> Optional[str]:
+    """Lowercase 0x address for equality checks; None if not a 20-byte hex address."""
+    raw = str(addr or "").strip()
+    if not raw.startswith("0x") or len(raw) != 42:
+        return None
+    body = raw[2:]
+    if not all(c in "0123456789abcdefABCDEF" for c in body):
+        return None
+    return raw.lower()
+
+
+def _resolve_card_claim_type(winner_proxy_wallet: Optional[str], session_signin_proxy_wallet: Optional[str]) -> str:
+    """SVG OWNERSHIP band: ORIGIN SECURED vs LOOTER TAKEOVER.
+
+    - *Winner side*: `winner_wallets_nft_to_claim.proxy_wallet` (trader identity on the allocation row).
+    - *Session side*: Polymarket `proxy_wallet` from `user_wallet_signins` for the **dashboard EOA** (JWT `sub`
+      from Authorization — the wallet that signed in; never from request body or query params).
+
+    When both are valid 0x addresses and equal (case-insensitive) → ``origin`` (ORIGIN SECURED), else ``looter``.
+    """
+    w = _normalize_proxy_wallet_for_compare(winner_proxy_wallet)
+    c = _normalize_proxy_wallet_for_compare(session_signin_proxy_wallet)
+    if w and c and w == c:
+        return "origin"
+    return "looter"
+
+
+def _load_signin_proxy_for_session_wallet(cursor: Any, session_wallet_eoa: str) -> str:
+    """Return Polymarket proxy bound to this session EOA at sign-in (same row dashboard auth uses).
+
+    ``session_wallet_eoa`` must come only from verified JWT (e.g. ``_extract_wallet_from_request``).
+    """
+    cursor.execute(
+        """
+        SELECT proxy_wallet
+        FROM user_wallet_signins
+        WHERE LOWER(wallet_address) = LOWER(%s)
+        LIMIT 1
+        """,
+        (session_wallet_eoa,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return PM_NOT_REGISTERED_VALUE
+    raw = row.get("proxy_wallet") if isinstance(row, dict) else row[0]
+    value = str(raw or "").strip()
+    return value or PM_NOT_REGISTERED_VALUE
+
+
+def _build_card_payload_from_source_row(
+    row: Dict[str, Any],
+    *,
+    session_signin_proxy_wallet: Optional[str] = None,
+) -> Dict[str, Any]:
     normalized_entry_bracket = _normalize_entry_bracket(row.get("entry_bracket"))
     normalized_edge = _normalize_choice(row.get("edge"), CARD_TIER_OPTIONS, "BASE")
     normalized_yield = _normalize_choice(row.get("yield"), CARD_TIER_OPTIONS, "BASE")
@@ -666,11 +719,21 @@ def _build_card_payload_from_source_row(row: Dict[str, Any]) -> Dict[str, Any]:
         normalized_gravity,
     )
     normalized_archetype = _normalize_choice(row.get("archetype"), CARD_ARCHETYPE_OPTIONS, inferred_archetype)
+    rec_raw = row.get("reccurence")
+    recurrence_out: Optional[str]
+    if rec_raw is None:
+        recurrence_out = None
+    else:
+        recurrence_out = str(rec_raw).strip() or None
+
     return {
         "season_type": _normalize_choice(row.get("season_type"), CARD_SEASON_TYPE_OPTIONS, "standard").lower(),
         "season_number": int(row.get("season_number") or 1),
-        "recurrence": str(row.get("reccurence")) if row.get("reccurence") else None,
-        "claim_type": "looter",
+        "recurrence": recurrence_out,
+        "claim_type": _resolve_card_claim_type(
+            str(row.get("proxy_wallet") or "").strip() or None,
+            str(session_signin_proxy_wallet or "").strip() or None,
+        ),
         "image_url": str(row.get("manual_image_url") or "").strip(),
         "card_title": str(row.get("card_title") or "").strip(),
         "card_lore": str(row.get("card_lore") or "").strip(),
@@ -2039,11 +2102,10 @@ def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
 @app.post("/api/cards/get")
 def get_card(request: Request) -> UserGeneratedCardResponse:
     phase_t = monotonic()
-    owner_wallet = _extract_wallet_from_request(request).lower()
-    if not Web3.is_address(owner_wallet):
+    # EOA tied to dashboard session (JWT only — same wallet user connected at sign-in).
+    session_wallet_eoa = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(session_wallet_eoa):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
-    owner_proxy_wallet = _load_proxy_wallet_for_user_wallet(owner_wallet)
-    phase_t = _log_card_get_phase("load_proxy_wallet_db", phase_t)
 
     slug: Optional[str] = None
     uploaded_front_key: Optional[str] = None
@@ -2051,6 +2113,9 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
     conn = _get_connection()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            session_signin_proxy_wallet = _load_signin_proxy_for_session_wallet(cursor, session_wallet_eoa)
+            phase_t = _log_card_get_phase("load_session_signin_proxy", phase_t)
+
             winner_row_id = _pick_eligible_winner_row_id(cursor)
             phase_t = _log_card_get_phase("pick_eligible_winner", phase_t)
             if winner_row_id is None:
@@ -2071,7 +2136,10 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
             if not source_row:
                 raise HTTPException(status_code=400, detail="Selected row has no renderable card payload")
 
-            payload = _build_card_payload_from_source_row(source_row)
+            payload = _build_card_payload_from_source_row(
+                source_row,
+                session_signin_proxy_wallet=session_signin_proxy_wallet,
+            )
             slug = _generated_card_slug(payload.get("season_type"), payload.get("season_number"))
             image_url = str(payload.get("image_url") or "").strip()
             if not image_url:
@@ -2130,8 +2198,8 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
                 """,
                 (
                     slug,
-                    owner_wallet,
-                    owner_proxy_wallet,
+                    session_wallet_eoa,
+                    session_signin_proxy_wallet,
                     winner_row_id,
                     int(source_row.get("season_id") or 0),
                     source_row.get("event_id"),
@@ -2160,7 +2228,7 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
         conn.rollback()
         _delete_r2_object_by_key(uploaded_front_key)
         _delete_r2_object_by_key(uploaded_back_key)
-        logger.exception("Failed to generate card for wallet=%s", owner_wallet)
+        logger.exception("Failed to generate card for wallet=%s", session_wallet_eoa)
         raise HTTPException(status_code=503, detail="Failed to generate card. Please retry shortly.")
     finally:
         conn.close()
