@@ -84,4 +84,8 @@ BEGIN
   END IF;
 END $$;
 
+-- Per-season mint numbers use a trigger (no global sequence). If an old DB still has the
+-- legacy global sequence from earlier migrations, reset it so admin "Reset" leaves a clean state.
+ALTER SEQUENCE IF EXISTS user_generated_cards_collection_mint_seq RESTART WITH 1;
+
 COMMIT;

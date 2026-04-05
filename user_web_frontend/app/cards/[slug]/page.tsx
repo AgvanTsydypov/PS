@@ -19,6 +19,7 @@ type GeneratedCardPayload = {
 };
 
 type GeneratedCardItem = {
+  collection_mint_number?: number | null;
   slug: string;
   owner_wallet: string;
   owner_proxy_wallet?: string | null;
@@ -33,6 +34,23 @@ type GeneratedCardItem = {
   front_image_url: string;
   back_image_url: string;
   card_payload_json?: GeneratedCardPayload;
+  event_snapshot?: {
+    title?: string | null;
+    description?: string | null;
+    slug?: string | null;
+    volume?: number | string | null;
+    volume_24hr?: number | string | null;
+    volume_1wk?: number | string | null;
+    volume_1mo?: number | string | null;
+    liquidity?: number | string | null;
+    open_interest?: number | string | null;
+    comment_count?: number | null;
+    active?: boolean | null;
+    closed?: boolean | null;
+    start_date?: string | null;
+    end_date?: string | null;
+    closed_time?: string | null;
+  };
   created_at: string;
 };
 
@@ -92,6 +110,7 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
   }, [params.slug]);
 
   const payload = card?.card_payload_json ?? {};
+  const event = card?.event_snapshot ?? {};
   const title =
     String(card?.card_title ?? payload.card_title ?? "").trim() || "Generated card";
 
@@ -121,6 +140,7 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                 </div>
               </div>
               <div className="card-detail-chip-row">
+                <span className="card-detail-chip">Collection mint #{card.collection_mint_number ?? "N/A"}</span>
                 <span className="card-detail-chip">
                   {String(payload.season_type ?? "season")} #{String(payload.season_number ?? card.season_id)}
                 </span>
@@ -149,26 +169,16 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                 <section className="card-detail-panel">
                   <h2>Card Details</h2>
                   <dl className="card-detail-kv">
-                    <dt>Slug</dt>
-                    <dd>{card.slug}</dd>
-                    <dt>Winner row</dt>
-                    <dd>{card.winner_row_id}</dd>
                     <dt>Owner wallet</dt>
                     <dd>{card.owner_wallet}</dd>
                     <dt>Proxy wallet</dt>
                     <dd>{card.owner_proxy_wallet ?? "Not found"}</dd>
-                    <dt>Primary tag</dt>
-                    <dd>{String(card.primary_tag ?? payload.primary_tag ?? "UNKNOWN")}</dd>
-                    <dt>Secondary tag</dt>
-                    <dd>{String(card.secondary_tag ?? payload.secondary_tag ?? "NONE")}</dd>
-                    <dt>Rank</dt>
-                    <dd>{String(payload.leaderboard_rank ?? "N/A")}</dd>
+                    <dt>Event title</dt>
+                    <dd>{event.title ?? "N/A"}</dd>
                     <dt>Event ID</dt>
                     <dd>{card.event_id ?? "N/A"}</dd>
                     <dt>Event slug</dt>
-                    <dd>{card.event_slug ?? "N/A"}</dd>
-                    <dt>Recurrence</dt>
-                    <dd>{String(payload.recurrence ?? "SINGULAR")}</dd>
+                    <dd>{event.slug ?? card.event_slug ?? "N/A"}</dd>
                   </dl>
                 </section>
 
