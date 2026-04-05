@@ -144,9 +144,6 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                 <span className="card-detail-chip">
                   {String(payload.season_type ?? "season")} #{String(payload.season_number ?? card.season_id)}
                 </span>
-                {payload.archetype ? (
-                  <span className="card-detail-chip">Archetype: {String(payload.archetype)}</span>
-                ) : null}
               </div>
             </div>
 

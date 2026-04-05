@@ -1873,7 +1873,51 @@ class SeasonWorkbenchService:
         finally:
             conn.close()
 
-    def run_reset_sql(self) -> None:
+    @staticmethod
+    def _r2_cards_images_key_prefix() -> str:
+        """Same layout as user_web_backend card uploads: {R2_PREFIX}/cards-images/... or cards-images/..."""
+        prefix = str(os.getenv("R2_PREFIX", "dev")).strip().strip("/")
+        if prefix:
+            return f"{prefix}/cards-images/"
+        return "cards-images/"
+
+    def _purge_r2_cards_images(self) -> tuple[int, str]:
+        """Delete every object whose key starts with the cards-images prefix. Returns (deleted_count, prefix)."""
+        cfg = self._r2_required_env()
+        key_prefix = self._r2_cards_images_key_prefix()
+        client = self._get_r2_client()
+        bucket = cfg["bucket"]
+        deleted = 0
+        token: Optional[str] = None
+        while True:
+            list_kw: Dict[str, Any] = {
+                "Bucket": bucket,
+                "Prefix": key_prefix,
+                "MaxKeys": 1000,
+            }
+            if token:
+                list_kw["ContinuationToken"] = token
+            resp = client.list_objects_v2(**list_kw)
+            contents = resp.get("Contents") or []
+            if contents:
+                del_resp = client.delete_objects(
+                    Bucket=bucket,
+                    Delete={"Objects": [{"Key": obj["Key"]} for obj in contents], "Quiet": True},
+                )
+                errors = del_resp.get("Errors") or []
+                if errors:
+                    first = errors[0]
+                    raise RuntimeError(
+                        f"R2 delete_objects failed key={first.get('Key')!r} "
+                        f"code={first.get('Code')} message={first.get('Message')}"
+                    )
+                deleted += len(contents)
+            if not resp.get("IsTruncated"):
+                break
+            token = resp.get("NextContinuationToken")
+        return deleted, key_prefix
+
+    def run_reset_sql(self) -> str:
         sql_path = Path(__file__).resolve().parents[1] / "sql" / "queries" / "clear_seasons_logic.sql"
         if not sql_path.exists():
             raise FileNotFoundError(f"Reset SQL not found: {sql_path}")
@@ -1889,6 +1933,17 @@ class SeasonWorkbenchService:
         finally:
             conn.close()
         self.clear_wallets_cache()
+
+        parts = ["Reset SQL executed successfully."]
+        try:
+            removed, prefix = self._purge_r2_cards_images()
+            parts.append(f"Removed {removed} R2 object(s) under {prefix!r}.")
+        except ValueError as exc:
+            parts.append(f"R2 cards-images cleanup skipped: {exc}")
+        except Exception as exc:
+            logger.exception("R2 cards-images cleanup failed after reset")
+            parts.append(f"R2 cards-images cleanup failed: {exc}")
+        return " ".join(parts)
 
     @staticmethod
     def _normalize_optional_text(value: Optional[str]) -> Optional[str]:
@@ -2987,9 +3042,9 @@ async def run_reset(req: ResetRequest) -> Dict[str, str]:
     if not req.confirm:
         raise HTTPException(status_code=400, detail="Set confirm=true to run reset")
     try:
-        service.run_reset_sql()
-        await ws_hub.broadcast("reset", {"status": "ok", "message": "Reset SQL executed successfully"})
-        return {"status": "ok", "message": "Reset SQL executed successfully"}
+        message = service.run_reset_sql()
+        await ws_hub.broadcast("reset", {"status": "ok", "message": message})
+        return {"status": "ok", "message": message}
     except Exception as exc:
         await ws_hub.broadcast("reset", {"status": "error", "message": str(exc)})
         raise HTTPException(status_code=400, detail=str(exc))

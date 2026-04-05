@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -200,9 +201,36 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
 }
 _rate_limit_lock = threading.Lock()
 _rate_limit_store: Dict[str, deque[float]] = defaultdict(deque)
+_winner_catalog_join_total_lock = threading.Lock()
+_winner_catalog_join_total_cache: Tuple[float, int] = (0.0, 0)
+
+# Rows that can ever produce a card (manual image present). Used for supply totals.
+_WINNER_CATALOG_JOIN = """
+FROM winner_wallets_nft_to_claim w
+JOIN event_cards ec ON ec.event_id = w.event_id
+WHERE ec.manual_image_url IS NOT NULL
+  AND BTRIM(ec.manual_image_url) <> ''
+"""
+
+# Subset: catalog rows not yet used for a generated card (pick target for /api/cards/get).
+_ELIGIBLE_WINNER_BASE = """
+FROM winner_wallets_nft_to_claim w
+JOIN event_cards ec ON ec.event_id = w.event_id
+LEFT JOIN user_generated_cards gc ON gc.winner_row_id = w.id
+WHERE ec.manual_image_url IS NOT NULL
+  AND BTRIM(ec.manual_image_url) <> ''
+  AND gc.id IS NULL
+"""
 POLYMARKET_GAMMA_API_BASE = os.getenv("POLYMARKET_GAMMA_API_BASE", "https://gamma-api.polymarket.com").rstrip("/")
 POLYMARKET_DATA_API_BASE = os.getenv("POLYMARKET_DATA_API_BASE", "https://data-api.polymarket.com").rstrip("/")
 POLYMARKET_REQUEST_TIMEOUT_SECONDS = float(os.getenv("POLYMARKET_REQUEST_TIMEOUT_SECONDS", "8"))
+# Card SVG embeds remote manual_image_url — keep this tight so generation does not hang on slow CDNs.
+USER_WEB_CARD_IMAGE_TIMEOUT_SECONDS = float(os.getenv("USER_WEB_CARD_IMAGE_TIMEOUT_SECONDS", "6"))
+# Set USER_WEB_CARD_GET_TIMING=1 to log per-phase durations for POST /api/cards/get (find slow I/O).
+USER_WEB_CARD_GET_TIMING = os.getenv("USER_WEB_CARD_GET_TIMING", "").strip().lower() in ("1", "true", "yes")
+_user_web_timing_log_handler_installed = False
+# COUNT(w JOIN ec) for “total claimable rows” is expensive; safe to cache briefly for UI supply fields.
+USER_WEB_CARD_SUPPLY_JOIN_TOTAL_CACHE_TTL = float(os.getenv("USER_WEB_CARD_SUPPLY_JOIN_TOTAL_CACHE_TTL", "60"))
 PM_NOT_REGISTERED_VALUE = "Not registered in PM"
 NO_TRADES_YET_VALUE = "No trades yet"
 CLAIMS_UNIQUENESS_INDEX_NAME = "ux_claims_active_season_user_wallet_lower"
@@ -512,8 +540,16 @@ def _upload_generated_card_assets_to_r2(slug: str, front_svg: str, back_svg: str
         "ContentType": "image/svg+xml",
         "CacheControl": "public, max-age=31536000, immutable",
     }
-    client.put_object(Key=front_key, Body=front_svg.encode("utf-8"), **common_kwargs)
-    client.put_object(Key=back_key, Body=back_svg.encode("utf-8"), **common_kwargs)
+
+    def _put(key: str, body: str) -> None:
+        client.put_object(Key=key, Body=body.encode("utf-8"), **common_kwargs)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_front = pool.submit(_put, front_key, front_svg)
+        f_back = pool.submit(_put, back_key, back_svg)
+        f_front.result()
+        f_back.result()
+
     return (
         f"{cfg['public_base_url']}/{front_key}",
         f"{cfg['public_base_url']}/{back_key}",
@@ -667,13 +703,126 @@ def _generated_card_slug(season_type: Optional[str], season_number: Any) -> str:
     return f"card-{normalized_type}-s{normalized_number}-{random_chunk}-{uuid_chunk}"
 
 
+def _count_winner_catalog_join(cursor: Any) -> int:
+    cursor.execute(
+        f"""
+        SELECT COUNT(*) AS total_count
+        {_WINNER_CATALOG_JOIN}
+        """
+    )
+    row = cursor.fetchone()
+    raw = (row.get("total_count") if isinstance(row, dict) else row[0]) if row else 0
+    return int(raw or 0)
+
+
+def _winner_catalog_join_total_cached(cursor: Any) -> int:
+    global _winner_catalog_join_total_cache
+    now = monotonic()
+    with _winner_catalog_join_total_lock:
+        ts, cached_total = _winner_catalog_join_total_cache
+        if ts > 0 and (now - ts) < USER_WEB_CARD_SUPPLY_JOIN_TOTAL_CACHE_TTL:
+            return cached_total
+    total = _count_winner_catalog_join(cursor)
+    with _winner_catalog_join_total_lock:
+        _winner_catalog_join_total_cache = (monotonic(), total)
+    return total
+
+
+def _configure_user_web_timing_logging() -> None:
+    """Uvicorn only configures its own loggers; app logger.info would be dropped (root level WARNING)."""
+    global _user_web_timing_log_handler_installed
+    if not USER_WEB_CARD_GET_TIMING or _user_web_timing_log_handler_installed:
+        return
+    pkg = logging.getLogger("user_web_backend")
+    pkg.setLevel(logging.INFO)
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    pkg.addHandler(handler)
+    pkg.propagate = False
+    _user_web_timing_log_handler_installed = True
+
+
+def _log_card_get_phase(phase: str, phase_start: float) -> float:
+    if USER_WEB_CARD_GET_TIMING:
+        ms = (monotonic() - phase_start) * 1000.0
+        logger.info("POST /api/cards/get phase=%s elapsed_ms=%.1f", phase, ms)
+    return monotonic()
+
+
+def _pick_eligible_winner_row_id(cursor: Any) -> Optional[int]:
+    """Uniform random eligible row across all seasons (weights by per-season eligible count).
+
+    Eligible rows are mostly ~333 per season with one larger season (~2k). Probing global
+    min/max id skews toward dense id ranges; instead we pick a season with probability
+    proportional to its eligible count, then RANDOM() within that season (small sets).
+    """
+    cursor.execute(
+        f"""
+        SELECT w.season_id AS season_id, COUNT(*)::bigint AS eligible_count
+        {_ELIGIBLE_WINNER_BASE}
+        GROUP BY w.season_id
+        ORDER BY w.season_id
+        """
+    )
+    season_rows = cursor.fetchall()
+    if not season_rows:
+        return None
+
+    parsed: List[Tuple[Optional[int], int]] = []
+    total = 0
+    for r in season_rows:
+        sid_raw = r.get("season_id") if isinstance(r, dict) else r[0]
+        c_raw = r.get("eligible_count") if isinstance(r, dict) else r[1]
+        c = int(c_raw or 0)
+        if c <= 0:
+            continue
+        sid: Optional[int] = int(sid_raw) if sid_raw is not None else None
+        parsed.append((sid, c))
+        total += c
+    if total <= 0 or not parsed:
+        return None
+
+    pick = secrets.randbelow(total)
+    cumulative = 0
+    chosen_season: Optional[int]
+    for sid, c in parsed:
+        if pick < cumulative + c:
+            chosen_season = sid
+            break
+        cumulative += c
+    else:
+        return None
+
+    season_filter = "AND w.season_id IS NULL" if chosen_season is None else "AND w.season_id = %s"
+    season_params: Tuple[Any, ...] = () if chosen_season is None else (chosen_season,)
+
+    for _ in range(8):
+        cursor.execute(
+            f"""
+            SELECT w.id
+            {_ELIGIBLE_WINNER_BASE}
+              {season_filter}
+            ORDER BY RANDOM()
+            LIMIT 1
+            FOR UPDATE OF w SKIP LOCKED
+            """,
+            season_params,
+        )
+        row = cursor.fetchone()
+        if row:
+            rid = row.get("id") if isinstance(row, dict) else row[0]
+            return int(rid)
+    return None
+
+
 def _absolute_asset_url(request: Request, asset_path: str) -> str:
     if asset_path.startswith("http://") or asset_path.startswith("https://"):
         return asset_path
     return urllib.parse.urljoin(str(request.base_url), asset_path.lstrip("/"))
 
 
-def _remote_image_to_data_uri(image_url: str) -> str:
+def _remote_image_to_data_uri(image_url: str, *, timeout_seconds: Optional[float] = None) -> str:
     normalized = str(image_url or "").strip()
     if not normalized or normalized.startswith("data:"):
         return normalized
@@ -692,7 +841,10 @@ def _remote_image_to_data_uri(image_url: str) -> str:
             ),
         },
     )
-    with urllib.request.urlopen(req, timeout=POLYMARKET_REQUEST_TIMEOUT_SECONDS) as response:
+    effective_timeout = (
+        POLYMARKET_REQUEST_TIMEOUT_SECONDS if timeout_seconds is None else float(timeout_seconds)
+    )
+    with urllib.request.urlopen(req, timeout=effective_timeout) as response:
         raw = response.read()
         if not raw:
             raise ValueError("Downloaded image is empty")
@@ -709,7 +861,10 @@ def _build_render_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     image_url = str(render_payload.get("image_url") or "").strip()
     if image_url.startswith(("http://", "https://")):
         try:
-            render_payload["image_url"] = _remote_image_to_data_uri(image_url)
+            render_payload["image_url"] = _remote_image_to_data_uri(
+                image_url,
+                timeout_seconds=USER_WEB_CARD_IMAGE_TIMEOUT_SECONDS,
+            )
         except Exception:
             logger.exception("Failed to embed generated card image url=%s", image_url)
     return render_payload
@@ -810,20 +965,15 @@ def _load_card_source_row(cursor: Any, winner_row_id: int) -> Optional[Dict[str,
     return dict(row) if row else None
 
 
-def _generated_cards_supply_counts(cursor: Any) -> Tuple[int, int]:
-    cursor.execute(
-        """
-        SELECT COUNT(*) AS total_count
-        FROM winner_wallets_nft_to_claim w
-        JOIN event_cards ec ON ec.event_id = w.event_id
-        WHERE ec.manual_image_url IS NOT NULL
-          AND BTRIM(ec.manual_image_url) <> ''
-        """
-    )
-    total_row = cursor.fetchone()
-    total_available = int(
-        (total_row.get("total_count") if isinstance(total_row, dict) else total_row[0]) if total_row else 0
-    )
+def _generated_cards_supply_counts(
+    cursor: Any,
+    *,
+    use_cached_join_total: bool = True,
+) -> Tuple[int, int]:
+    if use_cached_join_total:
+        total_available = _winner_catalog_join_total_cached(cursor)
+    else:
+        total_available = _count_winner_catalog_join(cursor)
     cursor.execute("SELECT COUNT(*) AS claimed_count FROM user_generated_cards")
     claimed_row = cursor.fetchone()
     claimed_count = int(
@@ -1360,6 +1510,7 @@ async def rate_limit_middleware(request: Request, call_next):
 
 @app.on_event("startup")
 def startup_checks() -> None:
+    _configure_user_web_timing_logging()
     _warn_if_claims_uniqueness_index_missing()
     _ensure_user_generated_cards_schema()
 
@@ -1887,10 +2038,12 @@ def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
 
 @app.post("/api/cards/get")
 def get_card(request: Request) -> UserGeneratedCardResponse:
+    phase_t = monotonic()
     owner_wallet = _extract_wallet_from_request(request).lower()
     if not Web3.is_address(owner_wallet):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
     owner_proxy_wallet = _load_proxy_wallet_for_user_wallet(owner_wallet)
+    phase_t = _log_card_get_phase("load_proxy_wallet_db", phase_t)
 
     slug: Optional[str] = None
     uploaded_front_key: Optional[str] = None
@@ -1898,21 +2051,13 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
     conn = _get_connection()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-            cursor.execute(
-                """
-                SELECT COUNT(*) AS available_count
-                FROM winner_wallets_nft_to_claim w
-                JOIN event_cards ec ON ec.event_id = w.event_id
-                LEFT JOIN user_generated_cards gc ON gc.winner_row_id = w.id
-                WHERE ec.manual_image_url IS NOT NULL
-                  AND BTRIM(ec.manual_image_url) <> ''
-                  AND gc.id IS NULL
-                """
-            )
-            available_row = cursor.fetchone()
-            available_count = int((available_row or {}).get("available_count") or 0)
-            if available_count <= 0:
-                total_available, _ = _generated_cards_supply_counts(cursor)
+            winner_row_id = _pick_eligible_winner_row_id(cursor)
+            phase_t = _log_card_get_phase("pick_eligible_winner", phase_t)
+            if winner_row_id is None:
+                total_available, _ = _generated_cards_supply_counts(
+                    cursor,
+                    use_cached_join_total=False,
+                )
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -1921,53 +2066,8 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
                         else "No card-builder rows with manual images are available yet."
                     ),
                 )
-            random_offset = secrets.randbelow(available_count)
-            cursor.execute(
-                """
-                SELECT w.id
-                FROM winner_wallets_nft_to_claim w
-                JOIN event_cards ec ON ec.event_id = w.event_id
-                LEFT JOIN user_generated_cards gc ON gc.winner_row_id = w.id
-                WHERE ec.manual_image_url IS NOT NULL
-                  AND BTRIM(ec.manual_image_url) <> ''
-                  AND gc.id IS NULL
-                ORDER BY w.id
-                LIMIT 1
-                OFFSET %s
-                FOR UPDATE OF w SKIP LOCKED
-                """,
-                (random_offset,),
-            )
-            winner_row = cursor.fetchone()
-            if not winner_row:
-                cursor.execute(
-                    """
-                    SELECT w.id
-                    FROM winner_wallets_nft_to_claim w
-                    JOIN event_cards ec ON ec.event_id = w.event_id
-                    LEFT JOIN user_generated_cards gc ON gc.winner_row_id = w.id
-                    WHERE ec.manual_image_url IS NOT NULL
-                      AND BTRIM(ec.manual_image_url) <> ''
-                      AND gc.id IS NULL
-                    ORDER BY w.id
-                    LIMIT 1
-                    FOR UPDATE OF w SKIP LOCKED
-                    """
-                )
-                winner_row = cursor.fetchone()
-            if not winner_row:
-                total_available, _ = _generated_cards_supply_counts(cursor)
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "All cards have already been generated."
-                        if total_available > 0
-                        else "No card-builder rows with manual images are available yet."
-                    ),
-                )
-
-            winner_row_id = int(winner_row["id"])
             source_row = _load_card_source_row(cursor, winner_row_id=winner_row_id)
+            phase_t = _log_card_get_phase("load_card_source_row_db", phase_t)
             if not source_row:
                 raise HTTPException(status_code=400, detail="Selected row has no renderable card payload")
 
@@ -1978,13 +2078,16 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
                 raise HTTPException(status_code=400, detail="Selected row is missing manual image URL")
 
             render_payload = _build_render_payload(payload)
+            phase_t = _log_card_get_phase("fetch_manual_image_http", phase_t)
             front_svg = generate_card_svg(render_payload)
             back_svg = generate_card_back_svg(render_payload)
+            phase_t = _log_card_get_phase("generate_svg_local", phase_t)
             front_image_path, back_image_path, uploaded_front_key, uploaded_back_key = _upload_generated_card_assets_to_r2(
                 slug,
                 front_svg,
                 back_svg,
             )
+            phase_t = _log_card_get_phase("r2_put_object_x2", phase_t)
 
             cursor.execute(
                 """
@@ -2043,8 +2146,11 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
                 ),
             )
             created_row = cursor.fetchone()
+            phase_t = _log_card_get_phase("insert_generated_card", phase_t)
             total_available, remaining_available = _generated_cards_supply_counts(cursor)
+            phase_t = _log_card_get_phase("supply_counts_db", phase_t)
         conn.commit()
+        phase_t = _log_card_get_phase("transaction_commit", phase_t)
     except HTTPException:
         conn.rollback()
         _delete_r2_object_by_key(uploaded_front_key)
@@ -2059,10 +2165,13 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
     finally:
         conn.close()
 
+    card_payload = _format_generated_card_row(dict(created_row), request=request, include_payload=True)
+    phase_t = _log_card_get_phase("format_response_row", phase_t)
+
     return UserGeneratedCardResponse(
         status="ok",
         message="Card generated successfully",
-        card=_format_generated_card_row(dict(created_row), request=request, include_payload=True),
+        card=card_payload,
         remaining_available=remaining_available,
         total_available=total_available,
     )
