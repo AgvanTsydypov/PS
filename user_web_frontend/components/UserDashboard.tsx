@@ -183,6 +183,7 @@ const apiBase =
   (process.env.NODE_ENV === "development" ? "http://localhost:8011" : "/");
 const AUTH_TOKEN_STORAGE_KEY = "polystars_user_access_token";
 const AUTH_SESSION_META_STORAGE_KEY = "polystars_user_session_meta";
+const MY_CARDS_FLIP_STORAGE_KEY_PREFIX = "polystars_my_cards_flipped_v1";
 
 function buildApiUrl(path: string): string {
   if (apiBase === "/") return path;
@@ -226,6 +227,43 @@ function saveStoredSessionMeta(meta: StoredSessionMeta): void {
 
 function clearStoredSessionMeta(): void {
   window.localStorage.removeItem(AUTH_SESSION_META_STORAGE_KEY);
+}
+
+function buildMyCardsFlipStorageKey(wallet: string): string | null {
+  const normalized = String(wallet ?? "").trim().toLowerCase();
+  if (!normalized) return null;
+  return `${MY_CARDS_FLIP_STORAGE_KEY_PREFIX}:${normalized}`;
+}
+
+function loadStoredMyCardsFlipped(wallet: string): Record<string, boolean> {
+  const storageKey = buildMyCardsFlipStorageKey(wallet);
+  if (!storageKey) return {};
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object") return {};
+    const out: Record<string, boolean> = {};
+    Object.entries(parsed).forEach(([slug, flipped]) => {
+      if (typeof slug !== "string" || !slug) return;
+      if (flipped !== true) return;
+      out[slug] = true;
+    });
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function saveStoredMyCardsFlipped(wallet: string, flippedBySlug: Record<string, boolean>): void {
+  const storageKey = buildMyCardsFlipStorageKey(wallet);
+  if (!storageKey) return;
+  const out: Record<string, boolean> = {};
+  Object.entries(flippedBySlug).forEach(([slug, flipped]) => {
+    if (!slug || flipped !== true) return;
+    out[slug] = true;
+  });
+  window.localStorage.setItem(storageKey, JSON.stringify(out));
 }
 
 // ── Legacy fallback: walk window.ethereum ─────────────────────────────────────
@@ -276,6 +314,8 @@ export default function UserDashboard() {
   const [flippedCardSlugs, setFlippedCardSlugs] = useState<Record<string, boolean>>({});
   const [animatingCardSlugs, setAnimatingCardSlugs] = useState<Record<string, boolean>>({});
   const generatedCardFlipTimerRef = useRef<Record<string, number | null>>({});
+  const didHydrateMyCardFlipsRef = useRef(false);
+  const myCardFlipsWalletRef = useRef("");
   const [isWalletButtonHovered, setIsWalletButtonHovered] = useState(false);
   const [isWalletPanelHovered, setIsWalletPanelHovered] = useState(false);
   const [isWalletPanelCollapsed, setIsWalletPanelCollapsed] = useState(false);
@@ -370,6 +410,48 @@ export default function UserDashboard() {
     void refreshMyNfts();
     void refreshMyCards();
   }, [isSignedIn, accessToken, walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!isSignedIn || !walletAddress) {
+      didHydrateMyCardFlipsRef.current = false;
+      myCardFlipsWalletRef.current = "";
+      return;
+    }
+    const normalizedWallet = walletAddress.trim().toLowerCase();
+    if (myCardFlipsWalletRef.current !== normalizedWallet) {
+      didHydrateMyCardFlipsRef.current = false;
+      myCardFlipsWalletRef.current = normalizedWallet;
+    }
+  }, [isSignedIn, walletAddress]);
+
+  useEffect(() => {
+    if (!isSignedIn || !walletAddress) return;
+    if (myCardsLoading) return;
+    // Wait until first cards fetch resolves (success or error) to avoid
+    // overwriting persisted flips with an initial empty state on mount.
+    if (!myCardsFetchedAt && !myCardsError) return;
+    const persisted = loadStoredMyCardsFlipped(walletAddress);
+    if (!Array.isArray(myCards) || myCards.length === 0) {
+      setFlippedCardSlugs({});
+      didHydrateMyCardFlipsRef.current = true;
+      return;
+    }
+    const existingSlugs = new Set(myCards.map((item) => item.slug));
+    const restored: Record<string, boolean> = {};
+    Object.entries(persisted).forEach(([slug, flipped]) => {
+      if (!flipped) return;
+      if (!existingSlugs.has(slug)) return;
+      restored[slug] = true;
+    });
+    setFlippedCardSlugs(restored);
+    didHydrateMyCardFlipsRef.current = true;
+  }, [isSignedIn, walletAddress, myCards, myCardsLoading, myCardsFetchedAt, myCardsError]);
+
+  useEffect(() => {
+    if (!isSignedIn || !walletAddress) return;
+    if (!didHydrateMyCardFlipsRef.current) return;
+    saveStoredMyCardsFlipped(walletAddress, flippedCardSlugs);
+  }, [isSignedIn, walletAddress, flippedCardSlugs]);
 
   useEffect(() => {
     if (walletPanelCollapseTimerRef.current) {
@@ -537,7 +619,6 @@ export default function UserDashboard() {
       setMyCardsFetchedAt(null);
       setGeneratedCardsTotalAvailable(0);
       setGeneratedCardsRemainingAvailable(0);
-      setFlippedCardSlugs({});
     } finally {
       setMyCardsLoading(false);
     }
