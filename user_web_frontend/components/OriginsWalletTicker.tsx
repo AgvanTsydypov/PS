@@ -45,7 +45,7 @@ export default function OriginsWalletTicker() {
 
   return (
     <section className="wallet-ticker-strip" aria-label="Winner wallets ticker">
-      <div className="wallet-ticker-label">origins wallets:</div>
+      <div className="wallet-ticker-label">Origin wallets:</div>
       <div className="wallet-ticker-left-fade" />
       <div className="wallet-ticker-viewport">
         <div className="wallet-ticker-track">
