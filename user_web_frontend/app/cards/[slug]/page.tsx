@@ -168,9 +168,9 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                 <section className="card-detail-panel">
                   <h2>Card Details</h2>
                   <dl className="card-detail-kv">
-                    <dt>Owner wallet</dt>
+                    <dt>Claimer EOA wallet</dt>
                     <dd>{card.owner_wallet}</dd>
-                    <dt>Proxy wallet</dt>
+                    <dt>Claimer proxy wallet</dt>
                     <dd>{card.owner_proxy_wallet ?? "Not found"}</dd>
                     <dt>Winner proxy wallet</dt>
                     <dd>{card.winner_proxy_wallet ?? "N/A"}</dd>
