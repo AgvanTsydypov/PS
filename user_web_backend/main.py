@@ -1696,6 +1696,7 @@ def me_cards(request: Request) -> Dict[str, Any]:
                 """
                 SELECT
                     id,
+                    collection_mint_number,
                     slug,
                     owner_wallet,
                     owner_proxy_wallet,
@@ -1809,24 +1810,41 @@ def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
             cursor.execute(
                 """
                 SELECT
-                    id,
-                    slug,
-                    owner_wallet,
-                    owner_proxy_wallet,
-                    winner_row_id,
-                    season_id,
-                    event_id,
-                    event_slug,
-                    card_title,
-                    primary_tag,
-                    secondary_tag,
-                    pattern,
-                    front_image_path,
-                    back_image_path,
-                    card_payload_json,
-                    created_at
-                FROM user_generated_cards
-                WHERE slug = %s
+                    gc.id,
+                    gc.collection_mint_number,
+                    gc.slug,
+                    gc.owner_wallet,
+                    gc.owner_proxy_wallet,
+                    gc.winner_row_id,
+                    gc.season_id,
+                    gc.event_id,
+                    gc.event_slug,
+                    gc.card_title,
+                    gc.primary_tag,
+                    gc.secondary_tag,
+                    gc.pattern,
+                    gc.front_image_path,
+                    gc.back_image_path,
+                    gc.card_payload_json,
+                    gc.created_at,
+                    e.title AS event_title,
+                    e.description AS event_description,
+                    e.slug AS event_slug_from_events,
+                    e.volume AS event_volume,
+                    e.volume24hr AS event_volume_24hr,
+                    e.volume1wk AS event_volume_1wk,
+                    e.volume1mo AS event_volume_1mo,
+                    e.liquidity AS event_liquidity,
+                    e.open_interest AS event_open_interest,
+                    e.comment_count AS event_comment_count,
+                    e.active AS event_active,
+                    e.closed AS event_closed,
+                    e.start_date AS event_start_date,
+                    e.end_date AS event_end_date,
+                    e.closed_time AS event_closed_time
+                FROM user_generated_cards gc
+                LEFT JOIN events e ON e.id = gc.event_id
+                WHERE gc.slug = %s
                 LIMIT 1
                 """,
                 (normalized_slug,),
@@ -1840,7 +1858,31 @@ def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
 
     if not row:
         raise HTTPException(status_code=404, detail="Card not found")
-    return {"card": _format_generated_card_row(dict(row), request=request, include_payload=True)}
+    row_dict = dict(row)
+    card = _format_generated_card_row(row_dict, request=request, include_payload=True)
+    event_snapshot = {
+        "title": row_dict.get("event_title"),
+        "description": row_dict.get("event_description"),
+        "slug": row_dict.get("event_slug_from_events") or row_dict.get("event_slug"),
+        "volume": row_dict.get("event_volume"),
+        "volume_24hr": row_dict.get("event_volume_24hr"),
+        "volume_1wk": row_dict.get("event_volume_1wk"),
+        "volume_1mo": row_dict.get("event_volume_1mo"),
+        "liquidity": row_dict.get("event_liquidity"),
+        "open_interest": row_dict.get("event_open_interest"),
+        "comment_count": row_dict.get("event_comment_count"),
+        "active": row_dict.get("event_active"),
+        "closed": row_dict.get("event_closed"),
+        "start_date": row_dict.get("event_start_date"),
+        "end_date": row_dict.get("event_end_date"),
+        "closed_time": row_dict.get("event_closed_time"),
+    }
+    for key in ("start_date", "end_date", "closed_time"):
+        value = event_snapshot.get(key)
+        if isinstance(value, datetime):
+            event_snapshot[key] = value.astimezone(timezone.utc).isoformat()
+    card["event_snapshot"] = event_snapshot
+    return {"card": card}
 
 
 @app.post("/api/cards/get")
@@ -1858,6 +1900,30 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(
                 """
+                SELECT COUNT(*) AS available_count
+                FROM winner_wallets_nft_to_claim w
+                JOIN event_cards ec ON ec.event_id = w.event_id
+                LEFT JOIN user_generated_cards gc ON gc.winner_row_id = w.id
+                WHERE ec.manual_image_url IS NOT NULL
+                  AND BTRIM(ec.manual_image_url) <> ''
+                  AND gc.id IS NULL
+                """
+            )
+            available_row = cursor.fetchone()
+            available_count = int((available_row or {}).get("available_count") or 0)
+            if available_count <= 0:
+                total_available, _ = _generated_cards_supply_counts(cursor)
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "All cards have already been generated."
+                        if total_available > 0
+                        else "No card-builder rows with manual images are available yet."
+                    ),
+                )
+            random_offset = secrets.randbelow(available_count)
+            cursor.execute(
+                """
                 SELECT w.id
                 FROM winner_wallets_nft_to_claim w
                 JOIN event_cards ec ON ec.event_id = w.event_id
@@ -1865,12 +1931,30 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
                 WHERE ec.manual_image_url IS NOT NULL
                   AND BTRIM(ec.manual_image_url) <> ''
                   AND gc.id IS NULL
-                ORDER BY RANDOM()
-                FOR UPDATE OF w SKIP LOCKED
+                ORDER BY w.id
                 LIMIT 1
-                """
+                OFFSET %s
+                FOR UPDATE OF w SKIP LOCKED
+                """,
+                (random_offset,),
             )
             winner_row = cursor.fetchone()
+            if not winner_row:
+                cursor.execute(
+                    """
+                    SELECT w.id
+                    FROM winner_wallets_nft_to_claim w
+                    JOIN event_cards ec ON ec.event_id = w.event_id
+                    LEFT JOIN user_generated_cards gc ON gc.winner_row_id = w.id
+                    WHERE ec.manual_image_url IS NOT NULL
+                      AND BTRIM(ec.manual_image_url) <> ''
+                      AND gc.id IS NULL
+                    ORDER BY w.id
+                    LIMIT 1
+                    FOR UPDATE OF w SKIP LOCKED
+                    """
+                )
+                winner_row = cursor.fetchone()
             if not winner_row:
                 total_available, _ = _generated_cards_supply_counts(cursor)
                 raise HTTPException(
@@ -1924,6 +2008,7 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
                 )
                 RETURNING
                     id,
+                    collection_mint_number,
                     slug,
                     owner_wallet,
                     owner_proxy_wallet,

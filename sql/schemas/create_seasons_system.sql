@@ -376,6 +376,7 @@ DO $$ BEGIN RAISE NOTICE '✅ winner_wallets_nft_to_claim table created'; END $$
 
 CREATE TABLE IF NOT EXISTS user_generated_cards (
     id BIGSERIAL PRIMARY KEY,
+    collection_mint_number BIGINT,
     slug TEXT NOT NULL UNIQUE,
     owner_wallet VARCHAR(42) NOT NULL,
     owner_proxy_wallet TEXT,
@@ -403,6 +404,62 @@ CREATE INDEX IF NOT EXISTS idx_generated_cards_owner_wallet_lower
     ON user_generated_cards(LOWER(owner_wallet), created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_generated_cards_created_at
     ON user_generated_cards(created_at DESC);
+
+-- Per-season collection mint # (1..N within each season_id), not a global sequence.
+DO $$
+BEGIN
+    IF to_regclass('public.user_generated_cards') IS NULL THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE user_generated_cards
+        ADD COLUMN IF NOT EXISTS collection_mint_number BIGINT;
+
+    ALTER TABLE user_generated_cards
+        ALTER COLUMN collection_mint_number DROP DEFAULT;
+
+    DROP SEQUENCE IF EXISTS user_generated_cards_collection_mint_seq CASCADE;
+
+    DROP INDEX IF EXISTS idx_generated_cards_collection_mint_number;
+
+    WITH numbered AS (
+        SELECT
+            id,
+            ROW_NUMBER() OVER (
+                PARTITION BY season_id
+                ORDER BY created_at ASC, id ASC
+            ) AS rn
+        FROM user_generated_cards
+    )
+    UPDATE user_generated_cards u
+    SET collection_mint_number = n.rn
+    FROM numbered n
+    WHERE u.id = n.id;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_user_generated_cards_season_collection_mint
+        ON user_generated_cards(season_id, collection_mint_number);
+END $$;
+
+CREATE OR REPLACE FUNCTION user_generated_cards_assign_season_mint_number()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.collection_mint_number IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+    PERFORM pg_advisory_xact_lock(9283741, NEW.season_id);
+    SELECT COALESCE(MAX(collection_mint_number), 0) + 1
+    INTO NEW.collection_mint_number
+    FROM user_generated_cards
+    WHERE season_id = NEW.season_id;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS tr_user_generated_cards_assign_season_mint ON user_generated_cards;
+CREATE TRIGGER tr_user_generated_cards_assign_season_mint
+    BEFORE INSERT ON user_generated_cards
+    FOR EACH ROW
+    EXECUTE PROCEDURE user_generated_cards_assign_season_mint_number();
 
 -- Performance indexes for wallet lookup paths used by /api/wallets.
 CREATE INDEX IF NOT EXISTS idx_claims_season_user_wallet_lower
