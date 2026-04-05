@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   useEffect,
   useMemo,
@@ -11,6 +12,8 @@ import {
   clearFlipTimers,
   handleCardGridMouseLeave,
   handleCardGridMouseMove,
+  markCardPressStart,
+  navigateToCardIfCenterClick,
   triggerCardFlip,
 } from "./cardInteractions";
 
@@ -151,17 +154,37 @@ export default function GeneratedCardsTicker() {
               const backImageUrl = item.back_image_url || item.front_image_url;
               return (
                 <div key={cardId} className="card-ticker-item">
+                  <Link
+                    href={`/cards/${encodeURIComponent(item.slug)}`}
+                    className="card-center-hotspot"
+                    tabIndex={-1}
+                    aria-label={`Open card: ${label}`}
+                  />
                   <article
                     className={`nft-card nft-card-tilt theme-vivid card-ticker-card ${isAnimating ? "generated-card-preview-card-flipping" : ""}`}
-                    onClick={(event) =>
+                    data-center-navigate="1"
+                    onPointerDown={(event) => {
+                      markCardPressStart(event.currentTarget, event.clientX, event.clientY);
+                    }}
+                    onClick={(event) => {
+                      if (
+                        navigateToCardIfCenterClick(
+                          event.currentTarget,
+                          item.slug,
+                          event.clientX,
+                          event.clientY,
+                        )
+                      ) {
+                        return;
+                      }
                       triggerCardFlip(
                         cardId,
                         event.currentTarget,
                         flipTimerRef,
                         setAnimatingCards,
                         setFlippedCards,
-                      )
-                    }
+                      );
+                    }}
                     onKeyDown={(event) => {
                       if (event.key !== "Enter" && event.key !== " ") return;
                       event.preventDefault();
@@ -175,7 +198,7 @@ export default function GeneratedCardsTicker() {
                     }}
                     role="button"
                     tabIndex={0}
-                    aria-label={`Flip card: ${label}`}
+                    aria-label={`Open or flip card: ${label}`}
                   >
                     <div className={`generated-card-flip-inner ${isFlipped ? "is-flipped" : ""}`}>
                       <div className="generated-card-flip-face generated-card-flip-face-front">
