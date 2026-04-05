@@ -42,7 +42,7 @@ if project_root not in sys.path:
 
 from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE, GENESIS_END_DATE
 from scripts.daily_scheduler_simple import SimplifiedScheduler
-from scripts.cardgen.generate_card import detect_pattern, generate_card_back_svg, generate_card_svg
+from scripts.cardgen.generate_card import generate_card_back_svg, generate_card_svg
 from scripts.season_manager import SeasonManager
 from scripts.solana_service import MintedNftResult, SolanaClient
 from scripts.zora_service import ZoraClient
@@ -3144,10 +3144,11 @@ def card_builder_preview(req: CardBuilderPreviewRequest) -> Dict[str, Any]:
         payload["image_url"] = image_url
         svg = generate_card_svg(payload)
         back_svg = generate_card_back_svg(payload)
+        arch = str(payload.get("archetype", "") or "").strip() or None
         return {
             "svg": svg,
             "back_svg": back_svg,
-            "pattern": detect_pattern(payload),
+            "archetype": arch,
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))

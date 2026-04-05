@@ -563,7 +563,7 @@ export default function HomePage() {
   const [cardBuilderDetailBusy, setCardBuilderDetailBusy] = useState(false);
   const [cardBuilderPreviewSvg, setCardBuilderPreviewSvg] = useState("");
   const [cardBuilderPreviewBackSvg, setCardBuilderPreviewBackSvg] = useState("");
-  const [cardBuilderPattern, setCardBuilderPattern] = useState("");
+  const [cardBuilderArchetype, setCardBuilderArchetype] = useState("");
   const [cardBuilderPreviewBusy, setCardBuilderPreviewBusy] = useState(false);
   const [cardBuilderFrontFlipped, setCardBuilderFrontFlipped] = useState(false);
   const [cardBuilderBackFlipped, setCardBuilderBackFlipped] = useState(true);
@@ -571,7 +571,7 @@ export default function HomePage() {
   const [cardBuilderBackAnimating, setCardBuilderBackAnimating] = useState(false);
   const cardBuilderFrontFlipTimerRef = useRef<number | null>(null);
   const cardBuilderBackFlipTimerRef = useRef<number | null>(null);
-  const cardBuilderPreviewCacheRef = useRef<Map<string, { svg: string; back_svg: string; pattern: string }>>(new Map());
+  const cardBuilderPreviewCacheRef = useRef<Map<string, { svg: string; back_svg: string; archetype: string | null }>>(new Map());
   const cardBuilderSelectionRequestRef = useRef(0);
   const cardBuilderPreviewRequestRef = useRef(0);
   const [eventCardForm, setEventCardForm] = useState<EventCardForm>({
@@ -794,7 +794,7 @@ export default function HomePage() {
     setCardBuilderPreviewBackSvg("");
     setCardBuilderFrontFlipped(false);
     setCardBuilderBackFlipped(true);
-    setCardBuilderPattern("");
+    setCardBuilderArchetype("");
     setCardBuilderDetailBusy(true);
     try {
       const data = await fetchJSON<{ row: CardBuilderCandidate }>(`/api/card-builder/candidates/${row.winner_row_id}`);
@@ -1088,7 +1088,7 @@ export default function HomePage() {
       setCardBuilderPreviewBackSvg("");
       setCardBuilderFrontFlipped(false);
       setCardBuilderBackFlipped(true);
-      setCardBuilderPattern("");
+      setCardBuilderArchetype("");
       return;
     }
     const selected = data.rows.find((row) => row.winner_row_id === cardBuilderSelectedWinnerRowId);
@@ -1099,7 +1099,7 @@ export default function HomePage() {
     setCardBuilderPreviewBackSvg("");
     setCardBuilderFrontFlipped(false);
     setCardBuilderBackFlipped(true);
-    setCardBuilderPattern("");
+    setCardBuilderArchetype("");
   };
   const previewCardBuilderPayload = async (payloadOverride?: CardBuilderPayload) => {
     const payload = payloadOverride ?? cardBuilderPayload;
@@ -1119,22 +1119,25 @@ export default function HomePage() {
       setCardBuilderPreviewBackSvg(cached.back_svg);
       setCardBuilderFrontFlipped(false);
       setCardBuilderBackFlipped(true);
-      setCardBuilderPattern(cached.pattern);
+      setCardBuilderArchetype(cached.archetype ?? "");
       return;
     }
     setCardBuilderPreviewBusy(true);
     try {
-      const out = await fetchJSON<{ svg: string; back_svg: string; pattern: string }>("/api/card-builder/preview", {
-        method: "POST",
-        body: JSON.stringify({ payload }),
-      });
+      const out = await fetchJSON<{ svg: string; back_svg: string; archetype: string | null }>(
+        "/api/card-builder/preview",
+        {
+          method: "POST",
+          body: JSON.stringify({ payload }),
+        },
+      );
       if (cardBuilderPreviewRequestRef.current !== previewRequestId) return;
       cardBuilderPreviewCacheRef.current.set(cacheKey, out);
       setCardBuilderPreviewSvg(out.svg);
       setCardBuilderPreviewBackSvg(out.back_svg);
       setCardBuilderFrontFlipped(false);
       setCardBuilderBackFlipped(true);
-      setCardBuilderPattern(out.pattern);
+      setCardBuilderArchetype(out.archetype ?? "");
     } finally {
       if (cardBuilderPreviewRequestRef.current === previewRequestId) {
         setCardBuilderPreviewBusy(false);
@@ -2860,7 +2863,7 @@ export default function HomePage() {
 
           <div className="panel">
             <div className="row">
-              <span className="muted">Preview pattern: {cardBuilderPattern || "n/a"}</span>
+              <span className="muted">Preview archetype: {cardBuilderArchetype || "n/a"}</span>
               {cardBuilderPayload?.image_url ? (
                 <a href={cardBuilderPayload.image_url} target="_blank" rel="noreferrer">
                   Open source image

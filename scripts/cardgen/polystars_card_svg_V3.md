@@ -523,48 +523,11 @@ SQL: WHERE entry_bracket IN ('Vector', 'Harvester')
 | Contrarian | ~12,752 | 2.82% | #0A2A2A | Called it from the coin-flip zone |
 | Uniform | ~6,177 | 1.36% | Gradient | Perfect 4-axis alignment |
 
-### 10.4 Pattern Detection Pseudocode
+### 10.4 Data zone from Archetype (implementation)
 
-```
-function detectPattern(data):
-    bracket_tier = bracketToPosition(data.entry_bracket)
-    // bracketToPosition: Anomaly→P99, Oracle→P90, Outlier→P70, Vector→P50, Harvester→Base
+Pattern-detection pseudocode (former Section 10.4) is **removed**. The front and back **Data Zone** fill and stroke come only from **`data.archetype`** via `dz_style()` in `scripts/cardgen/generate_card.py` (`_DZ_ARCHETYPE_STYLES`). If `archetype` is missing or empty, the renderer uses **`THE OPERATOR`**.
 
-    // Priority 1: UNIFORM
-    if bracket_tier != "Base"
-       AND data.edge == bracket_tier
-       AND data.yield == bracket_tier
-       AND data.gravity == bracket_tier:
-        return "UNIFORM"
-
-    // Priority 2: SIGNAL
-    if data.entry_bracket IN ["Anomaly", "Oracle"]
-       AND data.edge IN ["P99", "P90"]
-       AND data.yield IN ["P99", "P90"]:
-        return "SIGNAL"
-
-    // Priority 3: CONTRARIAN
-    if data.entry_bracket == "Outlier"
-       AND data.edge IN ["P99", "P90"]
-       AND data.yield IN ["P99", "P90"]:
-        return "CONTRARIAN"
-
-    // Priority 4: EQUILIBRIUM
-    if data.edge IN ["P99", "P90", "P70"]
-       AND data.yield IN ["P99", "P90", "P70"]
-       AND data.gravity IN ["P99", "P90", "P70"]:
-        return "EQUILIBRIUM"
-
-    // Priority 5: LIQUIDATOR
-    if data.entry_bracket IN ["Vector", "Harvester"]
-       AND data.gravity IN ["P99", "P90"]
-       AND data.edge IN ["Base", "P50"]
-       AND data.yield IN ["Base", "P50"]:
-        return "LIQUIDATOR"
-
-    // Priority 6: DEFAULT
-    return "DEFAULT"
-```
+The historical pattern names in Sections 10.1–10.3 (UNIFORM, SIGNAL, LIQUIDATOR, etc.) describe **supply / narrative** context only; they are **not** computed at render time anymore.
 
 ---
 
@@ -582,6 +545,7 @@ function detectPattern(data):
   "primary_tag_color":  "#51E147",
   "secondary_tag":      "NONE",
   "entry_bracket":      "ORACLE",
+  "archetype":          "THE ANOMALY",
   "proxy_wallet":       "0xBb8E703abc123def456...",
   "edge":               "P99",
   "yield":              "P90",
@@ -604,36 +568,28 @@ Fields below `leaderboard_rank` are used by the back-of-card Agent (Part B).
 
 ```
 function buildCard(data):
-    // 1. Detect pattern
-    pattern = detectPattern(data)     // Section 10.4
+    // 1. Resolve Data Zone background from archetype (dz_style in generate_card.py)
+    archetype = normalizeArchetype(data.archetype)  // default THE OPERATOR if missing
+    (bg, stroke, text_stroke) = dzStyle(archetype)    // map per _DZ_ARCHETYPE_STYLES
 
-    // 2. Resolve Data Zone background
-    switch pattern:
-        "DEFAULT"     → bg = "#1C1B1B",  stroke = "#FFFFFF"
-        "LIQUIDATOR"  → bg = "#3B2647",  stroke = "#FFFFFF"
-        "EQUILIBRIUM" → bg = "#474332",  stroke = "#FFFFFF"
-        "SIGNAL"      → bg = "#CDD2DE",  stroke = "#000000", text_stroke = true
-        "CONTRARIAN"  → bg = "#0A2A2A",  stroke = "#FFFFFF"
-        "UNIFORM"     → bg = uniform_gradient, stroke = "#000000"
-
-    // 3. Resolve tier colors (4 independent axes)
+    // 2. Resolve tier colors (4 independent axes)
     bracket_color   = tierColor_EntryBracket(data.entry_bracket)
     edge_color      = tierColor_PTier(data.edge)
     yield_color     = tierColor_PTier(data.yield)
     gravity_color   = tierColor_PTier(data.gravity)
 
-    // 4. Resolve propagated colors
+    // 3. Resolve propagated colors
     wallet_color    = edge_color
     border_color    = yield_color
     dotted_line_clr = gravity_color
     sector_color    = data.primary_tag_color
 
-    // 5. Resolve conditional text
+    // 4. Resolve conditional text
     // ... (same as v2.0)
 
-    // 6. Inject into SVG front template
-    // 7. Generate back-of-card via Agent (Part B)
-    // 8. Assemble final dual-sided SVG/asset
+    // 5. Inject into SVG front template
+    // 6. Generate back-of-card via Agent (Part B)
+    // 7. Assemble final dual-sided SVG/asset
 ```
 
 ---
@@ -651,7 +607,7 @@ The back shares the outer frame with the front (same dimensions, same border col
 │  OUTER FRAME (identical to front)         │
 │  ┌──────────────────────────────────────┐ │
 │  │  DATA ZONE (full height)             │ │
-│  │  Same background as front (pattern)  │ │
+│  │  Same background as front (archetype)  │ │
 │  │  Same border gap as front            │ │
 │  │                                      │ │
 │  │  ┌─ UPPER THIRD ──────────────────┐  │ │
@@ -677,7 +633,7 @@ The back shares the outer frame with the front (same dimensions, same border col
 
 ### 13.2 Data Zone (Back)
 - Fills the full inner frame area (same gap between outer frame and data zone as front)
-- Background: **same pattern-driven fill as front** (Default=#1C1B1B, Signal=#CDD2DE, etc.)
+- Background: **same archetype-driven fill as front** (see `_DZ_ARCHETYPE_STYLES` in `generate_card.py`)
 - Border: same stroke color as front data zone
 - Corner radius: same as front data zone (22px)
 
