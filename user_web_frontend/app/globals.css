@@ -2,8 +2,20 @@
   color-scheme: dark;
 }
 
+@font-face {
+  font-family: "OrbitronLogo";
+  src: url("/orbitron-bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 * {
   box-sizing: border-box;
+}
+
+html {
+  overflow-x: hidden;
 }
 
 body {
@@ -12,6 +24,7 @@ body {
   background: #0f1117;
   color: #e6e9ef;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  overflow-x: hidden;
 }
 
 .site-nav {
@@ -31,15 +44,23 @@ body {
   font-size: 14px;
 }
 
-.site-nav a:hover {
+.site-nav a:not(.site-logo-link):hover {
   text-decoration: underline;
 }
 
 .site-logo-link {
   display: inline-flex;
   align-items: center;
-  line-height: 0;
+  gap: 2px;
+  line-height: 1;
   border-radius: 8px;
+  text-decoration: none;
+}
+
+.site-logo-link:hover,
+.site-logo-link:active,
+.site-logo-link:visited {
+  text-decoration: none;
 }
 
 .site-logo-link:focus-visible {
@@ -48,10 +69,23 @@ body {
 }
 
 .site-logo-img {
-  width: 80px;
-  height: 80px;
+  width: 98px;
+  height: 98px;
   display: block;
   object-fit: contain;
+  transform: translateY(-1px);
+}
+
+.site-logo-wordmark {
+  font-family: "OrbitronLogo", "Segoe UI", sans-serif;
+  font-size: 82px;
+  font-weight: 700;
+  line-height: 0.96;
+  letter-spacing: 0;
+  color: #f3f6fb;
+  white-space: nowrap;
+  margin-left: -6px;
+  transform: translateY(-1px);
 }
 
 .card-detail-logo-link {
@@ -63,6 +97,14 @@ body {
   font-size: 13px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.home-page-top-gap {
+  height: 44px;
+}
+
+.dashboard-page-top-gap {
+  height: 40px;
 }
 
 main {
@@ -372,10 +414,11 @@ main {
 
 .wallet-ticker-strip {
   position: relative;
-  max-width: min(1600px, calc(100vw - 32px));
-  margin: 24px auto 48px;
-  border: 1px solid #2b3242;
-  border-radius: 999px;
+  width: 100vw;
+  max-width: none;
+  margin: 24px calc(50% - 50vw) 48px;
+  border: 0;
+  border-radius: 0;
   background: #121722;
   min-height: 28px;
   overflow: hidden;
@@ -439,8 +482,9 @@ main {
 }
 
 .card-ticker-section {
-  max-width: min(1600px, calc(100vw - 32px));
-  margin: 0 auto 48px;
+  width: 100vw;
+  max-width: none;
+  margin: 0 calc(50% - 50vw) 48px;
 }
 
 .card-ticker-heading {
@@ -450,27 +494,28 @@ main {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: #8b95a6;
+  text-align: center;
 }
 
 .card-ticker-strip {
   position: relative;
   width: 100%;
-  border: 1px solid #2b3242;
-  border-radius: 16px;
+  border: 0;
+  border-radius: 0;
   background: #121722;
-  min-height: calc(386px * 0.8 + 24px);
-  overflow: hidden;
+  min-height: calc(386px * 0.96 + 32px);
+  overflow: visible;
 }
 
 .card-ticker-viewport {
-  overflow: hidden;
-  padding: 12px 16px;
+  overflow: visible;
+  padding: 16px;
 }
 
 .card-ticker-track {
   display: inline-flex;
   align-items: center;
-  gap: 14px;
+  gap: 28px;
   white-space: nowrap;
   width: max-content;
   will-change: transform;
@@ -481,29 +526,44 @@ main {
   animation-play-state: paused;
 }
 
-.card-ticker-item-link {
+.card-ticker-item {
   flex: 0 0 auto;
-  line-height: 0;
-  border-radius: 4px;
-  overflow: hidden;
-  border: 1px solid #2b3242;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  position: relative;
+  perspective: 1200px;
+  transform-style: preserve-3d;
+  z-index: 1;
 }
 
-.card-ticker-item-link:hover {
-  border-color: #4a5568;
-  box-shadow: 0 0 0 1px rgb(122 162 255 / 0.25);
+.card-ticker-item.nft-card-wrapper-active {
+  z-index: 22;
 }
 
-.card-ticker-item-link:focus-visible {
+.card-ticker-card {
+  width: calc(249px * 0.96);
+  height: calc(386px * 0.96);
+  min-height: calc(386px * 0.96);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  overflow: visible;
+}
+
+.card-ticker-card:focus-visible {
   outline: 2px solid #7aa2ff;
   outline-offset: 2px;
 }
 
+.card-ticker-card .generated-card-flip-face,
+.card-ticker-card .generated-card-image {
+  border-radius: 0;
+}
+
 .card-ticker-thumb {
   display: block;
-  width: calc(249px * 0.8);
-  height: calc(386px * 0.8);
+  width: calc(249px * 0.96);
+  height: calc(386px * 0.96);
   object-fit: cover;
   object-position: center;
 }

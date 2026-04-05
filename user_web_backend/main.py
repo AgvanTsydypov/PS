@@ -1737,7 +1737,7 @@ def me_cards(request: Request) -> Dict[str, Any]:
 
 @app.get("/api/cards/ticker")
 def generated_cards_ticker(request: Request, limit: Optional[int] = None) -> Dict[str, Any]:
-    """Public random sample of generated card fronts for the home ticker (no auth)."""
+    """Public random sample of generated cards for the home ticker (no auth)."""
     env_default = int(os.getenv("USER_WEB_CARDS_TICKER_SAMPLE_SIZE", "40"))
     ticker_default = max(1, min(env_default, 48))
     if limit is None:
@@ -1753,7 +1753,7 @@ def generated_cards_ticker(request: Request, limit: Optional[int] = None) -> Dic
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT slug, card_title, front_image_path, created_at
+                SELECT slug, card_title, front_image_path, back_image_path, created_at
                 FROM user_generated_cards
                 ORDER BY RANDOM()
                 LIMIT %s
@@ -1773,7 +1773,8 @@ def generated_cards_ticker(request: Request, limit: Optional[int] = None) -> Dic
         slug = str(r.get("slug") or "").strip()
         if not slug:
             continue
-        path = str(r.get("front_image_path") or "").strip()
+        front_path = str(r.get("front_image_path") or "").strip()
+        back_path = str(r.get("back_image_path") or "").strip()
         title = str(r.get("card_title") or "").strip()
         created_at = r.get("created_at")
         created_iso: Optional[str] = None
@@ -1783,7 +1784,8 @@ def generated_cards_ticker(request: Request, limit: Optional[int] = None) -> Dic
             {
                 "slug": slug,
                 "card_title": title,
-                "front_image_url": _absolute_asset_url(request, path),
+                "front_image_url": _absolute_asset_url(request, front_path),
+                "back_image_url": _absolute_asset_url(request, back_path) if back_path else None,
                 "created_at": created_iso,
             }
         )

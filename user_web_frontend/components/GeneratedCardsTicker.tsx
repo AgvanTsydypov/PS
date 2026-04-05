@@ -1,7 +1,18 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
+import {
+  clearFlipTimers,
+  handleCardGridMouseLeave,
+  handleCardGridMouseMove,
+  triggerCardFlip,
+} from "./cardInteractions";
 
 const apiBase =
   process.env.NEXT_PUBLIC_USER_API_BASE_URL ??
@@ -16,6 +27,7 @@ type CardTickerItem = {
   slug: string;
   card_title: string;
   front_image_url: string;
+  back_image_url?: string | null;
   created_at?: string | null;
 };
 
@@ -25,8 +37,9 @@ type CardTickerResponse = {
   fetched_at: string;
 };
 
-const TICKER_THUMB_PX = Math.round(249 * 0.8);
-const TICKER_GAP_PX = 14;
+const TICKER_THUMB_PX = Math.round(249 * 0.96);
+const TICKER_THUMB_HEIGHT_PX = Math.round(386 * 0.96);
+const TICKER_GAP_PX = 28;
 const TICKER_LINK_BORDER_PX = 2;
 
 function segmentWidthPx(itemCount: number): number {
@@ -48,6 +61,9 @@ function tickerSegmentCount(itemCount: number, viewportWidthPx: number): number 
 export default function GeneratedCardsTicker() {
   const [items, setItems] = useState<CardTickerItem[]>([]);
   const [viewportWidth, setViewportWidth] = useState(1200);
+  const [flippedCards, setFlippedCards] = useState<Record<string, boolean>>({});
+  const [animatingCards, setAnimatingCards] = useState<Record<string, boolean>>({});
+  const flipTimerRef = useRef<Record<string, number | null>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -81,6 +97,12 @@ export default function GeneratedCardsTicker() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  useEffect(() => {
+    return () => {
+      clearFlipTimers(flipTimerRef);
+    };
+  }, []);
+
   const segmentCount = useMemo(
     () => tickerSegmentCount(items.length, viewportWidth),
     [items.length, viewportWidth],
@@ -100,7 +122,16 @@ export default function GeneratedCardsTicker() {
     <div className="card-ticker-section">
       <h2 className="card-ticker-heading">Already Generated Cards</h2>
       <section className="card-ticker-strip" aria-label="Already generated cards">
-        <div className="card-ticker-viewport">
+        <div
+          className="card-ticker-viewport"
+          onMouseMove={(event) =>
+            handleCardGridMouseMove(event, {
+              wrapperSelector: ".card-ticker-item",
+              cardSelector: ".card-ticker-card",
+            })
+          }
+          onMouseLeave={(event) => handleCardGridMouseLeave(event, ".card-ticker-card")}
+        >
           <div
             className="card-ticker-track"
             style={
@@ -110,28 +141,70 @@ export default function GeneratedCardsTicker() {
             }
           >
             {loop.map((item, index) => {
+              const cardId = `${item.slug}-${index}`;
               const label =
                 item.card_title.trim() ||
                 item.slug ||
                 "Card";
+              const isFlipped = Boolean(flippedCards[cardId]);
+              const isAnimating = Boolean(animatingCards[cardId]);
+              const backImageUrl = item.back_image_url || item.front_image_url;
               return (
-                <Link
-                  key={`${item.slug}-${index}`}
-                  href={`/cards/${encodeURIComponent(item.slug)}`}
-                  className="card-ticker-item-link"
-                  aria-label={`Open card: ${label}`}
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    className="card-ticker-thumb"
-                    src={item.front_image_url}
-                    alt=""
-                    width={TICKER_THUMB_PX}
-                    height={Math.round(386 * 0.8)}
-                    loading="lazy"
-                    decoding="async"
-                  />
-                </Link>
+                <div key={cardId} className="card-ticker-item">
+                  <article
+                    className={`nft-card nft-card-tilt theme-vivid card-ticker-card ${isAnimating ? "generated-card-preview-card-flipping" : ""}`}
+                    onClick={(event) =>
+                      triggerCardFlip(
+                        cardId,
+                        event.currentTarget,
+                        flipTimerRef,
+                        setAnimatingCards,
+                        setFlippedCards,
+                      )
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      triggerCardFlip(
+                        cardId,
+                        event.currentTarget,
+                        flipTimerRef,
+                        setAnimatingCards,
+                        setFlippedCards,
+                      );
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Flip card: ${label}`}
+                  >
+                    <div className={`generated-card-flip-inner ${isFlipped ? "is-flipped" : ""}`}>
+                      <div className="generated-card-flip-face generated-card-flip-face-front">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          className="generated-card-image card-ticker-thumb"
+                          src={item.front_image_url}
+                          alt=""
+                          width={TICKER_THUMB_PX}
+                          height={TICKER_THUMB_HEIGHT_PX}
+                          loading="lazy"
+                          decoding="async"
+                        />
+                      </div>
+                      <div className="generated-card-flip-face generated-card-flip-face-back">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          className="generated-card-image card-ticker-thumb"
+                          src={backImageUrl}
+                          alt=""
+                          width={TICKER_THUMB_PX}
+                          height={TICKER_THUMB_HEIGHT_PX}
+                          loading="lazy"
+                          decoding="async"
+                        />
+                      </div>
+                    </div>
+                  </article>
+                </div>
               );
             })}
           </div>
