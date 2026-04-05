@@ -11,17 +11,10 @@ export default function HomePage() {
   return (
     <>
       <nav className="site-nav" aria-label="Site">
-        <SiteLogoLink />
-        <Link href="/me">My dashboard</Link>
+        <SiteLogoLink showWordmark />
       </nav>
 
-      <main>
-        <h1>PolyStars</h1>
-        <p>
-          Browse active seasons below. Connect your wallet, mint, and manage test cards on your
-          personal dashboard.
-        </p>
-      </main>
+      <div className="home-page-top-gap" aria-hidden="true" />
 
       <ActiveSeasonsBoard
         footer={
@@ -32,9 +25,9 @@ export default function HomePage() {
         }
       />
 
-      <OriginsWalletTicker />
-
       <GeneratedCardsTicker />
+
+      <OriginsWalletTicker />
     </>
   );
 }

@@ -3,7 +3,13 @@
 import Link from "next/link";
 
 /** Cardgen logo (62×67); displayed in an 80×80 box. */
-export default function SiteLogoLink({ className }: { className?: string }) {
+export default function SiteLogoLink({
+  className,
+  showWordmark = false,
+}: {
+  className?: string;
+  showWordmark?: boolean;
+}) {
   return (
     <Link
       href="/"
@@ -19,6 +25,7 @@ export default function SiteLogoLink({ className }: { className?: string }) {
         height={80}
         decoding="async"
       />
+      {showWordmark ? <span className="site-logo-wordmark">OLYSTARS</span> : null}
     </Link>
   );
 }

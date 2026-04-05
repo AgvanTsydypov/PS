@@ -7,6 +7,12 @@ import {
   ActiveSeasonsBoard,
   type ActiveSeasonsBoardHandle,
 } from "./ActiveSeasonsBoard";
+import {
+  clearFlipTimers,
+  handleCardGridMouseLeave,
+  handleCardGridMouseMove,
+  triggerCardFlip,
+} from "./cardInteractions";
 import SiteLogoLink from "./SiteLogoLink";
 
 // ── EIP-6963 types ────────────────────────────────────────────────────────────
@@ -388,11 +394,8 @@ export default function UserDashboard() {
   }, [isWalletPanelHovered, showPicker]);
 
   useEffect(() => {
-    const flipTimers = generatedCardFlipTimerRef.current;
     return () => {
-      Object.values(flipTimers).forEach((timerId) => {
-        if (timerId) window.clearTimeout(timerId);
-      });
+      clearFlipTimers(generatedCardFlipTimerRef);
     };
   }, []);
 
@@ -435,77 +438,6 @@ export default function UserDashboard() {
       return String((error as { message: unknown }).message);
     }
     return JSON.stringify(error);
-  }
-
-  function updateNftCardTilt(target: HTMLElement, clientX: number, clientY: number) {
-    const rect = target.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-    const relativeX = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    const relativeY = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
-    const MAX_TILT = 20;
-    const rotateY = (relativeX - 0.5) * (MAX_TILT * 2);
-    const rotateX = (0.5 - relativeY) * (MAX_TILT * 2);
-    // Plain-number ratios (-1..1) for CSS diffuse lighting.
-    // +ratio-x → tilted down (shadow), -ratio-x → tilted up (light).
-    const tiltRatioX = (relativeY - 0.5) * 2;
-    const tiltRatioY = (relativeX - 0.5) * 2;
-
-    target.classList.add("nft-card-active");
-    target.parentElement?.classList.add("nft-card-wrapper-active");
-    target.style.setProperty("--nft-tilt-x", `${rotateX.toFixed(2)}deg`);
-    target.style.setProperty("--nft-tilt-y", `${rotateY.toFixed(2)}deg`);
-    target.style.setProperty("--pointer-x", `${(relativeX * 100).toFixed(2)}%`);
-    target.style.setProperty("--pointer-y", `${(relativeY * 100).toFixed(2)}%`);
-    target.style.setProperty("--tilt-ratio-x", tiltRatioX.toFixed(3));
-    target.style.setProperty("--tilt-ratio-y", tiltRatioY.toFixed(3));
-  }
-
-  function resetNftCardTilt(target: HTMLElement) {
-    target.classList.remove("nft-card-active");
-    target.parentElement?.classList.remove("nft-card-wrapper-active");
-    target.style.setProperty("--nft-tilt-x", "0deg");
-    target.style.setProperty("--nft-tilt-y", "0deg");
-    target.style.setProperty("--pointer-x", "50%");
-    target.style.setProperty("--pointer-y", "50%");
-    target.style.setProperty("--tilt-ratio-x", "0");
-    target.style.setProperty("--tilt-ratio-y", "0");
-  }
-
-  function handleNftGridMouseMove(event: React.MouseEvent<HTMLDivElement>) {
-    const PROXIMITY_PX = 10;
-    const clientX = event.clientX;
-    const clientY = event.clientY;
-    const wrappers = event.currentTarget.querySelectorAll<HTMLElement>(".nft-card-wrapper");
-
-    wrappers.forEach((wrapper) => {
-      const card = wrapper.querySelector<HTMLElement>(".nft-card-tilt");
-      if (!card) return;
-      if (card.classList.contains("generated-card-preview-card-flipping")) {
-        resetNftCardTilt(card);
-        return;
-      }
-      // Use the transformed card bounds so scaled edges remain interactive.
-      const rect = card.getBoundingClientRect();
-      const isWithinProximity =
-        clientX >= rect.left - PROXIMITY_PX &&
-        clientX <= rect.right + PROXIMITY_PX &&
-        clientY >= rect.top - PROXIMITY_PX &&
-        clientY <= rect.bottom + PROXIMITY_PX;
-
-      if (!isWithinProximity) {
-        resetNftCardTilt(card);
-        return;
-      }
-
-      const clampedX = Math.min(rect.right, Math.max(rect.left, clientX));
-      const clampedY = Math.min(rect.bottom, Math.max(rect.top, clientY));
-      updateNftCardTilt(card, clampedX, clampedY);
-    });
-  }
-
-  function handleNftGridMouseLeave(event: React.MouseEvent<HTMLDivElement>) {
-    const cards = event.currentTarget.querySelectorAll<HTMLElement>(".nft-card-tilt");
-    cards.forEach((card) => resetNftCardTilt(card));
   }
 
   async function refreshMyNfts() {
@@ -637,32 +569,14 @@ export default function UserDashboard() {
     clearStoredSessionMeta();
   }
 
-  function toggleGeneratedCardFlip(slug: string) {
-    setFlippedCardSlugs((prev) => ({
-      ...prev,
-      [slug]: !prev[slug],
-    }));
-  }
-
   function triggerGeneratedCardFlip(slug: string, target: HTMLElement) {
-    resetNftCardTilt(target);
-    const existingTimer = generatedCardFlipTimerRef.current[slug];
-    if (existingTimer) window.clearTimeout(existingTimer);
-    setAnimatingCardSlugs((prev) => ({
-      ...prev,
-      [slug]: true,
-    }));
-    setFlippedCardSlugs((prev) => ({
-      ...prev,
-      [slug]: !prev[slug],
-    }));
-    generatedCardFlipTimerRef.current[slug] = window.setTimeout(() => {
-      setAnimatingCardSlugs((prev) => ({
-        ...prev,
-        [slug]: false,
-      }));
-      generatedCardFlipTimerRef.current[slug] = null;
-    }, 720);
+    triggerCardFlip(
+      slug,
+      target,
+      generatedCardFlipTimerRef,
+      setAnimatingCardSlugs,
+      setFlippedCardSlugs,
+    );
   }
 
   function handleAuthButtonClick() {
@@ -1177,12 +1091,7 @@ export default function UserDashboard() {
         ) : null}
       </aside>
 
-      <main>
-        <h1>PS DEVTEST User Sign-in</h1>
-        <p>
-          Connect an EVM wallet, sign a challenge, and verify on backend.
-        </p>
-      </main>
+      <div className="dashboard-page-top-gap" aria-hidden="true" />
 
       <ActiveSeasonsBoard
         ref={seasonsBoardRef}
@@ -1256,8 +1165,13 @@ export default function UserDashboard() {
             <div className="nft-grid-wrap">
               <div
                 className="nft-grid generated-card-grid"
-                onMouseMove={handleNftGridMouseMove}
-                onMouseLeave={handleNftGridMouseLeave}
+                onMouseMove={(event) =>
+                  handleCardGridMouseMove(event, {
+                    wrapperSelector: ".nft-card-wrapper",
+                    cardSelector: ".nft-card-tilt",
+                  })
+                }
+                onMouseLeave={(event) => handleCardGridMouseLeave(event, ".nft-card-tilt")}
               >
                 {myCards.map((item) => {
                   const isFlipped = Boolean(flippedCardSlugs[item.slug]);
@@ -1291,9 +1205,6 @@ export default function UserDashboard() {
                             </div>
                           </div>
                         </article>
-                      </div>
-                      <div className="generated-card-description">
-                        <a href={`/cards/${item.slug}`}>Open card page</a>
                       </div>
                     </div>
                   );
@@ -1329,8 +1240,13 @@ export default function UserDashboard() {
             <div className="nft-grid-wrap">
               <div
                 className="nft-grid"
-                onMouseMove={handleNftGridMouseMove}
-                onMouseLeave={handleNftGridMouseLeave}
+                onMouseMove={(event) =>
+                  handleCardGridMouseMove(event, {
+                    wrapperSelector: ".nft-card-wrapper",
+                    cardSelector: ".nft-card-tilt",
+                  })
+                }
+                onMouseLeave={(event) => handleCardGridMouseLeave(event, ".nft-card-tilt")}
               >
                 {myNfts.map((item) => {
                   return (
