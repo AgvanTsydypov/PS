@@ -363,15 +363,29 @@ def _season(data: Dict[str, Any]) -> Tuple[str, str]:
     return f"STANDARD #{n}", "#B1ABAB"
 
 
+def _event_recurrence_is_fractal(recurrence_value: Any) -> bool:
+    """True when the event is recurring (INSTANCE FRACTAL).
+
+    event_cards.reccurence is backfilled from series.recurrence; one-off events use 'unique'.
+    Anything other than empty / unique / null-like → recurring (FRACTAL).
+    """
+    s = str(recurrence_value or "").strip().lower()
+    if not s or s in ("null", "none", "-"):
+        return False
+    if s == "unique":
+        return False
+    return True
+
+
 def _instance(data: Dict[str, Any]) -> Tuple[str, str]:
-    rec = data.get("recurrence")
-    if rec and str(rec).lower() not in ("null", "none", ""):
+    if _event_recurrence_is_fractal(data.get("recurrence")):
         return "FRACTAL", "#2A8FEE"
     return "SINGULAR", "#E8A72F"
 
 
 def _ownership(data: Dict[str, Any]) -> Tuple[str, str]:
-    if data.get("claim_type", "").lower() == "origin":
+    claim = str(data.get("claim_type", "") or "").strip().lower()
+    if claim == "origin":
         return "ORIGIN SECURED", "#FF007F"
     return "LOOTER TAKEOVER", "#40E288"
 
@@ -1126,7 +1140,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 SAMPLE_DATA: Dict[str, Any] = {
     "season_type":       "standard",
     "season_number":     3,
-    "recurrence":        None,
+    "recurrence":        "unique",
     "claim_type":        "origin",
     "image_url":         "sample.jpg",
     "card_title":        "ZELENSKYY SUIT WATCH JUN 2025",
