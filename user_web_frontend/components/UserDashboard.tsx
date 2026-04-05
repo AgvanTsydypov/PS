@@ -11,6 +11,8 @@ import {
   clearFlipTimers,
   handleCardGridMouseLeave,
   handleCardGridMouseMove,
+  markCardPressStart,
+  navigateToCardIfCenterClick,
   triggerCardFlip,
 } from "./cardInteractions";
 import SiteLogoLink from "./SiteLogoLink";
@@ -1182,9 +1184,31 @@ export default function UserDashboard() {
                       className="generated-card-wrapper"
                     >
                       <div className="nft-card-wrapper generated-card-preview-wrapper">
+                        <Link
+                          href={`/cards/${encodeURIComponent(item.slug)}`}
+                          className="card-center-hotspot"
+                          tabIndex={-1}
+                          aria-label={`Open card: ${item.slug}`}
+                        />
                         <article
                           className={`nft-card nft-card-tilt theme-vivid generated-card-shell generated-card-preview-card ${isAnimating ? "generated-card-preview-card-flipping" : ""}`}
-                          onClick={(e) => triggerGeneratedCardFlip(item.slug, e.currentTarget)}
+                          data-center-navigate="1"
+                          onPointerDown={(event) => {
+                            markCardPressStart(event.currentTarget, event.clientX, event.clientY);
+                          }}
+                          onClick={(event) => {
+                            if (
+                              navigateToCardIfCenterClick(
+                                event.currentTarget,
+                                item.slug,
+                                event.clientX,
+                                event.clientY,
+                              )
+                            ) {
+                              return;
+                            }
+                            triggerGeneratedCardFlip(item.slug, event.currentTarget);
+                          }}
                         >
                           <div className={`generated-card-flip-inner ${isFlipped ? "is-flipped" : ""}`}>
                             <div className="generated-card-flip-face generated-card-flip-face-front">

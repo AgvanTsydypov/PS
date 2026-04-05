@@ -538,6 +538,25 @@ main {
   z-index: 22;
 }
 
+.card-center-hotspot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 50%;
+  height: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 40;
+  pointer-events: none;
+  cursor: default;
+  background: rgb(0 0 0 / 0.001);
+}
+
+.card-ticker-item[data-center-zone-active="1"] > .card-center-hotspot,
+.nft-card-wrapper[data-center-zone-active="1"] > .card-center-hotspot {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
 .card-ticker-card {
   width: calc(249px * 0.96);
   height: calc(386px * 0.96);
