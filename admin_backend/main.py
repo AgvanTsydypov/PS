@@ -332,6 +332,30 @@ class SeasonWorkbenchService:
                     ADD COLUMN IF NOT EXISTS minted_asset_address TEXT
                     """
                 )
+                cursor.execute(
+                    """
+                    ALTER TABLE winner_wallets_nft_to_claim
+                    ADD COLUMN IF NOT EXISTS archetype TEXT
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE winner_wallets_nft_to_claim
+                    ADD COLUMN IF NOT EXISTS archetype_description TEXT
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE winner_wallets_nft_to_claim
+                    ADD COLUMN IF NOT EXISTS archetype_math TEXT
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE winner_wallets_nft_to_claim
+                    ADD COLUMN IF NOT EXISTS rarity_bracket TEXT
+                    """
+                )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1992,6 +2016,7 @@ class SeasonWorkbenchService:
                             window_start, window_end, snapshot_at, created_at,
                             event_id, event_slug, entry_cwap, total_volume, total_pnl,
                             roi_percentage, entry_bracket, edge, yield, gravity, rank,
+                            archetype, archetype_description, archetype_math, rarity_bracket,
                             is_minted, minted_at,
                             minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
                             minted_tx_hash, minted_asset_address
@@ -2009,6 +2034,7 @@ class SeasonWorkbenchService:
                             window_start, window_end, snapshot_at, created_at,
                             event_id, event_slug, entry_cwap, total_volume, total_pnl,
                             roi_percentage, entry_bracket, edge, yield, gravity, rank,
+                            archetype, archetype_description, archetype_math, rarity_bracket,
                             is_minted, minted_at,
                             minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
                             minted_tx_hash, minted_asset_address
@@ -2131,9 +2157,10 @@ class SeasonWorkbenchService:
                         w.event_slug,
                         e.title AS event_title,
                         w.entry_bracket,
-                        p.archetype,
-                        p.archetype_description,
-                        p.archetype_math,
+                        COALESCE(w.archetype, p.archetype) AS archetype,
+                        COALESCE(w.archetype_description, p.archetype_description) AS archetype_description,
+                        COALESCE(w.archetype_math, p.archetype_math) AS archetype_math,
+                        COALESCE(w.rarity_bracket, p.rarity_bracket) AS rarity_bracket,
                         w.edge,
                         w.yield,
                         w.gravity,
@@ -2157,7 +2184,8 @@ class SeasonWorkbenchService:
                         SELECT
                             p.archetype,
                             p.archetype_description,
-                            p.archetype_math
+                            p.archetype_math,
+                            p.rarity_bracket
                         FROM participants p
                         WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
                           AND (
@@ -2230,7 +2258,9 @@ class SeasonWorkbenchService:
                         id, season_id, proxy_wallet AS wallet_address, source,
                         window_start, window_end, snapshot_at, created_at,
                         event_id, event_slug, entry_cwap, total_volume, total_pnl,
-                        roi_percentage, entry_bracket, edge, yield, gravity, rank, is_minted, minted_at,
+                        roi_percentage, entry_bracket, edge, yield, gravity, rank,
+                        archetype, archetype_description, archetype_math, rarity_bracket,
+                        is_minted, minted_at,
                         minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
                         minted_tx_hash, minted_asset_address
                     """,
@@ -2311,7 +2341,9 @@ class SeasonWorkbenchService:
                         id, season_id, proxy_wallet AS wallet_address, source,
                         window_start, window_end, snapshot_at, created_at,
                         event_id, event_slug, entry_cwap, total_volume, total_pnl,
-                        roi_percentage, entry_bracket, edge, yield, gravity, rank, is_minted, minted_at,
+                        roi_percentage, entry_bracket, edge, yield, gravity, rank,
+                        archetype, archetype_description, archetype_math, rarity_bracket,
+                        is_minted, minted_at,
                         minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
                         minted_tx_hash, minted_asset_address
                     """,

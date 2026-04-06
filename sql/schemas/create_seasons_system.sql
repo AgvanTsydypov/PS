@@ -3,6 +3,10 @@
 -- ============================================================================
 -- This migration creates tables for NFT minting seasons system
 -- Supports Genesis (historical) and Standard (10-day) seasons
+--
+-- Prerequisite: run sql/schemas/init-db.sql first. It defines the
+-- participants materialized view (including columns such as rarity_bracket)
+-- that this file references when backfilling winner_wallets_nft_to_claim.
 -- ============================================================================
 
 DO $$ BEGIN RAISE NOTICE '🎮 Starting PolyStars Seasons System migration...'; END $$;
@@ -290,6 +294,10 @@ CREATE TABLE IF NOT EXISTS winner_wallets_nft_to_claim (
     rank INTEGER,
     event_id TEXT,
     event_slug TEXT,
+    archetype TEXT,
+    archetype_description TEXT,
+    archetype_math TEXT,
+    rarity_bracket TEXT,
     is_minted BOOLEAN NOT NULL DEFAULT FALSE,
     minted_at TIMESTAMPTZ,
     minted_to_wallet TEXT,
@@ -325,6 +333,10 @@ ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_to_solan
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_claim_id BIGINT;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_tx_hash TEXT;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_asset_address TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS archetype TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS archetype_description TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS archetype_math TEXT;
+ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS rarity_bracket TEXT;
 
 -- Backward-compatible migration from legacy column naming.
 DO $$
@@ -371,6 +383,8 @@ COMMENT ON COLUMN winner_wallets_nft_to_claim.window_start IS 'Inclusive lower b
 COMMENT ON COLUMN winner_wallets_nft_to_claim.window_end IS 'Exclusive upper bound used to derive season working events';
 COMMENT ON COLUMN winner_wallets_nft_to_claim.event_id IS 'Participant event id sampled from participants materialized view';
 COMMENT ON COLUMN winner_wallets_nft_to_claim.event_slug IS 'Participant event slug sampled from participants materialized view';
+COMMENT ON COLUMN winner_wallets_nft_to_claim.archetype IS 'Archetype label frozen from participants at snapshot time';
+COMMENT ON COLUMN winner_wallets_nft_to_claim.rarity_bracket IS 'Occurrence band text frozen from participants at snapshot time';
 
 DO $$ BEGIN RAISE NOTICE '✅ winner_wallets_nft_to_claim table created'; END $$;
 
@@ -545,7 +559,11 @@ BEGIN
             edge,
             yield,
             gravity,
-            rank
+            rank,
+            archetype,
+            archetype_description,
+            archetype_math,
+            rarity_bracket
         )
         SELECT
             ts.id AS season_id,
@@ -564,7 +582,11 @@ BEGIN
             picked.edge,
             picked.yield,
             picked.gravity,
-            picked.rank
+            picked.rank,
+            picked.archetype,
+            picked.archetype_description,
+            picked.archetype_math,
+            picked.rarity_bracket
         FROM target_seasons ts
         CROSS JOIN LATERAL (
             WITH position_base AS (
@@ -652,7 +674,11 @@ BEGIN
                     p.edge,
                     p.yield,
                     p.gravity,
-                    p.rank
+                    p.rank,
+                    p.archetype,
+                    p.archetype_description,
+                    p.archetype_math,
+                    p.rarity_bracket
                 FROM candidate_participants p
                 ORDER BY LOWER(p.proxy_wallet), RANDOM()
             )

@@ -887,12 +887,13 @@ BEGIN
         EXECUTE 'DROP TABLE public.participants';
     ELSIF rel_kind = 'v' THEN
         EXECUTE 'DROP VIEW public.participants';
+    ELSIF rel_kind = 'm' THEN
+        EXECUTE 'DROP MATERIALIZED VIEW public.participants';
     END IF;
 END $$;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS participants AS
 WITH event_aggregates AS (
-    -- Step 1: Calculate the core metrics per wallet, per event
     SELECT
         proxy_wallet,
         MAX(event_id) AS event_id,
@@ -905,23 +906,20 @@ WITH event_aggregates AS (
     GROUP BY proxy_wallet, event_slug
 ),
 filtered_traders AS (
-    -- Step 2: Expand the funnel, remove glitches, and filter out late-stage bots (0.97+)
     SELECT *
     FROM event_aggregates
     WHERE capital_weighted_vwap >= 0.001
       AND capital_weighted_vwap <= 0.97
 ),
 ranked_traders AS (
-    -- Step 3: Calculate dynamic percentiles for relative metrics
     SELECT
         *,
-        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_roi ASC) AS roi_percentile,
-        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_volume_usdc ASC) AS volume_percentile,
-        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY capital_weighted_vwap ASC) AS vwap_percentile
+        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_roi) AS roi_percentile,
+        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_volume_usdc) AS volume_percentile,
+        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY capital_weighted_vwap) AS vwap_percentile
     FROM filtered_traders
 ),
 mapped_traders AS (
-    -- Step 4: UI Mapping for the 4-Metric Signature (The Stats)
     SELECT
         rt.proxy_wallet,
         rt.event_id,
@@ -961,56 +959,48 @@ mapped_traders AS (
     FROM ranked_traders rt
 ),
 archetyped_traders AS (
-    -- Step 5: The 9-Tier Waterfall Logic
     SELECT
-        mt.*,
+        mt.proxy_wallet,
+        mt.event_id,
+        mt.event_slug,
+        mt.entry_cwap,
+        mt.total_volume,
+        mt.total_pnl,
+        mt.roi_percentage,
+        mt.entry_bracket,
+        mt.edge,
+        mt.yield,
+        mt.gravity,
         CASE
-            -- Priority 1: THE ANOMALY
-            WHEN mt.entry_bracket != '[0.80 - 0.97]'
+            WHEN mt.entry_bracket <> '[0.80 - 0.97]'
                  AND (
                      (mt.entry_bracket = '[0.00 - 0.20]' AND mt.edge = 'P99' AND mt.yield = 'P99' AND mt.gravity = 'P99') OR
                      (mt.entry_bracket = '[0.20 - 0.40]' AND mt.edge = 'P90' AND mt.yield = 'P90' AND mt.gravity = 'P90') OR
                      (mt.entry_bracket = '[0.40 - 0.60]' AND mt.edge = 'P70' AND mt.yield = 'P70' AND mt.gravity = 'P70') OR
                      (mt.entry_bracket = '[0.60 - 0.80]' AND mt.edge = 'P50' AND mt.yield = 'P50' AND mt.gravity = 'P50')
-                 ) THEN 'THE ANOMALY'
-
-            -- Priority 2: THE SIGNAL
+                 ) THEN 'ANOMALY'
             WHEN mt.entry_bracket IN ('[0.00 - 0.20]', '[0.20 - 0.40]')
                  AND mt.edge IN ('P99', 'P90')
-                 AND mt.yield IN ('P99', 'P90') THEN 'THE SIGNAL'
-
-            -- Priority 3: THE VECTOR
+                 AND mt.yield IN ('P99', 'P90') THEN 'SIGNAL'
             WHEN mt.entry_bracket = '[0.40 - 0.60]'
                  AND mt.edge IN ('P99', 'P90')
-                 AND mt.yield IN ('P99', 'P90') THEN 'THE VECTOR'
-
-            -- Priority 4: THE EQUILIBRIUM
+                 AND mt.yield IN ('P99', 'P90') THEN 'VECTOR'
             WHEN mt.edge IN ('P99', 'P90', 'P70')
                  AND mt.yield IN ('P99', 'P90', 'P70')
-                 AND mt.gravity IN ('P99', 'P90', 'P70') THEN 'THE EQUILIBRIUM'
-
-            -- Priority 5: THE HARVESTER
+                 AND mt.gravity IN ('P99', 'P90', 'P70') THEN 'EQUILIBRIUM'
             WHEN mt.entry_bracket IN ('[0.60 - 0.80]', '[0.80 - 0.97]')
                  AND mt.gravity IN ('P99', 'P90')
                  AND mt.edge IN ('Base', 'P50')
-                 AND mt.yield IN ('Base', 'P50') THEN 'THE HARVESTER'
-
-            -- Priority 6: THE MARTYR
+                 AND mt.yield IN ('Base', 'P50') THEN 'HARVESTER'
             WHEN mt.entry_bracket IN ('[0.00 - 0.20]', '[0.20 - 0.40]')
                  AND mt.edge IN ('P99', 'P90', 'P70')
-                 AND mt.yield IN ('Base', 'P50') THEN 'THE MARTYR'
-
-            -- Priority 7: THE AMASSER
-            WHEN mt.gravity IN ('P99', 'P90') THEN 'THE AMASSER'
-
-            -- Priority 8: THE SUBSTRATE
+                 AND mt.yield IN ('Base', 'P50') THEN 'MARTYR'
+            WHEN mt.gravity IN ('P99', 'P90') THEN 'AMASSER'
             WHEN mt.entry_bracket IN ('[0.60 - 0.80]', '[0.80 - 0.97]')
                  AND mt.edge IN ('Base', 'P50')
                  AND mt.yield IN ('Base', 'P50')
-                 AND mt.gravity IN ('Base', 'P50', 'P70') THEN 'THE SUBSTRATE'
-
-            -- Priority 9: THE OPERATOR
-            ELSE 'THE OPERATOR'
+                 AND mt.gravity IN ('Base', 'P50', 'P70') THEN 'SUBSTRATE'
+            ELSE 'OPERATOR'
         END AS archetype
     FROM mapped_traders mt
 ),
@@ -1038,27 +1028,38 @@ SELECT
     at.gravity,
     at.archetype,
     CASE at.archetype
-        WHEN 'THE ANOMALY' THEN 'Systemic resonance detected. This entity represents a mathematical impossibility on the ledger. Their capital mass, execution velocity, and predictive accuracy have scaled in absolute algorithmic unison with their implied probability bracket. They do not merely trade the market; they mirror its optimal mathematical structure. Perfect calibration. Zero systemic drag.'
-        WHEN 'THE SIGNAL' THEN 'Pure information asymmetry. This operator deploys capital into the void before narrative formation. Lacking the gravitational mass to forcibly bend the market, they rely strictly on execution velocity and extreme absolute risk. They are the initial spark of the probability curve, capturing maximum capital efficiency through sheer predictive foresight. Lethal, early, and precise.'
-        WHEN 'THE VECTOR' THEN 'The calculated divergence. This entity intercepts the market at the point of maximum entropy-the statistical coin-flip. Rather than adopting the herd''s velocity, they execute early and take the mathematically hostile side of a forming consensus. By absorbing peak volatility and being proven violently correct, they achieve immense capital efficiency. A structural disruptor.'
-        WHEN 'THE EQUILIBRIUM' THEN 'Heavyweight alpha baseline established. This entity possesses the predictive velocity of a Signal, reinforced by the financial density to unilaterally rewrite the probability matrix. They do not wait for the market to mature; their capital deployment instantly forces a global repricing event. High efficiency. High mass. They are the gravitational anchors of the ecosystem.'
-        WHEN 'THE HARVESTER' THEN 'Consensus exploitation protocol active. This entity exhibits zero predictive foresight and absorbs minimal absolute risk. They execute only when a prevailing consensus has crystallized (0.60+) or the event is mathematically solved (0.80+). By deploying overwhelming financial mass at the terminal stage of the market lifecycle, they extract a low-variance tax from the ecosystem''s resolution. Pure capital preservation.'
-        WHEN 'THE MARTYR' THEN 'Critical predictive failure. This entity absorbed maximum absolute risk, executing with high velocity before consensus formation-and was proven violently incorrect. They attempted to act as a Signal but failed to achieve alignment with reality. They are the statistical anti-grail; a highly volatile, completely drained node. The organic noise of the system.'
-        WHEN 'THE AMASSER' THEN 'Heavy kinetic grinder. This entity lacks elite execution speed and generates standard capital efficiency, yet they operate with massive financial density. They deploy heavy volume into the mid-trend, serving as the raw mechanical engine of the market. They do not predict the future, nor do they wait for absolute certainty. They provide the deep liquidity floors that allow the broader ecosystem to function.'
-        WHEN 'THE SUBSTRATE' THEN 'Structural exit liquidity. This entity operates entirely on lagging indicators and late-stage narrative absorption. They inject low-tier capital into the market after the probability curve has already been priced by the upper echelons. Mathematically destined for capital bleed, they serve as the foundational biological matter of the ecosystem. Their losses fund the efficiency of the apex tiers.'
-        WHEN 'THE OPERATOR' THEN 'Standard kinetic node. This entity forms the prevailing wind of the probability matrix. They execute mid-trend, absorb average systemic risk, and generate standard baseline returns. They are not the whales anchoring the market, nor the snipers predicting it. They are the active, decentralized processing power of the ledger-the everyday volume that keeps the terminal alive.'
+        WHEN 'ANOMALY' THEN 'Systemic resonance detected. This entity represents a mathematical impossibility on the ledger. Their capital mass, execution velocity, and predictive accuracy have scaled in absolute algorithmic unison with their implied probability bracket. They do not merely trade the market; they mirror its optimal mathematical structure. Perfect calibration. Zero systemic drag.'
+        WHEN 'SIGNAL' THEN 'Pure information asymmetry. This operator deploys capital into the void before narrative formation. Lacking the gravitational mass to forcibly bend the market, they rely strictly on execution velocity and extreme absolute risk. They are the initial spark of the probability curve, capturing maximum capital efficiency through sheer predictive foresight. Lethal, early, and precise.'
+        WHEN 'VECTOR' THEN 'The calculated divergence. This entity intercepts the market at the point of maximum entropy-the statistical coin-flip. Rather than adopting the herd''s velocity, they execute early and take the mathematically hostile side of a forming consensus. By absorbing peak volatility and being proven violently correct, they achieve immense capital efficiency. A structural disruptor.'
+        WHEN 'EQUILIBRIUM' THEN 'Heavyweight alpha baseline established. This entity possesses the predictive velocity of a Signal, reinforced by the financial density to unilaterally rewrite the probability matrix. They do not wait for the market to mature; their capital deployment instantly forces a global repricing event. High efficiency. High mass. They are the gravitational anchors of the ecosystem.'
+        WHEN 'HARVESTER' THEN 'Consensus exploitation protocol active. This entity exhibits zero predictive foresight and absorbs minimal absolute risk. They execute only when a prevailing consensus has crystallized (0.60+) or the event is mathematically solved (0.80+). By deploying overwhelming financial mass at the terminal stage of the market lifecycle, they extract a low-variance tax from the ecosystem''s resolution. Pure capital preservation.'
+        WHEN 'MARTYR' THEN 'Critical predictive failure. This entity absorbed maximum absolute risk, executing with high velocity before consensus formation-and was proven violently incorrect. They attempted to act as a Signal but failed to achieve alignment with reality. They are the statistical anti-grail; a highly volatile, completely drained node. The organic noise of the system.'
+        WHEN 'AMASSER' THEN 'Heavy kinetic grinder. This entity lacks elite execution speed and generates standard capital efficiency, yet they operate with massive financial density. They deploy heavy volume into the mid-trend, serving as the raw mechanical engine of the market. They do not predict the future, nor do they wait for absolute certainty. They provide the deep liquidity floors that allow the broader ecosystem to function.'
+        WHEN 'SUBSTRATE' THEN 'Structural exit liquidity. This entity operates entirely on lagging indicators and late-stage narrative absorption. They inject low-tier capital into the market after the probability curve has already been priced by the upper echelons. Mathematically destined for capital bleed, they serve as the foundational biological matter of the ecosystem. Their losses fund the efficiency of the apex tiers.'
+        WHEN 'OPERATOR' THEN 'Standard kinetic node. This entity forms the prevailing wind of the probability matrix. They execute mid-trend, absorb average systemic risk, and generate standard baseline returns. They are not the whales anchoring the market, nor the snipers predicting it. They are the active, decentralized processing power of the ledger-the everyday volume that keeps the terminal alive.'
     END AS archetype_description,
     CASE at.archetype
-        WHEN 'THE ANOMALY' THEN 'P(E) ∉ [0.80 - 0.97] | Edge, Yield, and Gravity percentiles perfectly match the Entry probability tier.'
-        WHEN 'THE SIGNAL' THEN 'P(E) ∈ [0.00 - 0.40] | Edge >= P90 | Yield >= P90'
-        WHEN 'THE VECTOR' THEN 'P(E) ∈ [0.40 - 0.60] | Edge >= P90 | Yield >= P90'
-        WHEN 'THE EQUILIBRIUM' THEN 'Edge >= P70 | Yield >= P70 | Gravity >= P70'
-        WHEN 'THE HARVESTER' THEN 'P(E) ∈ [0.60 - 0.97] | Gravity >= P90 | Edge <= P50 | Yield <= P50'
-        WHEN 'THE MARTYR' THEN 'P(E) ∈ [0.00 - 0.40] | Edge >= P70 | Yield <= P50'
-        WHEN 'THE AMASSER' THEN 'Gravity >= P90 (Excluding extreme bounds captured by Equilibrium/Harvester)'
-        WHEN 'THE SUBSTRATE' THEN 'P(E) ∈ [0.60 - 0.97] | Edge <= P50 | Yield <= P50 | Gravity <= P70'
-        WHEN 'THE OPERATOR' THEN 'Mixed metrics. Surviving baseline evading upper and lower extreme parameters.'
+        WHEN 'ANOMALY' THEN 'P (E) ∉ [0.80 - 0.97] | Edge ≡ P (E) | Yield ≡ P (E) | Gravity ≡ P (E)'
+        WHEN 'SIGNAL' THEN 'P (E) ∈ [0.00 - 0.40] | Edge ≥ P90 | Yield ≥ P90'
+        WHEN 'VECTOR' THEN 'P (E) ∈ [0.40 - 0.60] | Edge ≥ P90 | Yield ≥ P90'
+        WHEN 'EQUILIBRIUM' THEN 'Edge ≥ P70 | Yield ≥ P70 | Gravity ≥ P70'
+        WHEN 'HARVESTER' THEN 'P (E) ∈ [0.60 - 0.97] | Gravity ≥ P90 | Edge ≤ P50 | Yield ≤ P50'
+        WHEN 'MARTYR' THEN 'P (E) ∈ [0.00 - 0.40] | Edge ≥ P70 | Yield ≤ P50'
+        WHEN 'AMASSER' THEN 'Gravity ≥ P90'
+        WHEN 'SUBSTRATE' THEN 'P (E) ∈ [0.60 - 0.97] | Edge ≤ P50 | Yield ≤ P50 | Gravity ≤ P70'
+        WHEN 'OPERATOR' THEN 'Gravity ≤ P70 | Edge ⇌ Yield'
     END AS archetype_math,
+    CASE at.archetype
+        WHEN 'MARTYR' THEN '[ OCCURRENCE: < 1.0% ]'
+        WHEN 'ANOMALY' THEN '[ OCCURRENCE: 1.0% - 2.0% ]'
+        WHEN 'AMASSER' THEN '[ OCCURRENCE: 2.0% - 3.5% ]'
+        WHEN 'VECTOR' THEN '[ OCCURRENCE: 2.0% - 3.5% ]'
+        WHEN 'SIGNAL' THEN '[ OCCURRENCE: 3.0% - 4.5% ]'
+        WHEN 'EQUILIBRIUM' THEN '[ OCCURRENCE: 3.0% - 4.5% ]'
+        WHEN 'HARVESTER' THEN '[ OCCURRENCE: 5.0% - 7.0% ]'
+        WHEN 'OPERATOR' THEN '[ OCCURRENCE: 30.0% - 35.0% ]'
+        WHEN 'SUBSTRATE' THEN '[ OCCURRENCE: 40.0% - 50.0% ]'
+    END AS rarity_bracket,
     ll.rank
 FROM archetyped_traders at
 LEFT JOIN leaderboard_latest ll

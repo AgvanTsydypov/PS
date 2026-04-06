@@ -268,15 +268,15 @@ CARD_ENTRY_BRACKET_OPTIONS = (
 )
 CARD_TIER_OPTIONS = ("P99", "P90", "P70", "P50", "BASE")
 CARD_ARCHETYPE_OPTIONS = (
-    "THE ANOMALY",
-    "THE SIGNAL",
-    "THE VECTOR",
-    "THE EQUILIBRIUM",
-    "THE HARVESTER",
-    "THE MARTYR",
-    "THE AMASSER",
-    "THE SUBSTRATE",
-    "THE OPERATOR",
+    "ANOMALY",
+    "SIGNAL",
+    "VECTOR",
+    "EQUILIBRIUM",
+    "HARVESTER",
+    "MARTYR",
+    "AMASSER",
+    "SUBSTRATE",
+    "OPERATOR",
 )
 LEGACY_ENTRY_BRACKET_MAP: Dict[str, str] = {
     "ANOMALY": "[0.00 - 0.20]",
@@ -588,6 +588,14 @@ def _normalize_choice(raw: Optional[str], options: Tuple[str, ...], fallback: st
     return fallback
 
 
+def _normalize_archetype(raw: Optional[str], inferred: str) -> str:
+    """Map DB / legacy payloads (e.g. 'THE ANOMALY') to canonical CARD_ARCHETYPE_OPTIONS labels."""
+    cleaned = str(raw or "").strip().upper()
+    if cleaned.startswith("THE "):
+        cleaned = cleaned[4:].strip()
+    return _normalize_choice(cleaned, CARD_ARCHETYPE_OPTIONS, inferred)
+
+
 def _normalize_entry_bracket(raw: Optional[str]) -> str:
     value = str(raw or "").strip().upper()
     if value in LEGACY_ENTRY_BRACKET_MAP:
@@ -614,44 +622,44 @@ def _infer_archetype_from_metrics(
             or (entry_bracket == "[0.60 - 0.80]" and edge == "P50" and yld == "P50" and grav == "P50")
         )
     ):
-        return "THE ANOMALY"
+        return "ANOMALY"
     if (
         (entry_bracket == "[0.00 - 0.20]" or entry_bracket == "[0.20 - 0.40]")
         and (edge == "P99" or edge == "P90")
         and (yld == "P99" or yld == "P90")
     ):
-        return "THE SIGNAL"
+        return "SIGNAL"
     if entry_bracket == "[0.40 - 0.60]" and (edge == "P99" or edge == "P90") and (yld == "P99" or yld == "P90"):
-        return "THE VECTOR"
+        return "VECTOR"
     if (
         (edge == "P99" or edge == "P90" or edge == "P70")
         and (yld == "P99" or yld == "P90" or yld == "P70")
         and (grav == "P99" or grav == "P90" or grav == "P70")
     ):
-        return "THE EQUILIBRIUM"
+        return "EQUILIBRIUM"
     if (
         (entry_bracket == "[0.60 - 0.80]" or entry_bracket == "[0.80 - 0.97]")
         and (grav == "P99" or grav == "P90")
         and (edge == "BASE" or edge == "P50")
         and (yld == "BASE" or yld == "P50")
     ):
-        return "THE HARVESTER"
+        return "HARVESTER"
     if (
         (entry_bracket == "[0.00 - 0.20]" or entry_bracket == "[0.20 - 0.40]")
         and (edge == "P99" or edge == "P90" or edge == "P70")
         and (yld == "BASE" or yld == "P50")
     ):
-        return "THE MARTYR"
+        return "MARTYR"
     if grav == "P99" or grav == "P90":
-        return "THE AMASSER"
+        return "AMASSER"
     if (
         (entry_bracket == "[0.60 - 0.80]" or entry_bracket == "[0.80 - 0.97]")
         and (edge == "BASE" or edge == "P50")
         and (yld == "BASE" or yld == "P50")
         and (grav == "BASE" or grav == "P50" or grav == "P70")
     ):
-        return "THE SUBSTRATE"
-    return "THE OPERATOR"
+        return "SUBSTRATE"
+    return "OPERATOR"
 
 
 def _normalize_proxy_wallet_for_compare(addr: Optional[str]) -> Optional[str]:
@@ -718,7 +726,7 @@ def _build_card_payload_from_source_row(
         normalized_yield,
         normalized_gravity,
     )
-    normalized_archetype = _normalize_choice(row.get("archetype"), CARD_ARCHETYPE_OPTIONS, inferred_archetype)
+    normalized_archetype = _normalize_archetype(row.get("archetype"), inferred_archetype)
     rec_raw = row.get("reccurence")
     recurrence_out: Optional[str]
     if rec_raw is None:
@@ -744,6 +752,7 @@ def _build_card_payload_from_source_row(
         "archetype": normalized_archetype,
         "archetype_description": str(row.get("archetype_description") or "").strip(),
         "archetype_math": str(row.get("archetype_math") or "").strip(),
+        "rarity_bracket": str(row.get("rarity_bracket") or "").strip(),
         "proxy_wallet": str(row.get("proxy_wallet") or "").strip(),
         "edge": normalized_edge,
         "yield": normalized_yield,
@@ -977,9 +986,10 @@ def _load_card_source_row(cursor: Any, winner_row_id: int) -> Optional[Dict[str,
             w.event_slug,
             e.title AS event_title,
             w.entry_bracket,
-            p.archetype,
-            p.archetype_description,
-            p.archetype_math,
+            COALESCE(w.archetype, p.archetype) AS archetype,
+            COALESCE(w.archetype_description, p.archetype_description) AS archetype_description,
+            COALESCE(w.archetype_math, p.archetype_math) AS archetype_math,
+            COALESCE(w.rarity_bracket, p.rarity_bracket) AS rarity_bracket,
             w.edge,
             w.yield,
             w.gravity,
@@ -997,7 +1007,8 @@ def _load_card_source_row(cursor: Any, winner_row_id: int) -> Optional[Dict[str,
             SELECT
                 p.archetype,
                 p.archetype_description,
-                p.archetype_math
+                p.archetype_math,
+                p.rarity_bracket
             FROM participants p
             WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
               AND (

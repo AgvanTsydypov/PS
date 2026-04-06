@@ -55,6 +55,10 @@ type WinnerWalletRow = {
   minted_claim_id?: number | null;
   minted_tx_hash?: string | null;
   minted_asset_address?: string | null;
+  archetype?: string | null;
+  archetype_description?: string | null;
+  archetype_math?: string | null;
+  rarity_bracket?: string | null;
 };
 
 type WinnerWalletForm = {
@@ -126,6 +130,7 @@ type CardBuilderCandidate = {
   card_lore?: string | null;
   archetype_description?: string | null;
   archetype_math?: string | null;
+  rarity_bracket?: string | null;
   primary_tag?: string | null;
   secondary_tag?: string | null;
   primary_tag_hex_color?: string | null;
@@ -146,6 +151,7 @@ type CardBuilderPayload = {
   archetype: string;
   archetype_description: string;
   archetype_math: string;
+  rarity_bracket: string;
   proxy_wallet: string;
   edge: string;
   yield: string;
@@ -311,15 +317,15 @@ const cardEntryBracketOptions = [
 ] as const;
 const cardTierOptions = ["P99", "P90", "P70", "P50", "BASE"] as const;
 const cardArchetypeOptions = [
-  "THE ANOMALY",
-  "THE SIGNAL",
-  "THE VECTOR",
-  "THE EQUILIBRIUM",
-  "THE HARVESTER",
-  "THE MARTYR",
-  "THE AMASSER",
-  "THE SUBSTRATE",
-  "THE OPERATOR",
+  "ANOMALY",
+  "SIGNAL",
+  "VECTOR",
+  "EQUILIBRIUM",
+  "HARVESTER",
+  "MARTYR",
+  "AMASSER",
+  "SUBSTRATE",
+  "OPERATOR",
 ] as const;
 
 const legacyEntryBracketMap: Record<string, typeof cardEntryBracketOptions[number]> = {
@@ -346,6 +352,15 @@ function normalizeEntryBracket(raw: string | null | undefined): typeof cardEntry
   return normalizeChoice(value, cardEntryBracketOptions, "[0.80 - 0.97]");
 }
 
+function normalizeArchetype(
+  raw: string | null | undefined,
+  fallback: typeof cardArchetypeOptions[number],
+): typeof cardArchetypeOptions[number] {
+  let value = String(raw ?? "").trim().toUpperCase();
+  if (value.startsWith("THE ")) value = value.slice(4).trim();
+  return normalizeChoice(value, cardArchetypeOptions, fallback);
+}
+
 function inferArchetypeFromMetrics(
   entryBracket: string,
   edgeRaw: string | null | undefined,
@@ -364,37 +379,37 @@ function inferArchetypeFromMetrics(
       (entryBracket === "[0.40 - 0.60]" && edge === "P70" && yld === "P70" && grav === "P70") ||
       (entryBracket === "[0.60 - 0.80]" && edge === "P50" && yld === "P50" && grav === "P50")
     )
-  ) return "THE ANOMALY";
+  ) return "ANOMALY";
   if (
     (entryBracket === "[0.00 - 0.20]" || entryBracket === "[0.20 - 0.40]") &&
     (edge === "P99" || edge === "P90") &&
     (yld === "P99" || yld === "P90")
-  ) return "THE SIGNAL";
-  if (entryBracket === "[0.40 - 0.60]" && (edge === "P99" || edge === "P90") && (yld === "P99" || yld === "P90")) return "THE VECTOR";
+  ) return "SIGNAL";
+  if (entryBracket === "[0.40 - 0.60]" && (edge === "P99" || edge === "P90") && (yld === "P99" || yld === "P90")) return "VECTOR";
   if (
     (edge === "P99" || edge === "P90" || edge === "P70") &&
     (yld === "P99" || yld === "P90" || yld === "P70") &&
     (grav === "P99" || grav === "P90" || grav === "P70")
-  ) return "THE EQUILIBRIUM";
+  ) return "EQUILIBRIUM";
   if (
     (entryBracket === "[0.60 - 0.80]" || entryBracket === "[0.80 - 0.97]") &&
     (grav === "P99" || grav === "P90") &&
     (edge === "BASE" || edge === "P50") &&
     (yld === "BASE" || yld === "P50")
-  ) return "THE HARVESTER";
+  ) return "HARVESTER";
   if (
     (entryBracket === "[0.00 - 0.20]" || entryBracket === "[0.20 - 0.40]") &&
     (edge === "P99" || edge === "P90" || edge === "P70") &&
     (yld === "BASE" || yld === "P50")
-  ) return "THE MARTYR";
-  if (grav === "P99" || grav === "P90") return "THE AMASSER";
+  ) return "MARTYR";
+  if (grav === "P99" || grav === "P90") return "AMASSER";
   if (
     (entryBracket === "[0.60 - 0.80]" || entryBracket === "[0.80 - 0.97]") &&
     (edge === "BASE" || edge === "P50") &&
     (yld === "BASE" || yld === "P50") &&
     (grav === "BASE" || grav === "P50" || grav === "P70")
-  ) return "THE SUBSTRATE";
-  return "THE OPERATOR";
+  ) return "SUBSTRATE";
+  return "OPERATOR";
 }
 
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
@@ -754,9 +769,8 @@ export default function HomePage() {
       const normalizedEdge = normalizeChoice(row.edge, cardTierOptions, "BASE");
       const normalizedYield = normalizeChoice(row.yield, cardTierOptions, "BASE");
       const normalizedGravity = normalizeChoice(row.gravity, cardTierOptions, "BASE");
-      const normalizedArchetype = normalizeChoice(
+      const normalizedArchetype = normalizeArchetype(
         row.archetype,
-        cardArchetypeOptions,
         inferArchetypeFromMetrics(normalizedEntryBracket, normalizedEdge, normalizedYield, normalizedGravity),
       );
       return {
@@ -767,6 +781,7 @@ export default function HomePage() {
         archetype: normalizedArchetype,
         archetype_description: String(row.archetype_description ?? ""),
         archetype_math: String(row.archetype_math ?? ""),
+        rarity_bracket: String(row.rarity_bracket ?? ""),
       };
     })(),
     season_type: normalizeChoice(row.season_type, cardSeasonTypeOptions, "standard").toLowerCase(),
