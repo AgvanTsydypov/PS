@@ -161,6 +161,11 @@ JWT_ALG = "HS256"
 JWT_TTL_SECONDS = int(os.getenv("USER_WEB_JWT_TTL_SECONDS", "3600"))
 JWT_ISSUER = os.getenv("USER_WEB_JWT_ISSUER", "polystars-user-web-backend")
 JWT_AUDIENCE = os.getenv("USER_WEB_JWT_AUDIENCE", "polystars-user-web")
+CARD_BASE_URL = (
+    os.getenv("CARD_BASE_URL")
+    or os.getenv("NEXT_PUBLIC_APP_URL")
+    or "https://polystars.app"
+).strip().rstrip("/")
 RATE_LIMITS: Dict[str, RateLimitConfig] = {
     "/api/auth/wallet/challenge": RateLimitConfig(
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
@@ -580,6 +585,16 @@ def _update_generated_card_asset_urls(slug: str, front_url: str, back_url: str) 
         conn.close()
 
 
+def _fmt_date_field(value: Any) -> Optional[str]:
+    """Return ISO date string (YYYY-MM-DD) from a datetime/date/str DB value, or None."""
+    if value is None:
+        return None
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    s = str(value).strip()
+    return s[:10] if len(s) >= 10 else s or None
+
+
 def _normalize_choice(raw: Optional[str], options: Tuple[str, ...], fallback: str) -> str:
     value = str(raw or "").strip().upper()
     for option in options:
@@ -758,6 +773,10 @@ def _build_card_payload_from_source_row(
         "yield": normalized_yield,
         "gravity": normalized_gravity,
         "leaderboard_rank": int(row.get("rank") or 0),
+        # Season meta for card back (dates, supply).
+        "season_start_date": _fmt_date_field(row.get("season_start_date")),
+        "season_end_date":   _fmt_date_field(row.get("season_end_date")),
+        "season_size":       row.get("season_size"),
     }
 
 
@@ -1000,7 +1019,10 @@ def _load_card_source_row(cursor: Any, winner_row_id: int) -> Optional[Dict[str,
             ec.card_lore,
             ec.primary_tag,
             ec.secondary_tag,
-            tp.hex_color AS primary_tag_hex_color
+            tp.hex_color AS primary_tag_hex_color,
+            s.start_date  AS season_start_date,
+            s.end_date    AS season_end_date,
+            s.total_supply AS season_size
         FROM winner_wallets_nft_to_claim w
         JOIN event_cards ec ON ec.event_id = w.event_id
         LEFT JOIN LATERAL (
@@ -2154,22 +2176,13 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
                 session_signin_proxy_wallet=session_signin_proxy_wallet,
             )
             slug = _generated_card_slug(payload.get("season_type"), payload.get("season_number"))
+            payload["qr_payload"] = f"{CARD_BASE_URL}/cards/{slug}"
             image_url = str(payload.get("image_url") or "").strip()
             if not image_url:
                 raise HTTPException(status_code=400, detail="Selected row is missing manual image URL")
 
-            render_payload = _build_render_payload(payload)
-            phase_t = _log_card_get_phase("fetch_manual_image_http", phase_t)
-            front_svg = generate_card_svg(render_payload)
-            back_svg = generate_card_back_svg(render_payload)
-            phase_t = _log_card_get_phase("generate_svg_local", phase_t)
-            front_image_path, back_image_path, uploaded_front_key, uploaded_back_key = _upload_generated_card_assets_to_r2(
-                slug,
-                front_svg,
-                back_svg,
-            )
-            phase_t = _log_card_get_phase("r2_put_object_x2", phase_t)
-
+            # ── Step 1: INSERT first (placeholder paths) so the DB trigger assigns
+            #   collection_mint_number before we render the SVG. ──────────────────
             cursor.execute(
                 """
                 INSERT INTO user_generated_cards (
@@ -2221,13 +2234,48 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
                     str(payload.get("primary_tag") or ""),
                     str(payload.get("secondary_tag") or ""),
                     None,
-                    front_image_path,
-                    back_image_path,
+                    "",   # placeholder — updated below after SVG render
+                    "",   # placeholder — updated below after SVG render
                     json.dumps(payload),
                 ),
             )
             created_row = cursor.fetchone()
             phase_t = _log_card_get_phase("insert_generated_card", phase_t)
+
+            # ── Step 2: Inject the assigned mint number into the render payload ──
+            payload["collection_mint_number"] = created_row["collection_mint_number"]
+
+            # ── Step 3: Render SVGs now that mint number is known ─────────────────
+            render_payload = _build_render_payload(payload)
+            phase_t = _log_card_get_phase("fetch_manual_image_http", phase_t)
+            front_svg = generate_card_svg(render_payload)
+            back_svg = generate_card_back_svg(render_payload)
+            phase_t = _log_card_get_phase("generate_svg_local", phase_t)
+
+            # ── Step 4: Upload to R2 ──────────────────────────────────────────────
+            front_image_path, back_image_path, uploaded_front_key, uploaded_back_key = _upload_generated_card_assets_to_r2(
+                slug,
+                front_svg,
+                back_svg,
+            )
+            phase_t = _log_card_get_phase("r2_put_object_x2", phase_t)
+
+            # ── Step 5: Update record with real paths and final payload ───────────
+            cursor.execute(
+                """
+                UPDATE user_generated_cards
+                SET front_image_path = %s,
+                    back_image_path  = %s,
+                    card_payload_json = %s::jsonb
+                WHERE slug = %s
+                """,
+                (front_image_path, back_image_path, json.dumps(payload), slug),
+            )
+            # Refresh created_row to reflect updated paths for the response.
+            created_row = dict(created_row)
+            created_row["front_image_path"] = front_image_path
+            created_row["back_image_path"] = back_image_path
+            created_row["card_payload_json"] = payload
             total_available, remaining_available = _generated_cards_supply_counts(cursor)
             phase_t = _log_card_get_phase("supply_counts_db", phase_t)
         conn.commit()
