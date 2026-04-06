@@ -122,6 +122,62 @@ DZ_PIN_COLOR   = "#978E8E"
 DZ_PIN_R       = 3.5
 DZ_PIN_INSET   = 15
 
+# Back-of-card inner olive rect — Figma Frame 122: x=14 y=12, 490×777, 1px inside stroke.
+BACK_DZ_X = 14.0
+BACK_DZ_Y = 12.0
+BACK_DZ_W = 490.0
+BACK_DZ_H = 777.0
+BACK_LINE_HEIGHT = 22
+BACK_QR_SIZE = 100
+BACK_QR_MARGIN = 14.0
+BACK_QR_X = BACK_DZ_X + BACK_DZ_W - BACK_QR_SIZE - BACK_QR_MARGIN
+BACK_QR_Y = BACK_DZ_Y + BACK_DZ_H - BACK_QR_SIZE - BACK_QR_MARGIN
+BACK_QR_INNER_PAD = 6.0
+# Text column x=55 with inner left at 14 → pad 41 (symmetric right inset matches 408px box width).
+BACK_TEXT_PAD_X = 41.0
+BACK_TEXT_X = int(BACK_DZ_X + BACK_TEXT_PAD_X)  # 55
+BACK_TEXT_X_HEAD = BACK_TEXT_X + 1  # 56 — section labels aligned with reference
+BACK_TEXT_RIGHT = BACK_DZ_X + BACK_DZ_W - BACK_TEXT_PAD_X
+# Figma Frame 122 (EVENT TOPOLOGY body): position (55, 85), fixed text box 408×110, Orbitron Bold 14,
+# line-height 22, letter-spacing 10%. Must match BACK_TEXT_RIGHT − BACK_TEXT_X.
+FIGMA_BACK_LORE_X = 55
+FIGMA_BACK_LORE_Y = 85
+FIGMA_BACK_LORE_W = 408
+FIGMA_BACK_LORE_H = 110
+BACK_BODY_WRAP_W = int(BACK_TEXT_RIGHT - BACK_TEXT_X)
+assert BACK_BODY_WRAP_W == FIGMA_BACK_LORE_W and BACK_TEXT_X == FIGMA_BACK_LORE_X
+# Footer rows share vertical band with QR; wrap ends before the QR column.
+BACK_META_WRAP_W = max(120, int(BACK_QR_X - BACK_TEXT_X - 12.0))
+# Separator: Figma spec X=60 Y=216 W=400 → x1=60, x2=460.
+BACK_SEP_X1 = BACK_TEXT_X + 5        # 60
+BACK_SEP_X2 = BACK_SEP_X1 + 400      # 460
+BACK_SEP_CAP_LEFT_X = BACK_SEP_X1 - 4
+BACK_SEP_CAP_RIGHT_X = BACK_SEP_X2
+# Vertical layout (back) — flow blocks to avoid fixed y collisions (Frame 136 reference).
+BACK_SEP_LINE_Y = 198.0             # shifted -18 px total
+BACK_LORE_Y = float(FIGMA_BACK_LORE_Y) - 3.0   # 82
+# Leave ~4px above the divider; room for lore lines without overflow.
+BACK_LORE_BOTTOM_LIMIT = BACK_SEP_LINE_Y - 4.0
+BACK_ARCH_HEADER_Y = 217.0          # 220 - 3
+BACK_ARCH_Y = 254.0                 # 257 - 3
+# Order: ARCHETYPE → body desc → [ OCCURRENCE ] (same font size as body).
+BACK_DESC_Y = float(BACK_ARCH_Y) + 25.0   # desc starts 25px below archetype (+3 gap)
+# Line-height for font-size=10 meta footer rows (SEASON CARD / DATES).
+BACK_META_LH = 14
+# Extra offset applied to the two footer meta lines (push down from computed pin).
+BACK_META_Y_OFFSET = 10.0
+# Lore: calibrated _orbitron_adv means 408 px works directly -- no extra slack needed.
+BACK_LORE_WRAP_SLACK_PX = 0.0
+# Desc: limit = 344 px makes "Consensus...active." break before "This" with the updated model.
+BACK_DESC_WRAP_SLACK_PX = 64.0
+# Approximate ink below hanging baseline for line-height 22 / Orbitron 14px body.
+BACK_BODY_INK_EXT = 16.0
+BACK_META_INK_EXT = 12.0
+BACK_GAP_SECTION = 18.0
+BACK_GAP_STAT_TO_METRICS = 10.0
+BACK_GAP_METRICS_TO_META = 12.0
+BACK_METRIC_CHUNK_GAP = 0.0
+
 # ═══════════════════════════════════════════════════════════════════════════
 # GRADIENT ANGLES  — degrees from vertical  (0 = pure top→bottom)
 # Positive values tilt clockwise (gold shifts to top-left corner).
@@ -146,13 +202,22 @@ def _grad_pts(cx: float, cy: float, hh: float, angle_deg: float = 0.0):
 
 
 def _orbitron_adv(ch: str, fs: float) -> float:
-    """Approximate Orbitron Bold glyph advance with global 0.1em tracking."""
+    """Approximate Orbitron Bold glyph advance with global 0.1em tracking.
+
+    Calibrated against Figma Frame 122 (408 px column, Orbitron Bold 14, letter-spacing 10%):
+      uppercase  0.65 em + 0.10 em = 0.75 em/char  → 10.5 px @ 14
+      lowercase  0.53 em + 0.10 em = 0.63 em/char  → 8.82 px @ 14
+      digits     0.55 em + 0.10 em = 0.65 em/char  → 9.10 px @ 14
+      punct/sp   0.45 em + 0.10 em = 0.55 em/char  → 7.70 px @ 14
+    """
     ls = fs * 0.10
-    if ch in " []:/.-()∈":
+    if ch in " []:/.-()∈$,'":
         return fs * 0.45 + ls
     if ch.isdigit():
-        return fs * 0.60 + ls
-    return fs * 0.65 + ls
+        return fs * 0.55 + ls
+    if ch.isupper():
+        return fs * 0.65 + ls
+    return fs * 0.53 + ls
 
 
 def _orbitron_width(s: str, fs: float) -> float:
@@ -761,6 +826,11 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
   <clipPath id="title-text-clip">
     <rect x="{TITLE_INNER_X}" y="{TB_Y}" width="{TITLE_INNER_W}" height="{TB_H}"/>
   </clipPath>
+
+  <!-- Layer blur for white-grey border frame (matches Figma Layer blur effect) -->
+  <filter id="frame-blur" x="-10%" y="-10%" width="120%" height="120%">
+    <feGaussianBlur stdDeviation="4"/>
+  </filter>
 </defs>''')
 
     # ---- Layer 1: Background canvas ----
@@ -773,7 +843,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ BORDER GLOW (driven by YIELD = {yld}) ══ -->
 <rect x="{FRAME_X}" y="{FRAME_Y}"
       width="{FRAME_W}" height="{FRAME_H}"
-      rx="{FRAME_RX}" fill="{border_fill}"/>''')
+      rx="{FRAME_RX}" fill="{border_fill}" filter="url(#frame-blur)"/>''')
 
     # ---- Layer 3: Event image ----
     if image_url:
@@ -1040,6 +1110,38 @@ def _wrap_text_by_width(text: str, max_px: float, font_size: float) -> List[str]
     return lines
 
 
+
+def _wrap_back_text(
+    text: str,
+    max_px: float,
+    font_size: float,
+    *,
+    slack_px: Optional[float] = None,
+    greedy_max_px: Optional[float] = None,
+    cap_px: Optional[float] = None,
+) -> List[str]:
+    """Word-wrap for back-zone copy.
+
+    *greedy_max_px* — optional wider line-fill budget for the greedy pass (overrides slack).
+    *cap_px* — optional max measured width before character-splitting (defaults to *max_px*).
+    """
+    if greedy_max_px is not None:
+        limit = max(40.0, float(greedy_max_px))
+    else:
+        slack = float(BACK_LORE_WRAP_SLACK_PX if slack_px is None else slack_px)
+        limit = max(40.0, float(max_px) - slack)
+    raw = _wrap_text_by_width(text, limit, font_size)
+    out: List[str] = []
+    cap_ref = float(cap_px) if cap_px is not None else float(max_px)
+    cap = cap_ref - 2.0
+    for ln in raw:
+        if _orbitron_width(ln, font_size) <= cap:
+            out.append(ln)
+        else:
+            out.extend(_split_oversized_line(ln, cap, font_size))
+    return out
+
+
 def _title_line_within_band(
     line: str, max_px: float, font_size: float, slack: float = TITLE_WRAP_MEASURE_SLACK
 ) -> bool:
@@ -1160,8 +1262,81 @@ def _format_archetype_math_lines(raw: str) -> List[str]:
     return lines
 
 
+def _fmt_back_date(raw: Any) -> str:
+    s = str(raw or "").strip()
+    if not s:
+        return "—"
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    return s
+
+
+def _qr_modules_svg(payload: str, ox: float, oy: float, draw_size: float) -> str:
+    """Black QR modules inside a square; outer stroke/fill drawn by caller."""
+    try:
+        import qrcode
+        from qrcode.constants import ERROR_CORRECT_M
+    except ImportError:
+        print(
+            "Warning: package 'qrcode' not installed; card back QR is omitted. "
+            "Install with: pip install qrcode (see requirements.txt).",
+            file=sys.stderr,
+        )
+        return ""
+    text = (payload or "").strip() or "polystars"
+    qr = qrcode.QRCode(version=None, error_correction=ERROR_CORRECT_M, box_size=1, border=0)
+    qr.add_data(text)
+    qr.make(fit=True)
+    matrix = qr.get_matrix()
+    n = len(matrix)
+    if not n:
+        return ""
+    cell = draw_size / n
+    parts: List[str] = []
+    for r in range(n):
+        for c in range(n):
+            if matrix[r][c]:
+                x = ox + c * cell
+                y = oy + r * cell
+                parts.append(
+                    f'<rect x="{x:.4f}" y="{y:.4f}" width="{cell:.4f}" height="{cell:.4f}" fill="black"/>'
+                )
+    return "".join(parts)
+
+
+def _back_block_bottom(start_y: float, line_count: int, lh: int, ink_ext: float) -> float:
+    """Last ink bottom for a hanging-baseline multiline <text> with even lh between baselines."""
+    if line_count <= 0:
+        return start_y
+    return start_y + (line_count - 1) * lh + ink_ext
+
+
+def _back_clamp_line_count(lines: List[str], max_lines: int) -> List[str]:
+    """Keep at most max_lines; merge overflow into the last line with an ellipsis."""
+    if max_lines < 1:
+        return []
+    if len(lines) <= max_lines:
+        return lines
+    if max_lines == 1:
+        one = " ".join(lines).strip()
+        return [one[:200] + ("…" if len(one) > 200 else "")]
+    head = lines[: max_lines - 1]
+    tail = " ".join(lines[max_lines - 1 :]).strip()
+    if not tail:
+        return head
+    merged = f"{head[-1]} {tail}".strip()
+    head[-1] = merged[:140] + ("…" if len(merged) > 140 else "")
+    return head
+
+
 def generate_card_back_svg(data: Dict[str, Any]) -> str:
     """Build back-of-card SVG."""
+    lh = BACK_LINE_HEIGHT
+    style_lh = f"line-height:{lh}px"
+    arch_ud = (
+        "text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:1.66px"
+    )
+
     archetype_raw = _archetype_style_key(str(data.get("archetype", "") or "").strip().upper() or "OPERATOR")
     dz_fill, _, _ = dz_style(archetype_raw)
     yld = str(data.get("yield", "BASE") or "BASE").upper()
@@ -1174,6 +1349,41 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     archetype_math_lines = [_esc(s) for s in _format_archetype_math_lines(archetype_math)]
     if not archetype_math_lines:
         archetype_math_lines = ["No statistical pattern."]
+
+    rarity_raw = str(data.get("rarity_bracket", "") or "").strip()
+    if not rarity_raw:
+        rarity_raw = "[ OCCURRENCE: — ]"
+    rarity_esc = _esc(rarity_raw)
+
+    mint = data.get("collection_mint_number")
+    mint_str = str(mint).strip() if mint is not None and str(mint).strip() != "" else "—"
+    season_size = data.get("season_size")
+    if season_size is None:
+        season_size = data.get("season_total_supply")
+    if season_size is None:
+        season_size = data.get("total_supply")
+    size_str = str(season_size).strip() if season_size is not None and str(season_size).strip() != "" else "—"
+    d1 = _fmt_back_date(data.get("season_start_date"))
+    d2 = _fmt_back_date(data.get("season_end_date"))
+
+    qr_payload = str(
+        data.get("qr_payload")
+        or data.get("qr_url")
+        or data.get("card_slug")
+        or data.get("proxy_wallet")
+        or "polystars"
+    ).strip()
+
+    qr_ox = BACK_QR_X + BACK_QR_INNER_PAD
+    qr_oy = BACK_QR_Y + BACK_QR_INNER_PAD
+    qr_draw = BACK_QR_SIZE - 2 * BACK_QR_INNER_PAD
+    qr_modules = _qr_modules_svg(qr_payload, qr_ox, qr_oy, qr_draw)
+    qr_block = (
+        f'<g id="card-back-qr">'
+        f'<rect x="{BACK_QR_X}" y="{BACK_QR_Y}" width="{BACK_QR_SIZE}" height="{BACK_QR_SIZE}" '
+        f'fill="#B6BBC8" stroke="black" stroke-width="1"/>'
+        f"{qr_modules}</g>"
+    )
 
     font_b64 = _load_font_b64()
     if font_b64:
@@ -1188,15 +1398,23 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     else:
         font_css = "@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700&amp;display=swap');"
 
-    lore_lines = _wrap_text_by_width(lore, 408, 14.0)
-    desc_lines = _wrap_text_by_width(archetype_desc, 363, 14.0)
+    lore_lines = _wrap_back_text(lore, float(FIGMA_BACK_LORE_W), 14.0, slack_px=BACK_LORE_WRAP_SLACK_PX)
+    max_lore = max(
+        1,
+        int((BACK_LORE_BOTTOM_LIMIT - BACK_LORE_Y - BACK_BODY_INK_EXT) // lh) + 1,
+    )
+    lore_lines = _back_clamp_line_count(lore_lines, max_lore)
+
+    desc_lines = _wrap_back_text(
+        archetype_desc, float(BACK_BODY_WRAP_W), 14.0, slack_px=BACK_DESC_WRAP_SLACK_PX
+    )
 
     lore_svg = "".join(
-        f'<tspan x="55" dy="{0 if i == 0 else 18}">{line}</tspan>'
+        f'<tspan x="{BACK_TEXT_X}" dy="{0 if i == 0 else lh}">{line}</tspan>'
         for i, line in enumerate(lore_lines)
     )
     desc_svg = "".join(
-        f'<tspan x="55" dy="{0 if i == 0 else 18}">{line}</tspan>'
+        f'<tspan x="{BACK_TEXT_X}" dy="{0 if i == 0 else lh}">{line}</tspan>'
         for i, line in enumerate(desc_lines)
     )
 
@@ -1207,22 +1425,81 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
         math_chunks = ["No statistical pattern."]
     archetype_line_text = _esc(f"ARCHETYPE: {archetype_raw}")
     stat_header = "STATISTICAL PATTERN:"
-    metric_line_blocks: List[tuple[float, str]] = []
-    y_cursor = 586.0
+
+    desc_bottom = _back_block_bottom(BACK_DESC_Y, len(desc_lines), lh, BACK_BODY_INK_EXT)
+    back_rarity_y = desc_bottom + BACK_GAP_SECTION
+    y_stat_header = back_rarity_y + lh + BACK_GAP_STAT_TO_METRICS
+    y_first_metric = y_stat_header + lh + BACK_GAP_STAT_TO_METRICS
+
+    inner_bottom = BACK_DZ_Y + BACK_DZ_H
+
+    flat_metrics: List[Optional[str]] = []
     for idx, chunk in enumerate(math_chunks):
-        wrapped = _wrap_text_by_width(chunk, 406, 14.0) or [chunk]
+        wrapped = _wrap_text_by_width(chunk, float(BACK_BODY_WRAP_W), 14.0) or [chunk]
         for line in wrapped:
-            if y_cursor > 760:
-                break
-            metric_line_blocks.append((y_cursor, line))
-            y_cursor += 18
-        if idx < len(math_chunks) - 1:
-            y_cursor += 2
+            flat_metrics.append(line)
+        if idx < len(math_chunks) - 1 and BACK_METRIC_CHUNK_GAP > 0:
+            flat_metrics.append(None)
+
+    def _layout_metric_blocks(seq: List[Optional[str]]) -> List[tuple[float, str]]:
+        out: List[tuple[float, str]] = []
+        y = y_first_metric
+        for item in seq:
+            if item is None:
+                y += BACK_METRIC_CHUNK_GAP
+            else:
+                out.append((y, item))
+                y += lh
+        return out
+
+    metric_line_blocks = _layout_metric_blocks(flat_metrics)
     if not metric_line_blocks:
-        metric_line_blocks = [(586.0, "No statistical pattern.")]
+        metric_line_blocks = [(y_first_metric, "No statistical pattern.")]
+
     metrics_svg = "".join(
-        f'<text x="57" y="{round(y,1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white">{txt}</text>'
+        f'<text x="{BACK_TEXT_X}" y="{round(y, 1)}" text-anchor="start" dominant-baseline="hanging" '
+        f'font-size="14" fill="white" style="{style_lh}">{txt}</text>'
         for y, txt in metric_line_blocks
+    )
+
+    if metric_line_blocks:
+        last_m_baseline = metric_line_blocks[-1][0]
+        meta_y1 = last_m_baseline + BACK_BODY_INK_EXT + BACK_GAP_METRICS_TO_META
+    else:
+        meta_y1 = y_stat_header + BACK_BODY_INK_EXT + BACK_GAP_METRICS_TO_META
+
+    season_card_raw = f"SEASON CARD NUMBER: {mint_str}/{size_str}"
+    season_dates_raw = f"SEASON DATES: {d1} - {d2}"
+    sc_wrap = _wrap_text_by_width(season_card_raw, float(BACK_META_WRAP_W), 10.0)
+    if not sc_wrap:
+        sc_wrap = [season_card_raw]
+    sd_wrap = _wrap_text_by_width(season_dates_raw, float(BACK_META_WRAP_W), 10.0)
+    if not sd_wrap:
+        sd_wrap = [season_dates_raw]
+    sc_lines_esc = [_esc(s) for s in sc_wrap]
+    sd_lines_esc = [_esc(s) for s in sd_wrap]
+
+    n_meta_lines = len(sc_lines_esc) + len(sd_lines_esc)
+    meta_y1_floor = meta_y1
+    inner_clear = 4.0
+    qr_bottom = BACK_QR_Y + BACK_QR_SIZE
+    meta_y1_pin = qr_bottom - (n_meta_lines - 1) * lh - BACK_META_INK_EXT
+    meta_y1_pin_inner = inner_bottom - inner_clear - (n_meta_lines - 1) * lh - BACK_META_INK_EXT
+    meta_y1_pin = min(meta_y1_pin, meta_y1_pin_inner)
+    if meta_y1_floor <= meta_y1_pin:
+        meta_y1 = meta_y1_pin
+    else:
+        meta_y1 = meta_y1_floor
+    meta_y1 += BACK_META_Y_OFFSET
+
+    season_meta_svg = "".join(
+        f'<tspan x="{BACK_TEXT_X}" dy="{0 if i == 0 else BACK_META_LH}">{line}</tspan>'
+        for i, line in enumerate(sc_lines_esc)
+    )
+    y_dates_block = meta_y1 + len(sc_lines_esc) * BACK_META_LH
+    dates_meta_svg = "".join(
+        f'<tspan x="{BACK_TEXT_X}" dy="{0 if i == 0 else BACK_META_LH}">{line}</tspan>'
+        for i, line in enumerate(sd_lines_esc)
     )
 
     return f'''<svg width="{CANVAS_W}" height="{CANVAS_H}"
@@ -1269,24 +1546,33 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     <stop offset="0.8" stop-color="#51FF48"/>
     <stop offset="1" stop-color="white"/>
   </linearGradient>
+  <filter id="frame-blur" x="-10%" y="-10%" width="120%" height="120%">
+    <feGaussianBlur stdDeviation="4"/>
+  </filter>
 </defs>
 <rect width="{CANVAS_W}" height="{CANVAS_H}" fill="#0B0C10"/>
-<rect x="{FRAME_X}" y="{FRAME_Y}" width="{FRAME_W}" height="{FRAME_H}" fill="{border_fill}"/>
-<rect x="14.5" y="12.5" width="489" height="776" fill="{dz_fill}" stroke="black"/>
+<rect x="{FRAME_X}" y="{FRAME_Y}" width="{FRAME_W}" height="{FRAME_H}" fill="{border_fill}" filter="url(#frame-blur)"/>
+<rect x="{BACK_DZ_X}" y="{BACK_DZ_Y}" width="{BACK_DZ_W}" height="{BACK_DZ_H}" fill="{dz_fill}" stroke="black"/>
 
-<text x="56" y="40" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black">[ EVENT TOPOLOGY ]</text>
-<text x="55" y="85" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white">{lore_svg}</text>
+<text x="{BACK_TEXT_X_HEAD}" y="40" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="{style_lh}">[ EVENT TOPOLOGY ]</text>
+<text x="{BACK_TEXT_X}" y="{BACK_LORE_Y}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh}">{lore_svg}</text>
 
-<line x1="60" y1="215" x2="460" y2="215" stroke="#333333" stroke-width="2"/>
-<rect x="56" y="213" width="4" height="4" fill="#333333"/>
-<rect x="460" y="213" width="4" height="4" fill="#333333"/>
+<line x1="{BACK_SEP_X1}" y1="{BACK_SEP_LINE_Y}" x2="{BACK_SEP_X2}" y2="{BACK_SEP_LINE_Y}" stroke="#333333" stroke-width="2"/>
+<rect x="{BACK_SEP_CAP_LEFT_X}" y="{BACK_SEP_LINE_Y - 2}" width="4" height="4" fill="#333333"/>
+<rect x="{BACK_SEP_CAP_RIGHT_X}" y="{BACK_SEP_LINE_Y - 2}" width="4" height="4" fill="#333333"/>
 
-<text x="56" y="235" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black">[ BEHAVIORAL SIGNATURE ]</text>
-<text x="55" y="272" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" text-decoration="underline" style="text-decoration-thickness:1px; text-underline-offset:1.66px">{archetype_line_text}</text>
-<text x="55" y="304" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white">{desc_svg}</text>
+<text x="{BACK_TEXT_X_HEAD}" y="{BACK_ARCH_HEADER_Y}" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="{style_lh}">[ BEHAVIORAL SIGNATURE ]</text>
+<text x="{BACK_TEXT_X}" y="{BACK_ARCH_Y}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh};{arch_ud}">{archetype_line_text}</text>
+<text x="{BACK_TEXT_X}" y="{BACK_DESC_Y}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh}">{desc_svg}</text>
+<text x="{BACK_TEXT_X}" y="{round(back_rarity_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="12" fill="white" style="{style_lh}">{rarity_esc}</text>
 
-<text x="57" y="550" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="black" text-decoration="underline" style="text-decoration-thickness:1px; text-underline-offset:1.66px">{stat_header}</text>
+<text x="{BACK_TEXT_X}" y="{round(y_stat_header, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="black" style="{style_lh};{arch_ud}">{stat_header}</text>
 {metrics_svg}
+
+<text x="{BACK_TEXT_X}" y="{round(meta_y1, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="10" fill="white" style="line-height:{BACK_META_LH}px">{season_meta_svg}</text>
+<text x="{BACK_TEXT_X}" y="{round(y_dates_block, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="10" fill="white" style="line-height:{BACK_META_LH}px">{dates_meta_svg}</text>
+
+{qr_block}
 
 <rect x="1.5" y="1.5" width="513" height="799" stroke="#333333" stroke-width="3"/>
 </svg>'''
@@ -1308,15 +1594,20 @@ SAMPLE_DATA: Dict[str, Any] = {
     "secondary_tag":     "NONE",
     "entry_bracket":     "[0.00 - 0.20]",
     "proxy_wallet":      "0xBb8E703abc123def456",
-    "edge":              "P99",
-    "yield":             "P99",
-    "gravity":           "P99",
-    "archetype":         "ANOMALY",
+    "edge":              "BASE",
+    "yield":             "BASE",
+    "gravity":           "BASE",
+    "archetype":         "SUBSTRATE",
     "card_lore":         "Standard edition pricing breach at triple digits signals industry inflection. Historical AAA launch data suggests $69.99 baseline holds. Resolution hinges on store listings by Feb 2026 deadline.",
-    "archetype_description": "Systemic resonance detected. This entity represents a mathematical impossibility on the ledger. Their capital mass, execution velocity, and predictive accuracy have scaled in absolute algorithmic unison with their implied probability bracket. They do not merely trade the market; they mirror its optimal mathematical structure. Perfect calibration. Zero systemic drag.",
-    "archetype_math":    "P (E) ∉ [0.80 - 0.97] | Edge ≡ P (E) | Yield ≡ P (E) | Gravity ≡ P (E)",
+    "archetype_description": "Consensus exploitation protocol active. This entity exhibits zero predictive foresight and absorbs minimal absolute risk. They execute only when a prevailing consensus has crystallized (0.60+) or the event is mathematically solved (0.80+). By deploying overwhelming financial mass at the terminal stage of the market lifecycle, they extract a low-variance tax from the ecosystem's resolution. Pure capital preservation.",
+    "archetype_math":    "P (E) ∈ [0.60 - 0.97] | Edge ≤ P50 | Yield ≤ P50 | Gravity ≤ P70",
     "rarity_bracket":    "[ OCCURRENCE: 1.0% - 2.0% ]",
     "leaderboard_rank":  63564,
+    "collection_mint_number": 7,
+    "season_size":       333,
+    "season_start_date": "2026-01-15",
+    "season_end_date":   "2026-01-25",
+    "qr_payload":        "https://polystars.app/cards/card-genesis-s1-595f047311a45c524f706f5d1153fdac-f429c3e4c1394d35bc047257fe913fdd",
 }
 
 

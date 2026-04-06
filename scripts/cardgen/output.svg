@@ -58,8 +58,8 @@
 
   <!-- Per-element gradient instances — inherit stops, apply their own coordinates -->
   <linearGradient id="mg-eb" gradientUnits="userSpaceOnUse"
-                  x1="405.42" y1="611.0"
-                  x2="406.33" y2="626.0"
+                  x1="403.17" y1="611.0"
+                  x2="404.08" y2="626.0"
                   xlink:href="#anomaly-stops"/>
   <linearGradient id="mg-w" gradientUnits="userSpaceOnUse"
                   x1="157.29" y1="611.0"
@@ -170,15 +170,20 @@
   <clipPath id="title-text-clip">
     <rect x="54" y="472" width="408" height="61"/>
   </clipPath>
+
+  <!-- Layer blur for white-grey border frame (matches Figma Layer blur effect) -->
+  <filter id="frame-blur" x="-10%" y="-10%" width="120%" height="120%">
+    <feGaussianBlur stdDeviation="4"/>
+  </filter>
 </defs>
 
 <!-- ══ BACKGROUND ══ -->
 <rect width="516" height="802" rx="0" fill="#0B0C10"/>
 
-<!-- ══ BORDER GLOW (driven by YIELD = P99) ══ -->
+<!-- ══ BORDER GLOW (driven by YIELD = BASE) ══ -->
 <rect x="3" y="3"
       width="510" height="796"
-      rx="0" fill="url(#border-gradient)"/>
+      rx="0" fill="#B6BBC8" filter="url(#frame-blur)"/>
 
 <!-- ══ EVENT IMAGE ══ -->
 <image x="13" y="13" width="490" height="490"
@@ -221,10 +226,10 @@
   <tspan fill="white"> ]</tspan>
 </text>
 
-<!-- ══ DATA ZONE (archetype: ANOMALY) ══ -->
+<!-- ══ DATA ZONE (archetype: SUBSTRATE) ══ -->
 <rect x="13.5" y="503.5"
       width="489" height="285"
-      rx="-0.5" fill="url(#uniform-gradient)" stroke="#000000"/>
+      rx="-0.5" fill="#474332" stroke="#000000"/>
 
 <!-- ══ DATA ZONE CORNER PINS ══ -->
 <circle cx="28" cy="518" r="3.5" fill="#978E8E"/>
@@ -273,7 +278,7 @@
   <rect x="258.5" y="606" width="1" height="24" fill="white"/>
   <text x="243.5" y="611"
         text-anchor="end" dominant-baseline="hanging"
-        font-size="15" fill="url(#mg-w)">
+        font-size="15" fill="#B6BBC8">
     0xBb8E703abc1...
   </text>
   <text x="273.5" y="611"
@@ -308,30 +313,30 @@
 <g filter="url(#txt-shadow)">
   <text x="130" y="667"
         text-anchor="middle" dominant-baseline="hanging"
-        font-size="20" fill="url(#mg-edge)">
-    P99
+        font-size="20" fill="#B6BBC8">
+    BASE
   </text>
   <text x="263" y="667"
         text-anchor="middle" dominant-baseline="hanging"
-        font-size="20" fill="url(#mg-yield)">
-    P99
+        font-size="20" fill="#B6BBC8">
+    BASE
   </text>
   <text x="391" y="667"
         text-anchor="middle" dominant-baseline="hanging"
-        font-size="20" fill="url(#mg-grav)">
-    P99
+        font-size="20" fill="#B6BBC8">
+    BASE
   </text>
 </g>
 
-<!-- ══ LOWER SEPARATOR (driven by GRAVITY = P99) ══ -->
-<rect x="57" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="63" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="69" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="75" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="81" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="87" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="93" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="99" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="105" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="111" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="117" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="123" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="129" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="135" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="141" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="147" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="153" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="159" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="165" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="171" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="177" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="183" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="189" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="195" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="201" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="207" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="213" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="219" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="225" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="231" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="237" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="243" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="249" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="255" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="261" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="267" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="273" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="279" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="285" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="291" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="297" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="303" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="309" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="315" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="321" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="327" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="333" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="339" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="345" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="351" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="357" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="363" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="369" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="375" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="381" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="387" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="393" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="399" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="405" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="411" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="417" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="423" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="429" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="435" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="441" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="447" y="743" width="2" height="2" fill="url(#mg-sep)"/><rect x="453" y="743" width="2" height="2" fill="url(#mg-sep)"/>
+<!-- ══ LOWER SEPARATOR (driven by GRAVITY = BASE) ══ -->
+<rect x="57" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="63" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="69" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="75" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="81" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="87" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="93" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="99" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="105" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="111" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="117" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="123" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="129" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="135" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="141" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="147" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="153" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="159" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="165" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="171" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="177" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="183" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="189" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="195" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="201" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="207" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="213" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="219" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="225" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="231" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="237" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="243" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="249" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="255" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="261" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="267" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="273" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="279" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="285" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="291" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="297" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="303" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="309" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="315" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="321" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="327" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="333" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="339" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="345" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="351" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="357" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="363" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="369" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="375" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="381" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="387" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="393" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="399" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="405" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="411" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="417" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="423" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="429" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="435" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="441" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="447" y="743" width="2" height="2" fill="#B6BBC8"/><rect x="453" y="743" width="2" height="2" fill="#B6BBC8"/>
 
 <!-- ══ ARCHETYPE ══ -->
 <g filter="url(#txt-shadow)">
   <text x="258" y="729"
         text-anchor="middle" dominant-baseline="alphabetic">
     <tspan font-size="18" fill="white">ARCHETYPE: </tspan>
-    <tspan font-size="20" fill="url(#archetype-gradient)">ANOMALY</tspan>
+    <tspan font-size="20" fill="url(#archetype-gradient)">SUBSTRATE</tspan>
   </text>
 </g>
 
