@@ -12,6 +12,7 @@ type GeneratedCardPayload = {
   season_type?: string;
   season_number?: number;
   archetype?: string;
+  rarity_bracket?: string;
   leaderboard_rank?: number;
   proxy_wallet?: string;
   recurrence?: string | null;

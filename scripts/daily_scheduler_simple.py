@@ -1564,6 +1564,10 @@ class SimplifiedScheduler:
                     p.yield,
                     p.gravity,
                     p.rank,
+                    p.archetype,
+                    p.archetype_description,
+                    p.archetype_math,
+                    p.rarity_bracket,
                     COALESCE(e.volume, we.event_volume, 0) AS event_volume,
                     RANDOM() AS random_key
                 FROM participants p
@@ -1590,6 +1594,10 @@ class SimplifiedScheduler:
                     yield,
                     gravity,
                     rank,
+                    archetype,
+                    archetype_description,
+                    archetype_math,
+                    rarity_bracket,
                     event_volume,
                     random_key
                 FROM candidate_participants
@@ -1609,6 +1617,10 @@ class SimplifiedScheduler:
                 yield,
                 gravity,
                 rank,
+                archetype,
+                archetype_description,
+                archetype_math,
+                rarity_bracket,
                 event_volume,
                 random_key
             FROM per_wallet_per_event_random
@@ -1853,6 +1865,10 @@ class SimplifiedScheduler:
                     row.get("yield"),
                     row.get("gravity"),
                     row.get("rank"),
+                    row.get("archetype"),
+                    row.get("archetype_description"),
+                    row.get("archetype_math"),
+                    row.get("rarity_bracket"),
                 )
             )
 
@@ -1875,11 +1891,16 @@ class SimplifiedScheduler:
                 edge,
                 yield,
                 gravity,
-                rank
+                rank,
+                archetype,
+                archetype_description,
+                archetype_math,
+                rarity_bracket
             )
             VALUES (
                 %s, %s, %s, %s, %s, NOW(),
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s
             )
             """,
             insert_values,

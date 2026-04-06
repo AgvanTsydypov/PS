@@ -335,21 +335,29 @@ def figma_gradients_to_svg_defs(gradients: list[Dict[str, Any]]) -> str:
 
 _DZ_ARCHETYPE_STYLES: Dict[str, Tuple[str, str, bool]] = {
     #                     (fill,                        stroke,    is_signal)
-    "THE ANOMALY":     ("url(#uniform-gradient)",      "#000000", False),
-    "THE HARVESTER":   ("#1C1B1B",                     "#000000", False),
-    "THE EQUILIBRIUM": ("#CDD2DE",                     "#000000", True),
-    "THE MARTYR":      ("#1B1D3A",                     "#000000", False),
-    "THE SIGNAL":      ("url(#signal-gradient)",       "#000000", False),
-    "THE AMASSER":     ("url(#amasser-gradient)",      "#000000", False),
-    "THE VECTOR":      ("url(#vector-gradient)",       "#000000", False),
-    "THE OPERATOR":    ("#625F5F",                     "#000000", False),
-    "THE SUBSTRATE":   ("#474332",                     "#000000", False),
+    "ANOMALY":     ("url(#uniform-gradient)",      "#000000", False),
+    "HARVESTER":   ("#1C1B1B",                     "#000000", False),
+    "EQUILIBRIUM": ("#CDD2DE",                     "#000000", True),
+    "MARTYR":      ("#1B1D3A",                     "#000000", False),
+    "SIGNAL":      ("url(#signal-gradient)",       "#000000", False),
+    "AMASSER":     ("url(#amasser-gradient)",      "#000000", False),
+    "VECTOR":      ("url(#vector-gradient)",       "#000000", False),
+    "OPERATOR":    ("#625F5F",                     "#000000", False),
+    "SUBSTRATE":   ("#474332",                     "#000000", False),
 }
+
+
+def _archetype_style_key(raw: str) -> str:
+    s = str(raw or "").strip().upper()
+    if s.startswith("THE "):
+        s = s[4:].strip()
+    return s or "OPERATOR"
 
 
 def dz_style(archetype: str) -> Tuple[str, str, bool]:
     """Return (fill, stroke, is_signal) for data zone by archetype."""
-    return _DZ_ARCHETYPE_STYLES.get(archetype, _DZ_ARCHETYPE_STYLES["THE OPERATOR"])
+    key = _archetype_style_key(archetype)
+    return _DZ_ARCHETYPE_STYLES.get(key, _DZ_ARCHETYPE_STYLES["OPERATOR"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -449,7 +457,8 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ── 1. Data zone style from archetype (pattern detection removed) ─
     archetype_raw = str(data.get("archetype", "") or "").strip().upper()
     if not archetype_raw:
-        archetype_raw = "THE OPERATOR"
+        archetype_raw = "OPERATOR"
+    archetype_raw = _archetype_style_key(archetype_raw)
     dz_fill, dz_stroke, is_signal = dz_style(archetype_raw)
 
     # ── 2. Resolve tier colors ────────────────────────────────────────
@@ -1003,7 +1012,7 @@ def _format_archetype_math_lines(raw: str) -> List[str]:
 
 def generate_card_back_svg(data: Dict[str, Any]) -> str:
     """Build back-of-card SVG."""
-    archetype_raw = str(data.get("archetype", "") or "").strip().upper() or "THE OPERATOR"
+    archetype_raw = _archetype_style_key(str(data.get("archetype", "") or "").strip().upper() or "OPERATOR")
     dz_fill, _, _ = dz_style(archetype_raw)
     yld = str(data.get("yield", "BASE") or "BASE").upper()
     yield_color = get_ptier_color(yld)
@@ -1152,10 +1161,11 @@ SAMPLE_DATA: Dict[str, Any] = {
     "edge":              "P99",
     "yield":             "P99",
     "gravity":           "P99",
-    "archetype":         "THE ANOMALY",
+    "archetype":         "ANOMALY",
     "card_lore":         "Standard edition pricing breach at triple digits signals industry inflection. Historical AAA launch data suggests $69.99 baseline holds. Resolution hinges on store listings by Feb 2026 deadline.",
     "archetype_description": "Systemic resonance detected. This entity represents a mathematical impossibility on the ledger. Their capital mass, execution velocity, and predictive accuracy have scaled in absolute algorithmic unison with their implied probability bracket. They do not merely trade the market; they mirror its optimal mathematical structure. Perfect calibration. Zero systemic drag.",
-    "archetype_math":    "P(E) ∉ [0.80 - 0.97] | Edge, Yield, and Gravity percentiles perfectly match the Entry probability tier.",
+    "archetype_math":    "P (E) ∉ [0.80 - 0.97] | Edge ≡ P (E) | Yield ≡ P (E) | Gravity ≡ P (E)",
+    "rarity_bracket":    "[ OCCURRENCE: 1.0% - 2.0% ]",
     "leaderboard_rank":  63564,
 }
 
@@ -1184,7 +1194,7 @@ if __name__ == "__main__":
     with open(out_back_path, "w", encoding="utf-8") as f:
         f.write(svg_back)
 
-    arch = str(card_data.get("archetype", "") or "").strip().upper() or "THE OPERATOR"
+    arch = _archetype_style_key(str(card_data.get("archetype", "") or "").strip().upper() or "OPERATOR")
     print(f"Archetype: {arch}")
     print(f"SVG written to:   {out_path}")
     print(f"Back SVG written: {out_back_path}")

@@ -2,6 +2,10 @@
 
 Все команды запускать из корня репозитория `/Users/agmac/Desktop/PolyStars`.
 
+## База (порядок SQL)
+
+Сначала `sql/schemas/init-db.sql`, затем `sql/schemas/create_seasons_system.sql`. Иначе бэкфилл сезонов обращается к `participants` без нужных колонок (например `rarity_bracket`).
+
 ## Backends
 
 ```bash
