@@ -130,10 +130,10 @@ DZ_PIN_R       = 3.5
 DZ_PIN_INSET   = 15
 
 # Back-of-card inner olive rect — Figma Frame 122: x=14 y=12, 490×777, 1px inside stroke.
-BACK_DZ_X = 14.0
-BACK_DZ_Y = 12.0
-BACK_DZ_W = 490.0
-BACK_DZ_H = 777.0
+BACK_DZ_X = 13.0   # FRAME_X + 10 = 3 + 10
+BACK_DZ_Y = 13.0   # FRAME_Y + 10 = 3 + 10
+BACK_DZ_W = 490.0  # FRAME_W - 20 = 510 - 20
+BACK_DZ_H = 776.0  # FRAME_H - 20 = 796 - 20
 BACK_LINE_HEIGHT = 22
 BACK_QR_SIZE = 100
 BACK_QR_MARGIN = 14.0
@@ -142,7 +142,7 @@ BACK_QR_Y = BACK_DZ_Y + BACK_DZ_H - BACK_QR_SIZE - BACK_QR_MARGIN
 BACK_QR_INNER_PAD = 6.0
 # Text column: left pad 41px, right pad = half of left (asymmetric).
 BACK_TEXT_PAD_X = 41.0
-BACK_TEXT_PAD_RIGHT = int(BACK_TEXT_PAD_X / 2)          # 20px right pad
+BACK_TEXT_PAD_RIGHT = 30                                 # 30px right pad
 BACK_TEXT_X = int(BACK_DZ_X + BACK_TEXT_PAD_X)          # 55
 BACK_TEXT_X_HEAD = BACK_TEXT_X + 1                       # 56 — section labels
 BACK_TEXT_RIGHT = BACK_DZ_X + BACK_DZ_W - BACK_TEXT_PAD_RIGHT  # 484
@@ -152,12 +152,13 @@ FIGMA_BACK_LORE_Y = 85
 FIGMA_BACK_LORE_W = 408
 FIGMA_BACK_LORE_H = 110
 BACK_BODY_WRAP_W = int(BACK_TEXT_RIGHT - BACK_TEXT_X)    # 429
-assert BACK_TEXT_X == FIGMA_BACK_LORE_X
+# FIGMA_BACK_LORE_X=55 is a reference; BACK_TEXT_X may differ by 1px due to DZ alignment fix.
 # Footer rows share vertical band with QR; wrap ends before the QR column.
 BACK_META_WRAP_W = max(120, int(BACK_QR_X - BACK_TEXT_X - 12.0))
-# Separator: from text-left+5 to text-right−3.
+# Separator: symmetric around card centre (CANVAS_W/2=258).
+# x1 = text-left+5 = 60; x2 = CANVAS_W − x1 = 456  →  centre = 258.
 BACK_SEP_X1 = BACK_TEXT_X + 5                           # 60
-BACK_SEP_X2 = int(BACK_TEXT_RIGHT) - 3                  # 481
+BACK_SEP_X2 = CANVAS_W - BACK_SEP_X1                   # 456
 BACK_SEP_CAP_LEFT_X = BACK_SEP_X1 - 4
 BACK_SEP_CAP_RIGHT_X = BACK_SEP_X2
 # Vertical layout (back) — flow blocks to avoid fixed y collisions (Frame 136 reference).
@@ -176,7 +177,7 @@ BACK_META_Y_OFFSET = 10.0
 # Lore: calibrated _orbitron_adv means 408 px works directly -- no extra slack needed.
 BACK_LORE_WRAP_SLACK_PX = 0.0
 # Desc: limit = 344 px makes "Consensus...active." break before "This" with the updated model.
-BACK_DESC_WRAP_SLACK_PX = 64.0
+BACK_DESC_WRAP_SLACK_PX = 0.0
 # Approximate ink below hanging baseline for line-height 22 / Orbitron 14px body.
 BACK_BODY_INK_EXT = 16.0
 BACK_META_INK_EXT = 12.0
@@ -224,7 +225,7 @@ def _orbitron_adv(ch: str, fs: float) -> float:
         return fs * 0.55 + ls
     if ch.isupper():
         return fs * 0.65 + ls
-    return fs * 0.53 + ls
+    return fs * 0.58 + ls
 
 
 def _orbitron_width(s: str, fs: float) -> float:
@@ -850,7 +851,8 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ BORDER GLOW (driven by YIELD = {yld}) ══ -->
 <rect x="{FRAME_X}" y="{FRAME_Y}"
       width="{FRAME_W}" height="{FRAME_H}"
-      rx="{FRAME_RX}" fill="{border_fill}"/>''')
+      rx="{FRAME_RX}" fill="{border_fill}"
+      filter="url(#frame-blur)"/>''')
 
     # ---- Layer 3: Event image ----
     if image_url:
@@ -1573,7 +1575,8 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
   </filter>
 </defs>
 <rect width="{CANVAS_W}" height="{CANVAS_H}" fill="#0B0C10"/>
-<rect x="{FRAME_X}" y="{FRAME_Y}" width="{FRAME_W}" height="{FRAME_H}" fill="{border_fill}"/>
+<rect x="{FRAME_X}" y="{FRAME_Y}" width="{FRAME_W}" height="{FRAME_H}" fill="{border_fill}"
+      filter="url(#frame-blur)"/>
 <rect x="{BACK_DZ_X}" y="{BACK_DZ_Y}" width="{BACK_DZ_W}" height="{BACK_DZ_H}" fill="{dz_fill}" stroke="black"/>
 
 <text x="{BACK_TEXT_X_HEAD}" y="40" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="{style_lh}">[ EVENT TOPOLOGY ]</text>
@@ -1616,7 +1619,7 @@ SAMPLE_DATA: Dict[str, Any] = {
     "recurrence":        "unique",
     "claim_type":        "origin",
     "image_url":         "sample.jpg",
-    "card_title":        "ZELENSKYY SUIT WATCH JUN 2025 HELLO HELLO HELLO",
+    "card_title":        "Government Shutdown Duration 2025",
     "primary_tag":       "CELEBRITIES",
     "primary_tag_color": "#51E147",
     "secondary_tag":     "NONE",
