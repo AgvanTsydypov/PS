@@ -31,6 +31,23 @@ function scopeIds(svgText: string, prefix: string): string {
   return out;
 }
 
+/**
+ * Strip explicit width/height from the <svg> root so CSS controls sizing,
+ * and replace SVG text-shadow filters with CSS drop-shadow to avoid
+ * mobile browser rasterisation blur on filtered text groups.
+ */
+function patchSvgForMobile(svgText: string): string {
+  let out = svgText.replace(/<svg\b([^>]*)>/, (_match, attrs: string) => {
+    const cleaned = attrs
+      .replace(/\s+width="[^"]*"/, "")
+      .replace(/\s+height="[^"]*"/, "");
+    return `<svg${cleaned}>`;
+  });
+  out = out.split('filter="url(#shadow)"').join('class="css-drop-shadow"');
+  out = out.split('filter="url(#txt-shadow)"').join('class="css-drop-shadow"');
+  return out;
+}
+
 interface InlineSvgCardProps {
   url: string | null | undefined;
   className?: string;
@@ -79,10 +96,10 @@ export function InlineSvgCard({ url, className, style, alt }: InlineSvgCardProps
         return r.text();
       })
       .then((text) => {
-        // Strip XML declaration before caching
         const raw = text.replace(/<\?xml[^>]*\?>\s*/g, "");
-        _fetchCache.set(url, raw);
-        setSvg(scopeIds(raw, prefix));
+        const patched = patchSvgForMobile(raw);
+        _fetchCache.set(url, patched);
+        setSvg(scopeIds(patched, prefix));
       })
       .catch((err) => {
         if (err.name !== "AbortError") {
