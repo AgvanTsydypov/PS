@@ -846,7 +846,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ BACKGROUND ══ -->
 <rect width="{CANVAS_W}" height="{CANVAS_H}" rx="0" fill="#0B0C10"/>''')
 
-    # ---- Layer 2: Border base (no darkening blur) ----
+    # ---- Layer 2: Border base with layer blur ----
     parts.append(f'''
 <!-- ══ BORDER GLOW (driven by YIELD = {yld}) ══ -->
 <rect x="{FRAME_X}" y="{FRAME_Y}"
