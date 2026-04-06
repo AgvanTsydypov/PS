@@ -140,24 +140,24 @@ BACK_QR_MARGIN = 14.0
 BACK_QR_X = BACK_DZ_X + BACK_DZ_W - BACK_QR_SIZE - BACK_QR_MARGIN
 BACK_QR_Y = BACK_DZ_Y + BACK_DZ_H - BACK_QR_SIZE - BACK_QR_MARGIN
 BACK_QR_INNER_PAD = 6.0
-# Text column x=55 with inner left at 14 → pad 41 (symmetric right inset matches 408px box width).
+# Text column: left pad 41px, right pad = half of left (asymmetric).
 BACK_TEXT_PAD_X = 41.0
-BACK_TEXT_X = int(BACK_DZ_X + BACK_TEXT_PAD_X)  # 55
-BACK_TEXT_X_HEAD = BACK_TEXT_X + 1  # 56 — section labels aligned with reference
-BACK_TEXT_RIGHT = BACK_DZ_X + BACK_DZ_W - BACK_TEXT_PAD_X
-# Figma Frame 122 (EVENT TOPOLOGY body): position (55, 85), fixed text box 408×110, Orbitron Bold 14,
-# line-height 22, letter-spacing 10%. Must match BACK_TEXT_RIGHT − BACK_TEXT_X.
+BACK_TEXT_PAD_RIGHT = int(BACK_TEXT_PAD_X / 2)          # 20px right pad
+BACK_TEXT_X = int(BACK_DZ_X + BACK_TEXT_PAD_X)          # 55
+BACK_TEXT_X_HEAD = BACK_TEXT_X + 1                       # 56 — section labels
+BACK_TEXT_RIGHT = BACK_DZ_X + BACK_DZ_W - BACK_TEXT_PAD_RIGHT  # 484
+# Figma Frame 122 reference (original 408px box); actual wrap width is wider now.
 FIGMA_BACK_LORE_X = 55
 FIGMA_BACK_LORE_Y = 85
 FIGMA_BACK_LORE_W = 408
 FIGMA_BACK_LORE_H = 110
-BACK_BODY_WRAP_W = int(BACK_TEXT_RIGHT - BACK_TEXT_X)
-assert BACK_BODY_WRAP_W == FIGMA_BACK_LORE_W and BACK_TEXT_X == FIGMA_BACK_LORE_X
+BACK_BODY_WRAP_W = int(BACK_TEXT_RIGHT - BACK_TEXT_X)    # 429
+assert BACK_TEXT_X == FIGMA_BACK_LORE_X
 # Footer rows share vertical band with QR; wrap ends before the QR column.
 BACK_META_WRAP_W = max(120, int(BACK_QR_X - BACK_TEXT_X - 12.0))
-# Separator: Figma spec X=60 Y=216 W=400 → x1=60, x2=460.
-BACK_SEP_X1 = BACK_TEXT_X + 5        # 60
-BACK_SEP_X2 = BACK_SEP_X1 + 400      # 460
+# Separator: from text-left+5 to text-right−3.
+BACK_SEP_X1 = BACK_TEXT_X + 5                           # 60
+BACK_SEP_X2 = int(BACK_TEXT_RIGHT) - 3                  # 481
 BACK_SEP_CAP_LEFT_X = BACK_SEP_X1 - 4
 BACK_SEP_CAP_RIGHT_X = BACK_SEP_X2
 # Vertical layout (back) — flow blocks to avoid fixed y collisions (Frame 136 reference).
@@ -1415,12 +1415,22 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     else:
         font_css = "@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700&amp;display=swap');"
 
-    lore_lines = _wrap_back_text(lore, float(FIGMA_BACK_LORE_W), 14.0, slack_px=BACK_LORE_WRAP_SLACK_PX)
-    max_lore = max(
-        1,
-        int((BACK_LORE_BOTTOM_LIMIT - BACK_LORE_Y - BACK_BODY_INK_EXT) // lh) + 1,
-    )
-    lore_lines = _back_clamp_line_count(lore_lines, max_lore)
+    lore_lines = _wrap_back_text(lore, float(BACK_BODY_WRAP_W), 14.0, slack_px=BACK_LORE_WRAP_SLACK_PX)
+
+    # Dynamic layout: lore may need more lines than the default zone allows.
+    # Push the separator (and everything below it) down by the overflow amount.
+    # QR code and the two bottom meta lines always stay pinned to the card bottom.
+    #
+    # Equal-gap rule: gap above sep == gap below sep.
+    # Gap below sep is fixed = BACK_ARCH_HEADER_Y - BACK_SEP_LINE_Y (≈19px).
+    # So we place sep at lore_block_bottom + that same gap (floor: BACK_SEP_LINE_Y).
+    _sep_half_gap = float(BACK_ARCH_HEADER_Y - BACK_SEP_LINE_Y)
+    lore_block_bottom = _back_block_bottom(BACK_LORE_Y, len(lore_lines), lh, BACK_BODY_INK_EXT)
+    sep_y = max(float(BACK_SEP_LINE_Y), lore_block_bottom + _sep_half_gap)
+    push_down = sep_y - BACK_SEP_LINE_Y
+    arch_header_y = BACK_ARCH_HEADER_Y + push_down
+    arch_y        = BACK_ARCH_Y        + push_down
+    desc_y        = BACK_DESC_Y        + push_down
 
     desc_lines = _wrap_back_text(
         archetype_desc, float(BACK_BODY_WRAP_W), 14.0, slack_px=BACK_DESC_WRAP_SLACK_PX
@@ -1443,7 +1453,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     archetype_line_text = _esc(f"ARCHETYPE: {archetype_raw}")
     stat_header = "STATISTICAL PATTERN:"
 
-    desc_bottom = _back_block_bottom(BACK_DESC_Y, len(desc_lines), lh, BACK_BODY_INK_EXT)
+    desc_bottom = _back_block_bottom(desc_y, len(desc_lines), lh, BACK_BODY_INK_EXT)
     back_rarity_y = desc_bottom + BACK_GAP_SECTION
     y_stat_header = back_rarity_y + lh + BACK_GAP_STAT_TO_METRICS
     y_first_metric = y_stat_header + lh + BACK_GAP_STAT_TO_METRICS
@@ -1497,17 +1507,12 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     sd_lines_esc = [_esc(s) for s in sd_wrap]
 
     n_meta_lines = len(sc_lines_esc) + len(sd_lines_esc)
-    meta_y1_floor = meta_y1
     inner_clear = 4.0
     qr_bottom = BACK_QR_Y + BACK_QR_SIZE
     meta_y1_pin = qr_bottom - (n_meta_lines - 1) * lh - BACK_META_INK_EXT
     meta_y1_pin_inner = inner_bottom - inner_clear - (n_meta_lines - 1) * lh - BACK_META_INK_EXT
-    meta_y1_pin = min(meta_y1_pin, meta_y1_pin_inner)
-    if meta_y1_floor <= meta_y1_pin:
-        meta_y1 = meta_y1_pin
-    else:
-        meta_y1 = meta_y1_floor
-    meta_y1 += BACK_META_Y_OFFSET
+    # Bottom meta rows are always pinned; they never follow the metrics down.
+    meta_y1 = min(meta_y1_pin, meta_y1_pin_inner) + BACK_META_Y_OFFSET
 
     season_meta_svg = "".join(
         f'<tspan x="{BACK_TEXT_X}" dy="{0 if i == 0 else BACK_META_LH}">{line}</tspan>'
@@ -1574,13 +1579,13 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 <text x="{BACK_TEXT_X_HEAD}" y="40" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="{style_lh}">[ EVENT TOPOLOGY ]</text>
 <text x="{BACK_TEXT_X}" y="{BACK_LORE_Y}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh}">{lore_svg}</text>
 
-<line x1="{BACK_SEP_X1}" y1="{BACK_SEP_LINE_Y}" x2="{BACK_SEP_X2}" y2="{BACK_SEP_LINE_Y}" stroke="#333333" stroke-width="2"/>
-<rect x="{BACK_SEP_CAP_LEFT_X}" y="{BACK_SEP_LINE_Y - 2}" width="4" height="4" fill="#333333"/>
-<rect x="{BACK_SEP_CAP_RIGHT_X}" y="{BACK_SEP_LINE_Y - 2}" width="4" height="4" fill="#333333"/>
+<line x1="{BACK_SEP_X1}" y1="{round(sep_y, 1)}" x2="{BACK_SEP_X2}" y2="{round(sep_y, 1)}" stroke="#333333" stroke-width="2"/>
+<rect x="{BACK_SEP_CAP_LEFT_X}" y="{round(sep_y - 2, 1)}" width="4" height="4" fill="#333333"/>
+<rect x="{BACK_SEP_CAP_RIGHT_X}" y="{round(sep_y - 2, 1)}" width="4" height="4" fill="#333333"/>
 
-<text x="{BACK_TEXT_X_HEAD}" y="{BACK_ARCH_HEADER_Y}" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="{style_lh}">[ BEHAVIORAL SIGNATURE ]</text>
-<text x="{BACK_TEXT_X}" y="{BACK_ARCH_Y}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh};{arch_ud}">{archetype_line_text}</text>
-<text x="{BACK_TEXT_X}" y="{BACK_DESC_Y}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh}">{desc_svg}</text>
+<text x="{BACK_TEXT_X_HEAD}" y="{round(arch_header_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="{style_lh}">[ BEHAVIORAL SIGNATURE ]</text>
+<text x="{BACK_TEXT_X}" y="{round(arch_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh};{arch_ud}">{archetype_line_text}</text>
+<text x="{BACK_TEXT_X}" y="{round(desc_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh}">{desc_svg}</text>
 <text x="{BACK_TEXT_X}" y="{round(back_rarity_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="12" fill="white" style="{style_lh}">{rarity_esc}</text>
 
 <text x="{BACK_TEXT_X}" y="{round(y_stat_header, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="black" style="{style_lh};{arch_ud}">{stat_header}</text>
