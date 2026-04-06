@@ -47,24 +47,33 @@
     <stop offset="0.8" stop-color="#51FF48"/>
     <stop offset="1" stop-color="white"/>
   </linearGradient>
+  <filter id="frame-blur" x="-10%" y="-10%" width="120%" height="120%">
+    <feGaussianBlur stdDeviation="4"/>
+  </filter>
 </defs>
 <rect width="516" height="802" fill="#0B0C10"/>
-<rect x="3" y="3" width="510" height="796" fill="url(#border-gradient)"/>
-<rect x="14.5" y="12.5" width="489" height="776" fill="url(#uniform-gradient)" stroke="black"/>
+<rect x="3" y="3" width="510" height="796" fill="#B6BBC8" filter="url(#frame-blur)"/>
+<rect x="14.0" y="12.0" width="490.0" height="777.0" fill="#474332" stroke="black"/>
 
-<text x="56" y="40" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black">[ EVENT TOPOLOGY ]</text>
-<text x="55" y="85" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white"><tspan x="55" dy="0">Standard edition pricing breach at</tspan><tspan x="55" dy="18">triple digits signals industry</tspan><tspan x="55" dy="18">inflection. Historical AAA launch data</tspan><tspan x="55" dy="18">suggests $69.99 baseline holds.</tspan><tspan x="55" dy="18">Resolution hinges on store listings by</tspan><tspan x="55" dy="18">Feb 2026 deadline.</tspan></text>
+<text x="56" y="40" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="line-height:22px">[ EVENT TOPOLOGY ]</text>
+<text x="55" y="82.0" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="line-height:22px"><tspan x="55" dy="0">Standard edition pricing breach at triple</tspan><tspan x="55" dy="22">digits signals industry inflection. Historical</tspan><tspan x="55" dy="22">AAA launch data suggests $69.99 baseline</tspan><tspan x="55" dy="22">holds. Resolution hinges on store listings by</tspan><tspan x="55" dy="22">Feb 2026 deadline.</tspan></text>
 
-<line x1="60" y1="215" x2="460" y2="215" stroke="#333333" stroke-width="2"/>
-<rect x="56" y="213" width="4" height="4" fill="#333333"/>
-<rect x="460" y="213" width="4" height="4" fill="#333333"/>
+<line x1="60" y1="198.0" x2="460" y2="198.0" stroke="#333333" stroke-width="2"/>
+<rect x="56" y="196.0" width="4" height="4" fill="#333333"/>
+<rect x="460" y="196.0" width="4" height="4" fill="#333333"/>
 
-<text x="56" y="235" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black">[ BEHAVIORAL SIGNATURE ]</text>
-<text x="55" y="272" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" text-decoration="underline" style="text-decoration-thickness:1px; text-underline-offset:1.66px">ARCHETYPE: ANOMALY</text>
-<text x="55" y="304" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white"><tspan x="55" dy="0">Systemic resonance detected. This</tspan><tspan x="55" dy="18">entity represents a mathematical</tspan><tspan x="55" dy="18">impossibility on the ledger. Their</tspan><tspan x="55" dy="18">capital mass, execution velocity,</tspan><tspan x="55" dy="18">and predictive accuracy have scaled</tspan><tspan x="55" dy="18">in absolute algorithmic unison with</tspan><tspan x="55" dy="18">their implied probability bracket.</tspan><tspan x="55" dy="18">They do not merely trade the market;</tspan><tspan x="55" dy="18">they mirror its optimal</tspan><tspan x="55" dy="18">mathematical structure. Perfect</tspan><tspan x="55" dy="18">calibration. Zero systemic drag.</tspan></text>
+<text x="56" y="217.0" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="line-height:22px">[ BEHAVIORAL SIGNATURE ]</text>
+<text x="55" y="254.0" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="line-height:22px;text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:1.66px">ARCHETYPE: SUBSTRATE</text>
+<text x="55" y="279.0" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="line-height:22px"><tspan x="55" dy="0">Consensus exploitation protocol active.</tspan><tspan x="55" dy="22">This entity exhibits zero predictive</tspan><tspan x="55" dy="22">foresight and absorbs minimal absolute</tspan><tspan x="55" dy="22">risk. They execute only when a</tspan><tspan x="55" dy="22">prevailing consensus has crystallized</tspan><tspan x="55" dy="22">(0.60+) or the event is mathematically</tspan><tspan x="55" dy="22">solved (0.80+). By deploying</tspan><tspan x="55" dy="22">overwhelming financial mass at the</tspan><tspan x="55" dy="22">terminal stage of the market lifecycle,</tspan><tspan x="55" dy="22">they extract a low-variance tax from</tspan><tspan x="55" dy="22">the ecosystem&#x27;s resolution. Pure</tspan><tspan x="55" dy="22">capital preservation.</tspan></text>
+<text x="55" y="555.0" text-anchor="start" dominant-baseline="hanging" font-size="12" fill="white" style="line-height:22px">[ OCCURRENCE: 1.0% - 2.0% ]</text>
 
-<text x="57" y="550" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="black" text-decoration="underline" style="text-decoration-thickness:1px; text-underline-offset:1.66px">STATISTICAL PATTERN:</text>
-<text x="57" y="586.0" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white">P (E) ∉ [0.80 - 0.97]</text><text x="57" y="606.0" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white">Edge ≡ P (E)</text><text x="57" y="626.0" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white">Yield ≡ P (E)</text><text x="57" y="646.0" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white">Gravity ≡ P (E)</text>
+<text x="55" y="587.0" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="black" style="line-height:22px;text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:1.66px">STATISTICAL PATTERN:</text>
+<text x="55" y="619.0" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="line-height:22px">P (E) ∈ [0.60 - 0.97]</text><text x="55" y="641.0" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="line-height:22px">Edge ≤ P50</text><text x="55" y="663.0" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="line-height:22px">Yield ≤ P50</text><text x="55" y="685.0" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="line-height:22px">Gravity ≤ P70</text>
+
+<text x="55" y="751.0" text-anchor="start" dominant-baseline="hanging" font-size="10" fill="white" style="line-height:14px"><tspan x="55" dy="0">SEASON CARD NUMBER: 7/333</tspan></text>
+<text x="55" y="765.0" text-anchor="start" dominant-baseline="hanging" font-size="10" fill="white" style="line-height:14px"><tspan x="55" dy="0">SEASON DATES: 2026-01-15 - 2026-01-25</tspan></text>
+
+<g id="card-back-qr"><rect x="390.0" y="675.0" width="100" height="100" fill="#B6BBC8" stroke="black" stroke-width="1"/></g>
 
 <rect x="1.5" y="1.5" width="513" height="799" stroke="#333333" stroke-width="3"/>
 </svg>
