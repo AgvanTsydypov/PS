@@ -1,10 +1,35 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
-// Module-level cache so SVGs are fetched only once per session even
-// if the same card is mounted multiple times (flip, re-render, etc.)
-const _cache = new Map<string, string>();
+// Fetched SVG texts are cached before ID-scoping so the raw text can be
+// re-scoped with different per-instance prefixes.
+const _fetchCache = new Map<string, string>();
+
+/**
+ * Prefix every id="X", url(#X), href="#X" and xlink:href="#X" occurrence in
+ * the SVG text with a unique string so that multiple inline SVGs on the same
+ * page never share IDs (which would make filters / gradients bleed across cards).
+ */
+function scopeIds(svgText: string, prefix: string): string {
+  // Collect all IDs declared in this SVG
+  const ids: string[] = [];
+  svgText.replace(/\bid="([^"]+)"/g, (_, id: string) => {
+    ids.push(id);
+    return _;
+  });
+
+  let out = svgText;
+  for (const id of ids) {
+    const newId = `${prefix}${id}`;
+    // Simple string split/join avoids regex special-character escaping issues
+    out = out.split(`id="${id}"`).join(`id="${newId}"`);
+    out = out.split(`url(#${id})`).join(`url(#${newId})`);
+    out = out.split(`href="#${id}"`).join(`href="#${newId}"`);
+    out = out.split(`xlink:href="#${id}"`).join(`xlink:href="#${newId}"`);
+  }
+  return out;
+}
 
 interface InlineSvgCardProps {
   url: string | null | undefined;
@@ -27,12 +52,20 @@ interface InlineSvgCardProps {
  * so there is no layout shift.
  */
 export function InlineSvgCard({ url, className, style, alt }: InlineSvgCardProps) {
-  const [svg, setSvg] = useState<string | null>(() => (url ? (_cache.get(url) ?? null) : null));
+  // Stable unique prefix for this component instance — prevents ID collisions
+  // when multiple cards are rendered inline on the same page.
+  const reactId = useId();
+  // useId returns ":r0:" style strings — strip non-alphanumeric for SVG IDs
+  const prefix = useRef(`svg${reactId.replace(/[^a-z0-9]/gi, "")}_`).current;
+
+  const [svg, setSvg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!url) return;
-    if (_cache.has(url)) {
-      setSvg(_cache.get(url)!);
+
+    // If already in cache, scope and set immediately
+    if (_fetchCache.has(url)) {
+      setSvg(scopeIds(_fetchCache.get(url)!, prefix));
       return;
     }
 
@@ -46,20 +79,19 @@ export function InlineSvgCard({ url, className, style, alt }: InlineSvgCardProps
         return r.text();
       })
       .then((text) => {
-        // Strip XML declaration; leave SVG root width/height intact —
-        // CSS overrides them so the SVG fills the container.
-        const clean = text.replace(/<\?xml[^>]*\?>\s*/g, "");
-        _cache.set(url, clean);
-        setSvg(clean);
+        // Strip XML declaration before caching
+        const raw = text.replace(/<\?xml[^>]*\?>\s*/g, "");
+        _fetchCache.set(url, raw);
+        setSvg(scopeIds(raw, prefix));
       })
       .catch((err) => {
         if (err.name !== "AbortError") {
-          // Keep the <img> fallback; nothing to do
+          // Fetch failed — the <img> fallback remains visible
         }
       });
 
     return () => controller.abort();
-  }, [url]);
+  }, [url, prefix]);
 
   if (!svg) {
     if (!url) return null;
