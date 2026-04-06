@@ -681,6 +681,10 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
       letter-spacing: 0.1em;
       text-rendering: optimizeLegibility;
     }}
+    text[dominant-baseline="hanging"] {{
+      dominant-baseline: auto;
+      transform: translateY(0.72em);
+    }}
     .css-drop-shadow {{
       filter: drop-shadow(0px 4px 2px rgba(0,0,0,0.25));
     }}
@@ -1492,6 +1496,10 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
       font-weight: 700;
       letter-spacing: 0.1em;
       text-rendering: optimizeLegibility;
+    }}
+    text[dominant-baseline="hanging"] {{
+      dominant-baseline: auto;
+      transform: translateY(0.72em);
     }}
   </style>
   <linearGradient id="uniform-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
