@@ -16,7 +16,7 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -42,6 +42,20 @@ BADGE_CX = BADGE_X + BADGE_W // 2  # 404
 # Title bar (overlaps image/data boundary)
 TB_X, TB_Y, TB_W, TB_H, TB_RX = 29, 472, 458, 61, 0
 TB_CX = TB_X + TB_W // 2  # 258
+TITLE_PAD_X = 25
+TITLE_FS = 16.0
+# Vertical cadence between title lines: must match tspan `dy` and CSS `line-height` on <text>.
+TITLE_LINE_HEIGHT = 22
+# Padded text band inside the title rect (25px inset left/right).
+TITLE_INNER_X = TB_X + TITLE_PAD_X
+TITLE_INNER_W = TB_W - 2 * TITLE_PAD_X
+TITLE_INNER_CX = TITLE_INNER_X + TITLE_INNER_W / 2
+# Target width for wrapping (inner band minus small margin for subpixel / metric drift).
+TITLE_WRAP_W = TITLE_INNER_W - 8
+# Treat a line as “fits” only below this (avoids last word clipping when model ≈ reality).
+TITLE_WRAP_MEASURE_SLACK = 10.0
+# Nudge title block downward in the bar (SVG +y = down).
+TITLE_Y_NUDGE = 2.0
 
 # Data zone
 DZ_X, DZ_Y, DZ_W, DZ_H, DZ_RX = 13, 503, 490, 286, 0
@@ -56,7 +70,6 @@ COL_GRAVITY = 391   # label x=339 w=105 → 391.5; value x=365 w=53 → 391.5
 Y_SEASON        = 31
 Y_INSTANCE      = 47
 Y_OWNERSHIP     = 63
-Y_TITLE_TEXT    = 495   # vertically centered in 61px title bar: 472 + (61-16)/2 ≈ 495
 Y_SECTOR        = 542
 Y_NODE          = 565
 Y_UPPER_SEP     = 589
@@ -484,7 +497,10 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     ownership_val, ownership_clr = _ownership(data)
 
     # ── 5. Text content ──────────────────────────────────────────────
-    title       = _esc(data.get("card_title", "UNTITLED EVENT").upper())
+    title_raw = str(data.get("card_title", "UNTITLED EVENT") or "").strip().upper()
+    if not title_raw:
+        title_raw = "UNTITLED EVENT"
+    title_lines = _wrap_card_title_lines(title_raw, TITLE_WRAP_W, TITLE_FS)
     sector      = _esc(data.get("primary_tag", "UNKNOWN").upper())
     sector_clr  = data.get("primary_tag_color", "#FFFFFF")
     node        = _esc(data.get("secondary_tag", "NONE").upper())
@@ -740,6 +756,11 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     <rect x="{IMG_X}" y="{IMG_Y}"
           width="{IMG_W}" height="{IMG_H}" rx="{IMG_RX}"/>
   </clipPath>
+
+  <!-- Title text — 25px horizontal inset from title bar edges -->
+  <clipPath id="title-text-clip">
+    <rect x="{TITLE_INNER_X}" y="{TB_Y}" width="{TITLE_INNER_W}" height="{TB_H}"/>
+  </clipPath>
 </defs>''')
 
     # ---- Layer 1: Background canvas ----
@@ -821,17 +842,36 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <circle cx="{DZ_X + DZ_W - DZ_PIN_INSET}" cy="{DZ_Y + DZ_H - DZ_PIN_INSET}" r="{DZ_PIN_R}" fill="{DZ_PIN_COLOR}"/>''')
 
     # ---- Layer 7: Title bar ----
+    # Center the text block in TB_H: dominant-baseline="hanging" → y0 is the top
+    # anchor; glyphs occupy ~TITLE_FS downward; further lines step by TITLE_LINE_HEIGHT.
+    if not title_lines:
+        title_lines = ["UNTITLED EVENT"]
+    n_title = len(title_lines)
+    title_block_h = (n_title - 1) * TITLE_LINE_HEIGHT + TITLE_FS
+    y_title_first = TB_Y + (TB_H - title_block_h) / 2 + TITLE_Y_NUDGE
+    title_tspans: List[str] = []
+    for i, ln in enumerate(title_lines):
+        esc_ln = _esc(ln)
+        dy_attr = "" if i == 0 else f' dy="{int(TITLE_LINE_HEIGHT)}"'
+        title_tspans.append(
+            f'<tspan x="{int(TITLE_INNER_CX)}" text-anchor="middle"{dy_attr}>{esc_ln}</tspan>'
+        )
+    title_inner = "".join(title_tspans)
+
     parts.append(f'''
 <!-- ══ TITLE BAR ══ -->
 <rect x="{TB_X}" y="{TB_Y}" width="{TB_W}" height="{TB_H}"
       rx="{TB_RX}" fill="#171717" fill-opacity="0.95"
       stroke="#333333" stroke-width="2"/>
 
-<text x="{TB_CX}" y="{Y_TITLE_TEXT}"
-      text-anchor="middle" dominant-baseline="hanging"
-      font-size="16" fill="white">
-  {title}
-</text>''')
+<g clip-path="url(#title-text-clip)">
+  <text x="{int(TITLE_INNER_CX)}" y="{round(y_title_first, 2)}"
+        text-anchor="middle" dominant-baseline="hanging"
+        font-size="{int(TITLE_FS)}" fill="white"
+        style="text-align:center;font-size:{int(TITLE_FS)}px;line-height:{int(TITLE_LINE_HEIGHT)}px">
+    {title_inner}
+  </text>
+</g>''')
 
     # ---- Layer 8: SECTOR ----
     parts.append(f'''
@@ -1000,6 +1040,116 @@ def _wrap_text_by_width(text: str, max_px: float, font_size: float) -> List[str]
     return lines
 
 
+def _title_line_within_band(
+    line: str, max_px: float, font_size: float, slack: float = TITLE_WRAP_MEASURE_SLACK
+) -> bool:
+    """True if measured width stays inside the padded band (with slack against clipping)."""
+    return _orbitron_width(line, font_size) <= max_px - slack
+
+
+def _reflow_title_peel_until_fit(
+    lines: List[str], max_px: float, font_size: float, slack: float = TITLE_WRAP_MEASURE_SLACK
+) -> List[str]:
+    """Repeatedly move the last word of an over-wide line to the next line until stable."""
+    out = [ln.strip() for ln in lines if ln.strip()]
+    if not out:
+        return []
+    max_iterations = max(32, sum(len(ln) for ln in out))
+    for _ in range(max_iterations):
+        changed = False
+        i = 0
+        while i < len(out):
+            while " " in out[i] and not _title_line_within_band(out[i], max_px, font_size, slack):
+                left, _, right = out[i].rpartition(" ")
+                if not left:
+                    break
+                out[i] = left.strip()
+                if i + 1 < len(out):
+                    out[i + 1] = f"{right} {out[i + 1]}".strip()
+                else:
+                    out.append(right)
+                changed = True
+            i += 1
+        if not changed:
+            break
+    return [ln for ln in out if ln]
+
+
+def _title_best_two_line_split(
+    words: List[str], max_px: float, font_size: float
+) -> Optional[List[str]]:
+    """If the title fits on two lines with whole words, return [line1, line2]. Prefer keeping
+    as many words as possible on line 1 while both lines stay within the band.
+    """
+    if len(words) < 2:
+        return None
+    slack = TITLE_WRAP_MEASURE_SLACK
+    # k = words on line 1; try k = n-1, n-2, …, 1 (max words on line 1 first).
+    for k in range(len(words) - 1, 0, -1):
+        l1 = " ".join(words[:k])
+        l2 = " ".join(words[k:])
+        if _title_line_within_band(l1, max_px, font_size, slack) and _title_line_within_band(
+            l2, max_px, font_size, slack
+        ):
+            return [l1, l2]
+    return None
+
+
+def _split_oversized_line(line: str, max_px: float, font_size: float) -> List[str]:
+    """Break a single line into segments that fit max_px (Orbitron width model)."""
+    if _orbitron_width(line, font_size) <= max_px:
+        return [line]
+    out: List[str] = []
+    chunk = ""
+    for ch in line:
+        trial = chunk + ch
+        if _orbitron_width(trial, font_size) <= max_px:
+            chunk = trial
+        else:
+            if chunk:
+                out.append(chunk)
+            chunk = ch
+    if chunk:
+        out.append(chunk)
+    return out if out else [line]
+
+
+def _wrap_card_title_lines(text: str, max_px: float, font_size: float) -> List[str]:
+    """Word-wrap inside the padded title band. Prefer whole words on line 2 (never clip the
+    last word) using a conservative width slack; only character-split a single token that
+    cannot fit alone on its own line.
+    """
+    slack = TITLE_WRAP_MEASURE_SLACK
+    words = [w for w in str(text or "").replace("\n", " ").split(" ") if w]
+    if not words:
+        return []
+    one = " ".join(words)
+    if _title_line_within_band(one, max_px, font_size, slack):
+        return [one]
+
+    two = _title_best_two_line_split(words, max_px, font_size)
+    if two is not None:
+        return two
+
+    limit = max_px - slack
+    base = _wrap_text_by_width(text, limit, font_size)
+    peeled = _reflow_title_peel_until_fit(base, max_px, font_size, slack)
+    result: List[str] = []
+    for line in peeled:
+        if _title_line_within_band(line, max_px, font_size, slack):
+            result.append(line)
+        elif " " in line:
+            pieces = _reflow_title_peel_until_fit([line], max_px, font_size, slack)
+            for piece in pieces:
+                if _title_line_within_band(piece, max_px, font_size, slack):
+                    result.append(piece)
+                else:
+                    result.extend(_split_oversized_line(piece, max_px - slack, font_size))
+        else:
+            result.extend(_split_oversized_line(line, max_px - slack, font_size))
+    return result
+
+
 def _format_archetype_math_lines(raw: str) -> List[str]:
     chunks = [c.strip() for c in str(raw or "").split("|") if c.strip()]
     if not chunks:
@@ -1152,7 +1302,7 @@ SAMPLE_DATA: Dict[str, Any] = {
     "recurrence":        "unique",
     "claim_type":        "origin",
     "image_url":         "sample.jpg",
-    "card_title":        "ZELENSKYY SUIT WATCH JUN 2025",
+    "card_title":        "ZELENSKYY SUIT WATCH JUN 2025 HELLO HELLO HELLO",
     "primary_tag":       "CELEBRITIES",
     "primary_tag_color": "#51E147",
     "secondary_tag":     "NONE",

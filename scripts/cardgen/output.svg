@@ -165,6 +165,11 @@
     <rect x="13" y="13"
           width="490" height="490" rx="0"/>
   </clipPath>
+
+  <!-- Title text — 25px horizontal inset from title bar edges -->
+  <clipPath id="title-text-clip">
+    <rect x="54" y="472" width="408" height="61"/>
+  </clipPath>
 </defs>
 
 <!-- ══ BACKGROUND ══ -->
@@ -216,7 +221,7 @@
   <tspan fill="white"> ]</tspan>
 </text>
 
-<!-- ══ DATA ZONE (pattern: UNIFORM) ══ -->
+<!-- ══ DATA ZONE (archetype: ANOMALY) ══ -->
 <rect x="13.5" y="503.5"
       width="489" height="285"
       rx="-0.5" fill="url(#uniform-gradient)" stroke="#000000"/>
@@ -232,15 +237,18 @@
       rx="0" fill="#171717" fill-opacity="0.95"
       stroke="#333333" stroke-width="2"/>
 
-<text x="258" y="495"
-      text-anchor="middle" dominant-baseline="hanging"
-      font-size="16" fill="white">
-  ZELENSKYY SUIT WATCH JUN 2025
-</text>
+<g clip-path="url(#title-text-clip)">
+  <text x="258" y="485.5"
+        text-anchor="middle" dominant-baseline="hanging"
+        font-size="16" fill="white"
+        style="text-align:center;font-size:16px;line-height:22px">
+    <tspan x="258" text-anchor="middle">ZELENSKYY SUIT WATCH JUN 2025</tspan><tspan x="258" text-anchor="middle" dy="22">HELLO HELLO HELLO</tspan>
+  </text>
+</g>
 
 <!-- ══ SECTOR ══ -->
 <g filter="url(#shadow)">
-  <text x="258" y="538"
+  <text x="258" y="542"
         text-anchor="middle" dominant-baseline="hanging"
         font-size="18">
     <tspan fill="white">SECTOR: </tspan>
@@ -250,8 +258,8 @@
 
 <!-- ══ NODE ══ -->
 <g filter="url(#shadow)">
-  <text x="202" y="565"
-        text-anchor="start" dominant-baseline="hanging"
+  <text x="258" y="565"
+        text-anchor="middle" dominant-baseline="hanging"
         font-size="16" fill="#888888" style="letter-spacing:0em">
     NODE: NONE
   </text>
@@ -323,21 +331,17 @@
   <text x="258" y="729"
         text-anchor="middle" dominant-baseline="alphabetic">
     <tspan font-size="18" fill="white">ARCHETYPE: </tspan>
-    <tspan font-size="20" fill="url(#archetype-gradient)">THE ANOMALY</tspan>
+    <tspan font-size="20" fill="url(#archetype-gradient)">ANOMALY</tspan>
   </text>
 </g>
 
 <!-- ══ FOOTER ══ -->
 <g filter="url(#shadow)">
-  <text x="58" y="754"
-        text-anchor="start" dominant-baseline="hanging"
+  <text x="258" y="754"
+        text-anchor="middle" dominant-baseline="hanging"
         font-size="16">
-    <tspan fill="#2E5CFF">POLYMARKET</tspan><tspan fill="#828181"> GLOBAL RANK:</tspan>
+    <tspan fill="#2E5CFF">POLYMARKET</tspan><tspan fill="#828181"> GLOBAL RANK: </tspan><tspan fill="#FFFFFF" stroke="#000000" stroke-width="1" paint-order="stroke fill">#63564</tspan>
   </text>
-  <text x="373" y="754"
-        text-anchor="start" dominant-baseline="hanging"
-        font-size="16" fill="#FFFFFF"
-        stroke="#000000" stroke-width="1" paint-order="stroke fill">#63564</text>
 </g>
 
 <text x="240" y="777"
