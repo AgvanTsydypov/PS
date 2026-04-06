@@ -10,9 +10,9 @@ import SiteLogoLink from "../components/SiteLogoLink";
 export default function HomePage() {
   return (
     <>
-      <nav className="site-nav" aria-label="Site">
+      <div className="home-hero-logo" aria-label="PolyStars">
         <SiteLogoLink showWordmark />
-      </nav>
+      </div>
 
       <div className="home-page-top-gap" aria-hidden="true" />
 
