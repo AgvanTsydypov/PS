@@ -139,6 +139,7 @@ type GeneratedCardPayload = {
   season_number?: number;
   archetype?: string;
   leaderboard_rank?: number;
+  border_color?: string;
   [key: string]: unknown;
 };
 
@@ -1273,6 +1274,7 @@ export default function UserDashboard() {
                         />
                         <article
                           className={`nft-card nft-card-tilt theme-vivid generated-card-shell generated-card-preview-card ${isAnimating ? "generated-card-preview-card-flipping" : ""}`}
+                          style={{"--card-border-color": item.card_payload_json?.border_color ?? "#B6BBC8"} as React.CSSProperties}
                           data-center-navigate="1"
                           onPointerDown={(event) => {
                             markCardPressStart(event.currentTarget, event.clientX, event.clientY);

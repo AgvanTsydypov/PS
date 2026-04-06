@@ -728,6 +728,22 @@ def _load_signin_proxy_for_session_wallet(cursor: Any, session_wallet_eoa: str) 
     return value or PM_NOT_REGISTERED_VALUE
 
 
+_PTIER_CSS_COLORS: Dict[str, str] = {
+    "P999": "#FFD700",
+    "P99":  "#FFD700",
+    "P95":  "#FFBF00",
+    "P90":  "#FFBF00",
+    "P80":  "#265DD2",
+    "P70":  "#265DD2",
+    "P50":  "#38BE50",
+    "BASE": "#B6BBC8",
+}
+
+def _border_css_color(yield_tier: str) -> str:
+    """Return hex CSS color for the card border (resolves gradient tiers to gold fallback)."""
+    return _PTIER_CSS_COLORS.get(str(yield_tier or "BASE").upper(), "#B6BBC8")
+
+
 def _build_card_payload_from_source_row(
     row: Dict[str, Any],
     *,
@@ -774,6 +790,7 @@ def _build_card_payload_from_source_row(
         "edge": normalized_edge,
         "yield": normalized_yield,
         "gravity": normalized_gravity,
+        "border_color": _border_css_color(normalized_yield),
         "leaderboard_rank": int(row.get("rank") or 0),
         # Season meta for card back (dates, supply).
         # Genesis seasons use canonical dates from env vars (GENESIS_START_DATE / GENESIS_END_DATE).

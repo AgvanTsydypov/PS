@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 
 import SiteLogoLink from "../../../components/SiteLogoLink";
 
@@ -152,13 +152,19 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
 
             <div className="card-detail-grid">
               <div className="card-detail-images">
-                <section className="card-detail-image-card">
+                <section
+                  className="card-detail-image-card"
+                  style={{"--card-border-color": (card.card_payload_json as {border_color?: string} | undefined)?.border_color ?? "#B6BBC8"} as React.CSSProperties}
+                >
                   <h2>Front</h2>
                   {/* Card assets are generated SVG files served by the backend static mount. */}
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img className="card-detail-image" src={card.front_image_url} alt={`${title} front`} />
                 </section>
-                <section className="card-detail-image-card">
+                <section
+                  className="card-detail-image-card"
+                  style={{"--card-border-color": (card.card_payload_json as {border_color?: string} | undefined)?.border_color ?? "#B6BBC8"} as React.CSSProperties}
+                >
                   <h2>Back</h2>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img className="card-detail-image" src={card.back_image_url} alt={`${title} back`} />
