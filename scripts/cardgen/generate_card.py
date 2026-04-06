@@ -212,9 +212,9 @@ def _grad_pts(cx: float, cy: float, hh: float, angle_deg: float = 0.0):
 def _orbitron_adv(ch: str, fs: float) -> float:
     """Approximate Orbitron Bold glyph advance with global 0.1em tracking.
 
-    Calibrated against Figma Frame 122 (408 px column, Orbitron Bold 14, letter-spacing 10%):
-      uppercase  0.65 em + 0.10 em = 0.75 em/char  → 10.5 px @ 14
-      lowercase  0.53 em + 0.10 em = 0.63 em/char  → 8.82 px @ 14
+    Calibrated against Orbitron Bold rendering (letter-spacing 10%):
+      uppercase  0.70 em + 0.10 em = 0.80 em/char  → 11.2 px @ 14
+      lowercase  0.58 em + 0.10 em = 0.68 em/char  → 9.52 px @ 14
       digits     0.55 em + 0.10 em = 0.65 em/char  → 9.10 px @ 14
       punct/sp   0.45 em + 0.10 em = 0.55 em/char  → 7.70 px @ 14
     """
@@ -224,7 +224,7 @@ def _orbitron_adv(ch: str, fs: float) -> float:
     if ch.isdigit():
         return fs * 0.55 + ls
     if ch.isupper():
-        return fs * 0.65 + ls
+        return fs * 0.70 + ls
     return fs * 0.58 + ls
 
 
@@ -1189,21 +1189,25 @@ def _reflow_title_peel_until_fit(
 def _title_best_two_line_split(
     words: List[str], max_px: float, font_size: float
 ) -> Optional[List[str]]:
-    """If the title fits on two lines with whole words, return [line1, line2]. Prefer keeping
-    as many words as possible on line 1 while both lines stay within the band.
+    """If the title fits on two lines with whole words, return [line1, line2].
+    Among all valid splits, prefer the most visually balanced (min width difference).
     """
     if len(words) < 2:
         return None
     slack = TITLE_WRAP_MEASURE_SLACK
-    # k = words on line 1; try k = n-1, n-2, …, 1 (max words on line 1 first).
-    for k in range(len(words) - 1, 0, -1):
+    best: Optional[List[str]] = None
+    best_diff = float("inf")
+    for k in range(1, len(words)):
         l1 = " ".join(words[:k])
         l2 = " ".join(words[k:])
         if _title_line_within_band(l1, max_px, font_size, slack) and _title_line_within_band(
             l2, max_px, font_size, slack
         ):
-            return [l1, l2]
-    return None
+            diff = abs(_orbitron_width(l1, font_size) - _orbitron_width(l2, font_size))
+            if diff < best_diff:
+                best_diff = diff
+                best = [l1, l2]
+    return best
 
 
 def _split_oversized_line(line: str, max_px: float, font_size: float) -> List[str]:
@@ -1241,38 +1245,18 @@ def _split_oversized_line(line: str, max_px: float, font_size: float) -> List[st
 
 
 def _wrap_card_title_lines(text: str, max_px: float, font_size: float) -> List[str]:
-    """Word-wrap inside the padded title band. Prefer whole words on line 2 (never clip the
-    last word) using a conservative width slack; only character-split a single token that
-    cannot fit alone on its own line.
+    """Greedy word-wrap for the title band: accumulate words left-to-right;
+    wrap to next line when the next word would cross the padding boundary.
+    Character-splits only for a single token that alone exceeds the limit.
     """
-    slack = TITLE_WRAP_MEASURE_SLACK
-    words = [w for w in str(text or "").replace("\n", " ").split(" ") if w]
-    if not words:
-        return []
-    one = " ".join(words)
-    if _title_line_within_band(one, max_px, font_size, slack):
-        return [one]
-
-    two = _title_best_two_line_split(words, max_px, font_size)
-    if two is not None:
-        return two
-
-    limit = max_px - slack
-    base = _wrap_text_by_width(text, limit, font_size)
-    peeled = _reflow_title_peel_until_fit(base, max_px, font_size, slack)
+    limit = max_px - TITLE_WRAP_MEASURE_SLACK
+    lines = _wrap_text_by_width(str(text or ""), limit, font_size)
     result: List[str] = []
-    for line in peeled:
-        if _title_line_within_band(line, max_px, font_size, slack):
+    for line in lines:
+        if _orbitron_width(line, font_size) <= limit:
             result.append(line)
-        elif " " in line:
-            pieces = _reflow_title_peel_until_fit([line], max_px, font_size, slack)
-            for piece in pieces:
-                if _title_line_within_band(piece, max_px, font_size, slack):
-                    result.append(piece)
-                else:
-                    result.extend(_split_oversized_line(piece, max_px - slack, font_size))
         else:
-            result.extend(_split_oversized_line(line, max_px - slack, font_size))
+            result.extend(_split_oversized_line(line, limit, font_size))
     return result
 
 
