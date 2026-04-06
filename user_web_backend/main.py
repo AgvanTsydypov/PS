@@ -166,6 +166,8 @@ CARD_BASE_URL = (
     or os.getenv("NEXT_PUBLIC_APP_URL")
     or "https://polystars.app"
 ).strip().rstrip("/")
+GENESIS_START_DATE: Optional[str] = os.getenv("GENESIS_START_DATE", "").strip() or None
+GENESIS_END_DATE: Optional[str] = os.getenv("GENESIS_END_DATE", "").strip() or None
 RATE_LIMITS: Dict[str, RateLimitConfig] = {
     "/api/auth/wallet/challenge": RateLimitConfig(
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
@@ -774,8 +776,19 @@ def _build_card_payload_from_source_row(
         "gravity": normalized_gravity,
         "leaderboard_rank": int(row.get("rank") or 0),
         # Season meta for card back (dates, supply).
-        "season_start_date": _fmt_date_field(row.get("season_start_date")),
-        "season_end_date":   _fmt_date_field(row.get("season_end_date")),
+        # Genesis seasons use canonical dates from env vars (GENESIS_START_DATE / GENESIS_END_DATE).
+        "season_start_date": (
+            GENESIS_START_DATE
+            if _normalize_choice(row.get("season_type"), CARD_SEASON_TYPE_OPTIONS, "standard").lower() == "genesis"
+               and GENESIS_START_DATE
+            else _fmt_date_field(row.get("season_start_date"))
+        ),
+        "season_end_date": (
+            GENESIS_END_DATE
+            if _normalize_choice(row.get("season_type"), CARD_SEASON_TYPE_OPTIONS, "standard").lower() == "genesis"
+               and GENESIS_END_DATE
+            else _fmt_date_field(row.get("season_end_date"))
+        ),
         "season_size":       row.get("season_size"),
     }
 

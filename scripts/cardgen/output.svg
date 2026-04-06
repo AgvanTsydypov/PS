@@ -183,7 +183,7 @@
 <!-- ══ BORDER GLOW (driven by YIELD = BASE) ══ -->
 <rect x="3" y="3"
       width="510" height="796"
-      rx="0" fill="#B6BBC8" filter="url(#frame-blur)"/>
+      rx="0" fill="#B6BBC8"/>
 
 <!-- ══ EVENT IMAGE ══ -->
 <image x="13" y="13" width="490" height="490"
@@ -208,7 +208,7 @@
       text-anchor="middle" dominant-baseline="hanging"
       font-size="10">
   <tspan fill="white">SEASON: </tspan>
-  <tspan fill="#B1ABAB">STANDARD #3</tspan>
+  <tspan fill="#00FFFF">GENESIS</tspan>
 </text>
 
 <text x="404" y="47"
