@@ -667,8 +667,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
         font_css = "@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700&amp;display=swap');"
 
     # ---- SVG root & defs ----
-    parts.append(f'''<svg width="{CANVAS_W}" height="{CANVAS_H}"
-     viewBox="0 0 {CANVAS_W} {CANVAS_H}"
+    parts.append(f'''<svg viewBox="0 0 {CANVAS_W} {CANVAS_H}"
      fill="none"
      xmlns="http://www.w3.org/2000/svg"
      xmlns:xlink="http://www.w3.org/1999/xlink">
@@ -680,7 +679,10 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
       font-family: 'Orbitron', sans-serif;
       font-weight: 700;
       letter-spacing: 0.1em;
-      text-rendering: geometricPrecision;
+      text-rendering: optimizeLegibility;
+    }}
+    .css-drop-shadow {{
+      filter: drop-shadow(0px 4px 2px rgba(0,0,0,0.25));
     }}
   </style>
 
@@ -791,37 +793,6 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
           width="{CANVAS_W + 2}" height="{CANVAS_H + 2}"
           filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
     <feGaussianBlur stdDeviation="2"/>
-  </filter>
-
-  <!--
-    Drop shadow — exact Figma settings: X=0 Y=4 Blur=4 Spread=0 #000000 25%
-    Figma blur → SVG stdDeviation = Figma_blur / 2 = 2.
-    The pipeline puts the blurred shadow beneath SourceGraphic so the
-    original <text> node is composited last and stays fully crisp.
-  -->
-  <filter id="shadow" x="-10%" y="-20%" width="120%" height="150%"
-          color-interpolation-filters="sRGB">
-    <feFlood flood-color="#000000" flood-opacity="0.25" result="flood"/>
-    <feComposite in="flood" in2="SourceAlpha" operator="in" result="shadow-shape"/>
-    <feOffset dx="0" dy="4" result="shadow-offset"/>
-    <feGaussianBlur in="shadow-offset" stdDeviation="2" result="shadow-blur"/>
-    <feMerge>
-      <feMergeNode in="shadow-blur"/>
-      <feMergeNode in="SourceGraphic"/>
-    </feMerge>
-  </filter>
-
-  <!-- Same settings, applied to individual text elements in the data zone -->
-  <filter id="txt-shadow" x="-10%" y="-20%" width="120%" height="150%"
-          color-interpolation-filters="sRGB">
-    <feFlood flood-color="#000000" flood-opacity="0.25" result="flood"/>
-    <feComposite in="flood" in2="SourceAlpha" operator="in" result="shadow-shape"/>
-    <feOffset dx="0" dy="4" result="shadow-offset"/>
-    <feGaussianBlur in="shadow-offset" stdDeviation="2" result="shadow-blur"/>
-    <feMerge>
-      <feMergeNode in="shadow-blur"/>
-      <feMergeNode in="SourceGraphic"/>
-    </feMerge>
   </filter>
 
   <!-- Image zone clip (rounded corners) -->
@@ -955,7 +926,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ---- Layer 8: SECTOR ----
     parts.append(f'''
 <!-- ══ SECTOR ══ -->
-<g filter="url(#shadow)">
+<g class="css-drop-shadow">
   <text x="{DZ_CX}" y="{Y_SECTOR}"
         text-anchor="middle" dominant-baseline="hanging"
         font-size="18"{sig}>
@@ -967,7 +938,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ---- Layer 9: NODE ----
     parts.append(f'''
 <!-- ══ NODE ══ -->
-<g filter="url(#shadow)">
+<g class="css-drop-shadow">
   <text x="{X_NODE}" y="{Y_NODE}"
         text-anchor="middle" dominant-baseline="hanging"
         font-size="16" fill="#888888" style="letter-spacing:0em"{sig}>
@@ -983,7 +954,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ---- Layer 11: Wallet + P(E) bracket ----
     parts.append(f'''
 <!-- ══ WALLET + PROBABILITY BRACKET ══ -->
-<g filter="url(#txt-shadow)">
+<g class="css-drop-shadow">
   <rect x="{X_PE_DIVIDER}" y="{Y_PE_DIVIDER_1}" width="1" height="{Y_PE_DIVIDER_2 - Y_PE_DIVIDER_1}" fill="white"/>
   <text x="{X_PE_DIVIDER - X_WALLET_GAP}" y="{Y_BRACKET}"
         text-anchor="end" dominant-baseline="hanging"
@@ -1002,7 +973,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ---- Layer 12: Metric labels (EDGE / YIELD / GRAVITY) ----
     parts.append(f'''
 <!-- ══ METRIC LABELS ══ -->
-<g filter="url(#shadow)">
+<g class="css-drop-shadow">
   <text x="{COL_EDGE}" y="{Y_METRIC_LABELS}"
         text-anchor="middle" dominant-baseline="hanging"
         font-size="12" fill="white"{sig}>
@@ -1023,7 +994,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ---- Layer 13: Metric values ----
     parts.append(f'''
 <!-- ══ METRIC VALUES ══ -->
-<g filter="url(#txt-shadow)">
+<g class="css-drop-shadow">
   <text x="{COL_EDGE}" y="{Y_METRIC_VALUES}"
         text-anchor="middle" dominant-baseline="hanging"
         font-size="20" fill="{edge_val_fill}"{sig}>
@@ -1049,7 +1020,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ---- Layer 15: Archetype row ----
     parts.append(f'''
 <!-- ══ ARCHETYPE ══ -->
-<g filter="url(#txt-shadow)">
+<g class="css-drop-shadow">
   <text x="{DZ_CX}" y="{Y_ARCHETYPE}"
         text-anchor="middle" dominant-baseline="alphabetic"{sig}>
     <tspan font-size="18" fill="white">ARCHETYPE: </tspan>
@@ -1060,7 +1031,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ---- Layer 16: Footer (POLYMARKET GLOBAL RANK) ----
     parts.append(f'''
 <!-- ══ FOOTER ══ -->
-<g filter="url(#shadow)">
+<g class="css-drop-shadow">
   <text x="{DZ_CX}" y="{Y_FOOTER}"
         text-anchor="middle" dominant-baseline="hanging"
         font-size="16"{sig}>
@@ -1510,8 +1481,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
         for i, line in enumerate(sd_lines_esc)
     )
 
-    return f'''<svg width="{CANVAS_W}" height="{CANVAS_H}"
-    viewBox="0 0 {CANVAS_W} {CANVAS_H}"
+    return f'''<svg viewBox="0 0 {CANVAS_W} {CANVAS_H}"
     fill="none"
     xmlns="http://www.w3.org/2000/svg">
 <defs>
@@ -1521,7 +1491,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
       font-family: 'Orbitron', sans-serif;
       font-weight: 700;
       letter-spacing: 0.1em;
-      text-rendering: geometricPrecision;
+      text-rendering: optimizeLegibility;
     }}
   </style>
   <linearGradient id="uniform-gradient" x1="0.5" y1="0" x2="0.5" y2="1">

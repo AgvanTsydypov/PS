@@ -1030,6 +1030,13 @@ button:disabled {
   width: 100%;
   height: 100%;
   display: block;
+  overflow: visible;
+}
+
+/* CSS drop-shadow replaces SVG <filter> for text groups — renders at device
+   DPR on mobile instead of being rasterised at SVG coordinate-space resolution */
+.inline-svg-card .css-drop-shadow {
+  filter: drop-shadow(0px 4px 2px rgba(0, 0, 0, 0.25));
 }
 
 /* Prevent global page styles from leaking into inline SVG text elements.
