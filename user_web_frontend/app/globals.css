@@ -1039,6 +1039,15 @@ button:disabled {
   filter: drop-shadow(0px 4px 2px rgba(0, 0, 0, 0.25));
 }
 
+/* Normalise dominant-baseline="hanging" — mobile Safari and Chrome Android
+   compute the hanging baseline at a different offset than desktop browsers.
+   Override to the universally consistent "auto" (alphabetic) baseline and
+   shift down by Orbitron Bold's cap-height (≈0.72 em) to compensate. */
+.inline-svg-card svg text[dominant-baseline="hanging"] {
+  dominant-baseline: auto;
+  transform: translateY(0.72em);
+}
+
 /* Prevent global page styles from leaking into inline SVG text elements.
    The SVG's own internal <style> handles all font/letter-spacing rules. */
 .inline-svg-card svg text,
