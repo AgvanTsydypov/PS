@@ -1023,15 +1023,15 @@ button:disabled {
   display: block;
   background: #0b1018;
   border-radius: 0;
-  /* Crisp SVG rendering on high-DPI mobile displays */
-  image-rendering: -webkit-optimize-contrast;
-  image-rendering: crisp-edges;
 }
 
-/* Frame border glow — applied on shell (overflow:visible) because flip-face clips shadows */
-.generated-card-shell {
-  box-shadow: 0 0 10px 3px var(--card-border-color, #B6BBC8);
+/* When the card is rendered as inline SVG, make the <svg> fill its wrapper */
+.inline-svg-card > svg {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
+
 
 .generated-card-description {
   position: relative;
@@ -1144,11 +1144,6 @@ button:disabled {
   display: block;
   border-radius: 0;
   background: #0b1018;
-  /* Crisp SVG rendering on high-DPI mobile displays */
-  image-rendering: -webkit-optimize-contrast;
-  image-rendering: crisp-edges;
-  /* Frame border blur effect (CSS post-render — safe for mobile, matches SVG feGaussianBlur std=4) */
-  filter: drop-shadow(0 0 6px var(--card-border-color, #B6BBC8));
 }
 
 .card-detail-info {
