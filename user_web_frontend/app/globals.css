@@ -1019,10 +1019,13 @@ button:disabled {
 .generated-card-image {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
   background: #0b1018;
   border-radius: 0;
+  /* Crisp SVG rendering on high-DPI mobile displays */
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
 }
 
 .generated-card-description {
@@ -1132,10 +1135,13 @@ button:disabled {
 .card-detail-image {
   width: 100%;
   aspect-ratio: 516 / 802;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
   border-radius: 0;
   background: #0b1018;
+  /* Crisp SVG rendering on high-DPI mobile displays */
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
 }
 
 .card-detail-info {

@@ -14,9 +14,16 @@ import base64
 import html
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -843,7 +850,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <!-- ══ BORDER GLOW (driven by YIELD = {yld}) ══ -->
 <rect x="{FRAME_X}" y="{FRAME_Y}"
       width="{FRAME_W}" height="{FRAME_H}"
-      rx="{FRAME_RX}" fill="{border_fill}" filter="url(#frame-blur)"/>''')
+      rx="{FRAME_RX}" fill="{border_fill}"/>''')
 
     # ---- Layer 3: Event image ----
     if image_url:
@@ -1198,9 +1205,24 @@ def _title_best_two_line_split(
 
 
 def _split_oversized_line(line: str, max_px: float, font_size: float) -> List[str]:
-    """Break a single line into segments that fit max_px (Orbitron width model)."""
+    """Break a single line into segments that fit max_px (Orbitron width model).
+
+    Tries word-level splits first; character-splits only as a last resort for
+    single tokens (no spaces) that are individually wider than max_px.
+    """
     if _orbitron_width(line, font_size) <= max_px:
         return [line]
+    # Word-level pass: re-wrap at the tighter limit
+    if " " in line:
+        out: List[str] = []
+        for sub in _wrap_text_by_width(line, max_px, font_size):
+            if _orbitron_width(sub, font_size) <= max_px:
+                out.append(sub)
+            else:
+                # Single oversized token — fall through to char-split below
+                out.extend(_split_oversized_line(sub, max_px, font_size))
+        return out
+    # Single token with no spaces — character-split as last resort
     out: List[str] = []
     chunk = ""
     for ch in line:
@@ -1312,21 +1334,16 @@ def _back_block_bottom(start_y: float, line_count: int, lh: int, ink_ext: float)
 
 
 def _back_clamp_line_count(lines: List[str], max_lines: int) -> List[str]:
-    """Keep at most max_lines; merge overflow into the last line with an ellipsis."""
+    """Keep at most max_lines; truncate and add ellipsis on the last line if needed."""
     if max_lines < 1:
         return []
     if len(lines) <= max_lines:
         return lines
-    if max_lines == 1:
-        one = " ".join(lines).strip()
-        return [one[:200] + ("…" if len(one) > 200 else "")]
-    head = lines[: max_lines - 1]
-    tail = " ".join(lines[max_lines - 1 :]).strip()
-    if not tail:
-        return head
-    merged = f"{head[-1]} {tail}".strip()
-    head[-1] = merged[:140] + ("…" if len(merged) > 140 else "")
-    return head
+    result = list(lines[:max_lines])
+    last = result[-1].rstrip()
+    if not last.endswith("…"):
+        result[-1] = last + "…"
+    return result
 
 
 def generate_card_back_svg(data: Dict[str, Any]) -> str:
@@ -1551,7 +1568,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
   </filter>
 </defs>
 <rect width="{CANVAS_W}" height="{CANVAS_H}" fill="#0B0C10"/>
-<rect x="{FRAME_X}" y="{FRAME_Y}" width="{FRAME_W}" height="{FRAME_H}" fill="{border_fill}" filter="url(#frame-blur)"/>
+<rect x="{FRAME_X}" y="{FRAME_Y}" width="{FRAME_W}" height="{FRAME_H}" fill="{border_fill}"/>
 <rect x="{BACK_DZ_X}" y="{BACK_DZ_Y}" width="{BACK_DZ_W}" height="{BACK_DZ_H}" fill="{dz_fill}" stroke="black"/>
 
 <text x="{BACK_TEXT_X_HEAD}" y="40" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="{style_lh}">[ EVENT TOPOLOGY ]</text>
@@ -1582,8 +1599,14 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 # SAMPLE DATA (mirrors the data contract in Section 11)
 # ═══════════════════════════════════════════════════════════════════════════
 
+_SAMPLE_SEASON_TYPE = "genesis"
+_GENESIS_START = os.getenv("GENESIS_START_DATE", "2024-06-01")
+_GENESIS_END   = os.getenv("GENESIS_END_DATE",   "2026-03-01")
+_SAMPLE_START  = _GENESIS_START if _SAMPLE_SEASON_TYPE == "genesis" else "2026-01-15"
+_SAMPLE_END    = _GENESIS_END   if _SAMPLE_SEASON_TYPE == "genesis" else "2026-01-25"
+
 SAMPLE_DATA: Dict[str, Any] = {
-    "season_type":       "standard",
+    "season_type":       _SAMPLE_SEASON_TYPE,
     "season_number":     3,
     "recurrence":        "unique",
     "claim_type":        "origin",
@@ -1598,15 +1621,15 @@ SAMPLE_DATA: Dict[str, Any] = {
     "yield":             "BASE",
     "gravity":           "BASE",
     "archetype":         "SUBSTRATE",
-    "card_lore":         "Standard edition pricing breach at triple digits signals industry inflection. Historical AAA launch data suggests $69.99 baseline holds. Resolution hinges on store listings by Feb 2026 deadline.",
+    "card_lore":         "Daily consensus matrix tracking kinetic probability between US and Venezuelan forces. Volatility elevated post-Aug 2025 baseline. Resolution requires confirmed direct military engagement—interceptions and warning shots excluded from trigger threshold.",
     "archetype_description": "Consensus exploitation protocol active. This entity exhibits zero predictive foresight and absorbs minimal absolute risk. They execute only when a prevailing consensus has crystallized (0.60+) or the event is mathematically solved (0.80+). By deploying overwhelming financial mass at the terminal stage of the market lifecycle, they extract a low-variance tax from the ecosystem's resolution. Pure capital preservation.",
     "archetype_math":    "P (E) ∈ [0.60 - 0.97] | Edge ≤ P50 | Yield ≤ P50 | Gravity ≤ P70",
     "rarity_bracket":    "[ OCCURRENCE: 1.0% - 2.0% ]",
     "leaderboard_rank":  63564,
     "collection_mint_number": 7,
     "season_size":       333,
-    "season_start_date": "2026-01-15",
-    "season_end_date":   "2026-01-25",
+    "season_start_date": _SAMPLE_START,
+    "season_end_date":   _SAMPLE_END,
     "qr_payload":        "https://polystars.app/cards/card-genesis-s1-595f047311a45c524f706f5d1153fdac-f429c3e4c1394d35bc047257fe913fdd",
 }
 
