@@ -70,8 +70,8 @@ COL_GRAVITY = 391   # label x=339 w=105 → 391.5; value x=365 w=53 → 391.5
 Y_SEASON        = 31
 Y_INSTANCE      = 47
 Y_OWNERSHIP     = 63
-Y_SECTOR        = 542
-Y_NODE          = 565
+Y_SECTOR        = 543
+Y_NODE          = 566
 Y_UPPER_SEP     = 589
 Y_BRACKET       = 611
 Y_METRIC_LABELS = 649
@@ -557,7 +557,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 
     # Bracket gradient center: geometric center of the inner [entry_bracket] text block.
     fs_bracket = 15.0
-    prefix = "P(E) ∈ ["
+    prefix = "P (E) ∈ ["
     bracket_block_x = X_PE_DIVIDER + X_PE_GAP + _orbitron_width(prefix, fs_bracket)
     bracket_block_w = _orbitron_width(eb_inner, fs_bracket)
     bracket_block_cx = bracket_block_x + (bracket_block_w / 2)
@@ -914,7 +914,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
   <text x="{X_PE_DIVIDER + X_PE_GAP}" y="{Y_BRACKET}"
         text-anchor="start" dominant-baseline="hanging"
         font-size="15"{sig}>
-    <tspan fill="white">P(E) ∈ [</tspan>
+    <tspan fill="white">P (E) ∈ [</tspan>
     <tspan fill="{bracket_fill}">{eb_inner}</tspan>
     <tspan fill="white">]</tspan>
   </text>

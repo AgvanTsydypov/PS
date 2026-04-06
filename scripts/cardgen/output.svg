@@ -58,8 +58,8 @@
 
   <!-- Per-element gradient instances — inherit stops, apply their own coordinates -->
   <linearGradient id="mg-eb" gradientUnits="userSpaceOnUse"
-                  x1="397.17" y1="611.0"
-                  x2="398.08" y2="626.0"
+                  x1="405.42" y1="611.0"
+                  x2="406.33" y2="626.0"
                   xlink:href="#anomaly-stops"/>
   <linearGradient id="mg-w" gradientUnits="userSpaceOnUse"
                   x1="157.29" y1="611.0"
@@ -248,7 +248,7 @@
 
 <!-- ══ SECTOR ══ -->
 <g filter="url(#shadow)">
-  <text x="258" y="542"
+  <text x="258" y="543"
         text-anchor="middle" dominant-baseline="hanging"
         font-size="18">
     <tspan fill="white">SECTOR: </tspan>
@@ -258,7 +258,7 @@
 
 <!-- ══ NODE ══ -->
 <g filter="url(#shadow)">
-  <text x="258" y="565"
+  <text x="258" y="566"
         text-anchor="middle" dominant-baseline="hanging"
         font-size="16" fill="#888888" style="letter-spacing:0em">
     NODE: NONE
@@ -279,7 +279,7 @@
   <text x="273.5" y="611"
         text-anchor="start" dominant-baseline="hanging"
         font-size="15">
-    <tspan fill="white">P(E) ∈ [</tspan>
+    <tspan fill="white">P (E) ∈ [</tspan>
     <tspan fill="url(#mg-eb)">0.00 - 0.20</tspan>
     <tspan fill="white">]</tspan>
   </text>
