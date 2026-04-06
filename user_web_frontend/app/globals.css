@@ -1032,6 +1032,15 @@ button:disabled {
   display: block;
 }
 
+/* Prevent global page styles from leaking into inline SVG text elements.
+   The SVG's own internal <style> handles all font/letter-spacing rules. */
+.inline-svg-card svg text,
+.inline-svg-card svg tspan {
+  font-family: "Orbitron", sans-serif;
+  letter-spacing: unset;
+  line-height: unset;
+}
+
 
 .generated-card-description {
   position: relative;
