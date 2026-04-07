@@ -463,7 +463,7 @@ main {
   border: 0;
   border-radius: 0;
   background: #121722;
-  min-height: calc(386px * 0.96 + 32px);
+  min-height: calc(386px * 0.96 * 1.1 + 32px);
   overflow: visible;
 }
 
@@ -518,9 +518,9 @@ main {
 }
 
 .card-ticker-card {
-  width: calc(249px * 0.96);
-  height: calc(386px * 0.96);
-  min-height: calc(386px * 0.96);
+  width: calc(249px * 0.96 * 1.1);
+  height: calc(386px * 0.96 * 1.1);
+  min-height: calc(386px * 0.96 * 1.1);
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -541,8 +541,8 @@ main {
 
 .card-ticker-thumb {
   display: block;
-  width: calc(249px * 0.96);
-  height: calc(386px * 0.96);
+  width: calc(249px * 0.96 * 1.1);
+  height: calc(386px * 0.96 * 1.1);
   object-fit: cover;
   object-position: center;
 }

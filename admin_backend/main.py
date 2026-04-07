@@ -107,6 +107,13 @@ class AdvancedScenarioRequest(BaseModel):
     is_completed: bool
 
 
+class SimulateGeneratedCardsBatchRequest(BaseModel):
+    """Mirrors repeated user POST /api/cards/get for load testing (same DB + R2 as user_web)."""
+
+    max_count: int = Field(default=50, ge=1, le=200)
+    origin_match_fraction: float = Field(default=0.1, ge=0.0, le=1.0)
+
+
 class ResetRequest(BaseModel):
     confirm: bool
 
@@ -3067,6 +3074,20 @@ def apply_advanced(req: AdvancedScenarioRequest) -> Dict[str, str]:
         return {"status": "ok", "message": f"Updated season {req.season_id} advanced params"}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/scenarios/simulate-generated-cards-batch")
+def simulate_generated_cards_batch(req: SimulateGeneratedCardsBatchRequest) -> Dict[str, Any]:
+    try:
+        from user_web_backend.main import run_admin_simulated_card_generations
+
+        return run_admin_simulated_card_generations(
+            max_count=req.max_count,
+            origin_match_fraction=req.origin_match_fraction,
+        )
+    except Exception as exc:
+        logger.exception("simulate-generated-cards-batch failed")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/reset")

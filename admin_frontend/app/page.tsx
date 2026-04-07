@@ -526,6 +526,9 @@ export default function HomePage() {
   const [scenarioIsActive, setScenarioIsActive] = useState("true");
   const [scenarioIsCompleted, setScenarioIsCompleted] = useState("false");
   const [scenarioOutput, setScenarioOutput] = useState("");
+  const [scenarioSimulateMaxCards, setScenarioSimulateMaxCards] = useState("50");
+  const [scenarioSimulateOriginPercent, setScenarioSimulateOriginPercent] = useState("10");
+  const [scenarioSimulateBatchBusy, setScenarioSimulateBatchBusy] = useState(false);
 
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetOutput, setResetOutput] = useState("");
@@ -3186,6 +3189,102 @@ export default function HomePage() {
               >
                 Apply advanced params
               </button>
+            </div>
+          </div>
+          <div className="panel" style={{ marginTop: 16 }}>
+            <div className="muted" style={{ marginBottom: 8 }}>
+              Simulate user &quot;generate card&quot; actions (same pipeline as POST /api/cards/get). Count is capped by
+              remaining claimable catalog rows. Set how many runs to attempt and the chance (0–100%) that claimer proxy =
+              winner proxy (ORIGIN on card); otherwise a decoy proxy is used (looter path).
+            </div>
+            <div className="row" style={{ marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <label>Max cards to generate</label>
+              <input
+                type="number"
+                min={1}
+                max={200}
+                value={scenarioSimulateMaxCards}
+                onChange={(e) => setScenarioSimulateMaxCards(e.target.value)}
+                style={{ width: 90 }}
+                disabled={scenarioSimulateBatchBusy}
+              />
+              <label>Claimer proxy = winner proxy (%)</label>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                value={scenarioSimulateOriginPercent}
+                onChange={(e) => setScenarioSimulateOriginPercent(e.target.value)}
+                style={{ width: 90 }}
+                disabled={scenarioSimulateBatchBusy}
+              />
+              <span className="muted">0–100</span>
+            </div>
+            <div className="row" style={{ marginBottom: 0, alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+              <button
+                disabled={scenarioSimulateBatchBusy}
+                onClick={() =>
+                  void run(async () => {
+                    setScenarioSimulateBatchBusy(true);
+                    try {
+                      appendScenarioLog("Simulate generate cards: started…");
+                      const maxRaw = Number.parseInt(scenarioSimulateMaxCards.trim(), 10);
+                      const max_count = Number.isFinite(maxRaw)
+                        ? Math.min(200, Math.max(1, maxRaw))
+                        : 50;
+                      const pctRaw = Number.parseFloat(scenarioSimulateOriginPercent.trim());
+                      const originPct = Number.isFinite(pctRaw)
+                        ? Math.min(100, Math.max(0, pctRaw))
+                        : 0;
+                      const origin_match_fraction = originPct / 100;
+                      const out = await fetchJSON<{
+                        requested: number;
+                        planned: number;
+                        generated: number;
+                        origin_claim_cards: number;
+                        remaining_supply_before: number;
+                        remaining_supply_after: number;
+                        origin_slots_skipped_no_winner_proxy: number;
+                        errors: string[];
+                        stopped_reason?: string;
+                      }>("/api/scenarios/simulate-generated-cards-batch", {
+                        method: "POST",
+                        body: JSON.stringify({ max_count, origin_match_fraction }),
+                      });
+                      appendScenarioLog(
+                        `Simulate generate cards: requested=${max_count} origin%=${originPct} planned=${out.planned} generated=${out.generated} ` +
+                          `origin_claim=${out.origin_claim_cards} skipped_origin_no_proxy=${out.origin_slots_skipped_no_winner_proxy} ` +
+                          `remaining ${out.remaining_supply_before}→${out.remaining_supply_after}` +
+                          (out.stopped_reason ? ` stopped=${out.stopped_reason}` : "")
+                      );
+                      if (out.errors.length > 0) {
+                        appendScenarioLog(`Errors (${out.errors.length}): ${out.errors.slice(0, 5).join(" | ")}`);
+                      }
+                      appendScenarioLog("Simulate generate cards: finished.");
+                      setOk(`Simulated ${out.generated} card(s); ${out.origin_claim_cards} with origin proxy match.`);
+                      await refreshOverview();
+                    } finally {
+                      setScenarioSimulateBatchBusy(false);
+                    }
+                  })
+                }
+              >
+                {scenarioSimulateBatchBusy ? (
+                  <span className="inline-flex items-center gap-2">
+                    <Loader2 size={16} className="animate-spin shrink-0" aria-hidden />
+                    Generating cards…
+                  </span>
+                ) : (
+                  "Run simulate generate card batch"
+                )}
+              </button>
+              {scenarioSimulateBatchBusy ? (
+                <span className="muted inline-flex items-center gap-1">
+                  <Loader2 size={14} className="animate-spin" aria-hidden />
+                  Batch in progress — please wait
+                </span>
+              ) : null}
             </div>
           </div>
           <div className="mono">{scenarioOutput}</div>

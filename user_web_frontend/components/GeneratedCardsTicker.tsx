@@ -40,8 +40,10 @@ type CardTickerResponse = {
   fetched_at: string;
 };
 
-const TICKER_THUMB_PX = Math.round(249 * 0.96);
-const TICKER_THUMB_HEIGHT_PX = Math.round(386 * 0.96);
+/** Home ticker card size vs 249×386 artboard (0.96 display scale + 10% bump). */
+const HOME_TICKER_CARD_SCALE = 0.96 * 1.1;
+const TICKER_THUMB_PX = Math.round(249 * HOME_TICKER_CARD_SCALE);
+const TICKER_THUMB_HEIGHT_PX = Math.round(386 * HOME_TICKER_CARD_SCALE);
 const TICKER_GAP_PX = 28;
 const TICKER_LINK_BORDER_PX = 2;
 
