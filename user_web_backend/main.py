@@ -5,6 +5,7 @@ import json
 import logging
 import mimetypes
 import os
+import random
 import secrets
 import sys
 import threading
@@ -2162,6 +2163,201 @@ def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
             event_snapshot[key] = value.astimezone(timezone.utc).isoformat()
     card["event_snapshot"] = event_snapshot
     return {"card": card}
+
+
+def run_admin_simulated_card_generations(
+    *,
+    max_count: int = 50,
+    origin_match_fraction: float = 0.1,
+) -> Dict[str, Any]:
+    """Bulk-simulate POST /api/cards/get for admin scenarios (synthetic EOAs, optional proxy match).
+
+    Uses the same DB + R2 pipeline as the user endpoint. ~``origin_match_fraction`` of runs
+    use a session proxy equal to the winner row's proxy so ``claim_type`` is ``origin``; the rest
+    use a fixed decoy proxy (looter path). Count is capped by ``max_count`` and remaining catalog supply.
+    """
+    LOOTER_PROXY = "0x000000000000000000000000000000000000dEaD"
+    LOOTER_PROXY_ALT = "0x000000000000000000000000000000000000bEef"
+
+    probe = _get_connection()
+    try:
+        with probe.cursor() as c:
+            _, remaining = _generated_cards_supply_counts(c, use_cached_join_total=False)
+    finally:
+        probe.close()
+
+    remaining_i = int(remaining)
+    n = min(max(0, int(max_count)), remaining_i)
+    errors: List[str] = []
+    out: Dict[str, Any] = {
+        "requested": int(max_count),
+        "remaining_supply_before": remaining_i,
+        "planned": n,
+        "generated": 0,
+        "origin_claim_cards": 0,
+        "origin_slots_skipped_no_winner_proxy": 0,
+        "errors": errors,
+    }
+
+    if n <= 0:
+        out["stopped_reason"] = "no_remaining_supply" if remaining_i <= 0 else "zero_planned"
+        return out
+
+    n_origin_target = min(n, max(0, int(round(n * float(origin_match_fraction)))))
+    origin_indices = set(random.sample(range(n), k=n_origin_target)) if n_origin_target > 0 else set()
+
+    skipped_no_winner_proxy = 0
+    for i in range(n):
+        want_origin = i in origin_indices
+        conn = _get_connection()
+        uploaded_front_key: Optional[str] = None
+        uploaded_back_key: Optional[str] = None
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                winner_row_id = _pick_eligible_winner_row_id(cursor)
+                if winner_row_id is None:
+                    out["stopped_reason"] = "no_eligible_winner_mid_run"
+                    break
+
+                source_row = _load_card_source_row(cursor, winner_row_id=winner_row_id)
+                if not source_row:
+                    errors.append(f"winner_row_id={winner_row_id}: missing source row")
+                    conn.rollback()
+                    continue
+
+                winner_proxy_raw = str(source_row.get("proxy_wallet") or "").strip()
+                w_norm = _normalize_proxy_wallet_for_compare(winner_proxy_raw)
+
+                if want_origin and w_norm:
+                    signin_proxy = winner_proxy_raw
+                    owner_proxy_for_db = signin_proxy
+                else:
+                    if want_origin and not w_norm:
+                        skipped_no_winner_proxy += 1
+                    signin_proxy = LOOTER_PROXY
+                    if w_norm and signin_proxy.lower() == w_norm:
+                        signin_proxy = LOOTER_PROXY_ALT
+                    owner_proxy_for_db = signin_proxy
+
+                fake_eoa = ("0x" + secrets.token_hex(20)).lower()
+                if not Web3.is_address(fake_eoa):
+                    raise RuntimeError("internal: invalid synthetic owner wallet")
+
+                payload = _build_card_payload_from_source_row(
+                    source_row,
+                    session_signin_proxy_wallet=signin_proxy,
+                )
+                is_origin_claim = str(payload.get("claim_type") or "") == "origin"
+
+                slug = _generated_card_slug(payload.get("season_type"), payload.get("season_number"))
+                payload["qr_payload"] = f"{CARD_BASE_URL}/cards/{slug}"
+                image_url = str(payload.get("image_url") or "").strip()
+                if not image_url:
+                    raise ValueError("Selected row is missing manual image URL")
+
+                cursor.execute(
+                    """
+                    INSERT INTO user_generated_cards (
+                        slug,
+                        owner_wallet,
+                        owner_proxy_wallet,
+                        winner_row_id,
+                        season_id,
+                        event_id,
+                        event_slug,
+                        card_title,
+                        primary_tag,
+                        secondary_tag,
+                        pattern,
+                        front_image_path,
+                        back_image_path,
+                        card_payload_json
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+                    )
+                    RETURNING
+                        id,
+                        collection_mint_number,
+                        slug,
+                        owner_wallet,
+                        owner_proxy_wallet,
+                        winner_row_id,
+                        season_id,
+                        event_id,
+                        event_slug,
+                        card_title,
+                        primary_tag,
+                        secondary_tag,
+                        pattern,
+                        front_image_path,
+                        back_image_path,
+                        card_payload_json,
+                        created_at
+                    """,
+                    (
+                        slug,
+                        fake_eoa,
+                        owner_proxy_for_db,
+                        winner_row_id,
+                        int(source_row.get("season_id") or 0),
+                        source_row.get("event_id"),
+                        source_row.get("event_slug"),
+                        str(payload.get("card_title") or ""),
+                        str(payload.get("primary_tag") or ""),
+                        str(payload.get("secondary_tag") or ""),
+                        None,
+                        "",
+                        "",
+                        json.dumps(payload),
+                    ),
+                )
+                created_row = cursor.fetchone()
+                if not created_row:
+                    raise RuntimeError("INSERT returned no row")
+
+                payload["collection_mint_number"] = created_row["collection_mint_number"]
+                render_payload = _build_render_payload(payload)
+                front_svg = generate_card_svg(render_payload)
+                back_svg = generate_card_back_svg(render_payload)
+                front_image_path, back_image_path, uploaded_front_key, uploaded_back_key = (
+                    _upload_generated_card_assets_to_r2(slug, front_svg, back_svg)
+                )
+
+                cursor.execute(
+                    """
+                    UPDATE user_generated_cards
+                    SET front_image_path = %s,
+                        back_image_path  = %s,
+                        card_payload_json = %s::jsonb
+                    WHERE slug = %s
+                    """,
+                    (front_image_path, back_image_path, json.dumps(payload), slug),
+                )
+            conn.commit()
+            out["generated"] = int(out["generated"]) + 1
+            if is_origin_claim:
+                out["origin_claim_cards"] = int(out["origin_claim_cards"]) + 1
+        except Exception as exc:
+            conn.rollback()
+            _delete_r2_object_by_key(uploaded_front_key)
+            _delete_r2_object_by_key(uploaded_back_key)
+            errors.append(str(exc))
+            logger.exception("Admin simulate card generation failed on iteration i=%s", i)
+        finally:
+            conn.close()
+
+    out["origin_slots_skipped_no_winner_proxy"] = skipped_no_winner_proxy
+
+    probe2 = _get_connection()
+    try:
+        with probe2.cursor() as c2:
+            _, rem_after = _generated_cards_supply_counts(c2, use_cached_join_total=False)
+    finally:
+        probe2.close()
+    out["remaining_supply_after"] = int(rem_after)
+    if "stopped_reason" not in out and out["generated"] < n and not errors:
+        out["stopped_reason"] = "completed_short"
+    return out
 
 
 @app.post("/api/cards/get")
