@@ -18,6 +18,7 @@ import {
   triggerCardFlip,
 } from "./cardInteractions";
 import SiteLogoLink from "./SiteLogoLink";
+import { fetchSiteStatus } from "../lib/userApiBase";
 
 // ── EIP-6963 types ────────────────────────────────────────────────────────────
 type EIP6963ProviderInfo = {
@@ -335,6 +336,11 @@ export default function UserDashboard() {
   const [showPicker, setShowPicker] = useState(false);
 
   const seasonsBoardRef = useRef<ActiveSeasonsBoardHandle>(null);
+  const [siteWalletActionsDown, setSiteWalletActionsDown] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    void fetchSiteStatus().then((s) => setSiteWalletActionsDown(Boolean(s?.wallet_actions_disabled)));
+  }, []);
 
   // Listen for EIP-6963 announcements and trigger discovery.
   useEffect(() => {
@@ -1052,6 +1058,40 @@ export default function UserDashboard() {
     } finally {
       setGetCardLoading(false);
     }
+  }
+
+  if (siteWalletActionsDown === null) {
+    return (
+      <>
+        <nav className="site-nav" aria-label="Site">
+          <SiteLogoLink />
+          <span className="site-nav-title">My dashboard</span>
+        </nav>
+        <main className="card-detail-page" style={{ padding: "2rem", maxWidth: 480 }}>
+          <p className="season-board-muted">Checking site status…</p>
+        </main>
+      </>
+    );
+  }
+
+  if (siteWalletActionsDown) {
+    return (
+      <>
+        <nav className="site-nav" aria-label="Site">
+          <SiteLogoLink />
+          <span className="site-nav-title">My dashboard</span>
+        </nav>
+        <main className="card-detail-page" style={{ padding: "2rem", maxWidth: 520 }}>
+          <h1 style={{ fontSize: "1.25rem", marginBottom: "0.75rem" }}>Dashboard unavailable</h1>
+          <p className="season-board-muted" style={{ marginBottom: "1.25rem" }}>
+            See the maintenance notice at the top of the page. Wallet and card actions are paused.
+          </p>
+          <Link href="/" className="card-detail-backlink">
+            Back to home
+          </Link>
+        </main>
+      </>
+    );
   }
 
   return (

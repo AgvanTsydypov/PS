@@ -50,6 +50,15 @@ from scripts.zora_service import ZoraClient
 
 logger = logging.getLogger(__name__)
 
+
+def _user_web_wallet_actions_env_override() -> bool:
+    truthy = {"1", "true", "yes"}
+    return (
+        str(os.getenv("USER_WEB_WALLET_ACTIONS_DISABLED", "")).strip().lower() in truthy
+        or str(os.getenv("USER_WEB_DISABLE_ME_API", "")).strip().lower() in truthy
+    )
+
+
 MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
 BLOCKCHAIN_SOLANA = "solana"
 BLOCKCHAIN_BASE_ZORA = "base_zora"
@@ -113,6 +122,10 @@ class SimulateGeneratedCardsBatchRequest(BaseModel):
 
     max_count: int = Field(default=50, ge=1, le=200)
     origin_match_fraction: float = Field(default=0.1, ge=0.0, le=1.0)
+
+
+class UserWebWalletActionsUpdate(BaseModel):
+    disabled: bool
 
 
 class ResetRequest(BaseModel):
@@ -214,6 +227,7 @@ class SeasonWorkbenchService:
         self._wallets_cache: Dict[tuple[int, str, bool, int], tuple[float, List[str]]] = {}
         self.ensure_claims_schema_for_mint()
         self.ensure_winners_schema_for_assignment()
+        self.ensure_user_web_controls_schema()
 
     def clear_wallets_cache(self) -> None:
         self._wallets_cache.clear()
@@ -363,6 +377,66 @@ class SeasonWorkbenchService:
                     ALTER TABLE winner_wallets_nft_to_claim
                     ADD COLUMN IF NOT EXISTS rarity_bracket TEXT
                     """
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def ensure_user_web_controls_schema(self) -> None:
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS polystars_user_web_controls (
+                        singleton_id SMALLINT PRIMARY KEY CHECK (singleton_id = 1),
+                        wallet_actions_disabled BOOLEAN NOT NULL DEFAULT FALSE,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO polystars_user_web_controls (singleton_id, wallet_actions_disabled)
+                    VALUES (1, FALSE)
+                    ON CONFLICT (singleton_id) DO NOTHING
+                    """
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_user_web_wallet_actions_disabled_db(self) -> bool:
+        self.ensure_user_web_controls_schema()
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT wallet_actions_disabled FROM polystars_user_web_controls WHERE singleton_id = 1"
+                )
+                row = cursor.fetchone()
+                return bool(row and row[0])
+        finally:
+            conn.close()
+
+    def set_user_web_wallet_actions_disabled(self, disabled: bool) -> None:
+        self.ensure_user_web_controls_schema()
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE polystars_user_web_controls
+                    SET wallet_actions_disabled = %s, updated_at = NOW()
+                    WHERE singleton_id = 1
+                    """,
+                    (disabled,),
                 )
             conn.commit()
         except Exception:
@@ -2913,6 +2987,29 @@ def get_config() -> Dict[str, Any]:
         "default_solana_recipient": DEFAULT_SOLANA_RECIPIENT,
         "default_base_recipient": DEFAULT_BASE_RECIPIENT,
         "blockchains": [BLOCKCHAIN_SOLANA, BLOCKCHAIN_BASE_ZORA],
+    }
+
+
+@app.get("/api/user-web/wallet-actions")
+def get_user_web_wallet_actions() -> Dict[str, Any]:
+    env_on = _user_web_wallet_actions_env_override()
+    db_disabled = service.get_user_web_wallet_actions_disabled_db()
+    return {
+        "wallet_actions_disabled": env_on or db_disabled,
+        "database_wallet_actions_disabled": db_disabled,
+        "env_override_active": env_on,
+    }
+
+
+@app.put("/api/user-web/wallet-actions")
+def put_user_web_wallet_actions(body: UserWebWalletActionsUpdate) -> Dict[str, Any]:
+    service.set_user_web_wallet_actions_disabled(body.disabled)
+    env_on = _user_web_wallet_actions_env_override()
+    db_disabled = service.get_user_web_wallet_actions_disabled_db()
+    return {
+        "wallet_actions_disabled": env_on or db_disabled,
+        "database_wallet_actions_disabled": db_disabled,
+        "env_override_active": env_on,
     }
 
 

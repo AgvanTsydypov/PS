@@ -6,7 +6,18 @@ import { ArrowUpDown, Copy, Loader2, Pencil, RotateCcw } from "lucide-react";
 const RAW_API_BASE = process.env.NEXT_PUBLIC_SEASON_API_BASE_URL ?? "http://localhost:8001";
 const API_BASE = RAW_API_BASE === "/" ? "" : RAW_API_BASE.replace(/\/$/, "");
 
-type TabKey = "overview" | "eligibility" | "claims" | "seasonClaims" | "winners" | "eventCards" | "eventPictures" | "cardBuilder" | "scenarios" | "reset";
+type TabKey =
+  | "overview"
+  | "eligibility"
+  | "claims"
+  | "seasonClaims"
+  | "winners"
+  | "eventCards"
+  | "eventPictures"
+  | "cardBuilder"
+  | "scenarios"
+  | "userWeb"
+  | "reset";
 
 type Season = {
   id: number;
@@ -303,6 +314,7 @@ const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "eventPictures", label: "Event Pictures" },
   { key: "cardBuilder", label: "Card Builder" },
   { key: "scenarios", label: "Scenarios" },
+  { key: "userWeb", label: "User web" },
   { key: "reset", label: "Reset" },
 ];
 
@@ -532,6 +544,12 @@ export default function HomePage() {
 
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetOutput, setResetOutput] = useState("");
+
+  const [userWebDbDisabled, setUserWebDbDisabled] = useState<boolean | null>(null);
+  const [userWebEnvOverride, setUserWebEnvOverride] = useState(false);
+  const [userWebLoading, setUserWebLoading] = useState(false);
+  const [userWebSaving, setUserWebSaving] = useState(false);
+  const [userWebError, setUserWebError] = useState("");
   const [seasonUpdateRunning, setSeasonUpdateRunning] = useState(false);
   const [seasonUpdateOutput, setSeasonUpdateOutput] = useState("");
   const [winnerRows, setWinnerRows] = useState<WinnerWalletRow[]>([]);
@@ -1387,6 +1405,35 @@ export default function HomePage() {
       ws.close();
     };
   }, []);
+
+  useEffect(() => {
+    if (tab !== "userWeb") return;
+    let cancelled = false;
+    setUserWebLoading(true);
+    setUserWebError("");
+    void (async () => {
+      try {
+        const data = await fetchJSON<{
+          wallet_actions_disabled: boolean;
+          database_wallet_actions_disabled: boolean;
+          env_override_active: boolean;
+        }>("/api/user-web/wallet-actions");
+        if (cancelled) return;
+        setUserWebDbDisabled(data.database_wallet_actions_disabled);
+        setUserWebEnvOverride(data.env_override_active);
+      } catch (e) {
+        if (!cancelled) {
+          setUserWebDbDisabled(null);
+          setUserWebError(e instanceof Error ? e.message : String(e));
+        }
+      } finally {
+        if (!cancelled) setUserWebLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab]);
 
   const title = "PolyStars Seasons Test Workbench (Web)";
 
@@ -3288,6 +3335,92 @@ export default function HomePage() {
             </div>
           </div>
           <div className="mono">{scenarioOutput}</div>
+        </section>
+      ) : null}
+
+      {tab === "userWeb" ? (
+        <section className="panel">
+          <h2 className="text-lg font-semibold mb-2">User web API — wallet-linked actions</h2>
+          <p className="muted mb-4">
+            When disabled, <span className="mono">user_web_backend</span> returns 503 for sign-in (
+            <span className="mono">POST /api/auth/wallet/challenge</span> and{" "}
+            <span className="mono">/verify</span>), eligibility, mint, generated card generation (
+            <span className="mono">POST /api/cards/get</span>), <span className="mono">/api/me/*</span>, and{" "}
+            <span className="mono">/api/polymarket/public-profile</span>. Still available: public card browsing{" "}
+            <span className="mono">GET /api/cards/ticker</span>, <span className="mono">GET /api/cards/{"{slug}"}</span>,{" "}
+            <span className="mono">GET /api/public/site-status</span> (UI banner), <span className="mono">/api/health</span>,{" "}
+            <span className="mono">/api/server-time</span>, <span className="mono">/api/seasons/active</span>,{" "}
+            <span className="mono">/api/wallet-ticker</span>. The flag is
+            read from the database (short cache). <span className="mono">USER_WEB_WALLET_ACTIONS_DISABLED</span> or{" "}
+            <span className="mono">USER_WEB_DISABLE_ME_API</span> overrides the DB and forces &quot;off&quot;.
+          </p>
+          {userWebError ? <div className="error mb-3">{userWebError}</div> : null}
+          {userWebEnvOverride ? (
+            <div className="ok mb-3" style={{ background: "#3d3420", color: "#f5e6c8", border: "1px solid #8a7a40" }}>
+              Environment override is active — the toggle below only updates the database; user web stays blocked until you
+              unset <span className="mono">USER_WEB_WALLET_ACTIONS_DISABLED</span> /{" "}
+              <span className="mono">USER_WEB_DISABLE_ME_API</span>.
+            </div>
+          ) : null}
+          <div className="row items-center gap-4 flex-wrap">
+            {userWebLoading && userWebDbDisabled === null ? (
+              <span className="inline-flex items-center gap-2 muted">
+                <Loader2 size={18} className="animate-spin shrink-0" aria-hidden />
+                Loading…
+              </span>
+            ) : (
+              <label className="inline-flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={userWebDbDisabled === true}
+                  disabled={userWebDbDisabled === null || userWebLoading || userWebSaving}
+                  onChange={(e) => {
+                    const next = e.target.checked;
+                    void (async () => {
+                      setUserWebSaving(true);
+                      setUserWebError("");
+                      try {
+                        const out = await fetchJSON<{
+                          wallet_actions_disabled: boolean;
+                          database_wallet_actions_disabled: boolean;
+                          env_override_active: boolean;
+                        }>("/api/user-web/wallet-actions", {
+                          method: "PUT",
+                          body: JSON.stringify({ disabled: next }),
+                        });
+                        setUserWebDbDisabled(out.database_wallet_actions_disabled);
+                        setUserWebEnvOverride(out.env_override_active);
+                        setOk(
+                          out.wallet_actions_disabled
+                            ? "Wallet-linked user web APIs are OFF (effective)."
+                            : "Wallet-linked user web APIs are ON (effective).",
+                        );
+                      } catch (err) {
+                        setUserWebError(err instanceof Error ? err.message : String(err));
+                      } finally {
+                        setUserWebSaving(false);
+                      }
+                    })();
+                  }}
+                />
+                <span>Disable wallet-linked routes (stored in DB)</span>
+              </label>
+            )}
+            {userWebSaving ? (
+              <span className="inline-flex items-center gap-2 muted">
+                <Loader2 size={16} className="animate-spin shrink-0" aria-hidden />
+                Saving…
+              </span>
+            ) : null}
+          </div>
+          {userWebDbDisabled !== null && !userWebLoading ? (
+            <p className="muted mt-3 text-sm">
+              Effective state:{" "}
+              <strong>{userWebEnvOverride || userWebDbDisabled ? "blocked" : "allowed"}</strong>
+              {" · "}
+              DB flag: <strong>{userWebDbDisabled ? "disabled" : "enabled"}</strong>
+            </p>
+          ) : null}
         </section>
       ) : null}
 

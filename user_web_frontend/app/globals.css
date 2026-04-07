@@ -132,6 +132,32 @@ body {
   height: 56px;
 }
 
+/* Full-width maintenance strip: fixed, does not participate in page hit-testing (see SiteMaintenanceStrip). */
+.site-maintenance-strip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 10px 20px;
+  z-index: 2147483000;
+  text-align: center;
+  font-size: 0.875rem;
+  line-height: 1.45;
+  color: #f4efe4;
+  background: rgba(22, 18, 10, 0.97);
+  border-bottom: 1px solid rgba(255, 196, 86, 0.45);
+  pointer-events: none;
+  user-select: none;
+}
+
+body.has-site-maintenance-strip {
+  padding-top: var(--site-maintenance-strip-height, 48px);
+}
+
 .dashboard-page-top-gap {
   height: 40px;
 }
