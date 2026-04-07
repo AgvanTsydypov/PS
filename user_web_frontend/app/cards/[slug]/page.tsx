@@ -187,11 +187,6 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                     <dd>{event.slug ?? card.event_slug ?? "N/A"}</dd>
                   </dl>
                 </section>
-
-                <section className="card-detail-panel">
-                  <h2>Payload Snapshot</h2>
-                  <pre>{JSON.stringify(payload, null, 2)}</pre>
-                </section>
               </div>
             </div>
           </>
