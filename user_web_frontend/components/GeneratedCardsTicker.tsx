@@ -134,8 +134,8 @@ export default function GeneratedCardsTicker() {
 
   return (
     <div className="card-ticker-section">
-      <h2 className="card-ticker-heading">Possible to claim cards</h2>
-      <section className="card-ticker-strip" aria-label="Possible to claim cards">
+      <h2 className="card-ticker-heading">CLAIMED CARDS SHOWCASE</h2>
+      <section className="card-ticker-strip" aria-label="CLAIMED CARDS SHOWCASE">
         <div
           className="card-ticker-viewport"
           onMouseMove={(event) =>
