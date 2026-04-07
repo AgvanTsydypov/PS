@@ -208,6 +208,9 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
 }
 _rate_limit_lock = threading.Lock()
 _rate_limit_store: Dict[str, deque[float]] = defaultdict(deque)
+_wallet_actions_db_cache_lock = threading.Lock()
+_wallet_actions_db_cache: Optional[Tuple[float, bool]] = None
+_WALLET_ACTIONS_DB_CACHE_TTL_SECONDS = float(os.getenv("USER_WEB_WALLET_ACTIONS_DB_CACHE_TTL", "2"))
 _winner_catalog_join_total_lock = threading.Lock()
 _winner_catalog_join_total_cache: Tuple[float, int] = (0.0, 0)
 
@@ -343,6 +346,59 @@ def _issue_access_token(wallet_address: str) -> str:
         "aud": JWT_AUDIENCE,
     }
     return jwt.encode(payload, _jwt_secret(), algorithm=JWT_ALG)
+
+
+def _user_web_wallet_actions_env_disabled() -> bool:
+    truthy = {"1", "true", "yes"}
+    return (
+        os.getenv("USER_WEB_WALLET_ACTIONS_DISABLED", "").strip().lower() in truthy
+        or os.getenv("USER_WEB_DISABLE_ME_API", "").strip().lower() in truthy
+    )
+
+
+def _wallet_actions_disabled_from_db_cached() -> bool:
+    """Reads polystars_user_web_controls; failures fall back to False (actions allowed)."""
+    global _wallet_actions_db_cache
+    if _WALLET_ACTIONS_DB_CACHE_TTL_SECONDS <= 0:
+        _wallet_actions_db_cache = None
+    now = monotonic()
+    with _wallet_actions_db_cache_lock:
+        if _wallet_actions_db_cache is not None:
+            ts, val = _wallet_actions_db_cache
+            if now - ts < _WALLET_ACTIONS_DB_CACHE_TTL_SECONDS:
+                return val
+    disabled = False
+    try:
+        conn = _get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT wallet_actions_disabled FROM polystars_user_web_controls WHERE singleton_id = 1"
+                )
+                row = cursor.fetchone()
+                disabled = bool(row and row[0])
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("Could not read polystars_user_web_controls; allowing wallet actions")
+        disabled = False
+    with _wallet_actions_db_cache_lock:
+        _wallet_actions_db_cache = (now, disabled)
+    return disabled
+
+
+def _wallet_actions_effective_disabled() -> bool:
+    if _user_web_wallet_actions_env_disabled():
+        return True
+    return _wallet_actions_disabled_from_db_cached()
+
+
+def _require_wallet_actions_enabled() -> None:
+    if _wallet_actions_effective_disabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Wallet-linked actions are temporarily disabled",
+        )
 
 
 def _extract_wallet_from_request(request: Request) -> str:
@@ -1651,6 +1707,12 @@ def server_time() -> Dict[str, str]:
     return {"now_utc_iso": datetime.now(timezone.utc).isoformat()}
 
 
+@app.get("/api/public/site-status")
+def public_site_status() -> Dict[str, bool]:
+    """Always available — used by the frontend to show maintenance UI (not subject to wallet-actions lock)."""
+    return {"wallet_actions_disabled": _wallet_actions_effective_disabled()}
+
+
 @app.get("/api/seasons/active")
 def active_seasons() -> List[Dict[str, Any]]:
     try:
@@ -1751,6 +1813,7 @@ def wallet_ticker(limit: int = 100) -> Dict[str, Any]:
 
 @app.post("/api/eligibility")
 def check_eligibility(payload: EligibilityRequest, request: Request) -> Dict[str, Any]:
+    _require_wallet_actions_enabled()
     token_wallet = _extract_wallet_from_request(request).lower()
     proxy_wallet = _load_proxy_wallet_for_user_wallet(token_wallet)
     trader_rank = _load_trader_rank_for_user_wallet(token_wallet)
@@ -1829,6 +1892,7 @@ def check_eligibility(payload: EligibilityRequest, request: Request) -> Dict[str
 
 @app.post("/api/auth/wallet/challenge")
 def wallet_challenge(payload: ChallengeRequest):
+    _require_wallet_actions_enabled()
     wallet_address = _normalize_evm_address(payload.wallet_address)
     nonce = secrets.token_hex(16)
     challenge_id = str(uuid.uuid4())
@@ -1851,6 +1915,7 @@ def wallet_challenge(payload: ChallengeRequest):
 
 @app.post("/api/auth/wallet/verify")
 def wallet_verify(payload: VerifyRequest):
+    _require_wallet_actions_enabled()
     wallet_address = _normalize_evm_address(payload.wallet_address)
     with _challenge_lock:
         challenge = _challenge_store.get(payload.challenge_id)
@@ -1942,6 +2007,7 @@ def wallet_verify(payload: VerifyRequest):
 
 @app.get("/api/polymarket/public-profile")
 def polymarket_public_profile(request: Request) -> Dict[str, Any]:
+    _require_wallet_actions_enabled()
     wallet = _extract_wallet_from_request(request)
     profile = _fetch_polymarket_public_profile(wallet)
     proxy_wallet = _proxy_wallet_from_profile(profile) or PM_NOT_REGISTERED_VALUE
@@ -1954,6 +2020,7 @@ def polymarket_public_profile(request: Request) -> Dict[str, Any]:
 
 @app.get("/api/me/nfts")
 def me_nfts(request: Request) -> Dict[str, Any]:
+    _require_wallet_actions_enabled()
     connected_wallet = _extract_wallet_from_request(request).lower()
     if not Web3.is_address(connected_wallet):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
@@ -1962,6 +2029,7 @@ def me_nfts(request: Request) -> Dict[str, Any]:
 
 @app.get("/api/me/cards")
 def me_cards(request: Request) -> Dict[str, Any]:
+    _require_wallet_actions_enabled()
     connected_wallet = _extract_wallet_from_request(request).lower()
     if not Web3.is_address(connected_wallet):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
@@ -2015,7 +2083,7 @@ def me_cards(request: Request) -> Dict[str, Any]:
 
 @app.get("/api/cards/ticker")
 def generated_cards_ticker(request: Request, limit: Optional[int] = None) -> Dict[str, Any]:
-    """Public random sample of generated cards for the home ticker (no auth)."""
+    """Public random sample for the home ticker (no auth). Intentionally not gated by wallet-actions lock."""
     env_default = int(os.getenv("USER_WEB_CARDS_TICKER_SAMPLE_SIZE", "40"))
     ticker_default = max(1, min(env_default, 48))
     if limit is None:
@@ -2077,6 +2145,7 @@ def generated_cards_ticker(request: Request, limit: Optional[int] = None) -> Dic
 
 @app.get("/api/cards/{slug}")
 def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
+    """Public card detail for showcase links; not gated by wallet-actions lock (same as /api/cards/ticker)."""
     normalized_slug = str(slug or "").strip()
     if not normalized_slug:
         raise HTTPException(status_code=400, detail="Card slug is required")
@@ -2166,6 +2235,7 @@ def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
 
 @app.post("/api/cards/get")
 def get_card(request: Request) -> UserGeneratedCardResponse:
+    _require_wallet_actions_enabled()
     phase_t = monotonic()
     # EOA tied to dashboard session (JWT only — same wallet user connected at sign-in).
     session_wallet_eoa = _extract_wallet_from_request(request).lower()
@@ -2338,6 +2408,7 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
 
 @app.post("/api/mint/base-sepolia")
 def mint_base_sepolia(request: Request) -> UserMintResponse:
+    _require_wallet_actions_enabled()
     wallet = _extract_wallet_from_request(request).lower()
     proxy_wallet = _load_proxy_wallet_for_user_wallet(wallet)
     trader_rank = _load_trader_rank_for_user_wallet(wallet)

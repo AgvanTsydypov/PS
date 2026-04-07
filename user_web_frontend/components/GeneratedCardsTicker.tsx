@@ -81,6 +81,10 @@ export default function GeneratedCardsTicker() {
         const res = await fetch(buildApiUrl("/api/cards/ticker"), {
           cache: "no-store",
         });
+        if (res.status === 503) {
+          if (!cancelled) setItems([]);
+          return;
+        }
         if (!res.ok) return;
         const payload = (await res.json()) as CardTickerResponse;
         const list = Array.isArray(payload.items) ? payload.items : [];

@@ -1147,6 +1147,21 @@ LIMIT 100;
 DO $$ BEGIN RAISE NOTICE '✅ Tracking views created'; END $$;
 
 -- ============================================================================
+-- USER WEB RUNTIME CONTROLS (admin toggles → user_web_backend reads same DB)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS polystars_user_web_controls (
+    singleton_id SMALLINT PRIMARY KEY CHECK (singleton_id = 1),
+    wallet_actions_disabled BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO polystars_user_web_controls (singleton_id, wallet_actions_disabled)
+VALUES (1, FALSE)
+ON CONFLICT (singleton_id) DO NOTHING;
+
+DO $$ BEGIN RAISE NOTICE '✅ polystars_user_web_controls ready'; END $$;
+
+-- ============================================================================
 -- COMPLETION
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE ''; END $$;

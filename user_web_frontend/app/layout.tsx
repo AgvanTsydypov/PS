@@ -2,6 +2,8 @@ import "./globals.css";
 import type { Metadata } from "next";
 import { ReactNode } from "react";
 
+import SiteMaintenanceStrip from "../components/SiteMaintenanceStrip";
+
 export const metadata: Metadata = {
   title: "PolyStars User",
   description: "Wallet sign-in for PolyStars users",
@@ -20,7 +22,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           rel="stylesheet"
         />
       </head>
-      <body>{children}</body>
+      <body>
+        <SiteMaintenanceStrip />
+        {children}
+      </body>
     </html>
   );
 }
