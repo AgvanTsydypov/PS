@@ -601,7 +601,8 @@ class SeasonWorkbenchService:
 
         cfg = self._r2_required_env()
         ext = self._content_type_extension(content_type)
-        file_bytes = self._maybe_remove_gemini_watermark(file_bytes=file_bytes, ext=ext)
+        # Gemini watermark strip disabled (needs admin_backend/GeminiWatermarkTool or GEMINI_WATERMARK_TOOL_BIN).
+        # file_bytes = self._maybe_remove_gemini_watermark(file_bytes=file_bytes, ext=ext)
         key = self._build_r2_object_key(target_event_id, ext)
         self._get_r2_client().put_object(
             Bucket=cfg["bucket"],
