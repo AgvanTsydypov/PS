@@ -618,15 +618,24 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # font-size 15 px at Y_BRACKET=654:
     #   cap top ≈ 655,  cap bottom ≈ 666  →  centre 660,  hh = 6
 
-    _p_hh  = 7.5          # half cap-height for 20 px metric values
-    _eb_hh = 6.0          # half cap-height for 15 px bracket / 14 px wallet
-
-    p99_cy = Y_METRIC_VALUES + 8   # ≈ 715 — vertical centre of 20 px caps
-    eb_cy  = Y_BRACKET    + 6     # ≈ 660 — vertical centre of 15 px caps
-
+    # Text gradients in stable user-space coordinates:
+    # center + axis are tied to fixed text blocks and do not depend on SVG zoom.
+    # Use visible cap-height (~0.72em), not full font-size box.
+    # This keeps the gradient midpoint on the rendered glyph block
+    # and avoids "mostly yellow" when the gradient sits too low.
+    # Some SVG renderers treat hanging baseline/CSS transforms differently;
+    # this upward em-shift keeps gradient centers aligned with the visible glyphs.
+    cap_ratio = 0.72
+    grad_center_em_shift = -0.72
+    p99_block_h = 20.0 * cap_ratio
+    eb_block_h = 15.0 * cap_ratio
+    _p_hh = p99_block_h / 2.0
+    _eb_hh = eb_block_h / 2.0
+    # P99 values block (EDGE / YIELD / GRAVITY)
+    p99_cy = Y_METRIC_VALUES + (grad_center_em_shift * 20.0) + _p_hh
     edge_gx1, edge_gy1, edge_gx2, edge_gy2 = _grad_pts(COL_EDGE,    p99_cy, _p_hh, GRAD_ANGLE_P99)
     yld_gx1,  yld_gy1,  yld_gx2,  yld_gy2  = _grad_pts(COL_YIELD,   p99_cy, _p_hh, GRAD_ANGLE_P99)
-    grav_gx1, grav_gy1, grav_gx2, grav_gy2  = _grad_pts(COL_GRAVITY, p99_cy, _p_hh, GRAD_ANGLE_P99)
+    grav_gx1, grav_gy1, grav_gx2, grav_gy2 = _grad_pts(COL_GRAVITY, p99_cy, _p_hh, GRAD_ANGLE_P99)
 
     # Bracket gradient center: geometric center of the inner [entry_bracket] text block.
     fs_bracket = 15.0
@@ -634,13 +643,13 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     bracket_block_x = X_PE_DIVIDER + X_PE_GAP + _orbitron_width(prefix, fs_bracket)
     bracket_block_w = _orbitron_width(eb_inner, fs_bracket)
     bracket_block_cx = bracket_block_x + (bracket_block_w / 2)
-    bracket_block_cy = Y_BRACKET + 7.5
+    bracket_block_cy = Y_BRACKET + (grad_center_em_shift * 15.0) + _eb_hh
     # mg-eb: midpoint locked to geometric center of bracket text block (without [ ]).
-    eb_x1, eb_y1, eb_x2, eb_y2 = _grad_pts(bracket_block_cx, bracket_block_cy, 7.5, GRAD_ANGLE_ANOMALY)
+    eb_x1, eb_y1, eb_x2, eb_y2 = _grad_pts(bracket_block_cx, bracket_block_cy, _eb_hh, GRAD_ANGLE_ANOMALY)
     wallet_block_cx = (WALLET_BLOCK_X1 + WALLET_BLOCK_X2) / 2
-    wallet_block_cy = WALLET_BLOCK_Y1 + (WALLET_BLOCK_H / 2)
+    wallet_block_cy = WALLET_BLOCK_Y1 + (grad_center_em_shift * 15.0) + _eb_hh
     # mg-w: midpoint locked to geometric center of wallet block; angle rotates around this center.
-    w_x1,  w_y1,  w_x2,  w_y2  = _grad_pts(wallet_block_cx, wallet_block_cy, WALLET_BLOCK_H / 2, GRAD_ANGLE_WALLET)
+    w_x1,  w_y1,  w_x2,  w_y2  = _grad_pts(wallet_block_cx, wallet_block_cy, _eb_hh, GRAD_ANGLE_WALLET)
 
     # Border gradient — userSpaceOnUse so GRAD_ANGLE_BORDER means the same
     # screen-pixel degrees as the text gradients above.
