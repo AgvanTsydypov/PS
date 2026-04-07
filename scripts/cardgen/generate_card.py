@@ -287,10 +287,14 @@ def _bracket_line_pos(eb_name: str, wallet_disp: str) -> Dict[str, float]:
 
 _GRAD = "url(#master-gradient)"
 
+# Mid-tier blue: UI/text uses the softer shade; card frame keeps DEEP_BLUE_CARD_BORDER (see propagation).
+SOFT_TIER_BLUE = "#2C7ECA"
+DEEP_BLUE_CARD_BORDER = "#265DD2"
+
 ENTRY_BRACKET_COLORS: Dict[str, str] = {
     "[0.00 - 0.20]": _GRAD,
     "[0.20 - 0.40]": "#FFBF00",
-    "[0.40 - 0.60]": "#265DD2",
+    "[0.40 - 0.60]": SOFT_TIER_BLUE,
     "[0.60 - 0.80]": "#38BE50",
     "[0.80 - 0.97]": "#B6BBC8",
 }
@@ -300,11 +304,14 @@ PTIER_COLORS: Dict[str, str] = {
     "P99":  _GRAD,
     "P95":  "#FFBF00",
     "P90":  "#FFBF00",
-    "P80":  "#265DD2",
-    "P70":  "#265DD2",
+    "P80":  SOFT_TIER_BLUE,
+    "P70":  SOFT_TIER_BLUE,
     "P50":  "#38BE50",
     "BASE": "#B6BBC8",
 }
+
+# Yield tiers whose outer glow must stay deep blue (all other uses of that hue are SOFT_TIER_BLUE).
+_YIELD_TIERS_DEEP_BORDER = frozenset({"P70", "P80"})
 
 
 _LEGACY_TO_INTERVAL: Dict[str, str] = {
@@ -569,7 +576,8 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 
     # ── 3. Propagation (Section 9) ────────────────────────────────────
     wallet_color = edge_color           # EDGE → wallet
-    border_color = yield_color          # YIELD → outer glow
+    # YIELD → outer glow: P70/P80 use deep blue on the frame only; same hue elsewhere is SOFT_TIER_BLUE.
+    border_color = DEEP_BLUE_CARD_BORDER if yld in _YIELD_TIERS_DEEP_BORDER else yield_color
     dotted_color = gravity_color        # GRAVITY → lower dotted line
 
     # ── 4. Metadata ───────────────────────────────────────────────────
@@ -1339,7 +1347,12 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     dz_fill, _, _ = dz_style(archetype_raw)
     yld = str(data.get("yield", "BASE") or "BASE").upper()
     yield_color = get_ptier_color(yld)
-    border_fill = "url(#border-gradient)" if "url(" in yield_color else yield_color
+    if "url(" in yield_color:
+        border_fill = "url(#border-gradient)"
+    elif yld in _YIELD_TIERS_DEEP_BORDER:
+        border_fill = DEEP_BLUE_CARD_BORDER
+    else:
+        border_fill = yield_color
 
     lore = _esc(str(data.get("card_lore", "") or "No topology data available."))
     archetype_desc = _esc(str(data.get("archetype_description", "") or "No archetype description."))
@@ -1605,12 +1618,12 @@ SAMPLE_DATA: Dict[str, Any] = {
     "primary_tag":       "CELEBRITIES",
     "primary_tag_color": "#51E147",
     "secondary_tag":     "NONE",
-    "entry_bracket":     "[0.00 - 0.20]",
+    "entry_bracket":     "[0.40 - 0.60]",
     "proxy_wallet":      "0xBb8E703abc123def456",
-    "edge":              "P99",
-    "yield":             "P99",
+    "edge":              "P90",
+    "yield":             "P70",
     "gravity":           "P99",
-    "archetype":         "ANOMALY",
+    "archetype":         "SUBSTRATE",
     "card_lore":         "Daily consensus matrix tracking kinetic probability between US and Venezuelan forces. Volatility elevated post-Aug 2025 baseline. Resolution requires confirmed direct military engagement—interceptions and warning shots excluded from trigger threshold.",
     "archetype_description": "Consensus exploitation protocol active. This entity exhibits zero predictive foresight and absorbs minimal absolute risk. They execute only when a prevailing consensus has crystallized (0.60+) or the event is mathematically solved (0.80+). By deploying overwhelming financial mass at the terminal stage of the market lifecycle, they extract a low-variance tax from the ecosystem's resolution. Pure capital preservation.",
     "archetype_math":    "P (E) ∈ [0.60 - 0.97] | Edge ≤ P50 | Yield ≤ P50 | Gravity ≤ P70",
