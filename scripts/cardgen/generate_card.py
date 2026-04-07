@@ -174,8 +174,10 @@ BACK_DESC_Y = float(BACK_ARCH_Y) + 25.0   # desc starts 25px below archetype (+3
 BACK_META_LH = 14
 # Extra offset applied to the two footer meta lines (push down from computed pin).
 BACK_META_Y_OFFSET = 10.0
-# Lore: calibrated _orbitron_adv means 408 px works directly -- no extra slack needed.
-BACK_LORE_WRAP_SLACK_PX = 0.0
+# Lore: the analytic width model is slightly narrower than real Orbitron Bold + 0.1em
+# tracking (dense caps / dates can touch the right pad). Keep a few px slack so wrap
+# breaks before the renderer does.
+BACK_LORE_WRAP_SLACK_PX = 30.0
 # Desc: limit = 344 px makes "Consensus...active." break before "This" with the updated model.
 BACK_DESC_WRAP_SLACK_PX = 0.0
 # Approximate ink below hanging baseline for line-height 22 / Orbitron 14px body.
@@ -1624,7 +1626,7 @@ SAMPLE_DATA: Dict[str, Any] = {
     "yield":             "P70",
     "gravity":           "P99",
     "archetype":         "SUBSTRATE",
-    "card_lore":         "Daily consensus matrix tracking kinetic probability between US and Venezuelan forces. Volatility elevated post-Aug 2025 baseline. Resolution requires confirmed direct military engagement—interceptions and warning shots excluded from trigger threshold.",
+    "card_lore":         "Daily consensus matrix tracking Supreme Leader removal probability. Regime continuity signals remain dominant across all credible feeds. Volatility negligible—structural power consolidation suppresses deviation vectors.",
     "archetype_description": "Consensus exploitation protocol active. This entity exhibits zero predictive foresight and absorbs minimal absolute risk. They execute only when a prevailing consensus has crystallized (0.60+) or the event is mathematically solved (0.80+). By deploying overwhelming financial mass at the terminal stage of the market lifecycle, they extract a low-variance tax from the ecosystem's resolution. Pure capital preservation.",
     "archetype_math":    "P (E) ∈ [0.60 - 0.97] | Edge ≤ P50 | Yield ≤ P50 | Gravity ≤ P70",
     "rarity_bracket":    "[ OCCURRENCE: 1.0% - 2.0% ]",
