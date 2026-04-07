@@ -45,6 +45,9 @@ const TICKER_THUMB_HEIGHT_PX = Math.round(386 * 0.96);
 const TICKER_GAP_PX = 28;
 const TICKER_LINK_BORDER_PX = 2;
 
+/** One full loop scrolls one segment; duration = segmentWidth / this → constant px/s regardless of card count. */
+const CARD_TICKER_PX_PER_SEC = 2124 / 70;
+
 function segmentWidthPx(itemCount: number): number {
   if (itemCount <= 0) return 0;
   const cell = TICKER_THUMB_PX + TICKER_LINK_BORDER_PX;
@@ -111,6 +114,12 @@ export default function GeneratedCardsTicker() {
     [items.length, viewportWidth],
   );
 
+  const tickerDurationSec = useMemo(() => {
+    const w = segmentWidthPx(items.length);
+    if (w <= 0) return 70;
+    return Math.max(8, w / CARD_TICKER_PX_PER_SEC);
+  }, [items.length]);
+
   const loop = useMemo(() => {
     const out: CardTickerItem[] = [];
     for (let s = 0; s < segmentCount; s += 1) {
@@ -123,8 +132,8 @@ export default function GeneratedCardsTicker() {
 
   return (
     <div className="card-ticker-section">
-      <h2 className="card-ticker-heading">Already Generated Cards</h2>
-      <section className="card-ticker-strip" aria-label="Already generated cards">
+      <h2 className="card-ticker-heading">Possible to claim cards</h2>
+      <section className="card-ticker-strip" aria-label="Possible to claim cards">
         <div
           className="card-ticker-viewport"
           onMouseMove={(event) =>
@@ -140,6 +149,7 @@ export default function GeneratedCardsTicker() {
             style={
               {
                 "--ticker-segments": segmentCount,
+                "--ticker-duration": `${tickerDurationSec}s`,
               } as CSSProperties
             }
           >

@@ -4,7 +4,6 @@ import Link from "next/link";
 
 import { ActiveSeasonsBoard } from "../components/ActiveSeasonsBoard";
 import GeneratedCardsTicker from "../components/GeneratedCardsTicker";
-import OriginsWalletTicker from "../components/OriginsWalletTicker";
 import SiteLogoLink from "../components/SiteLogoLink";
 
 export default function HomePage() {
@@ -26,8 +25,6 @@ export default function HomePage() {
       />
 
       <GeneratedCardsTicker />
-
-      <OriginsWalletTicker />
     </>
   );
 }
