@@ -441,75 +441,6 @@ main {
   }
 }
 
-.wallet-ticker-strip {
-  position: relative;
-  width: 100vw;
-  max-width: none;
-  margin: 24px calc(50% - 50vw) 48px;
-  border: 0;
-  border-radius: 0;
-  background: #121722;
-  min-height: 28px;
-  overflow: hidden;
-}
-
-.wallet-ticker-label {
-  position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 4;
-  color: #727b8c;
-  font-size: 11px;
-  letter-spacing: 0.03em;
-  text-transform: lowercase;
-  white-space: nowrap;
-  pointer-events: none;
-}
-
-.wallet-ticker-left-fade {
-  position: absolute;
-  left: 0;
-  top: 0;
-  height: 100%;
-  width: 200px;
-  z-index: 3;
-  pointer-events: none;
-  background: linear-gradient(90deg, #121722 0%, #121722 72%, rgba(18, 23, 34, 0) 100%);
-}
-
-.wallet-ticker-viewport {
-  overflow: hidden;
-  padding: 5px 0 5px 132px;
-}
-
-.wallet-ticker-track {
-  display: inline-flex;
-  align-items: center;
-  gap: 18px;
-  white-space: nowrap;
-  animation: walletTickerScroll 140s linear infinite;
-}
-
-.wallet-ticker-strip:hover .wallet-ticker-track {
-  animation-play-state: paused;
-}
-
-.wallet-ticker-item {
-  color: #666f80;
-  font-size: 11px;
-  letter-spacing: 0.01em;
-}
-
-@keyframes walletTickerScroll {
-  from {
-    transform: translateX(0);
-  }
-  to {
-    transform: translateX(-50%);
-  }
-}
-
 .card-ticker-section {
   width: 100vw;
   max-width: none;
@@ -548,7 +479,7 @@ main {
   white-space: nowrap;
   width: max-content;
   will-change: transform;
-  animation: cardTickerScroll 70s linear infinite;
+  animation: cardTickerScroll var(--ticker-duration, 70s) linear infinite;
 }
 
 .card-ticker-strip:hover .card-ticker-track {

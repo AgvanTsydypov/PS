@@ -94,7 +94,6 @@ type EligibilityResponse = {
   proxy_wallet?: string;
   trader_rank?: string;
   eligibility_wallet?: string;
-  is_origin_wallet: boolean;
   mint_blocked?: boolean;
   mint_block_reason?: string;
   genesis: EligibilityStream;
