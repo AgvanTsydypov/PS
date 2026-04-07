@@ -193,8 +193,16 @@ BACK_METRIC_CHUNK_GAP = 0.0
 # ═══════════════════════════════════════════════════════════════════════════
 
 GRAD_ANGLE_ANOMALY = 3.5  # [ BRACKET ] label
+# mg-eb only: scales gradient axis vs cap half-height _eb_hh (same idea as WALLET_GRAD_HH_MULT).
+BRACKET_GRAD_HH_MULT = 1.6
 GRAD_ANGLE_WALLET  = 3.5  # wallet address (matched to reference tilt)
-GRAD_ANGLE_P99     = 2.5  # EDGE / YIELD / GRAVITY metric values
+# mg-w only: scales gradient axis half-length vs bracket cap (_eb_hh).  >1 lengthens the
+# axis in user space → each glyph samples a narrower slice of #wallet-stops, so 0%/100%
+# edge colors appear less on the address (no SVG mask — this is the practical "zoom").
+WALLET_GRAD_HH_MULT = 1.6
+GRAD_ANGLE_P99     = 5  # EDGE / YIELD / GRAVITY metric values
+# mg-edge / mg-yield / mg-grav: scales axis vs metric cap half-height _p_hh.
+P99_GRAD_HH_MULT = 1.1
 GRAD_ANGLE_BORDER  = 12   # card border glow rect
 
 
@@ -633,9 +641,10 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     _eb_hh = eb_block_h / 2.0
     # P99 values block (EDGE / YIELD / GRAVITY)
     p99_cy = Y_METRIC_VALUES + (grad_center_em_shift * 20.0) + _p_hh
-    edge_gx1, edge_gy1, edge_gx2, edge_gy2 = _grad_pts(COL_EDGE,    p99_cy, _p_hh, GRAD_ANGLE_P99)
-    yld_gx1,  yld_gy1,  yld_gx2,  yld_gy2  = _grad_pts(COL_YIELD,   p99_cy, _p_hh, GRAD_ANGLE_P99)
-    grav_gx1, grav_gy1, grav_gx2, grav_gy2 = _grad_pts(COL_GRAVITY, p99_cy, _p_hh, GRAD_ANGLE_P99)
+    p99_hh = _p_hh * P99_GRAD_HH_MULT
+    edge_gx1, edge_gy1, edge_gx2, edge_gy2 = _grad_pts(COL_EDGE,    p99_cy, p99_hh, GRAD_ANGLE_P99)
+    yld_gx1,  yld_gy1,  yld_gx2,  yld_gy2  = _grad_pts(COL_YIELD,   p99_cy, p99_hh, GRAD_ANGLE_P99)
+    grav_gx1, grav_gy1, grav_gx2, grav_gy2 = _grad_pts(COL_GRAVITY, p99_cy, p99_hh, GRAD_ANGLE_P99)
 
     # Bracket gradient center: geometric center of the inner [entry_bracket] text block.
     fs_bracket = 15.0
@@ -645,11 +654,13 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     bracket_block_cx = bracket_block_x + (bracket_block_w / 2)
     bracket_block_cy = Y_BRACKET + (grad_center_em_shift * 15.0) + _eb_hh
     # mg-eb: midpoint locked to geometric center of bracket text block (without [ ]).
-    eb_x1, eb_y1, eb_x2, eb_y2 = _grad_pts(bracket_block_cx, bracket_block_cy, _eb_hh, GRAD_ANGLE_ANOMALY)
+    eb_hh_g = _eb_hh * BRACKET_GRAD_HH_MULT
+    eb_x1, eb_y1, eb_x2, eb_y2 = _grad_pts(bracket_block_cx, bracket_block_cy, eb_hh_g, GRAD_ANGLE_ANOMALY)
     wallet_block_cx = (WALLET_BLOCK_X1 + WALLET_BLOCK_X2) / 2
     wallet_block_cy = WALLET_BLOCK_Y1 + (grad_center_em_shift * 15.0) + _eb_hh
     # mg-w: midpoint locked to geometric center of wallet block; angle rotates around this center.
-    w_x1,  w_y1,  w_x2,  w_y2  = _grad_pts(wallet_block_cx, wallet_block_cy, _eb_hh, GRAD_ANGLE_WALLET)
+    w_hh = _eb_hh * WALLET_GRAD_HH_MULT
+    w_x1,  w_y1,  w_x2,  w_y2  = _grad_pts(wallet_block_cx, wallet_block_cy, w_hh, GRAD_ANGLE_WALLET)
 
     # Border gradient — userSpaceOnUse so GRAD_ANGLE_BORDER means the same
     # screen-pixel degrees as the text gradients above.
@@ -710,17 +721,17 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
   <!-- ── P99 metric value stops (EDGE / YIELD / GRAVITY) — angle = GRAD_ANGLE_P99 -->
   <linearGradient id="p99-stops">
     <stop offset="0%"   stop-color="#FFBF00"/>
-    <stop offset="50%"  stop-color="#8A2BE2"/>
-    <stop offset="75%"  stop-color="#0051FF"/>
+    <stop offset="33%"  stop-color="#8A2BE2"/>
+    <stop offset="66%"  stop-color="#0051FF"/>
     <stop offset="100%" stop-color="#51FF48"/>
   </linearGradient>
 
   <!-- ── Wallet address stops — angle = GRAD_ANGLE_WALLET -->
   <linearGradient id="wallet-stops">
-    <stop offset="0%"  stop-color="#FFBF00"/>
+    <stop offset="0%"   stop-color="#FFBF00"/>
     <stop offset="25%"  stop-color="#8A2BE2"/>
     <stop offset="50%"  stop-color="#0051FF"/>
-    <stop offset="75%" stop-color="#51FF48"/>
+    <stop offset="75%"  stop-color="#51FF48"/>
     <stop offset="100%" stop-color="#FFFFFF"/>
   </linearGradient>
 
