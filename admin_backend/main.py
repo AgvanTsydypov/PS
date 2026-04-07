@@ -43,6 +43,7 @@ if project_root not in sys.path:
 from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE, GENESIS_END_DATE
 from scripts.daily_scheduler_simple import SimplifiedScheduler
 from scripts.cardgen.generate_card import generate_card_back_svg, generate_card_svg
+from scripts.simulate_user_generated_cards_batch import run_admin_simulated_card_generations
 from scripts.season_manager import SeasonManager
 from scripts.solana_service import MintedNftResult, SolanaClient
 from scripts.zora_service import ZoraClient
@@ -3079,8 +3080,6 @@ def apply_advanced(req: AdvancedScenarioRequest) -> Dict[str, str]:
 @app.post("/api/scenarios/simulate-generated-cards-batch")
 def simulate_generated_cards_batch(req: SimulateGeneratedCardsBatchRequest) -> Dict[str, Any]:
     try:
-        from user_web_backend.main import run_admin_simulated_card_generations
-
         return run_admin_simulated_card_generations(
             max_count=req.max_count,
             origin_match_fraction=req.origin_match_fraction,
