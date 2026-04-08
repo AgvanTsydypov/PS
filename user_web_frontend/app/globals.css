@@ -537,14 +537,11 @@ main {
 }
 
 .card-ticker-viewport-lite {
-  overflow-x: auto;
-  overflow-y: hidden;
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior-x: contain;
+  overflow: hidden;
 }
 
 .card-ticker-track-lite {
-  animation: none;
+  animation: cardTickerScroll var(--ticker-duration, 28s) linear infinite;
   will-change: auto;
 }
 
@@ -587,11 +584,15 @@ main {
     will-change: auto;
   }
 
-  .card-ticker-viewport {
+  .card-ticker-viewport:not(.card-ticker-viewport-lite) {
     overflow-x: auto;
     overflow-y: hidden;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-x: contain;
+  }
+
+  .card-ticker-track-lite {
+    animation: cardTickerScroll var(--ticker-duration, 28s) linear infinite;
   }
 
   .card-ticker-card.nft-card-tilt {
