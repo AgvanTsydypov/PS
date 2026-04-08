@@ -18,7 +18,7 @@ import {
   triggerCardFlip,
 } from "./cardInteractions";
 import SiteLogoLink from "./SiteLogoLink";
-import { fetchSiteStatus } from "../lib/userApiBase";
+import { fetchSiteStatus, userApiCredentials } from "../lib/userApiBase";
 
 // ── EIP-6963 types ────────────────────────────────────────────────────────────
 type EIP6963ProviderInfo = {
@@ -64,14 +64,15 @@ type VerifyResponse = {
   sign_in_count: number;
   proxy_wallet?: string;
   trader_rank?: string;
-  access_token?: string;
-  token_type?: string;
   expires_in?: number;
 };
 
-type JwtPayload = {
-  sub?: string;
-  exp?: number;
+type WalletSessionResponse = {
+  signed_in: boolean;
+  wallet_address?: string;
+  sign_in_count?: number;
+  proxy_wallet?: string | null;
+  trader_rank?: string | null;
 };
 
 type StoredSessionMeta = {
@@ -184,7 +185,8 @@ type GeneratedCardCreateResponse = {
 const apiBase =
   process.env.NEXT_PUBLIC_USER_API_BASE_URL ??
   (process.env.NODE_ENV === "development" ? "http://localhost:8011" : "/");
-const AUTH_TOKEN_STORAGE_KEY = "polystars_user_access_token";
+/** Legacy localStorage JWT (removed); cleared on load for one-time migration. */
+const LEGACY_JWT_LOCAL_STORAGE_KEY = "polystars_user_access_token";
 const AUTH_SESSION_META_STORAGE_KEY = "polystars_user_session_meta";
 const MY_CARDS_FLIP_STORAGE_KEY_PREFIX = "polystars_my_cards_flipped_v1";
 
@@ -215,25 +217,6 @@ const safeLocalStorage = {
 function buildApiUrl(path: string): string {
   if (apiBase === "/") return path;
   return `${apiBase.replace(/\/$/, "")}${path}`;
-}
-
-function parseJwtPayload(token: string): JwtPayload | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length < 2) return null;
-    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
-    const json = window.atob(padded);
-    return JSON.parse(json) as JwtPayload;
-  } catch {
-    return null;
-  }
-}
-
-function isJwtExpired(payload: JwtPayload | null): boolean {
-  const exp = Number(payload?.exp ?? 0);
-  if (!exp) return true;
-  return Date.now() >= exp * 1000;
 }
 
 function loadStoredSessionMeta(): StoredSessionMeta | null {
@@ -323,7 +306,6 @@ export default function UserDashboard() {
   const [canMintNow, setCanMintNow] = useState(false);
   const [mintLoading, setMintLoading] = useState(false);
   const [mintResultText, setMintResultText] = useState("");
-  const [accessToken, setAccessToken] = useState("");
   const [proxyWallet, setProxyWallet] = useState<string | null>(null);
   const [traderRank, setTraderRank] = useState<string | null>(null);
   const [myNfts, setMyNfts] = useState<UserNftItem[]>([]);
@@ -387,47 +369,49 @@ export default function UserDashboard() {
   }, []);
 
   useEffect(() => {
-    const token = safeLocalStorage.getItem(AUTH_TOKEN_STORAGE_KEY) ?? "";
-    if (!token) return;
-    const payload = parseJwtPayload(token);
-    if (!payload || isJwtExpired(payload)) {
-      safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-      clearStoredSessionMeta();
-      return;
+    let cancelled = false;
+    safeLocalStorage.removeItem(LEGACY_JWT_LOCAL_STORAGE_KEY);
+
+    async function hydrateSession() {
+      try {
+        const res = await fetch(buildApiUrl("/api/auth/wallet/session"), {
+          credentials: userApiCredentials,
+          cache: "no-store",
+        });
+        const data = (await res.json()) as WalletSessionResponse;
+        if (cancelled) return;
+        if (!data.signed_in || !data.wallet_address) {
+          return;
+        }
+        setIsSignedIn(true);
+        setStatusText("Signed in");
+        setWalletAddress(String(data.wallet_address));
+        if (typeof data.sign_in_count === "number") {
+          setSignInCount(data.sign_in_count);
+        }
+        setProxyWallet(data.proxy_wallet ?? null);
+        setTraderRank(data.trader_rank ?? null);
+
+        const meta = loadStoredSessionMeta();
+        if (typeof meta?.selectedWalletName === "string" && meta.selectedWalletName.trim()) {
+          setSelectedWalletName(meta.selectedWalletName);
+        }
+        if (typeof meta?.challengeId === "string" && meta.challengeId.trim()) {
+          setChallengeId(meta.challengeId);
+        }
+      } catch {
+        /* ignore */
+      }
     }
 
-    setAccessToken(token);
-    setIsSignedIn(true);
-    setStatusText("Signed in");
-
-    const meta = loadStoredSessionMeta();
-    if (meta?.walletAddress) {
-      setWalletAddress(String(meta.walletAddress));
-    }
-    if (typeof meta?.selectedWalletName === "string" && meta.selectedWalletName.trim()) {
-      setSelectedWalletName(meta.selectedWalletName);
-    }
-    if (typeof meta?.signInCount === "number") {
-      setSignInCount(meta.signInCount);
-    }
-    if (meta?.proxyWallet !== undefined) {
-      setProxyWallet(meta.proxyWallet ?? null);
-    }
-    if (meta?.traderRank !== undefined) {
-      setTraderRank(meta.traderRank ?? null);
-    }
-    if (typeof meta?.challengeId === "string" && meta.challengeId.trim()) {
-      setChallengeId(meta.challengeId);
-    }
-
-    const subjectWallet = String(payload.sub ?? "").trim();
-    if (subjectWallet && !meta?.walletAddress) {
-      setWalletAddress(subjectWallet);
-    }
+    void hydrateSession();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
-    if (!isSignedIn || !accessToken) {
+    if (!isSignedIn) {
       setMyNfts([]);
       setMyNftsError("");
       setMyNftsFetchedAt(null);
@@ -441,7 +425,7 @@ export default function UserDashboard() {
     }
     void refreshMyNfts();
     void refreshMyCards();
-  }, [isSignedIn, accessToken, walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isSignedIn, walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!isSignedIn || !walletAddress) {
@@ -556,8 +540,19 @@ export default function UserDashboard() {
     return JSON.stringify(error);
   }
 
+  async function clearServerSessionCookie(): Promise<void> {
+    try {
+      await fetch(buildApiUrl("/api/auth/wallet/logout"), {
+        method: "POST",
+        credentials: userApiCredentials,
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+
   async function refreshMyNfts() {
-    if (!accessToken || !isSignedIn) {
+    if (!isSignedIn) {
       setMyNfts([]);
       setMyNftsError("");
       setMyNftsFetchedAt(null);
@@ -569,12 +564,12 @@ export default function UserDashboard() {
     try {
       const res = await fetch(buildApiUrl("/api/me/nfts"), {
         method: "GET",
-        headers: { Authorization: `Bearer ${accessToken}` },
+        credentials: userApiCredentials,
       });
       if (!res.ok) {
         if (res.status === 401) {
+          void clearServerSessionCookie();
           setIsSignedIn(false);
-          setAccessToken("");
           setProxyWallet(null);
           setTraderRank(null);
           setStatusText("Session expired. Please connect wallet again.");
@@ -586,7 +581,6 @@ export default function UserDashboard() {
           setMyCardsFetchedAt(null);
           setGeneratedCardsTotalAvailable(0);
           setGeneratedCardsRemainingAvailable(0);
-          safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
         }
         const text = await res.text();
@@ -606,7 +600,7 @@ export default function UserDashboard() {
   }
 
   async function refreshMyCards() {
-    if (!accessToken || !isSignedIn) {
+    if (!isSignedIn) {
       setMyCards([]);
       setMyCardsError("");
       setMyCardsFetchedAt(null);
@@ -620,12 +614,12 @@ export default function UserDashboard() {
     try {
       const res = await fetch(buildApiUrl("/api/me/cards"), {
         method: "GET",
-        headers: { Authorization: `Bearer ${accessToken}` },
+        credentials: userApiCredentials,
       });
       if (!res.ok) {
         if (res.status === 401) {
+          void clearServerSessionCookie();
           setIsSignedIn(false);
-          setAccessToken("");
           setProxyWallet(null);
           setTraderRank(null);
           setStatusText("Session expired. Please connect wallet again.");
@@ -633,7 +627,6 @@ export default function UserDashboard() {
           setMyNftsFetchedAt(null);
           setMyCards([]);
           setMyCardsFetchedAt(null);
-          safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
         }
         const text = await res.text();
@@ -656,9 +649,9 @@ export default function UserDashboard() {
     }
   }
 
-  function handleSignOut() {
+  async function handleSignOut() {
+    await clearServerSessionCookie();
     setIsSignedIn(false);
-    setAccessToken("");
     setProxyWallet(null);
     setTraderRank(null);
     setChallengeId("");
@@ -680,7 +673,7 @@ export default function UserDashboard() {
     setStatusText("Logged out");
     setIsWalletButtonHovered(false);
     selectedProviderRef.current = null;
-    safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    safeLocalStorage.removeItem(LEGACY_JWT_LOCAL_STORAGE_KEY);
     clearStoredSessionMeta();
   }
 
@@ -696,7 +689,7 @@ export default function UserDashboard() {
 
   function handleAuthButtonClick() {
     if (isSignedIn && isWalletButtonHovered) {
-      handleSignOut();
+      void handleSignOut();
       return;
     }
     setShowPicker(true);
@@ -714,6 +707,7 @@ export default function UserDashboard() {
         buildApiUrl("/api/auth/wallet/challenge"),
         {
           method: "POST",
+          credentials: userApiCredentials,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ wallet_address: address }),
         },
@@ -732,6 +726,7 @@ export default function UserDashboard() {
 
       const verifyRes = await fetch(buildApiUrl("/api/auth/wallet/verify"), {
         method: "POST",
+        credentials: userApiCredentials,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           challenge_id: challenge.challenge_id,
@@ -756,10 +751,7 @@ export default function UserDashboard() {
       const resolvedTraderRank = String(verify.trader_rank ?? "").trim() || null;
       setProxyWallet(null);
       setTraderRank(null);
-      const token = String(verify.access_token ?? "");
-      if (verify.signed_in && token) {
-        setAccessToken(token);
-        safeLocalStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+      if (verify.signed_in) {
         setProxyWallet(resolvedProxyWallet);
         setTraderRank(resolvedTraderRank);
         saveStoredSessionMeta({
@@ -771,8 +763,6 @@ export default function UserDashboard() {
           challengeId: challenge.challenge_id,
         });
       } else {
-        setAccessToken("");
-        safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
         setProxyWallet(null);
         setTraderRank(null);
         setMyNfts([]);
@@ -788,7 +778,6 @@ export default function UserDashboard() {
     } catch (error) {
       setIsSignedIn(false);
       setStatusText(extractErrorMessage(error));
-      setAccessToken("");
       setProxyWallet(null);
       setTraderRank(null);
       setMyNfts([]);
@@ -803,7 +792,7 @@ export default function UserDashboard() {
       setCanMintNow(false);
       setMintResultText("");
       setGetCardResultText("");
-      safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      void clearServerSessionCookie();
       clearStoredSessionMeta();
     } finally {
       setIsBusy(false);
@@ -836,7 +825,6 @@ export default function UserDashboard() {
       setIsSignedIn(false);
       setChallengeId("");
       setSignInCount(null);
-      setAccessToken("");
       setProxyWallet(null);
       setTraderRank(null);
       setMyNfts([]);
@@ -851,7 +839,7 @@ export default function UserDashboard() {
       setCanMintNow(false);
       setMintResultText("");
       setGetCardResultText("");
-      safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      void clearServerSessionCookie();
       clearStoredSessionMeta();
       await signInWith(provider, address, name);
     } catch (error) {
@@ -872,7 +860,7 @@ export default function UserDashboard() {
 
   async function checkMintEligibility() {
     if (!walletAddress) return;
-    if (!accessToken) {
+    if (!isSignedIn) {
       setEligibilitySummary("Please sign in again to refresh your secure session.");
       setEligibilityChecked(true);
       setCanMintNow(false);
@@ -883,16 +871,16 @@ export default function UserDashboard() {
     try {
       const res = await fetch(buildApiUrl("/api/eligibility"), {
         method: "POST",
+        credentials: userApiCredentials,
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
         },
         body: JSON.stringify({ wallet: walletAddress }),
       });
       if (!res.ok) {
         if (res.status === 401) {
+          void clearServerSessionCookie();
           setIsSignedIn(false);
-          setAccessToken("");
           setProxyWallet(null);
           setTraderRank(null);
           setMyNfts([]);
@@ -904,7 +892,6 @@ export default function UserDashboard() {
           setGeneratedCardsTotalAvailable(0);
           setGeneratedCardsRemainingAvailable(0);
           setStatusText("Session expired. Please connect wallet again.");
-          safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
         }
         const text = await res.text();
@@ -950,7 +937,7 @@ export default function UserDashboard() {
   }
 
   async function mintOnBaseSepolia() {
-    if (!accessToken) {
+    if (!isSignedIn) {
       setMintResultText("Mint failed: Please sign in again.");
       return;
     }
@@ -958,12 +945,12 @@ export default function UserDashboard() {
     try {
       const res = await fetch(buildApiUrl("/api/mint/base-sepolia"), {
         method: "POST",
-        headers: { Authorization: `Bearer ${accessToken}` },
+        credentials: userApiCredentials,
       });
       if (!res.ok) {
         if (res.status === 401) {
+          void clearServerSessionCookie();
           setIsSignedIn(false);
-          setAccessToken("");
           setProxyWallet(null);
           setTraderRank(null);
           setMyNfts([]);
@@ -975,7 +962,6 @@ export default function UserDashboard() {
           setGeneratedCardsTotalAvailable(0);
           setGeneratedCardsRemainingAvailable(0);
           setStatusText("Session expired. Please connect wallet again.");
-          safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
         }
         const text = await res.text();
@@ -1029,7 +1015,7 @@ export default function UserDashboard() {
   }
 
   async function getGeneratedCard() {
-    if (!accessToken) {
+    if (!isSignedIn) {
       setGetCardResultText("Get card failed: Please sign in again.");
       return;
     }
@@ -1038,12 +1024,12 @@ export default function UserDashboard() {
     try {
       const res = await fetch(buildApiUrl("/api/cards/get"), {
         method: "POST",
-        headers: { Authorization: `Bearer ${accessToken}` },
+        credentials: userApiCredentials,
       });
       if (!res.ok) {
         if (res.status === 401) {
+          void clearServerSessionCookie();
           setIsSignedIn(false);
-          setAccessToken("");
           setProxyWallet(null);
           setTraderRank(null);
           setMyNfts([]);
@@ -1055,7 +1041,6 @@ export default function UserDashboard() {
           setGeneratedCardsTotalAvailable(0);
           setGeneratedCardsRemainingAvailable(0);
           setStatusText("Session expired. Please connect wallet again.");
-          safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
         }
         const text = await res.text();

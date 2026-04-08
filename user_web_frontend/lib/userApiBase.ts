@@ -7,11 +7,17 @@ export function buildUserApiUrl(path: string): string {
   return `${apiBase.replace(/\/$/, "")}${path}`;
 }
 
+/** Use on user API fetches so the HttpOnly session cookie is sent (cross-origin). */
+export const userApiCredentials: RequestCredentials = "include";
+
 export type SiteStatusResponse = { wallet_actions_disabled: boolean };
 
 export async function fetchSiteStatus(): Promise<SiteStatusResponse | null> {
   try {
-    const res = await fetch(buildUserApiUrl("/api/public/site-status"), { cache: "no-store" });
+    const res = await fetch(buildUserApiUrl("/api/public/site-status"), {
+      cache: "no-store",
+      credentials: userApiCredentials,
+    });
     if (!res.ok) return null;
     return (await res.json()) as SiteStatusResponse;
   } catch {

@@ -136,6 +136,7 @@ app = FastAPI(title="PolyStars User Web API", version="1.0.0")
 
 
 def _allowed_origins() -> List[str]:
+    """Explicit origins for credentialed CORS (HttpOnly cookie). Set USER_WEB_CORS_ORIGINS in production."""
     raw = os.getenv("USER_WEB_CORS_ORIGINS", "").strip()
     if raw:
         return [origin.strip() for origin in raw.split(",") if origin.strip()]
@@ -147,7 +148,7 @@ def _allowed_origins() -> List[str]:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins(),
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -161,6 +162,26 @@ JWT_ALG = "HS256"
 JWT_TTL_SECONDS = int(os.getenv("USER_WEB_JWT_TTL_SECONDS", "3600"))
 JWT_ISSUER = os.getenv("USER_WEB_JWT_ISSUER", "polystars-user-web-backend")
 JWT_AUDIENCE = os.getenv("USER_WEB_JWT_AUDIENCE", "polystars-user-web")
+
+
+def _access_cookie_name() -> str:
+    return os.getenv("USER_WEB_ACCESS_COOKIE_NAME", "polystars_user_access").strip() or "polystars_user_access"
+
+
+def _cookie_secure_flag() -> bool:
+    explicit = os.getenv("USER_WEB_COOKIE_SECURE", "").strip().lower()
+    if explicit in ("1", "true", "yes", "on"):
+        return True
+    if explicit in ("0", "false", "no", "off"):
+        return False
+    return os.getenv("NODE_ENV", "development") != "development"
+
+
+def _cookie_domain_value() -> Optional[str]:
+    domain = os.getenv("USER_WEB_COOKIE_DOMAIN", "").strip()
+    return domain or None
+
+
 CARD_BASE_URL = (
     os.getenv("CARD_BASE_URL")
     or os.getenv("NEXT_PUBLIC_APP_URL")
@@ -176,6 +197,14 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
     "/api/auth/wallet/verify": RateLimitConfig(
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
         max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_VERIFY_MAX", "20")),
+    ),
+    "/api/auth/wallet/session": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_SESSION_MAX", "90")),
+    ),
+    "/api/auth/wallet/logout": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_LOGOUT_MAX", "40")),
     ),
     "/api/eligibility": RateLimitConfig(
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
@@ -401,53 +430,54 @@ def _require_wallet_actions_enabled() -> None:
         )
 
 
+def _raw_access_token_from_request(request: Request) -> Optional[str]:
+    """Prefer HttpOnly session cookie; fall back to Authorization Bearer (e.g. tooling)."""
+    cookie_token = request.cookies.get(_access_cookie_name())
+    if cookie_token:
+        cookie_token = cookie_token.strip()
+        if cookie_token:
+            return cookie_token
+    auth_header = request.headers.get("authorization", "").strip()
+    if auth_header.lower().startswith("bearer "):
+        bearer = auth_header.split(" ", 1)[1].strip()
+        if bearer:
+            return bearer
+    return None
+
+
+def _decode_access_token_to_wallet(token: str) -> Optional[str]:
+    try:
+        decoded = jwt.decode(
+            token,
+            _jwt_secret(),
+            algorithms=[JWT_ALG],
+            audience=JWT_AUDIENCE,
+            issuer=JWT_ISSUER,
+        )
+    except Exception:
+        return None
+    token_type = str(decoded.get("type", ""))
+    subject = str(decoded.get("sub", "")).strip().lower()
+    if token_type != "access" or not subject:
+        return None
+    return subject
+
+
+def _try_extract_wallet_from_cookie_or_bearer(request: Request) -> Optional[str]:
+    raw = _raw_access_token_from_request(request)
+    if not raw:
+        return None
+    return _decode_access_token_to_wallet(raw)
+
+
 def _extract_wallet_from_request(request: Request) -> str:
-    auth_header = request.headers.get("authorization", "").strip()
-    if not auth_header.lower().startswith("bearer "):
+    raw = _raw_access_token_from_request(request)
+    if not raw:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    token = auth_header.split(" ", 1)[1].strip()
-    if not token:
+    wallet = _decode_access_token_to_wallet(raw)
+    if not wallet:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    try:
-        decoded = jwt.decode(
-            token,
-            _jwt_secret(),
-            algorithms=[JWT_ALG],
-            audience=JWT_AUDIENCE,
-            issuer=JWT_ISSUER,
-        )
-    except Exception:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    token_type = str(decoded.get("type", ""))
-    subject = str(decoded.get("sub", "")).strip().lower()
-    if token_type != "access" or not subject:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return subject
-
-
-def _try_extract_wallet_from_auth_header(request: Request) -> Optional[str]:
-    auth_header = request.headers.get("authorization", "").strip()
-    if not auth_header.lower().startswith("bearer "):
-        return None
-    token = auth_header.split(" ", 1)[1].strip()
-    if not token:
-        return None
-    try:
-        decoded = jwt.decode(
-            token,
-            _jwt_secret(),
-            algorithms=[JWT_ALG],
-            audience=JWT_AUDIENCE,
-            issuer=JWT_ISSUER,
-        )
-    except Exception:
-        return None
-    token_type = str(decoded.get("type", ""))
-    subject = str(decoded.get("sub", "")).strip().lower()
-    if token_type != "access" or not subject:
-        return None
-    return subject
+    return wallet
 
 
 def _warn_if_claims_uniqueness_index_missing() -> None:
@@ -1285,6 +1315,27 @@ def _load_wallet_signin_snapshot(user_wallet_address: str) -> Tuple[str, str]:
         conn.close()
 
 
+def _load_wallet_session_row(user_wallet_address: str) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT sign_in_count, proxy_wallet, trader_rank
+                FROM user_wallet_signins
+                WHERE LOWER(wallet_address) = LOWER(%s)
+                LIMIT 1
+                """,
+                (user_wallet_address,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return dict(row)
+    finally:
+        conn.close()
+
+
 def _load_trader_rank_for_user_wallet(user_wallet_address: str) -> str:
     conn = _get_connection()
     try:
@@ -1673,7 +1724,7 @@ async def rate_limit_middleware(request: Request, call_next):
         client_ip = request.client.host if request.client else "unknown"
         wallet_scope = ""
         if request.url.path == "/api/mint/base-sepolia":
-            wallet_sub = _try_extract_wallet_from_auth_header(request)
+            wallet_sub = _try_extract_wallet_from_cookie_or_bearer(request)
             wallet_scope = wallet_sub or "anon"
         bucket_key = f"{request.url.path}:{client_ip}:{wallet_scope}"
         now = monotonic()
@@ -1695,6 +1746,11 @@ def startup_checks() -> None:
     _configure_user_web_timing_logging()
     _warn_if_claims_uniqueness_index_missing()
     _ensure_user_generated_cards_schema()
+    if os.getenv("NODE_ENV", "development") != "development" and not _allowed_origins():
+        logger.warning(
+            "USER_WEB_CORS_ORIGINS is empty: set it to your user web origins (e.g. https://app.example.com) "
+            "so browsers can send the session cookie."
+        )
 
 
 @app.get("/api/health")
@@ -1991,7 +2047,7 @@ def wallet_verify(payload: VerifyRequest):
         _challenge_store.pop(payload.challenge_id, None)
 
     access_token = _issue_access_token(wallet_address)
-    return {
+    body: Dict[str, Any] = {
         "signed_in": True,
         "wallet_address": row[0],
         "first_seen_at": row[1].isoformat(),
@@ -1999,10 +2055,58 @@ def wallet_verify(payload: VerifyRequest):
         "sign_in_count": row[3],
         "proxy_wallet": row[4],
         "trader_rank": row[5],
-        "access_token": access_token,
-        "token_type": "Bearer",
         "expires_in": JWT_TTL_SECONDS,
     }
+    response = JSONResponse(content=body)
+    response.set_cookie(
+        key=_access_cookie_name(),
+        value=access_token,
+        max_age=JWT_TTL_SECONDS,
+        httponly=True,
+        secure=_cookie_secure_flag(),
+        samesite="lax",
+        path="/",
+        domain=_cookie_domain_value(),
+    )
+    return response
+
+
+@app.get("/api/auth/wallet/session")
+def wallet_session(request: Request) -> Dict[str, Any]:
+    """Restore dashboard session from HttpOnly cookie (or Bearer for tooling)."""
+    wallet = _try_extract_wallet_from_cookie_or_bearer(request)
+    if not wallet:
+        return {"signed_in": False}
+    db_row = _load_wallet_session_row(wallet)
+    if not db_row:
+        return {
+            "signed_in": True,
+            "wallet_address": wallet,
+            "sign_in_count": 0,
+            "proxy_wallet": None,
+            "trader_rank": None,
+        }
+    return {
+        "signed_in": True,
+        "wallet_address": wallet,
+        "sign_in_count": int(db_row.get("sign_in_count") or 0),
+        "proxy_wallet": str(db_row.get("proxy_wallet") or "").strip() or None,
+        "trader_rank": str(db_row.get("trader_rank") or "").strip() or None,
+    }
+
+
+@app.post("/api/auth/wallet/logout")
+def wallet_logout() -> JSONResponse:
+    response = JSONResponse(content={"signed_in": False})
+    response.delete_cookie(
+        key=_access_cookie_name(),
+        path="/",
+        domain=_cookie_domain_value(),
+        httponly=True,
+        secure=_cookie_secure_flag(),
+        samesite="lax",
+    )
+    return response
 
 
 @app.get("/api/polymarket/public-profile")
