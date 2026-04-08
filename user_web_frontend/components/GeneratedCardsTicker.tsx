@@ -54,6 +54,7 @@ const CARD_TICKER_PX_PER_SEC = 2124 / 70;
 const TICKER_MAX_CELLS_COARSE = 56;
 const TICKER_MAX_CELLS_FINE = 220;
 const TICKER_MAX_ITEMS_COARSE = 10;
+const TICKER_MAX_SEGMENTS_COARSE = 4;
 
 function clampTickerSegments(requested: number, itemCount: number, maxCells: number): number {
   if (itemCount <= 0) return 2;
@@ -152,26 +153,31 @@ export default function GeneratedCardsTicker() {
   }, [items, tickerLiteTheme]);
 
   const segmentCount = useMemo(() => {
-    if (tickerLiteTheme) return 1;
+    if (tickerLiteTheme) {
+      const raw = tickerSegmentCount(visibleItems.length, viewportWidth);
+      const clamped = clampTickerSegments(raw, visibleItems.length, tickerMaxCells);
+      return Math.max(2, Math.min(clamped, TICKER_MAX_SEGMENTS_COARSE));
+    }
     const raw = tickerSegmentCount(visibleItems.length, viewportWidth);
     return clampTickerSegments(raw, visibleItems.length, tickerMaxCells);
   }, [visibleItems.length, viewportWidth, tickerMaxCells, tickerLiteTheme]);
 
   const tickerDurationSec = useMemo(() => {
-    if (tickerLiteTheme) return 0;
     const w = segmentWidthPx(visibleItems.length);
-    if (w <= 0) return 70;
+    if (w <= 0) return tickerLiteTheme ? 28 : 70;
+    if (tickerLiteTheme) {
+      return Math.max(14, w / 44);
+    }
     return Math.max(8, w / CARD_TICKER_PX_PER_SEC);
   }, [visibleItems.length, tickerLiteTheme]);
 
   const loop = useMemo(() => {
-    if (tickerLiteTheme) return visibleItems;
     const out: CardTickerItem[] = [];
     for (let s = 0; s < segmentCount; s += 1) {
       out.push(...visibleItems);
     }
     return out;
-  }, [visibleItems, segmentCount, tickerLiteTheme]);
+  }, [visibleItems, segmentCount]);
 
   if (items.length === 0) return null;
 
@@ -202,12 +208,10 @@ export default function GeneratedCardsTicker() {
           <div
             className={`card-ticker-track${tickerLiteTheme ? " card-ticker-track-lite" : ""}`}
             style={
-              tickerLiteTheme
-                ? undefined
-                : ({
-                    "--ticker-segments": segmentCount,
-                    "--ticker-duration": `${tickerDurationSec}s`,
-                  } as CSSProperties)
+              {
+                "--ticker-segments": segmentCount,
+                "--ticker-duration": `${tickerDurationSec}s`,
+              } as CSSProperties
             }
           >
             {loop.map((item, index) => {
