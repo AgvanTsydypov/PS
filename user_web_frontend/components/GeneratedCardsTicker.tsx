@@ -53,6 +53,7 @@ const CARD_TICKER_PX_PER_SEC = 2124 / 70;
 /** Phones: cap total ticker cells (segments × items) to avoid tab/renderer OOM from hundreds of images + blend layers. */
 const TICKER_MAX_CELLS_COARSE = 56;
 const TICKER_MAX_CELLS_FINE = 220;
+const TICKER_MAX_ITEMS_COARSE = 10;
 
 function clampTickerSegments(requested: number, itemCount: number, maxCells: number): number {
   if (itemCount <= 0) return 2;
@@ -145,52 +146,72 @@ export default function GeneratedCardsTicker() {
     };
   }, []);
 
+  const visibleItems = useMemo(() => {
+    if (!tickerLiteTheme) return items;
+    return items.slice(0, TICKER_MAX_ITEMS_COARSE);
+  }, [items, tickerLiteTheme]);
+
   const segmentCount = useMemo(() => {
-    const raw = tickerSegmentCount(items.length, viewportWidth);
-    return clampTickerSegments(raw, items.length, tickerMaxCells);
-  }, [items.length, viewportWidth, tickerMaxCells]);
+    if (tickerLiteTheme) return 1;
+    const raw = tickerSegmentCount(visibleItems.length, viewportWidth);
+    return clampTickerSegments(raw, visibleItems.length, tickerMaxCells);
+  }, [visibleItems.length, viewportWidth, tickerMaxCells, tickerLiteTheme]);
 
   const tickerDurationSec = useMemo(() => {
-    const w = segmentWidthPx(items.length);
+    if (tickerLiteTheme) return 0;
+    const w = segmentWidthPx(visibleItems.length);
     if (w <= 0) return 70;
     return Math.max(8, w / CARD_TICKER_PX_PER_SEC);
-  }, [items.length]);
+  }, [visibleItems.length, tickerLiteTheme]);
 
   const loop = useMemo(() => {
+    if (tickerLiteTheme) return visibleItems;
     const out: CardTickerItem[] = [];
     for (let s = 0; s < segmentCount; s += 1) {
-      out.push(...items);
+      out.push(...visibleItems);
     }
     return out;
-  }, [items, segmentCount]);
+  }, [visibleItems, segmentCount, tickerLiteTheme]);
 
   if (items.length === 0) return null;
 
   return (
     <div className="card-ticker-section">
       <h2 className="card-ticker-heading">CLAIMED CARDS SHOWCASE</h2>
-      <section className="card-ticker-strip" aria-label="CLAIMED CARDS SHOWCASE">
+      <section
+        className={`card-ticker-strip${tickerLiteTheme ? " card-ticker-strip-lite" : ""}`}
+        aria-label="CLAIMED CARDS SHOWCASE"
+      >
         <div
-          className="card-ticker-viewport"
-          onMouseMove={(event) =>
-            handleCardGridMouseMove(event, {
-              wrapperSelector: ".card-ticker-item",
-              cardSelector: ".card-ticker-card",
-            })
+          className={`card-ticker-viewport${tickerLiteTheme ? " card-ticker-viewport-lite" : ""}`}
+          onMouseMove={
+            tickerLiteTheme
+              ? undefined
+              : (event) =>
+                  handleCardGridMouseMove(event, {
+                    wrapperSelector: ".card-ticker-item",
+                    cardSelector: ".card-ticker-card",
+                  })
           }
-          onMouseLeave={(event) => handleCardGridMouseLeave(event, ".card-ticker-card")}
+          onMouseLeave={
+            tickerLiteTheme
+              ? undefined
+              : (event) => handleCardGridMouseLeave(event, ".card-ticker-card")
+          }
         >
           <div
-            className="card-ticker-track"
+            className={`card-ticker-track${tickerLiteTheme ? " card-ticker-track-lite" : ""}`}
             style={
-              {
-                "--ticker-segments": segmentCount,
-                "--ticker-duration": `${tickerDurationSec}s`,
-              } as CSSProperties
+              tickerLiteTheme
+                ? undefined
+                : ({
+                    "--ticker-segments": segmentCount,
+                    "--ticker-duration": `${tickerDurationSec}s`,
+                  } as CSSProperties)
             }
           >
             {loop.map((item, index) => {
-              const cardId = `${item.slug}-${index}`;
+              const cardId = tickerLiteTheme ? item.slug : `${item.slug}-${index}`;
               const label =
                 item.card_title.trim() ||
                 item.slug ||
@@ -198,6 +219,29 @@ export default function GeneratedCardsTicker() {
               const isFlipped = Boolean(flippedCards[cardId]);
               const isAnimating = Boolean(animatingCards[cardId]);
               const backImageUrl = item.back_image_url || item.front_image_url;
+              if (tickerLiteTheme) {
+                return (
+                  <Link
+                    key={cardId}
+                    href={`/cards/${encodeURIComponent(item.slug)}`}
+                    className="card-ticker-item card-ticker-item-lite"
+                    aria-label={`Open card: ${label}`}
+                  >
+                    <article className="nft-card card-ticker-card card-ticker-card-lite">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        className="generated-card-image card-ticker-thumb"
+                        src={item.front_image_url}
+                        alt=""
+                        width={TICKER_THUMB_PX}
+                        height={TICKER_THUMB_HEIGHT_PX}
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    </article>
+                  </Link>
+                );
+              }
               return (
                 <div key={cardId} className="card-ticker-item">
                   <Link
