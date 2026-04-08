@@ -661,6 +661,27 @@ main {
   object-position: center;
 }
 
+@media (max-width: 640px) {
+  .card-ticker-viewport {
+    padding: 12px;
+  }
+
+  .card-ticker-track {
+    gap: 12px;
+  }
+
+  .card-ticker-card,
+  .card-ticker-thumb {
+    width: min(calc((100vw - 36px) / 2), calc(249px * 0.96 * 1.1));
+    height: auto;
+    aspect-ratio: 249 / 386;
+  }
+
+  .card-ticker-strip {
+    min-height: calc(((100vw - 36px) / 2) * (386 / 249) + 24px);
+  }
+}
+
 @keyframes cardTickerScroll {
   from {
     transform: translate3d(0, 0, 0);
