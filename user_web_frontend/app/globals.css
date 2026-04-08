@@ -512,6 +512,17 @@ main {
   animation-play-state: paused;
 }
 
+/* Coarse pointers (phones): drop will-change to reduce GPU memory / compositor pressure with many cards. */
+@media (pointer: coarse) {
+  .card-ticker-track {
+    will-change: auto;
+  }
+
+  .card-ticker-card.nft-card-tilt {
+    will-change: auto;
+  }
+}
+
 .card-ticker-item {
   flex: 0 0 auto;
   position: relative;
