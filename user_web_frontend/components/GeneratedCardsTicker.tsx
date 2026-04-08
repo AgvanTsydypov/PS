@@ -50,6 +50,16 @@ const TICKER_LINK_BORDER_PX = 2;
 /** One full loop scrolls one segment; duration = segmentWidth / this → constant px/s regardless of card count. */
 const CARD_TICKER_PX_PER_SEC = 2124 / 70;
 
+/** Phones: cap total ticker cells (segments × items) to avoid tab/renderer OOM from hundreds of images + blend layers. */
+const TICKER_MAX_CELLS_COARSE = 56;
+const TICKER_MAX_CELLS_FINE = 220;
+
+function clampTickerSegments(requested: number, itemCount: number, maxCells: number): number {
+  if (itemCount <= 0) return 2;
+  const byMemory = Math.max(2, Math.floor(maxCells / itemCount));
+  return Math.min(requested, byMemory);
+}
+
 function segmentWidthPx(itemCount: number): number {
   if (itemCount <= 0) return 0;
   const cell = TICKER_THUMB_PX + TICKER_LINK_BORDER_PX;
@@ -69,6 +79,8 @@ function tickerSegmentCount(itemCount: number, viewportWidthPx: number): number 
 export default function GeneratedCardsTicker() {
   const [items, setItems] = useState<CardTickerItem[]>([]);
   const [viewportWidth, setViewportWidth] = useState(1200);
+  const [tickerMaxCells, setTickerMaxCells] = useState(TICKER_MAX_CELLS_FINE);
+  const [tickerLiteTheme, setTickerLiteTheme] = useState(false);
   const [flippedCards, setFlippedCards] = useState<Record<string, boolean>>({});
   const [animatingCards, setAnimatingCards] = useState<Record<string, boolean>>({});
   const flipTimerRef = useRef<Record<string, number | null>>({});
@@ -110,15 +122,33 @@ export default function GeneratedCardsTicker() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mqCoarse = window.matchMedia("(pointer: coarse)");
+    const mqNarrow = window.matchMedia("(max-width: 768px)");
+    const apply = () => {
+      const reduceLoad = mqCoarse.matches || mqNarrow.matches;
+      setTickerMaxCells(reduceLoad ? TICKER_MAX_CELLS_COARSE : TICKER_MAX_CELLS_FINE);
+      setTickerLiteTheme(reduceLoad);
+    };
+    apply();
+    mqCoarse.addEventListener("change", apply);
+    mqNarrow.addEventListener("change", apply);
+    return () => {
+      mqCoarse.removeEventListener("change", apply);
+      mqNarrow.removeEventListener("change", apply);
+    };
+  }, []);
+
+  useEffect(() => {
     return () => {
       clearFlipTimers(flipTimerRef);
     };
   }, []);
 
-  const segmentCount = useMemo(
-    () => tickerSegmentCount(items.length, viewportWidth),
-    [items.length, viewportWidth],
-  );
+  const segmentCount = useMemo(() => {
+    const raw = tickerSegmentCount(items.length, viewportWidth);
+    return clampTickerSegments(raw, items.length, tickerMaxCells);
+  }, [items.length, viewportWidth, tickerMaxCells]);
 
   const tickerDurationSec = useMemo(() => {
     const w = segmentWidthPx(items.length);
@@ -177,7 +207,7 @@ export default function GeneratedCardsTicker() {
                     aria-label={`Open card: ${label}`}
                   />
                   <article
-                    className={`nft-card nft-card-tilt theme-vivid card-ticker-card ${isAnimating ? "generated-card-preview-card-flipping" : ""}`}
+                    className={`nft-card nft-card-tilt ${tickerLiteTheme ? "theme-subtle" : "theme-vivid"} card-ticker-card ${isAnimating ? "generated-card-preview-card-flipping" : ""}`}
                     data-center-navigate="1"
                     onPointerDown={(event) => {
                       markCardPressStart(event.currentTarget, event.clientX, event.clientY);

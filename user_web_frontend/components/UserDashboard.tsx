@@ -188,6 +188,30 @@ const AUTH_TOKEN_STORAGE_KEY = "polystars_user_access_token";
 const AUTH_SESSION_META_STORAGE_KEY = "polystars_user_session_meta";
 const MY_CARDS_FLIP_STORAGE_KEY_PREFIX = "polystars_my_cards_flipped_v1";
 
+const safeLocalStorage = {
+  getItem(key: string): string | null {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  setItem(key: string, value: string): void {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {
+      /* Quota exceeded or private mode — avoid crashing the app */
+    }
+  },
+  removeItem(key: string): void {
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      /* ignore */
+    }
+  },
+};
+
 function buildApiUrl(path: string): string {
   if (apiBase === "/") return path;
   return `${apiBase.replace(/\/$/, "")}${path}`;
@@ -214,7 +238,7 @@ function isJwtExpired(payload: JwtPayload | null): boolean {
 
 function loadStoredSessionMeta(): StoredSessionMeta | null {
   try {
-    const raw = window.localStorage.getItem(AUTH_SESSION_META_STORAGE_KEY);
+    const raw = safeLocalStorage.getItem(AUTH_SESSION_META_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as StoredSessionMeta;
     if (!parsed || typeof parsed !== "object") return null;
@@ -225,11 +249,11 @@ function loadStoredSessionMeta(): StoredSessionMeta | null {
 }
 
 function saveStoredSessionMeta(meta: StoredSessionMeta): void {
-  window.localStorage.setItem(AUTH_SESSION_META_STORAGE_KEY, JSON.stringify(meta));
+  safeLocalStorage.setItem(AUTH_SESSION_META_STORAGE_KEY, JSON.stringify(meta));
 }
 
 function clearStoredSessionMeta(): void {
-  window.localStorage.removeItem(AUTH_SESSION_META_STORAGE_KEY);
+  safeLocalStorage.removeItem(AUTH_SESSION_META_STORAGE_KEY);
 }
 
 function buildMyCardsFlipStorageKey(wallet: string): string | null {
@@ -242,7 +266,7 @@ function loadStoredMyCardsFlipped(wallet: string): Record<string, boolean> {
   const storageKey = buildMyCardsFlipStorageKey(wallet);
   if (!storageKey) return {};
   try {
-    const raw = window.localStorage.getItem(storageKey);
+    const raw = safeLocalStorage.getItem(storageKey);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     if (!parsed || typeof parsed !== "object") return {};
@@ -266,7 +290,7 @@ function saveStoredMyCardsFlipped(wallet: string, flippedBySlug: Record<string, 
     if (!slug || flipped !== true) return;
     out[slug] = true;
   });
-  window.localStorage.setItem(storageKey, JSON.stringify(out));
+  safeLocalStorage.setItem(storageKey, JSON.stringify(out));
 }
 
 // ── Legacy fallback: walk window.ethereum ─────────────────────────────────────
@@ -363,11 +387,11 @@ export default function UserDashboard() {
   }, []);
 
   useEffect(() => {
-    const token = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) ?? "";
+    const token = safeLocalStorage.getItem(AUTH_TOKEN_STORAGE_KEY) ?? "";
     if (!token) return;
     const payload = parseJwtPayload(token);
     if (!payload || isJwtExpired(payload)) {
-      window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
       clearStoredSessionMeta();
       return;
     }
@@ -562,7 +586,7 @@ export default function UserDashboard() {
           setMyCardsFetchedAt(null);
           setGeneratedCardsTotalAvailable(0);
           setGeneratedCardsRemainingAvailable(0);
-          window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+          safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
         }
         const text = await res.text();
@@ -609,7 +633,7 @@ export default function UserDashboard() {
           setMyNftsFetchedAt(null);
           setMyCards([]);
           setMyCardsFetchedAt(null);
-          window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+          safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
         }
         const text = await res.text();
@@ -656,7 +680,7 @@ export default function UserDashboard() {
     setStatusText("Logged out");
     setIsWalletButtonHovered(false);
     selectedProviderRef.current = null;
-    window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
     clearStoredSessionMeta();
   }
 
@@ -735,7 +759,7 @@ export default function UserDashboard() {
       const token = String(verify.access_token ?? "");
       if (verify.signed_in && token) {
         setAccessToken(token);
-        window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+        safeLocalStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
         setProxyWallet(resolvedProxyWallet);
         setTraderRank(resolvedTraderRank);
         saveStoredSessionMeta({
@@ -748,7 +772,7 @@ export default function UserDashboard() {
         });
       } else {
         setAccessToken("");
-        window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+        safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
         setProxyWallet(null);
         setTraderRank(null);
         setMyNfts([]);
@@ -779,7 +803,7 @@ export default function UserDashboard() {
       setCanMintNow(false);
       setMintResultText("");
       setGetCardResultText("");
-      window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
       clearStoredSessionMeta();
     } finally {
       setIsBusy(false);
@@ -827,7 +851,7 @@ export default function UserDashboard() {
       setCanMintNow(false);
       setMintResultText("");
       setGetCardResultText("");
-      window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
       clearStoredSessionMeta();
       await signInWith(provider, address, name);
     } catch (error) {
@@ -880,7 +904,7 @@ export default function UserDashboard() {
           setGeneratedCardsTotalAvailable(0);
           setGeneratedCardsRemainingAvailable(0);
           setStatusText("Session expired. Please connect wallet again.");
-          window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+          safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
         }
         const text = await res.text();
@@ -951,7 +975,7 @@ export default function UserDashboard() {
           setGeneratedCardsTotalAvailable(0);
           setGeneratedCardsRemainingAvailable(0);
           setStatusText("Session expired. Please connect wallet again.");
-          window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+          safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
         }
         const text = await res.text();
@@ -1031,7 +1055,7 @@ export default function UserDashboard() {
           setGeneratedCardsTotalAvailable(0);
           setGeneratedCardsRemainingAvailable(0);
           setStatusText("Session expired. Please connect wallet again.");
-          window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+          safeLocalStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
           clearStoredSessionMeta();
         }
         const text = await res.text();
