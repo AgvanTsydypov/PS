@@ -7,6 +7,7 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -122,6 +123,7 @@ class SimulateGeneratedCardsBatchRequest(BaseModel):
 
     max_count: int = Field(default=50, ge=1, le=200)
     origin_match_fraction: float = Field(default=0.1, ge=0.0, le=1.0)
+    request_id: Optional[str] = None
     maximum_diversity: bool = Field(
         default=True,
         description="If true, pick a showcase-diverse plan; if false, legacy per-draw random eligible row.",
@@ -192,9 +194,11 @@ class CardBuilderPreviewRequest(BaseModel):
 class WsHub:
     def __init__(self) -> None:
         self._connections: List[WebSocket] = []
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
+        self._loop = asyncio.get_running_loop()
         self._connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket) -> None:
@@ -211,6 +215,20 @@ class WsHub:
                 stale.append(ws)
         for ws in stale:
             self.disconnect(ws)
+
+    def broadcast_threadsafe(self, event: str, payload: Dict[str, Any]) -> None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        future = asyncio.run_coroutine_threadsafe(self.broadcast(event, payload), loop)
+
+        def _consume_result(done_future: "asyncio.Future[Any]") -> None:
+            try:
+                done_future.result()
+            except Exception:
+                logger.warning("WebSocket broadcast failed for event=%s", event, exc_info=True)
+
+        future.add_done_callback(_consume_result)
 
 
 class SeasonWorkbenchService:
@@ -3181,13 +3199,34 @@ def apply_advanced(req: AdvancedScenarioRequest) -> Dict[str, str]:
 
 @app.post("/api/scenarios/simulate-generated-cards-batch")
 def simulate_generated_cards_batch(req: SimulateGeneratedCardsBatchRequest) -> Dict[str, Any]:
+    request_id = str(req.request_id or uuid.uuid4().hex).strip()
+
+    def progress_callback(payload: Dict[str, Any]) -> None:
+        ws_hub.broadcast_threadsafe(
+            "simulate_generated_cards_batch",
+            {
+                "request_id": request_id,
+                **payload,
+            },
+        )
+
     try:
-        return run_admin_simulated_card_generations(
+        result = run_admin_simulated_card_generations(
             max_count=req.max_count,
             origin_match_fraction=req.origin_match_fraction,
             maximum_diversity=req.maximum_diversity,
+            progress_callback=progress_callback,
         )
+        return {"request_id": request_id, **result}
     except Exception as exc:
+        ws_hub.broadcast_threadsafe(
+            "simulate_generated_cards_batch",
+            {
+                "request_id": request_id,
+                "stage": "error",
+                "error": str(exc),
+            },
+        )
         logger.exception("simulate-generated-cards-batch failed")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

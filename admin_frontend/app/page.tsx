@@ -304,6 +304,7 @@ type EventCardsSortKey =
 
 type LocalCountdownItem = { label: string; value: string };
 type SimulateGeneratedCardsBatchResponse = {
+  request_id?: string;
   requested: number;
   planned: number;
   generated: number;
@@ -317,6 +318,16 @@ type SimulateGeneratedCardsBatchResponse = {
   showcase_eligible_total?: number | null;
   showcase_candidate_pool_size?: number | null;
   showcase_pool_cap?: number | null;
+};
+type SimulateGeneratedCardsBatchWsPayload = {
+  request_id?: string;
+  stage?: "started" | "planned" | "progress" | "completed" | "stopped" | "error";
+  requested?: number;
+  planned?: number;
+  generated?: number;
+  current_chunk_size?: number;
+  stopped_reason?: string | null;
+  error?: string;
 };
 type ScenarioSimulateProgress = {
   requestedTotal: number;
@@ -570,6 +581,15 @@ export default function HomePage() {
   const [scenarioSimulateBatchBusy, setScenarioSimulateBatchBusy] = useState(false);
   const [scenarioSimulateProgress, setScenarioSimulateProgress] =
     useState<ScenarioSimulateProgress | null>(null);
+  const scenarioSimulateActiveRequestRef = useRef<{
+    requestId: string;
+    requestedBase: number;
+    generatedBase: number;
+    chunkIndex: number;
+    chunkTotal: number;
+    currentChunkSize: number;
+    lastLoggedGenerated: number;
+  } | null>(null);
 
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetOutput, setResetOutput] = useState("");
@@ -1414,6 +1434,64 @@ export default function HomePage() {
           event: string;
           payload: { status?: string; message?: string; error?: string };
         };
+        if (payload.event === "simulate_generated_cards_batch") {
+          const sim = payload.payload as SimulateGeneratedCardsBatchWsPayload;
+          const active = scenarioSimulateActiveRequestRef.current;
+          if (!active || sim.request_id !== active.requestId) {
+            return;
+          }
+
+          if (sim.stage === "progress" || sim.stage === "planned" || sim.stage === "started") {
+            const chunkGenerated = Math.max(0, sim.generated ?? 0);
+            setScenarioSimulateProgress((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    chunkIndex: active.chunkIndex,
+                    chunkTotal: active.chunkTotal,
+                    currentChunkSize: active.currentChunkSize,
+                    generatedCompleted: active.generatedBase + chunkGenerated,
+                    status: "running",
+                  }
+                : prev
+            );
+            if (
+              sim.stage === "progress" &&
+              chunkGenerated > active.lastLoggedGenerated &&
+              (chunkGenerated === active.currentChunkSize || chunkGenerated - active.lastLoggedGenerated >= 5)
+            ) {
+              active.lastLoggedGenerated = chunkGenerated;
+              setScenarioOutput(
+                (prev) =>
+                  `${prev}[${new Date().toISOString()}] Simulate generate cards: live chunk ${active.chunkIndex}/${active.chunkTotal} generated=${chunkGenerated}/${active.currentChunkSize}\n`
+              );
+            }
+            return;
+          }
+
+          if (sim.stage === "error" && sim.error) {
+            setScenarioOutput(
+              (prev) =>
+                `${prev}[${new Date().toISOString()}] Simulate generate cards: live error chunk ${active.chunkIndex}/${active.chunkTotal}: ${sim.error}\n`
+            );
+            return;
+          }
+
+          if (sim.stage === "stopped" && sim.stopped_reason) {
+            setScenarioSimulateProgress((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    status: "stopped",
+                    stoppedReason: sim.stopped_reason,
+                  }
+                : prev
+            );
+            return;
+          }
+
+          return;
+        }
         const wsDetails = payload.payload?.message || payload.payload?.error || "";
         const msg = `[WS:${payload.event}] ${payload.payload?.status ?? ""} ${wsDetails}`.trim();
         setClaimOutput((prev) => `${prev}${msg}\n`);
@@ -3366,6 +3444,16 @@ export default function HomePage() {
                           max_count - requestedCompleted
                         );
                         if (chunkSize <= 0) break;
+                        const requestId = crypto.randomUUID();
+                        scenarioSimulateActiveRequestRef.current = {
+                          requestId,
+                          requestedBase: requestedCompleted,
+                          generatedBase: generatedCompleted,
+                          chunkIndex: chunkIndex + 1,
+                          chunkTotal,
+                          currentChunkSize: chunkSize,
+                          lastLoggedGenerated: 0,
+                        };
                         setScenarioSimulateProgress({
                           requestedTotal: max_count,
                           requestedCompleted,
@@ -3384,6 +3472,7 @@ export default function HomePage() {
                           {
                             method: "POST",
                             body: JSON.stringify({
+                              request_id: requestId,
                               max_count: chunkSize,
                               origin_match_fraction,
                               maximum_diversity,
@@ -3429,6 +3518,7 @@ export default function HomePage() {
                           );
                           break;
                         }
+                        scenarioSimulateActiveRequestRef.current = null;
                       }
 
                       setScenarioSimulateProgress({
@@ -3457,9 +3547,11 @@ export default function HomePage() {
                       setOk(
                         `Simulated ${generatedCompleted} card(s) in ${Math.max(1, Math.ceil(requestedCompleted / simulateGeneratedCardsChunkSize))}/${chunkTotal} chunk(s); ${originClaimCompleted} with origin proxy match.`
                       );
+                      scenarioSimulateActiveRequestRef.current = null;
                       await refreshOverview();
                     } catch (e) {
                       const message = e instanceof Error ? e.message : String(e);
+                      scenarioSimulateActiveRequestRef.current = null;
                       setScenarioSimulateProgress((prev) =>
                         prev
                           ? {
