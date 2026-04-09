@@ -2,43 +2,21 @@
 
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
+import {
+  fetchActiveSeasons,
+  fetchServerTime,
+  type SeasonResponse,
+} from "../lib/userApiBase";
 
-const apiBase =
-  process.env.NEXT_PUBLIC_USER_API_BASE_URL ??
-  (process.env.NODE_ENV === "development" ? "http://localhost:8011" : "/");
-
-function buildApiUrl(path: string): string {
-  if (apiBase === "/") return path;
-  return `${apiBase.replace(/\/$/, "")}${path}`;
-}
-
-function extractErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "object" && error !== null && "message" in error) {
-    return String((error as { message: unknown }).message);
-  }
-  return JSON.stringify(error);
-}
-
-type SeasonResponse = {
-  id: number;
-  type: string;
-  season_number: number;
-  title: string;
-  short_description: string;
-  total_supply: number;
-  remaining_supply: number;
-  end_date: string | null;
-  is_active: boolean;
-  phase: string;
-  phase_reason: string;
-};
+const SEASONS_RETRY_DELAYS_MS = [3000, 8000, 15000, 30000];
 
 export type ActiveSeasonsBoardHandle = {
   refresh: () => Promise<void>;
@@ -46,53 +24,116 @@ export type ActiveSeasonsBoardHandle = {
 
 type ActiveSeasonsBoardProps = {
   footer?: ReactNode;
+  initialSeasons?: SeasonResponse[];
+  initialServerNowIso?: string | null;
 };
 
 export const ActiveSeasonsBoard = forwardRef<
   ActiveSeasonsBoardHandle,
   ActiveSeasonsBoardProps
->(function ActiveSeasonsBoard({ footer }, ref) {
-  const [activeSeasons, setActiveSeasons] = useState<SeasonResponse[]>([]);
+>(function ActiveSeasonsBoard(
+  { footer, initialSeasons = [], initialServerNowIso = null },
+  ref,
+) {
+  const initialServerNowMs = initialServerNowIso
+    ? Date.parse(initialServerNowIso)
+    : Number.NaN;
+  const hasInitialServerTime = !Number.isNaN(initialServerNowMs);
+  const [activeSeasons, setActiveSeasons] = useState<SeasonResponse[]>(initialSeasons);
   const [seasonError, setSeasonError] = useState("");
-  const [serverNowBaseMs, setServerNowBaseMs] = useState<number | null>(null);
-  const [clientNowAtSyncMs, setClientNowAtSyncMs] = useState<number | null>(
-    null,
+  const [loading, setLoading] = useState(initialSeasons.length === 0);
+  const [serverNowBaseMs, setServerNowBaseMs] = useState<number | null>(
+    hasInitialServerTime ? initialServerNowMs : null,
   );
-  const [syncedNowMs, setSyncedNowMs] = useState<number>(() => Date.now());
+  const [clientNowAtSyncMs, setClientNowAtSyncMs] = useState<number | null>(
+    hasInitialServerTime ? Date.now() : null,
+  );
+  const [syncedNowMs, setSyncedNowMs] = useState<number>(
+    hasInitialServerTime ? initialServerNowMs : Date.now(),
+  );
+  const activeSeasonsRef = useRef(activeSeasons);
+  const retryTimerRef = useRef<number | null>(null);
+  const retryAttemptRef = useRef(0);
 
-  async function refreshSeasonsFromApi() {
-    try {
-      setSeasonError("");
-      const timeRes = await fetch(buildApiUrl("/api/server-time"));
-      if (timeRes.ok) {
-        const timePayload = (await timeRes.json()) as { now_utc_iso?: string };
-        const parsedMs = Date.parse(String(timePayload.now_utc_iso ?? ""));
-        if (!Number.isNaN(parsedMs)) {
-          setServerNowBaseMs(parsedMs);
-          setClientNowAtSyncMs(Date.now());
-          setSyncedNowMs(parsedMs);
-        }
-      }
+  useEffect(() => {
+    activeSeasonsRef.current = activeSeasons;
+  }, [activeSeasons]);
 
-      const res = await fetch(buildApiUrl("/api/seasons/active"));
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || "Failed to load seasons");
-      }
-      const allSeasons = (await res.json()) as SeasonResponse[];
-      setActiveSeasons(allSeasons);
-    } catch (error) {
-      setSeasonError(extractErrorMessage(error));
+  const refreshSeasonsFromApi = useCallback(async () => {
+    if (retryTimerRef.current != null) {
+      window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
     }
-  }
+
+    const hadSeasons = activeSeasonsRef.current.length > 0;
+    if (!hadSeasons) {
+      setLoading(true);
+    }
+    setSeasonError("");
+
+    const [timePayload, allSeasons] = await Promise.all([
+      fetchServerTime({ retries: 3 }),
+      fetchActiveSeasons({ retries: 3 }),
+    ]);
+
+    const parsedMs = Date.parse(String(timePayload?.now_utc_iso ?? ""));
+    if (!Number.isNaN(parsedMs)) {
+      setServerNowBaseMs(parsedMs);
+      setClientNowAtSyncMs(Date.now());
+      setSyncedNowMs(parsedMs);
+    }
+
+    if (allSeasons) {
+      retryAttemptRef.current = 0;
+      setActiveSeasons(allSeasons);
+      setLoading(false);
+      return;
+    }
+
+    if (!hadSeasons) {
+      setSeasonError("Unable to load seasons right now.");
+    }
+    setLoading(false);
+
+    const delayMs =
+      SEASONS_RETRY_DELAYS_MS[
+        Math.min(retryAttemptRef.current, SEASONS_RETRY_DELAYS_MS.length - 1)
+      ] ?? 30000;
+    retryAttemptRef.current += 1;
+    retryTimerRef.current = window.setTimeout(() => {
+      void refreshSeasonsFromApi();
+    }, delayMs);
+  }, []);
 
   useImperativeHandle(ref, () => ({
     refresh: refreshSeasonsFromApi,
-  }));
+  }), [refreshSeasonsFromApi]);
 
   useEffect(() => {
     void refreshSeasonsFromApi();
-  }, []);
+
+    const handleOnline = () => {
+      retryAttemptRef.current = 0;
+      void refreshSeasonsFromApi();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      retryAttemptRef.current = 0;
+      void refreshSeasonsFromApi();
+    };
+
+    window.addEventListener("online", handleOnline);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (retryTimerRef.current != null) {
+        window.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+    };
+  }, [refreshSeasonsFromApi]);
 
   useEffect(() => {
     if (serverNowBaseMs == null || clientNowAtSyncMs == null) return;
@@ -145,14 +186,18 @@ export const ActiveSeasonsBoard = forwardRef<
   return (
     <section className="season-board season-board-standalone">
       <div className="season-board-title">Active seasons</div>
-      {seasonError ? (
+      {seasonError && seasonCards.length === 0 ? (
         <div className="season-board-muted">
           Unable to load seasons right now.
         </div>
       ) : null}
-      {seasonCards.length === 0 && !seasonError ? (
+      {loading && seasonCards.length === 0 ? (
+        <div className="season-board-muted">Loading active seasons...</div>
+      ) : null}
+      {seasonCards.length === 0 && !seasonError && !loading ? (
         <div className="season-board-muted">No active seasons right now.</div>
-      ) : (
+      ) : null}
+      {seasonCards.length > 0 ? (
         <div className="season-list">
           {seasonCards.map((season) => (
             <article key={season.id} className="season-card">
@@ -177,7 +222,7 @@ export const ActiveSeasonsBoard = forwardRef<
             </article>
           ))}
         </div>
-      )}
+      ) : null}
       {footer}
     </section>
   );
