@@ -240,6 +240,11 @@ _rate_limit_store: Dict[str, deque[float]] = defaultdict(deque)
 _wallet_actions_db_cache_lock = threading.Lock()
 _wallet_actions_db_cache: Optional[Tuple[float, bool]] = None
 _WALLET_ACTIONS_DB_CACHE_TTL_SECONDS = float(os.getenv("USER_WEB_WALLET_ACTIONS_DB_CACHE_TTL", "2"))
+_cards_ticker_cache_lock = threading.Lock()
+_cards_ticker_cache: Dict[Tuple[int, str], Tuple[float, Dict[str, Any]]] = {}
+USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS = float(
+    os.getenv("USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS", "30")
+)
 _winner_catalog_join_total_lock = threading.Lock()
 _winner_catalog_join_total_cache: Tuple[float, int] = (0.0, 0)
 
@@ -1027,6 +1032,40 @@ def _absolute_asset_url(request: Request, asset_path: str) -> str:
     if asset_path.startswith("http://") or asset_path.startswith("https://"):
         return asset_path
     return urllib.parse.urljoin(str(request.base_url), asset_path.lstrip("/"))
+
+
+def _clone_cards_ticker_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "items": [dict(item) for item in list(payload.get("items") or [])],
+        "total": int(payload.get("total") or 0),
+        "fetched_at": str(payload.get("fetched_at") or ""),
+    }
+
+
+def _cards_ticker_cache_key(request: Request, safe_limit: int) -> Tuple[int, str]:
+    return safe_limit, str(request.base_url)
+
+
+def _get_cards_ticker_cached(request: Request, safe_limit: int) -> Optional[Dict[str, Any]]:
+    if USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS <= 0:
+        return None
+    cache_key = _cards_ticker_cache_key(request, safe_limit)
+    now = monotonic()
+    with _cards_ticker_cache_lock:
+        cached = _cards_ticker_cache.get(cache_key)
+        if cached and (now - cached[0]) < USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS:
+            return _clone_cards_ticker_payload(cached[1])
+        if cached is not None:
+            _cards_ticker_cache.pop(cache_key, None)
+    return None
+
+
+def _set_cards_ticker_cached(request: Request, safe_limit: int, payload: Dict[str, Any]) -> None:
+    if USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS <= 0:
+        return
+    cache_key = _cards_ticker_cache_key(request, safe_limit)
+    with _cards_ticker_cache_lock:
+        _cards_ticker_cache[cache_key] = (monotonic(), _clone_cards_ticker_payload(payload))
 
 
 def _remote_image_to_data_uri(image_url: str, *, timeout_seconds: Optional[float] = None) -> str:
@@ -2198,6 +2237,10 @@ def generated_cards_ticker(request: Request, limit: Optional[int] = None) -> Dic
         except (TypeError, ValueError):
             safe_limit = ticker_default
 
+    cached_payload = _get_cards_ticker_cached(request, safe_limit)
+    if cached_payload is not None:
+        return cached_payload
+
     conn = _get_connection()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
@@ -2240,11 +2283,13 @@ def generated_cards_ticker(request: Request, limit: Optional[int] = None) -> Dic
             }
         )
 
-    return {
+    payload = {
         "items": items,
         "total": len(items),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
+    _set_cards_ticker_cached(request, safe_limit, payload)
+    return payload
 
 
 @app.get("/api/cards/{slug}")
