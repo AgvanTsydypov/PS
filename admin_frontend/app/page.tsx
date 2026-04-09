@@ -303,6 +303,31 @@ type EventCardsSortKey =
   | "updated_at";
 
 type LocalCountdownItem = { label: string; value: string };
+type SimulateGeneratedCardsBatchResponse = {
+  requested: number;
+  planned: number;
+  generated: number;
+  origin_claim_cards: number;
+  remaining_supply_before: number;
+  remaining_supply_after: number;
+  origin_slots_skipped_no_winner_proxy: number;
+  errors: string[];
+  stopped_reason?: string;
+  maximum_diversity?: boolean;
+  showcase_eligible_total?: number | null;
+  showcase_candidate_pool_size?: number | null;
+  showcase_pool_cap?: number | null;
+};
+type ScenarioSimulateProgress = {
+  requestedTotal: number;
+  requestedCompleted: number;
+  generatedCompleted: number;
+  chunkIndex: number;
+  chunkTotal: number;
+  currentChunkSize: number;
+  status: "running" | "completed" | "stopped" | "error";
+  stoppedReason?: string | null;
+};
 
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "overview", label: "Overview" },
@@ -347,6 +372,7 @@ const legacyEntryBracketMap: Record<string, typeof cardEntryBracketOptions[numbe
   VECTOR: "[0.60 - 0.80]",
   HARVESTER: "[0.80 - 0.97]",
 };
+const simulateGeneratedCardsChunkSize = 10;
 
 function normalizeChoice<T extends readonly string[]>(
   raw: string | null | undefined,
@@ -542,6 +568,8 @@ export default function HomePage() {
   const [scenarioSimulateOriginPercent, setScenarioSimulateOriginPercent] = useState("10");
   const [scenarioSimulateMaximumDiversity, setScenarioSimulateMaximumDiversity] = useState(true);
   const [scenarioSimulateBatchBusy, setScenarioSimulateBatchBusy] = useState(false);
+  const [scenarioSimulateProgress, setScenarioSimulateProgress] =
+    useState<ScenarioSimulateProgress | null>(null);
 
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetOutput, setResetOutput] = useState("");
@@ -3292,7 +3320,7 @@ export default function HomePage() {
                   void run(async () => {
                     setScenarioSimulateBatchBusy(true);
                     try {
-                      appendScenarioLog("Simulate generate cards: started…");
+                      setScenarioSimulateProgress(null);
                       const maxRaw = Number.parseInt(scenarioSimulateMaxCards.trim(), 10);
                       const max_count = Number.isFinite(maxRaw)
                         ? Math.min(200, Math.max(1, maxRaw))
@@ -3303,39 +3331,144 @@ export default function HomePage() {
                         : 0;
                       const origin_match_fraction = originPct / 100;
                       const maximum_diversity = scenarioSimulateMaximumDiversity;
-                      const out = await fetchJSON<{
-                        requested: number;
-                        planned: number;
-                        generated: number;
-                        origin_claim_cards: number;
-                        remaining_supply_before: number;
-                        remaining_supply_after: number;
-                        origin_slots_skipped_no_winner_proxy: number;
-                        errors: string[];
-                        stopped_reason?: string;
-                        maximum_diversity?: boolean;
-                        showcase_eligible_total?: number | null;
-                        showcase_candidate_pool_size?: number | null;
-                        showcase_pool_cap?: number | null;
-                      }>("/api/scenarios/simulate-generated-cards-batch", {
-                        method: "POST",
-                        body: JSON.stringify({ max_count, origin_match_fraction, maximum_diversity }),
+                      const chunkTotal = Math.ceil(max_count / simulateGeneratedCardsChunkSize);
+                      let requestedCompleted = 0;
+                      let generatedCompleted = 0;
+                      let plannedCompleted = 0;
+                      let originClaimCompleted = 0;
+                      let originSlotsSkippedNoWinnerProxy = 0;
+                      let remainingSupplyBefore: number | null = null;
+                      let remainingSupplyAfter: number | null = null;
+                      let showcaseEligibleTotal: number | null = null;
+                      let showcaseCandidatePoolSize: number | null = null;
+                      let showcasePoolCap: number | null = null;
+                      let stoppedReason = "";
+                      const errors: string[] = [];
+
+                      appendScenarioLog(
+                        `Simulate generate cards: started requested=${max_count} chunk_size=${simulateGeneratedCardsChunkSize} origin%=${originPct} max_diversity=${maximum_diversity ? "on" : "off"}`
+                      );
+                      setScenarioSimulateProgress({
+                        requestedTotal: max_count,
+                        requestedCompleted: 0,
+                        generatedCompleted: 0,
+                        chunkIndex: 0,
+                        chunkTotal,
+                        currentChunkSize: 0,
+                        status: "running",
+                        stoppedReason: null,
+                      });
+
+                      for (let chunkIndex = 0; chunkIndex < chunkTotal; chunkIndex += 1) {
+                        const chunkSize = Math.min(
+                          simulateGeneratedCardsChunkSize,
+                          max_count - requestedCompleted
+                        );
+                        if (chunkSize <= 0) break;
+                        setScenarioSimulateProgress({
+                          requestedTotal: max_count,
+                          requestedCompleted,
+                          generatedCompleted,
+                          chunkIndex: chunkIndex + 1,
+                          chunkTotal,
+                          currentChunkSize: chunkSize,
+                          status: "running",
+                          stoppedReason: null,
+                        });
+                        appendScenarioLog(
+                          `Simulate generate cards: chunk ${chunkIndex + 1}/${chunkTotal} started requested=${chunkSize} progress=${requestedCompleted}/${max_count} generated=${generatedCompleted}`
+                        );
+                        const out = await fetchJSON<SimulateGeneratedCardsBatchResponse>(
+                          "/api/scenarios/simulate-generated-cards-batch",
+                          {
+                            method: "POST",
+                            body: JSON.stringify({
+                              max_count: chunkSize,
+                              origin_match_fraction,
+                              maximum_diversity,
+                            }),
+                          }
+                        );
+
+                        if (remainingSupplyBefore === null) {
+                          remainingSupplyBefore = out.remaining_supply_before;
+                        }
+                        remainingSupplyAfter = out.remaining_supply_after;
+                        requestedCompleted += chunkSize;
+                        plannedCompleted += out.planned;
+                        generatedCompleted += out.generated;
+                        originClaimCompleted += out.origin_claim_cards;
+                        originSlotsSkippedNoWinnerProxy +=
+                          out.origin_slots_skipped_no_winner_proxy;
+                        if (
+                          showcaseEligibleTotal === null &&
+                          typeof out.showcase_eligible_total === "number"
+                        ) {
+                          showcaseEligibleTotal = out.showcase_eligible_total;
+                        }
+                        if (typeof out.showcase_candidate_pool_size === "number") {
+                          showcaseCandidatePoolSize = out.showcase_candidate_pool_size;
+                        }
+                        if (typeof out.showcase_pool_cap === "number") {
+                          showcasePoolCap = out.showcase_pool_cap;
+                        }
+                        errors.push(...out.errors);
+                        appendScenarioLog(
+                          `Simulate generate cards: chunk ${chunkIndex + 1}/${chunkTotal} finished planned=${out.planned} generated=${out.generated} remaining=${out.remaining_supply_after}`
+                        );
+                        if (out.errors.length > 0) {
+                          appendScenarioLog(
+                            `Chunk ${chunkIndex + 1} errors (${out.errors.length}): ${out.errors.slice(0, 5).join(" | ")}`
+                          );
+                        }
+                        if (out.stopped_reason) {
+                          stoppedReason = out.stopped_reason;
+                          appendScenarioLog(
+                            `Simulate generate cards: stopped after chunk ${chunkIndex + 1}/${chunkTotal} reason=${stoppedReason}`
+                          );
+                          break;
+                        }
+                      }
+
+                      setScenarioSimulateProgress({
+                        requestedTotal: max_count,
+                        requestedCompleted,
+                        generatedCompleted,
+                        chunkIndex: Math.ceil(requestedCompleted / simulateGeneratedCardsChunkSize),
+                        chunkTotal,
+                        currentChunkSize: 0,
+                        status: stoppedReason ? "stopped" : "completed",
+                        stoppedReason: stoppedReason || null,
                       });
                       appendScenarioLog(
-                        `Simulate generate cards: requested=${max_count} origin%=${originPct} max_diversity=${maximum_diversity ? "on" : "off"} planned=${out.planned} generated=${out.generated} ` +
-                          `origin_claim=${out.origin_claim_cards} skipped_origin_no_proxy=${out.origin_slots_skipped_no_winner_proxy} ` +
-                          `remaining ${out.remaining_supply_before}→${out.remaining_supply_after}` +
-                          (typeof out.showcase_eligible_total === "number"
-                            ? ` showcase_eligible=${out.showcase_eligible_total} pool=${out.showcase_candidate_pool_size ?? "?"}/cap=${out.showcase_pool_cap ?? "?"}`
+                        `Simulate generate cards: requested=${max_count} origin%=${originPct} max_diversity=${maximum_diversity ? "on" : "off"} planned=${plannedCompleted} generated=${generatedCompleted} ` +
+                          `origin_claim=${originClaimCompleted} skipped_origin_no_proxy=${originSlotsSkippedNoWinnerProxy} ` +
+                          `remaining ${remainingSupplyBefore ?? "?"}→${remainingSupplyAfter ?? "?"}` +
+                          (typeof showcaseEligibleTotal === "number"
+                            ? ` showcase_eligible=${showcaseEligibleTotal} pool=${showcaseCandidatePoolSize ?? "?"}/cap=${showcasePoolCap ?? "?"}`
                             : "") +
-                          (out.stopped_reason ? ` stopped=${out.stopped_reason}` : "")
+                          (stoppedReason ? ` stopped=${stoppedReason}` : "")
                       );
-                      if (out.errors.length > 0) {
-                        appendScenarioLog(`Errors (${out.errors.length}): ${out.errors.slice(0, 5).join(" | ")}`);
+                      if (errors.length > 0) {
+                        appendScenarioLog(`Errors (${errors.length}): ${errors.slice(0, 5).join(" | ")}`);
                       }
                       appendScenarioLog("Simulate generate cards: finished.");
-                      setOk(`Simulated ${out.generated} card(s); ${out.origin_claim_cards} with origin proxy match.`);
+                      setOk(
+                        `Simulated ${generatedCompleted} card(s) in ${Math.max(1, Math.ceil(requestedCompleted / simulateGeneratedCardsChunkSize))}/${chunkTotal} chunk(s); ${originClaimCompleted} with origin proxy match.`
+                      );
                       await refreshOverview();
+                    } catch (e) {
+                      const message = e instanceof Error ? e.message : String(e);
+                      setScenarioSimulateProgress((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              status: "error",
+                            }
+                          : null
+                      );
+                      appendScenarioLog(`Simulate generate cards failed: ${message}`);
+                      throw e;
                     } finally {
                       setScenarioSimulateBatchBusy(false);
                     }
@@ -3358,6 +3491,23 @@ export default function HomePage() {
                 </span>
               ) : null}
             </div>
+            {scenarioSimulateProgress ? (
+              <div className="muted mono" style={{ marginTop: 8 }}>
+                Progress: requested {scenarioSimulateProgress.requestedCompleted}/
+                {scenarioSimulateProgress.requestedTotal}, generated{" "}
+                {scenarioSimulateProgress.generatedCompleted}, chunk{" "}
+                {scenarioSimulateProgress.chunkIndex}/{scenarioSimulateProgress.chunkTotal}
+                {scenarioSimulateProgress.currentChunkSize > 0
+                  ? ` (current=${scenarioSimulateProgress.currentChunkSize})`
+                  : ""}
+                {scenarioSimulateProgress.status !== "running"
+                  ? `, status=${scenarioSimulateProgress.status}`
+                  : ""}
+                {scenarioSimulateProgress.stoppedReason
+                  ? `, reason=${scenarioSimulateProgress.stoppedReason}`
+                  : ""}
+              </div>
+            ) : null}
           </div>
           <div className="mono">{scenarioOutput}</div>
         </section>
