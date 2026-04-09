@@ -3272,7 +3272,8 @@ export default function HomePage() {
               Simulate user &quot;generate card&quot; actions (same pipeline as POST /api/cards/get). Rows always come from{" "}
               <span className="mono">winner_wallets_nft_to_claim</span>. With{" "}
               <strong>Maximum diversity mode</strong>, the batch uses a showcase plan (distinct{" "}
-              <span className="mono">manual_image_url</span>, balanced archetypes, spread metric quads); planned rows may
+              <span className="mono">manual_image_url</span>, balanced archetypes, among ANOMALY rows balanced P99 / P90 /
+              P70 / P50 triples when edge=yield=gravity match, spread metric quads); planned rows may
               fall back to a random eligible row if already claimed. Pool cap: env{" "}
               <span className="mono">SIMULATE_SHOWCASE_MAX_CANDIDATES</span> (default 8000). With the mode off, each draw
               uses the legacy random eligible pick (season-weighted, then <span className="mono">ORDER BY RANDOM()</span>

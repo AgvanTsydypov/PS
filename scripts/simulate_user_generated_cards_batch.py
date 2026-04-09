@@ -57,6 +57,7 @@ CARD_ENTRY_BRACKET_OPTIONS = (
     "[0.80 - 0.97]",
 )
 CARD_TIER_OPTIONS = ("P99", "P90", "P70", "P50", "BASE")
+_ANOMALY_SUBTIER_OPTIONS = frozenset({"P99", "P90", "P70", "P50"})
 CARD_ARCHETYPE_OPTIONS = (
     "ANOMALY",
     "SIGNAL",
@@ -248,6 +249,20 @@ def _infer_archetype_from_metrics(
     ):
         return "SUBSTRATE"
     return "OPERATOR"
+
+
+def _anomaly_balance_tier(
+    archetype: str,
+    edge: str,
+    yield_tier: str,
+    gravity: str,
+) -> Optional[str]:
+    """Within ANOMALY, bucket by common edge/yield/gravity tier (P99…P50) for even showcase spread."""
+    if archetype != "ANOMALY":
+        return None
+    if edge == yield_tier == gravity and edge in _ANOMALY_SUBTIER_OPTIONS:
+        return edge
+    return None
 
 
 def _normalize_proxy_wallet_for_compare(addr: Optional[str]) -> Optional[str]:
@@ -506,6 +521,7 @@ class _ShowcasePick:
     image_key: str
     archetype: str
     metrics_quad: Tuple[str, str, str, str]
+    anomaly_tier: Optional[str]
 
 
 def _showcase_pick_from_db_row(row: Dict[str, Any]) -> Optional[_ShowcasePick]:
@@ -523,16 +539,18 @@ def _showcase_pick_from_db_row(row: Dict[str, Any]) -> Optional[_ShowcasePick]:
     grav = _normalize_choice(row.get("gravity"), CARD_TIER_OPTIONS, "BASE")
     inferred = _infer_archetype_from_metrics(eb, edge, yld, grav)
     arch = _normalize_archetype(row.get("archetype_coalesced"), inferred)
+    atier = _anomaly_balance_tier(arch, edge, yld, grav)
     return _ShowcasePick(
         winner_row_id=wid,
         image_key=image_key,
         archetype=arch,
         metrics_quad=(eb, edge, yld, grav),
+        anomaly_tier=atier,
     )
 
 
 def _select_diverse_winner_row_plan(candidates: List[Dict[str, Any]], k: int) -> List[int]:
-    """Greedy ordering: prefer new manual_image_url, then balance archetypes, then new metric quad."""
+    """Greedy: new image URL, balance archetypes, balance ANOMALY P99/P90/P70/P50 buckets, new metric quad."""
     picks: List[_ShowcasePick] = []
     seen_ids: set[int] = set()
     for raw in candidates:
@@ -547,17 +565,22 @@ def _select_diverse_winner_row_plan(candidates: List[Dict[str, Any]], k: int) ->
     remaining = list(picks)
     selected_images: set[str] = set()
     arch_counts: Dict[str, int] = defaultdict(int)
+    anomaly_tier_counts: Dict[str, int] = defaultdict(int)
     used_quads: set[Tuple[str, str, str, str]] = set()
     plan: List[int] = []
     for _ in range(k):
         best_i = 0
-        best_key: Tuple[int, int, int, int] = (-1, -10**9, -1, -1)
+        best_key: Tuple[int, int, int, int, int] = (-1, -10**9, -10**9, -1, -1)
         for i, c in enumerate(remaining):
             nu = 1 if c.image_key not in selected_images else 0
             ac = -arch_counts[c.archetype]
+            if c.anomaly_tier:
+                asub = -anomaly_tier_counts[c.anomaly_tier]
+            else:
+                asub = 0
             nq = 1 if c.metrics_quad not in used_quads else 0
             tie = secrets.randbelow(1_000_000)
-            key = (nu, ac, nq, tie)
+            key = (nu, ac, asub, nq, tie)
             if key > best_key:
                 best_key = key
                 best_i = i
@@ -565,6 +588,8 @@ def _select_diverse_winner_row_plan(candidates: List[Dict[str, Any]], k: int) ->
         plan.append(c.winner_row_id)
         selected_images.add(c.image_key)
         arch_counts[c.archetype] += 1
+        if c.anomaly_tier:
+            anomaly_tier_counts[c.anomaly_tier] += 1
         used_quads.add(c.metrics_quad)
     return plan
 
