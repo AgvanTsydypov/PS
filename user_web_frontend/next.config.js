@@ -1,15 +1,27 @@
 function buildCspConnectSrc() {
-  const parts = ["'self'"];
-  const raw = (process.env.NEXT_PUBLIC_USER_API_BASE_URL || "").trim();
-  if (raw.startsWith("http://") || raw.startsWith("https://")) {
+  const parts = new Set(["'self'"]);
+  const addOrigin = (value) => {
+    const raw = String(value || "").trim();
+    if (!raw.startsWith("http://") && !raw.startsWith("https://")) return;
     try {
-      parts.push(new URL(raw).origin);
+      parts.add(new URL(raw).origin);
     } catch (_) {
       /* ignore */
     }
+  };
+
+  addOrigin(process.env.NEXT_PUBLIC_USER_API_BASE_URL);
+
+  // Frontend code falls back to localhost:8011 in dev, so CSP must allow it
+  // even when NEXT_PUBLIC_USER_API_BASE_URL is unset.
+  if (process.env.NODE_ENV === "development") {
+    addOrigin("http://localhost:8011");
+    addOrigin("http://127.0.0.1:8011");
   }
-  parts.push("https://fonts.googleapis.com", "https://fonts.gstatic.com");
-  return parts.join(" ");
+
+  parts.add("https://fonts.googleapis.com");
+  parts.add("https://fonts.gstatic.com");
+  return Array.from(parts).join(" ");
 }
 
 const scriptSrc =
