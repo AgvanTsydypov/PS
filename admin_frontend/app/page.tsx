@@ -540,6 +540,7 @@ export default function HomePage() {
   const [scenarioOutput, setScenarioOutput] = useState("");
   const [scenarioSimulateMaxCards, setScenarioSimulateMaxCards] = useState("50");
   const [scenarioSimulateOriginPercent, setScenarioSimulateOriginPercent] = useState("10");
+  const [scenarioSimulateMaximumDiversity, setScenarioSimulateMaximumDiversity] = useState(true);
   const [scenarioSimulateBatchBusy, setScenarioSimulateBatchBusy] = useState(false);
 
   const [resetConfirm, setResetConfirm] = useState(false);
@@ -3240,9 +3241,25 @@ export default function HomePage() {
           </div>
           <div className="panel" style={{ marginTop: 16 }}>
             <div className="muted" style={{ marginBottom: 8 }}>
-              Simulate user &quot;generate card&quot; actions (same pipeline as POST /api/cards/get). Count is capped by
-              remaining claimable catalog rows. Set how many runs to attempt and the chance (0–100%) that claimer proxy =
-              winner proxy (ORIGIN on card); otherwise a decoy proxy is used (looter path).
+              Simulate user &quot;generate card&quot; actions (same pipeline as POST /api/cards/get). Rows always come from{" "}
+              <span className="mono">winner_wallets_nft_to_claim</span>. With{" "}
+              <strong>Maximum diversity mode</strong>, the batch uses a showcase plan (distinct{" "}
+              <span className="mono">manual_image_url</span>, balanced archetypes, spread metric quads); planned rows may
+              fall back to a random eligible row if already claimed. Pool cap: env{" "}
+              <span className="mono">SIMULATE_SHOWCASE_MAX_CANDIDATES</span> (default 8000). With the mode off, each draw
+              uses the legacy random eligible pick (season-weighted, then <span className="mono">ORDER BY RANDOM()</span>
+              ). Set the chance (0–100%) that claimer proxy = winner proxy (ORIGIN); otherwise a decoy proxy (looter).
+            </div>
+            <div className="row" style={{ marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <label className="inline-flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={scenarioSimulateMaximumDiversity}
+                  onChange={(e) => setScenarioSimulateMaximumDiversity(e.target.checked)}
+                  disabled={scenarioSimulateBatchBusy}
+                />
+                Maximum diversity mode
+              </label>
             </div>
             <div className="row" style={{ marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
               <label>Max cards to generate</label>
@@ -3285,6 +3302,7 @@ export default function HomePage() {
                         ? Math.min(100, Math.max(0, pctRaw))
                         : 0;
                       const origin_match_fraction = originPct / 100;
+                      const maximum_diversity = scenarioSimulateMaximumDiversity;
                       const out = await fetchJSON<{
                         requested: number;
                         planned: number;
@@ -3295,14 +3313,21 @@ export default function HomePage() {
                         origin_slots_skipped_no_winner_proxy: number;
                         errors: string[];
                         stopped_reason?: string;
+                        maximum_diversity?: boolean;
+                        showcase_eligible_total?: number | null;
+                        showcase_candidate_pool_size?: number | null;
+                        showcase_pool_cap?: number | null;
                       }>("/api/scenarios/simulate-generated-cards-batch", {
                         method: "POST",
-                        body: JSON.stringify({ max_count, origin_match_fraction }),
+                        body: JSON.stringify({ max_count, origin_match_fraction, maximum_diversity }),
                       });
                       appendScenarioLog(
-                        `Simulate generate cards: requested=${max_count} origin%=${originPct} planned=${out.planned} generated=${out.generated} ` +
+                        `Simulate generate cards: requested=${max_count} origin%=${originPct} max_diversity=${maximum_diversity ? "on" : "off"} planned=${out.planned} generated=${out.generated} ` +
                           `origin_claim=${out.origin_claim_cards} skipped_origin_no_proxy=${out.origin_slots_skipped_no_winner_proxy} ` +
                           `remaining ${out.remaining_supply_before}→${out.remaining_supply_after}` +
+                          (typeof out.showcase_eligible_total === "number"
+                            ? ` showcase_eligible=${out.showcase_eligible_total} pool=${out.showcase_candidate_pool_size ?? "?"}/cap=${out.showcase_pool_cap ?? "?"}`
+                            : "") +
                           (out.stopped_reason ? ` stopped=${out.stopped_reason}` : "")
                       );
                       if (out.errors.length > 0) {

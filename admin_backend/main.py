@@ -122,6 +122,10 @@ class SimulateGeneratedCardsBatchRequest(BaseModel):
 
     max_count: int = Field(default=50, ge=1, le=200)
     origin_match_fraction: float = Field(default=0.1, ge=0.0, le=1.0)
+    maximum_diversity: bool = Field(
+        default=True,
+        description="If true, pick a showcase-diverse plan; if false, legacy per-draw random eligible row.",
+    )
 
 
 class UserWebWalletActionsUpdate(BaseModel):
@@ -3181,6 +3185,7 @@ def simulate_generated_cards_batch(req: SimulateGeneratedCardsBatchRequest) -> D
         return run_admin_simulated_card_generations(
             max_count=req.max_count,
             origin_match_fraction=req.origin_match_fraction,
+            maximum_diversity=req.maximum_diversity,
         )
     except Exception as exc:
         logger.exception("simulate-generated-cards-batch failed")

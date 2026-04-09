@@ -21,7 +21,9 @@ import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from dataclasses import dataclass
 from time import monotonic
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -90,9 +92,42 @@ WHERE ec.manual_image_url IS NOT NULL
   AND gc.id IS NULL
 """
 
+# Same participant resolution as _load_card_source_row (showcase planning only).
+_SHOWCASE_PARTICIPANT_LATERAL = """
+LEFT JOIN LATERAL (
+    SELECT p.archetype AS archetype
+    FROM participants p
+    WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
+      AND (
+          (w.event_id IS NOT NULL AND p.event_id = w.event_id)
+          OR
+          (w.event_slug IS NOT NULL AND p.event_slug = w.event_slug)
+      )
+    ORDER BY
+        CASE
+            WHEN w.event_id IS NOT NULL AND p.event_id = w.event_id THEN 0
+            WHEN w.event_slug IS NOT NULL AND p.event_slug = w.event_slug THEN 1
+            ELSE 2
+        END,
+        p.rank ASC NULLS LAST
+    LIMIT 1
+) p ON TRUE
+"""
+
+_ELIGIBLE_SHOWCASE_FROM = f"""
+FROM winner_wallets_nft_to_claim w
+JOIN event_cards ec ON ec.event_id = w.event_id
+{_SHOWCASE_PARTICIPANT_LATERAL}
+LEFT JOIN user_generated_cards gc ON gc.winner_row_id = w.id
+WHERE ec.manual_image_url IS NOT NULL
+  AND BTRIM(ec.manual_image_url) <> ''
+  AND gc.id IS NULL
+"""
+
 POLYMARKET_REQUEST_TIMEOUT_SECONDS = float(os.getenv("POLYMARKET_REQUEST_TIMEOUT_SECONDS", "8"))
 USER_WEB_CARD_IMAGE_TIMEOUT_SECONDS = float(os.getenv("USER_WEB_CARD_IMAGE_TIMEOUT_SECONDS", "6"))
 USER_WEB_CARD_SUPPLY_JOIN_TOTAL_CACHE_TTL = float(os.getenv("USER_WEB_CARD_SUPPLY_JOIN_TOTAL_CACHE_TTL", "60"))
+SIMULATE_SHOWCASE_MAX_CANDIDATES = max(1, int(os.getenv("SIMULATE_SHOWCASE_MAX_CANDIDATES", "8000")))
 
 GENESIS_START_DATE: Optional[str] = os.getenv("GENESIS_START_DATE", "").strip() or None
 GENESIS_END_DATE: Optional[str] = os.getenv("GENESIS_END_DATE", "").strip() or None
@@ -430,6 +465,127 @@ def _pick_eligible_winner_row_id(cursor: Any) -> Optional[int]:
     return None
 
 
+def _count_eligible_showcase_candidates(cursor: Any) -> int:
+    cursor.execute(
+        f"""
+        SELECT COUNT(*)::bigint AS c
+        {_ELIGIBLE_SHOWCASE_FROM}
+        """
+    )
+    row = cursor.fetchone()
+    raw = (row.get("c") if isinstance(row, dict) else row[0]) if row else 0
+    return int(raw or 0)
+
+
+def _fetch_eligible_showcase_candidates(cursor: Any, *, max_rows: int) -> List[Dict[str, Any]]:
+    total = _count_eligible_showcase_candidates(cursor)
+    if total <= 0:
+        return []
+    base = f"""
+        SELECT
+            w.id,
+            w.entry_bracket,
+            w.edge,
+            w.yield,
+            w.gravity,
+            COALESCE(w.archetype, p.archetype) AS archetype_coalesced,
+            ec.manual_image_url AS manual_image_url
+        {_ELIGIBLE_SHOWCASE_FROM}
+        """
+    if total <= max_rows:
+        cursor.execute(base + " ORDER BY w.id")
+    else:
+        cursor.execute(base + " ORDER BY RANDOM() LIMIT %s", (max_rows,))
+    rows = cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+@dataclass(frozen=True)
+class _ShowcasePick:
+    winner_row_id: int
+    image_key: str
+    archetype: str
+    metrics_quad: Tuple[str, str, str, str]
+
+
+def _showcase_pick_from_db_row(row: Dict[str, Any]) -> Optional[_ShowcasePick]:
+    try:
+        wid = int(row["id"])
+    except Exception:
+        return None
+    url_raw = str(row.get("manual_image_url") or "").strip()
+    if not url_raw:
+        return None
+    image_key = url_raw.lower()
+    eb = _normalize_entry_bracket(row.get("entry_bracket"))
+    edge = _normalize_choice(row.get("edge"), CARD_TIER_OPTIONS, "BASE")
+    yld = _normalize_choice(row.get("yield"), CARD_TIER_OPTIONS, "BASE")
+    grav = _normalize_choice(row.get("gravity"), CARD_TIER_OPTIONS, "BASE")
+    inferred = _infer_archetype_from_metrics(eb, edge, yld, grav)
+    arch = _normalize_archetype(row.get("archetype_coalesced"), inferred)
+    return _ShowcasePick(
+        winner_row_id=wid,
+        image_key=image_key,
+        archetype=arch,
+        metrics_quad=(eb, edge, yld, grav),
+    )
+
+
+def _select_diverse_winner_row_plan(candidates: List[Dict[str, Any]], k: int) -> List[int]:
+    """Greedy ordering: prefer new manual_image_url, then balance archetypes, then new metric quad."""
+    picks: List[_ShowcasePick] = []
+    seen_ids: set[int] = set()
+    for raw in candidates:
+        p = _showcase_pick_from_db_row(raw)
+        if p is None or p.winner_row_id in seen_ids:
+            continue
+        seen_ids.add(p.winner_row_id)
+        picks.append(p)
+    if not picks or k <= 0:
+        return []
+    k = min(k, len(picks))
+    remaining = list(picks)
+    selected_images: set[str] = set()
+    arch_counts: Dict[str, int] = defaultdict(int)
+    used_quads: set[Tuple[str, str, str, str]] = set()
+    plan: List[int] = []
+    for _ in range(k):
+        best_i = 0
+        best_key: Tuple[int, int, int, int] = (-1, -10**9, -1, -1)
+        for i, c in enumerate(remaining):
+            nu = 1 if c.image_key not in selected_images else 0
+            ac = -arch_counts[c.archetype]
+            nq = 1 if c.metrics_quad not in used_quads else 0
+            tie = secrets.randbelow(1_000_000)
+            key = (nu, ac, nq, tie)
+            if key > best_key:
+                best_key = key
+                best_i = i
+        c = remaining.pop(best_i)
+        plan.append(c.winner_row_id)
+        selected_images.add(c.image_key)
+        arch_counts[c.archetype] += 1
+        used_quads.add(c.metrics_quad)
+    return plan
+
+
+def _try_lock_planned_winner_row_id(cursor: Any, winner_row_id: int) -> Optional[int]:
+    cursor.execute(
+        f"""
+        SELECT w.id
+        {_ELIGIBLE_SHOWCASE_FROM}
+          AND w.id = %s
+        FOR UPDATE OF w SKIP LOCKED
+        """,
+        (winner_row_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    rid = row.get("id") if isinstance(row, dict) else row[0]
+    return int(rid)
+
+
 def _load_card_source_row(cursor: Any, winner_row_id: int) -> Optional[Dict[str, Any]]:
     cursor.execute(
         """
@@ -639,6 +795,7 @@ def run_admin_simulated_card_generations(
     *,
     max_count: int = 50,
     origin_match_fraction: float = 0.1,
+    maximum_diversity: bool = True,
 ) -> Dict[str, Any]:
     LOOTER_PROXY = "0x000000000000000000000000000000000000dEaD"
     LOOTER_PROXY_ALT = "0x000000000000000000000000000000000000bEef"
@@ -656,29 +813,68 @@ def run_admin_simulated_card_generations(
     out: Dict[str, Any] = {
         "requested": int(max_count),
         "remaining_supply_before": remaining_i,
-        "planned": n,
+        "planned": 0,
         "generated": 0,
         "origin_claim_cards": 0,
         "origin_slots_skipped_no_winner_proxy": 0,
         "errors": errors,
+        "maximum_diversity": bool(maximum_diversity),
+        "showcase_eligible_total": None,
+        "showcase_candidate_pool_size": None,
+        "showcase_pool_cap": None,
     }
 
     if n <= 0:
         out["stopped_reason"] = "no_remaining_supply" if remaining_i <= 0 else "zero_planned"
         return out
 
-    n_origin_target = min(n, max(0, int(round(n * float(origin_match_fraction)))))
-    origin_indices = set(random.sample(range(n), k=n_origin_target)) if n_origin_target > 0 else set()
+    planned_ids: List[int] = []
+    if maximum_diversity:
+        plan_conn = _get_connection()
+        try:
+            with plan_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as plan_cur:
+                eligible_total = _count_eligible_showcase_candidates(plan_cur)
+                out["showcase_eligible_total"] = eligible_total
+                candidates_raw = _fetch_eligible_showcase_candidates(
+                    plan_cur, max_rows=SIMULATE_SHOWCASE_MAX_CANDIDATES
+                )
+                out["showcase_candidate_pool_size"] = len(candidates_raw)
+                out["showcase_pool_cap"] = SIMULATE_SHOWCASE_MAX_CANDIDATES
+                planned_ids = _select_diverse_winner_row_plan(candidates_raw, n)
+        finally:
+            plan_conn.close()
+
+        n_run = len(planned_ids)
+        out["planned"] = n_run
+        if n_run <= 0:
+            out["stopped_reason"] = "no_eligible_showcase_candidates"
+            return out
+    else:
+        n_run = n
+        out["planned"] = n_run
+
+    n_origin_target = min(n_run, max(0, int(round(n_run * float(origin_match_fraction)))))
+    origin_indices = set(random.sample(range(n_run), k=n_origin_target)) if n_origin_target > 0 else set()
 
     skipped_no_winner_proxy = 0
-    for i in range(n):
+    for i in range(n_run):
         want_origin = i in origin_indices
         conn = _get_connection()
         uploaded_front_key: Optional[str] = None
         uploaded_back_key: Optional[str] = None
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-                winner_row_id = _pick_eligible_winner_row_id(cursor)
+                if maximum_diversity:
+                    planned_winner_row_id = planned_ids[i]
+                    winner_row_id = _try_lock_planned_winner_row_id(cursor, planned_winner_row_id)
+                    if winner_row_id is None:
+                        logger.info(
+                            "Showcase plan row id=%s not lockable; falling back to random eligible",
+                            planned_winner_row_id,
+                        )
+                        winner_row_id = _pick_eligible_winner_row_id(cursor)
+                else:
+                    winner_row_id = _pick_eligible_winner_row_id(cursor)
                 if winner_row_id is None:
                     out["stopped_reason"] = "no_eligible_winner_mid_run"
                     break
@@ -819,6 +1015,6 @@ def run_admin_simulated_card_generations(
     finally:
         probe2.close()
     out["remaining_supply_after"] = int(rem_after)
-    if "stopped_reason" not in out and out["generated"] < n and not errors:
+    if "stopped_reason" not in out and out["generated"] < n_run and not errors:
         out["stopped_reason"] = "completed_short"
     return out
