@@ -1,22 +1,75 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { fetchSiteStatus } from "../lib/userApiBase";
 
 const STRIP_ID = "site-maintenance-strip";
+const STRIP_RETRY_DELAYS_MS = [3000, 8000, 15000, 30000];
+const STRIP_REFRESH_MS = 30000;
 
 export default function SiteMaintenanceStrip() {
   const [active, setActive] = useState(false);
   const [checked, setChecked] = useState(false);
   const stripRef = useRef<HTMLDivElement>(null);
+  const retryTimerRef = useRef<number | null>(null);
+  const retryAttemptRef = useRef(0);
+
+  const scheduleLoad = useCallback((delayMs: number, load: () => void) => {
+    if (retryTimerRef.current != null) {
+      window.clearTimeout(retryTimerRef.current);
+    }
+    retryTimerRef.current = window.setTimeout(load, delayMs);
+  }, []);
+
+  const loadSiteStatus = useCallback(async () => {
+    const status = await fetchSiteStatus({ retries: 3 });
+    if (status) {
+      retryAttemptRef.current = 0;
+      setActive(Boolean(status.wallet_actions_disabled));
+      setChecked(true);
+      scheduleLoad(STRIP_REFRESH_MS, () => {
+        void loadSiteStatus();
+      });
+      return;
+    }
+
+    setChecked(true);
+    const delayMs =
+      STRIP_RETRY_DELAYS_MS[
+        Math.min(retryAttemptRef.current, STRIP_RETRY_DELAYS_MS.length - 1)
+      ] ?? STRIP_REFRESH_MS;
+    retryAttemptRef.current += 1;
+    scheduleLoad(delayMs, () => {
+      void loadSiteStatus();
+    });
+  }, [scheduleLoad]);
 
   useEffect(() => {
-    void fetchSiteStatus().then((s) => {
-      setActive(Boolean(s?.wallet_actions_disabled));
-      setChecked(true);
-    });
-  }, []);
+    void loadSiteStatus();
+
+    const handleOnline = () => {
+      retryAttemptRef.current = 0;
+      void loadSiteStatus();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      retryAttemptRef.current = 0;
+      void loadSiteStatus();
+    };
+
+    window.addEventListener("online", handleOnline);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (retryTimerRef.current != null) {
+        window.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+    };
+  }, [loadSiteStatus]);
 
   useLayoutEffect(() => {
     if (!checked || !active) {

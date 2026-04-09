@@ -16,29 +16,9 @@ import {
   navigateToCardIfCenterClick,
   triggerCardFlip,
 } from "./cardInteractions";
+import { fetchCardTicker, type CardTickerItem } from "../lib/userApiBase";
 
-const apiBase =
-  process.env.NEXT_PUBLIC_USER_API_BASE_URL ??
-  (process.env.NODE_ENV === "development" ? "http://localhost:8011" : "/");
-
-function buildApiUrl(path: string): string {
-  if (apiBase === "/") return path;
-  return `${apiBase.replace(/\/$/, "")}${path}`;
-}
-
-type CardTickerItem = {
-  slug: string;
-  card_title: string;
-  front_image_url: string;
-  back_image_url?: string | null;
-  created_at?: string | null;
-};
-
-type CardTickerResponse = {
-  items: CardTickerItem[];
-  total: number;
-  fetched_at: string;
-};
+const TICKER_RETRY_DELAYS_MS = [3000, 8000, 15000, 30000];
 
 /** Home ticker card size vs 249×386 artboard (0.96 display scale + 10% bump). */
 const HOME_TICKER_CARD_SCALE = 0.96 * 1.1;
@@ -78,41 +58,84 @@ function tickerSegmentCount(itemCount: number, viewportWidthPx: number): number 
   return Math.max(2, Math.min(needed, 24));
 }
 
-export default function GeneratedCardsTicker() {
-  const [items, setItems] = useState<CardTickerItem[]>([]);
+type GeneratedCardsTickerProps = {
+  initialItems?: CardTickerItem[];
+};
+
+export default function GeneratedCardsTicker({
+  initialItems = [],
+}: GeneratedCardsTickerProps) {
+  const hasInitialItems = initialItems.length > 0;
+  const [items, setItems] = useState<CardTickerItem[]>(initialItems);
+  const [loading, setLoading] = useState(!hasInitialItems);
   const [viewportWidth, setViewportWidth] = useState(1200);
   const [tickerMaxCells, setTickerMaxCells] = useState(TICKER_MAX_CELLS_FINE);
   const [tickerLiteTheme, setTickerLiteTheme] = useState(false);
   const [flippedCards, setFlippedCards] = useState<Record<string, boolean>>({});
   const [animatingCards, setAnimatingCards] = useState<Record<string, boolean>>({});
   const flipTimerRef = useRef<Record<string, number | null>>({});
+  const retryTimerRef = useRef<number | null>(null);
+  const retryAttemptRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      try {
-        const res = await fetch(buildApiUrl("/api/cards/ticker"), {
-          cache: "no-store",
-        });
-        if (res.status === 503) {
-          if (!cancelled) setItems([]);
-          return;
-        }
-        if (!res.ok) return;
-        const payload = (await res.json()) as CardTickerResponse;
-        const list = Array.isArray(payload.items) ? payload.items : [];
-        if (!cancelled) setItems(list);
-      } catch {
-        if (!cancelled) setItems([]);
+      if (retryTimerRef.current != null) {
+        window.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
       }
+
+      const payload = await fetchCardTicker({ retries: 3 });
+      if (cancelled) {
+        return;
+      }
+
+      if (payload) {
+        retryAttemptRef.current = 0;
+        const list = Array.isArray(payload.items) ? payload.items : [];
+        setItems(list);
+      } else {
+        if (!hasInitialItems) {
+          setItems([]);
+        }
+        const delayMs =
+          TICKER_RETRY_DELAYS_MS[
+            Math.min(retryAttemptRef.current, TICKER_RETRY_DELAYS_MS.length - 1)
+          ] ?? 30000;
+        retryAttemptRef.current += 1;
+        retryTimerRef.current = window.setTimeout(() => {
+          void load();
+        }, delayMs);
+      }
+      setLoading(false);
     }
 
     void load();
+
+    const handleOnline = () => {
+      retryAttemptRef.current = 0;
+      void load();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      retryAttemptRef.current = 0;
+      void load();
+    };
+
+    window.addEventListener("online", handleOnline);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
     return () => {
       cancelled = true;
+      window.removeEventListener("online", handleOnline);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (retryTimerRef.current != null) {
+        window.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
     };
-  }, []);
+  }, [hasInitialItems]);
 
   useEffect(() => {
     function onResize() {
@@ -178,6 +201,15 @@ export default function GeneratedCardsTicker() {
     }
     return out;
   }, [visibleItems, segmentCount]);
+
+  if (loading && items.length === 0) {
+    return (
+      <div className="card-ticker-section">
+        <h2 className="card-ticker-heading">CLAIMED CARDS SHOWCASE</h2>
+        <div className="season-board-muted">Loading showcase...</div>
+      </div>
+    );
+  }
 
   if (items.length === 0) return null;
 
