@@ -7,6 +7,9 @@ import SiteMaintenanceStrip from "../components/SiteMaintenanceStrip";
 export const metadata: Metadata = {
   title: "PolyStars User",
   description: "Wallet sign-in for PolyStars users",
+  icons: {
+    icon: [{ url: "/logo.svg", type: "image/svg+xml" }],
+  },
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
