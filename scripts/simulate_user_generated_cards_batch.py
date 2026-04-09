@@ -84,7 +84,9 @@ WHERE ec.manual_image_url IS NOT NULL
   AND BTRIM(ec.manual_image_url) <> ''
 """
 
-_ELIGIBLE_WINNER_BASE = """
+# Eligible catalog rows: winner snapshot + event_cards (image) + not yet in user_generated_cards.
+# Archetype/metrics for planning come from w only — no participants join.
+_SHOWCASE_CANDIDATE_BODY = """
 FROM winner_wallets_nft_to_claim w
 JOIN event_cards ec ON ec.event_id = w.event_id
 LEFT JOIN user_generated_cards gc ON gc.winner_row_id = w.id
@@ -93,37 +95,7 @@ WHERE ec.manual_image_url IS NOT NULL
   AND gc.id IS NULL
 """
 
-# Same participant resolution as _load_card_source_row (showcase planning only).
-_SHOWCASE_PARTICIPANT_LATERAL = """
-LEFT JOIN LATERAL (
-    SELECT p.archetype AS archetype
-    FROM participants p
-    WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
-      AND (
-          (w.event_id IS NOT NULL AND p.event_id = w.event_id)
-          OR
-          (w.event_slug IS NOT NULL AND p.event_slug = w.event_slug)
-      )
-    ORDER BY
-        CASE
-            WHEN w.event_id IS NOT NULL AND p.event_id = w.event_id THEN 0
-            WHEN w.event_slug IS NOT NULL AND p.event_slug = w.event_slug THEN 1
-            ELSE 2
-        END,
-        p.rank ASC NULLS LAST
-    LIMIT 1
-) p ON TRUE
-"""
-
-_ELIGIBLE_SHOWCASE_FROM = f"""
-FROM winner_wallets_nft_to_claim w
-JOIN event_cards ec ON ec.event_id = w.event_id
-{_SHOWCASE_PARTICIPANT_LATERAL}
-LEFT JOIN user_generated_cards gc ON gc.winner_row_id = w.id
-WHERE ec.manual_image_url IS NOT NULL
-  AND BTRIM(ec.manual_image_url) <> ''
-  AND gc.id IS NULL
-"""
+_ELIGIBLE_WINNER_BASE = _SHOWCASE_CANDIDATE_BODY
 
 POLYMARKET_REQUEST_TIMEOUT_SECONDS = float(os.getenv("POLYMARKET_REQUEST_TIMEOUT_SECONDS", "8"))
 USER_WEB_CARD_IMAGE_TIMEOUT_SECONDS = float(os.getenv("USER_WEB_CARD_IMAGE_TIMEOUT_SECONDS", "6"))
@@ -490,7 +462,7 @@ def _count_eligible_showcase_candidates(cursor: Any) -> int:
     cursor.execute(
         f"""
         SELECT COUNT(*)::bigint AS c
-        {_ELIGIBLE_SHOWCASE_FROM}
+        {_ELIGIBLE_WINNER_BASE}
         """
     )
     row = cursor.fetchone()
@@ -502,21 +474,33 @@ def _fetch_eligible_showcase_candidates(cursor: Any, *, max_rows: int) -> List[D
     total = _count_eligible_showcase_candidates(cursor)
     if total <= 0:
         return []
-    base = f"""
+    select_cols = """
         SELECT
             w.id,
             w.entry_bracket,
             w.edge,
             w.yield,
             w.gravity,
-            COALESCE(w.archetype, p.archetype) AS archetype_coalesced,
+            w.archetype AS archetype_coalesced,
             ec.manual_image_url AS manual_image_url
-        {_ELIGIBLE_SHOWCASE_FROM}
         """
     if total <= max_rows:
-        cursor.execute(base + " ORDER BY w.id")
+        cursor.execute(select_cols + _SHOWCASE_CANDIDATE_BODY + " ORDER BY w.id")
     else:
-        cursor.execute(base + " ORDER BY RANDOM() LIMIT %s", (max_rows,))
+        cursor.execute(
+            select_cols
+            + f"""
+        FROM (
+            SELECT w.id AS id
+            {_ELIGIBLE_WINNER_BASE}
+            ORDER BY RANDOM()
+            LIMIT %s
+        ) si
+        JOIN winner_wallets_nft_to_claim w ON w.id = si.id
+        JOIN event_cards ec ON ec.event_id = w.event_id
+        """,
+            (max_rows,),
+        )
     rows = cursor.fetchall()
     return [dict(r) for r in rows]
 
@@ -604,7 +588,7 @@ def _try_lock_planned_winner_row_id(cursor: Any, winner_row_id: int) -> Optional
     cursor.execute(
         f"""
         SELECT w.id
-        {_ELIGIBLE_SHOWCASE_FROM}
+        {_ELIGIBLE_WINNER_BASE}
           AND w.id = %s
         FOR UPDATE OF w SKIP LOCKED
         """,
@@ -630,10 +614,10 @@ def _load_card_source_row(cursor: Any, winner_row_id: int) -> Optional[Dict[str,
             w.event_slug,
             e.title AS event_title,
             w.entry_bracket,
-            COALESCE(w.archetype, p.archetype) AS archetype,
-            COALESCE(w.archetype_description, p.archetype_description) AS archetype_description,
-            COALESCE(w.archetype_math, p.archetype_math) AS archetype_math,
-            COALESCE(w.rarity_bracket, p.rarity_bracket) AS rarity_bracket,
+            w.archetype AS archetype,
+            w.archetype_description AS archetype_description,
+            w.archetype_math AS archetype_math,
+            w.rarity_bracket AS rarity_bracket,
             w.edge,
             w.yield,
             w.gravity,
@@ -650,28 +634,6 @@ def _load_card_source_row(cursor: Any, winner_row_id: int) -> Optional[Dict[str,
             s.total_supply AS season_size
         FROM winner_wallets_nft_to_claim w
         JOIN event_cards ec ON ec.event_id = w.event_id
-        LEFT JOIN LATERAL (
-            SELECT
-                p.archetype,
-                p.archetype_description,
-                p.archetype_math,
-                p.rarity_bracket
-            FROM participants p
-            WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
-              AND (
-                  (w.event_id IS NOT NULL AND p.event_id = w.event_id)
-                  OR
-                  (w.event_slug IS NOT NULL AND p.event_slug = w.event_slug)
-              )
-            ORDER BY
-                CASE
-                    WHEN w.event_id IS NOT NULL AND p.event_id = w.event_id THEN 0
-                    WHEN w.event_slug IS NOT NULL AND p.event_slug = w.event_slug THEN 1
-                    ELSE 2
-                END,
-                p.rank ASC NULLS LAST
-            LIMIT 1
-        ) p ON TRUE
         LEFT JOIN events e ON e.id = w.event_id
         LEFT JOIN seasons s ON s.id = w.season_id
         LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
