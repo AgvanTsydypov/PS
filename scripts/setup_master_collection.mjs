@@ -70,7 +70,7 @@ Options:
   -h, --help              Show help
 
 Notes:
-  - --uri should be a REAL public metadata JSON URL (Arweave/IPFS/HTTPS).
+  - --uri should be a REAL public metadata JSON URL (HTTPS, e.g. Pinata gateway).
   - Script validates metadata has name, symbol and image.
   - If --royalty-bps is omitted, uses metadata.seller_fee_basis_points.
 `);
