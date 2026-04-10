@@ -551,7 +551,6 @@ export default function HomePage() {
   const [claimPhase, setClaimPhase] = useState("breach");
   const [claimAutoPhase, setClaimAutoPhase] = useState(true);
   const [claimDbOnly, setClaimDbOnly] = useState(false);
-  const [claimBlockchain, setClaimBlockchain] = useState("solana");
   const [claimRecipient, setClaimRecipient] = useState("");
   const [claimSeasonInfo, setClaimSeasonInfo] = useState<string>("");
   const [claimOutput, setClaimOutput] = useState<string>("");
@@ -1104,7 +1103,7 @@ export default function HomePage() {
   const refreshClaimSeasonInfo = async () => {
     if (!claimSeasonId) return;
     const data = await fetchJSON<{ lines: string[] }>(
-      `/api/claims/season-info?season_id=${claimSeasonId}&wallet=${encodeURIComponent(claimWallet)}&auto_phase=${claimAutoPhase}&manual_phase=${claimPhase}&blockchain=${claimBlockchain}`,
+      `/api/claims/season-info?season_id=${claimSeasonId}&wallet=${encodeURIComponent(claimWallet)}&auto_phase=${claimAutoPhase}&manual_phase=${claimPhase}`,
     );
     setClaimSeasonInfo(data.lines.join("\n"));
   };
@@ -1331,7 +1330,7 @@ export default function HomePage() {
     if (!claimSeasonId) return;
     void run(refreshClaimSeasonInfo);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [claimWallet, claimPhase, claimAutoPhase, claimBlockchain, tab]);
+  }, [claimWallet, claimPhase, claimAutoPhase, tab]);
 
   useEffect(() => {
     if (serverNowBaseMs == null || clientNowAtSyncMs == null) return;
@@ -1684,18 +1683,6 @@ export default function HomePage() {
               <option value="vault">vault</option>
               <option value="scavenge">scavenge</option>
             </select>
-            <label>Chain</label>
-            <select
-              value={claimBlockchain}
-              onChange={(e) => {
-                const chain = e.target.value;
-                setClaimBlockchain(chain);
-                setClaimRecipient(chain === "base_zora" ? "0xdC65DFF7EED4c1C05511395Ccf19CF507066aCe1" : "H1wsggroxpW3LwCCv8dVeiJW73oYPkcDGgSqhiT5Zbz3");
-              }}
-            >
-              <option value="solana">solana</option>
-              <option value="base_zora">base_zora</option>
-            </select>
             <label>Recipient</label>
             <input value={claimRecipient} onChange={(e) => setClaimRecipient(e.target.value)} style={{ minWidth: 420 }} />
           </div>
@@ -1718,7 +1705,6 @@ export default function HomePage() {
                         phase: claimPhase,
                         auto_phase: claimAutoPhase,
                         db_only: claimDbOnly,
-                        blockchain: claimBlockchain,
                       }),
                     });
                     setClaimOutput((prev) => `${prev}${JSON.stringify(out, null, 2)}\n`);

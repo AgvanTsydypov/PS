@@ -47,7 +47,6 @@ from scripts.cardgen.generate_card import generate_card_back_svg, generate_card_
 from scripts.simulate_user_generated_cards_batch import run_admin_simulated_card_generations
 from scripts.season_manager import SeasonManager
 from scripts.solana_service import MintedNftResult, SolanaClient
-from scripts.zora_service import ZoraClient
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +61,7 @@ def _user_web_wallet_actions_env_override() -> bool:
 
 MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
 BLOCKCHAIN_SOLANA = "solana"
-BLOCKCHAIN_BASE_ZORA = "base_zora"
 DEFAULT_SOLANA_RECIPIENT = "H1wsggroxpW3LwCCv8dVeiJW73oYPkcDGgSqhiT5Zbz3"
-DEFAULT_BASE_RECIPIENT = "0xdC65DFF7EED4c1C05511395Ccf19CF507066aCe1"
 
 
 @dataclass(frozen=True)
@@ -89,7 +86,6 @@ class MintClaimRequest(BaseModel):
     phase: str = "breach"
     auto_phase: bool = True
     db_only: bool = False
-    blockchain: str = BLOCKCHAIN_SOLANA
 
 
 class QuickPhaseRequest(BaseModel):
@@ -1220,7 +1216,6 @@ class SeasonWorkbenchService:
         wallet: str,
         auto_phase: bool,
         manual_phase: str,
-        blockchain: str,
     ) -> Dict[str, Any]:
         conn = self.manager.get_connection()
         try:
@@ -1328,7 +1323,7 @@ class SeasonWorkbenchService:
                     wallet_address=wallet_normalized,
                     season_id=season_id,
                 )
-                lines.extend(["", "Checklist before insert:", f"- wallet: {wallet_normalized}", f"- blockchain: {blockchain}"])
+                lines.extend(["", "Checklist before insert:", f"- wallet: {wallet_normalized}", f"- blockchain: {BLOCKCHAIN_SOLANA}"])
                 lines.append(
                     f"- is_origin_wallet_selected_season: {bool(selected_season_eligibility.get('is_origin_wallet'))}"
                 )
@@ -1745,17 +1740,10 @@ class SeasonWorkbenchService:
         if not recipient_raw:
             raise ValueError("Recipient address is required")
 
-        if req.blockchain == BLOCKCHAIN_SOLANA:
-            try:
-                recipient_address = str(Pubkey.from_string(recipient_raw))
-            except Exception:
-                raise ValueError("Invalid Solana recipient address")
-        elif req.blockchain == BLOCKCHAIN_BASE_ZORA:
-            recipient_address = recipient_raw.lower()
-            if not (recipient_address.startswith("0x") and len(recipient_address) == 42):
-                raise ValueError("Invalid Base recipient address")
-        else:
-            raise ValueError(f"Unsupported blockchain: {req.blockchain}")
+        try:
+            recipient_address = str(Pubkey.from_string(recipient_raw))
+        except Exception:
+            raise ValueError("Invalid Solana recipient address")
 
         phase = req.phase
         warnings: List[str] = []
@@ -1800,7 +1788,7 @@ class SeasonWorkbenchService:
                 recipient_wallet=recipient_address,
                 season_id=req.season_id,
                 phase=phase,
-                mint_chain=req.blockchain,
+                mint_chain=BLOCKCHAIN_SOLANA,
             )
             self.clear_wallets_cache()
             return {
@@ -1810,7 +1798,7 @@ class SeasonWorkbenchService:
                 "recipient_address": recipient_address,
                 "season_id": req.season_id,
                 "phase": phase,
-                "chain": req.blockchain,
+                "chain": BLOCKCHAIN_SOLANA,
                 "allocation": allocation.__dict__,
                 "warnings": warnings,
             }
@@ -1821,29 +1809,18 @@ class SeasonWorkbenchService:
             "claimer_wallet_address": wallet,
             "season_id": req.season_id,
             "snapshot": allocation.snapshot,
-            "blockchain": req.blockchain,
+            "blockchain": BLOCKCHAIN_SOLANA,
         }
 
-        if req.blockchain == BLOCKCHAIN_SOLANA:
-            mint_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
-            mint_result = mint_client.mint_user_nft(
-                user_wallet_address=recipient_address,
-                pnl_value=allocation.pnl_value,
-                rank=allocation.rank,
-                season_name=season_name,
-                claim_id=claim_id,
-                winner_context=winner_context,
-            )
-        else:
-            zora_client = ZoraClient(project_root=project_root)
-            mint_result = zora_client.mint_user_nft(
-                user_wallet_address=recipient_address,
-                pnl_value=allocation.pnl_value,
-                rank=allocation.rank,
-                season_name=season_name,
-                claim_id=claim_id,
-                winner_context=winner_context,
-            )
+        mint_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
+        mint_result = mint_client.mint_user_nft(
+            user_wallet_address=recipient_address,
+            pnl_value=allocation.pnl_value,
+            rank=allocation.rank,
+            season_name=season_name,
+            claim_id=claim_id,
+            winner_context=winner_context,
+        )
 
         self.insert_completed_claim(
             claim_id=claim_id,
@@ -1852,7 +1829,7 @@ class SeasonWorkbenchService:
             season_id=req.season_id,
             phase=phase,
             mint_result=mint_result,
-            mint_chain=req.blockchain,
+            mint_chain=BLOCKCHAIN_SOLANA,
         )
         self.mark_winner_row_as_minted(
             allocation=allocation,
@@ -1870,7 +1847,7 @@ class SeasonWorkbenchService:
             "recipient_address": recipient_address,
             "season_id": req.season_id,
             "phase": phase,
-            "chain": req.blockchain,
+            "chain": BLOCKCHAIN_SOLANA,
             "allocation": allocation.__dict__,
             "mint_result": mint_result.__dict__,
             "warnings": warnings,
@@ -3007,8 +2984,6 @@ def server_time() -> Dict[str, str]:
 def get_config() -> Dict[str, Any]:
     return {
         "default_solana_recipient": DEFAULT_SOLANA_RECIPIENT,
-        "default_base_recipient": DEFAULT_BASE_RECIPIENT,
-        "blockchains": [BLOCKCHAIN_SOLANA, BLOCKCHAIN_BASE_ZORA],
     }
 
 
@@ -3088,7 +3063,6 @@ def claim_season_info(
     wallet: str = "",
     auto_phase: bool = True,
     manual_phase: str = "breach",
-    blockchain: str = BLOCKCHAIN_SOLANA,
 ) -> Dict[str, Any]:
     try:
         return service.get_claim_season_info(
@@ -3096,7 +3070,6 @@ def claim_season_info(
             wallet=wallet,
             auto_phase=auto_phase,
             manual_phase=manual_phase,
-            blockchain=blockchain,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))

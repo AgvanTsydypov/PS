@@ -32,13 +32,10 @@ from scripts.data_loading_manager import DataLoadingManager
 from scripts.daily_scheduler_simple import SimplifiedScheduler
 from scripts.season_manager import SeasonManager
 from scripts.solana_service import MintedNftResult, SolanaClient
-from scripts.zora_service import ZoraClient
 
 MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
 BLOCKCHAIN_SOLANA = "solana"
-BLOCKCHAIN_BASE_ZORA = "base_zora"
 DEFAULT_SOLANA_RECIPIENT = "H1wsggroxpW3LwCCv8dVeiJW73oYPkcDGgSqhiT5Zbz3"
-DEFAULT_BASE_RECIPIENT = "0xdC65DFF7EED4c1C05511395Ccf19CF507066aCe1"
 
 
 @dataclass(frozen=True)
@@ -202,18 +199,6 @@ class SeasonTestWorkbench:
             state="readonly",
         )
         self.claim_phase_combo.grid(row=1, column=3, sticky="w", pady=(8, 0))
-
-        ttk.Label(frame, text="Blockchain").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.claim_blockchain_var = tk.StringVar(value=BLOCKCHAIN_SOLANA)
-        self.claim_blockchain_combo = ttk.Combobox(
-            frame,
-            textvariable=self.claim_blockchain_var,
-            values=[BLOCKCHAIN_SOLANA, BLOCKCHAIN_BASE_ZORA],
-            width=18,
-            state="readonly",
-        )
-        self.claim_blockchain_combo.grid(row=2, column=1, sticky="w", padx=(8, 8), pady=(8, 0))
-        self.claim_blockchain_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_blockchain_changed())
 
         self.claim_recipient_label_var = tk.StringVar(value="Solana address")
         ttk.Label(frame, textvariable=self.claim_recipient_label_var).grid(row=3, column=0, sticky="w", pady=(8, 0))
@@ -797,22 +782,6 @@ class SeasonTestWorkbench:
             self.claim_phase_combo.configure(state="readonly")
         self._refresh_claim_season_info()
 
-    def _on_blockchain_changed(self) -> None:
-        selected = self.claim_blockchain_var.get().strip()
-        current_recipient = self.claim_solana_var.get().strip()
-        if selected == BLOCKCHAIN_BASE_ZORA:
-            self.claim_recipient_label_var.set("Base recipient (0x...)")
-            wallet = self.claim_wallet_var.get().strip().lower()
-            if current_recipient == DEFAULT_SOLANA_RECIPIENT or not current_recipient:
-                self.claim_solana_var.set(DEFAULT_BASE_RECIPIENT)
-            elif wallet.startswith("0x") and len(wallet) == 42 and not current_recipient:
-                self.claim_solana_var.set(wallet)
-        else:
-            self.claim_recipient_label_var.set("Solana address")
-            if current_recipient == DEFAULT_BASE_RECIPIENT or not current_recipient:
-                self.claim_solana_var.set(DEFAULT_SOLANA_RECIPIENT)
-        self._refresh_claim_season_info()
-
     def _sync_claim_phase_preview(self) -> None:
         if not self.auto_phase_var.get():
             self._refresh_claim_season_info()
@@ -996,7 +965,7 @@ class SeasonTestWorkbench:
                 stream = self._resolve_stream_for_season_id(eligibility, season_id)
 
                 lines.append(f"- wallet: {wallet}")
-                lines.append(f"- blockchain: {self.claim_blockchain_var.get().strip()}")
+                lines.append(f"- blockchain: {BLOCKCHAIN_SOLANA}")
                 lines.append(f"- is_origin_wallet: {bool(eligibility.get('is_origin_wallet'))}")
 
                 if stream:
@@ -1067,7 +1036,7 @@ class SeasonTestWorkbench:
         season_label = self.claim_season_var.get().strip()
         season_id = self._get_selected_season_id(season_label)
         phase = self.claim_phase_var.get().strip()
-        selected_blockchain = self.claim_blockchain_var.get().strip()
+        selected_blockchain = BLOCKCHAIN_SOLANA
 
         if not wallet or not season_id or not recipient_raw:
             messagebox.showwarning("Missing fields", "Select wallet/season and enter recipient address.")
@@ -1076,21 +1045,11 @@ class SeasonTestWorkbench:
             messagebox.showinfo("Mint in progress", "Please wait until current mint finishes.")
             return
 
-        if selected_blockchain == BLOCKCHAIN_SOLANA:
-            try:
-                recipient_address = str(Pubkey.from_string(recipient_raw))
-                self.claim_solana_var.set(recipient_address)
-            except Exception:
-                messagebox.showwarning("Invalid Solana address", "Enter a valid Solana wallet address.")
-                return
-        elif selected_blockchain == BLOCKCHAIN_BASE_ZORA:
-            recipient_address = recipient_raw.lower()
-            if not (recipient_address.startswith("0x") and len(recipient_address) == 42):
-                messagebox.showwarning("Invalid Base address", "Enter a valid EVM address (0x...).")
-                return
+        try:
+            recipient_address = str(Pubkey.from_string(recipient_raw))
             self.claim_solana_var.set(recipient_address)
-        else:
-            messagebox.showwarning("Invalid blockchain", f"Unsupported blockchain: {selected_blockchain}")
+        except Exception:
+            messagebox.showwarning("Invalid Solana address", "Enter a valid Solana wallet address.")
             return
 
         auto_phase_reason: Optional[str] = None
@@ -1239,28 +1198,15 @@ class SeasonTestWorkbench:
                 "snapshot": allocation.snapshot,
                 "blockchain": selected_blockchain,
             }
-            if selected_blockchain == BLOCKCHAIN_SOLANA:
-                mint_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
-                mint_result = mint_client.mint_user_nft(
-                    user_wallet_address=recipient_address,
-                    pnl_value=allocation.pnl_value,
-                    rank=allocation.rank,
-                    season_name=season_name,
-                    claim_id=claim_id,
-                    winner_context=winner_context,
-                )
-            elif selected_blockchain == BLOCKCHAIN_BASE_ZORA:
-                zora_client = ZoraClient(project_root=project_root)
-                mint_result = zora_client.mint_user_nft(
-                    user_wallet_address=recipient_address,
-                    pnl_value=allocation.pnl_value,
-                    rank=allocation.rank,
-                    season_name=season_name,
-                    claim_id=claim_id,
-                    winner_context=winner_context,
-                )
-            else:
-                raise ValueError(f"Unsupported blockchain: {selected_blockchain}")
+            mint_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
+            mint_result = mint_client.mint_user_nft(
+                user_wallet_address=recipient_address,
+                pnl_value=allocation.pnl_value,
+                rank=allocation.rank,
+                season_name=season_name,
+                claim_id=claim_id,
+                winner_context=winner_context,
+            )
 
             self._insert_completed_claim(
                 claim_id=claim_id,
@@ -1311,7 +1257,7 @@ class SeasonTestWorkbench:
             self.claims_output_text,
             (
                 f"Mint completed: claim_id={claim_id} wallet={wallet} season_id={season_id} "
-                f"recipient={solana_wallet} chain={self.claim_blockchain_var.get().strip()} "
+                f"recipient={solana_wallet} chain={BLOCKCHAIN_SOLANA} "
                 f"asset_address={mint_result.asset_address} "
                 f"tx_hash={mint_result.tx_hash}"
             ),
