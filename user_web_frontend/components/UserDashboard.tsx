@@ -84,56 +84,6 @@ type StoredSessionMeta = {
   challengeId?: string;
 };
 
-type EligibilityStream = {
-  season_id: number | null;
-  phase: string | null;
-  eligible_now: boolean;
-  ineligible_reason: string | null;
-};
-
-type EligibilityResponse = {
-  wallet_address: string;
-  proxy_wallet?: string;
-  trader_rank?: string;
-  eligibility_wallet?: string;
-  mint_blocked?: boolean;
-  mint_block_reason?: string;
-  genesis: EligibilityStream;
-  standard: EligibilityStream;
-  double_mint: {
-    can_claim_genesis: boolean;
-    can_claim_standard: boolean;
-    can_claim_both_now: boolean;
-  };
-};
-
-type UserNftItem = {
-  token_id: string;
-  name: string;
-  description: string;
-  image_url: string;
-  owner_address: string;
-  collection_name: string;
-  token_type: string;
-  amount: string;
-  explorer_url: string;
-  metadata?: {
-    attributes?: Array<{
-      trait_type?: string;
-      value?: string | number | boolean | null;
-    }>;
-  };
-};
-
-type UserNftsResponse = {
-  wallet_address: string;
-  contract_address: string;
-  items: UserNftItem[];
-  total: number;
-  source: string;
-  fetched_at: string;
-};
-
 type GeneratedCardPayload = {
   card_title?: string;
   primary_tag?: string;
@@ -300,18 +250,8 @@ export default function UserDashboard() {
   const [isSignedIn, setIsSignedIn] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [signInCount, setSignInCount] = useState<number | null>(null);
-  const [eligibilityLoading, setEligibilityLoading] = useState(false);
-  const [eligibilitySummary, setEligibilitySummary] = useState("");
-  const [eligibilityChecked, setEligibilityChecked] = useState(false);
-  const [canMintNow, setCanMintNow] = useState(false);
-  const [mintLoading, setMintLoading] = useState(false);
-  const [mintResultText, setMintResultText] = useState("");
   const [proxyWallet, setProxyWallet] = useState<string | null>(null);
   const [traderRank, setTraderRank] = useState<string | null>(null);
-  const [myNfts, setMyNfts] = useState<UserNftItem[]>([]);
-  const [myNftsLoading, setMyNftsLoading] = useState(false);
-  const [myNftsError, setMyNftsError] = useState("");
-  const [myNftsFetchedAt, setMyNftsFetchedAt] = useState<string | null>(null);
   const [myCards, setMyCards] = useState<GeneratedCardItem[]>([]);
   const [myCardsLoading, setMyCardsLoading] = useState(false);
   const [myCardsError, setMyCardsError] = useState("");
@@ -412,9 +352,6 @@ export default function UserDashboard() {
 
   useEffect(() => {
     if (!isSignedIn) {
-      setMyNfts([]);
-      setMyNftsError("");
-      setMyNftsFetchedAt(null);
       setMyCards([]);
       setMyCardsError("");
       setMyCardsFetchedAt(null);
@@ -423,7 +360,6 @@ export default function UserDashboard() {
       setFlippedCardSlugs({});
       return;
     }
-    void refreshMyNfts();
     void refreshMyCards();
   }, [isSignedIn, walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -551,54 +487,6 @@ export default function UserDashboard() {
     }
   }
 
-  async function refreshMyNfts() {
-    if (!isSignedIn) {
-      setMyNfts([]);
-      setMyNftsError("");
-      setMyNftsFetchedAt(null);
-      return;
-    }
-
-    setMyNftsLoading(true);
-    setMyNftsError("");
-    try {
-      const res = await fetch(buildApiUrl("/api/me/nfts"), {
-        method: "GET",
-        credentials: userApiCredentials,
-      });
-      if (!res.ok) {
-        if (res.status === 401) {
-          void clearServerSessionCookie();
-          setIsSignedIn(false);
-          setProxyWallet(null);
-          setTraderRank(null);
-          setStatusText("Session expired. Please connect wallet again.");
-          setMyNfts([]);
-          setMyNftsError("");
-          setMyNftsFetchedAt(null);
-          setMyCards([]);
-          setMyCardsError("");
-          setMyCardsFetchedAt(null);
-          setGeneratedCardsTotalAvailable(0);
-          setGeneratedCardsRemainingAvailable(0);
-          clearStoredSessionMeta();
-        }
-        const text = await res.text();
-        throw new Error(text || "Failed to load NFT collection");
-      }
-      const payload = (await res.json()) as UserNftsResponse;
-      setMyNfts(Array.isArray(payload.items) ? payload.items : []);
-      setMyNftsFetchedAt(String(payload.fetched_at ?? ""));
-      setMyNftsError("");
-    } catch (error) {
-      setMyNftsError(extractErrorMessage(error));
-      setMyNfts([]);
-      setMyNftsFetchedAt(null);
-    } finally {
-      setMyNftsLoading(false);
-    }
-  }
-
   async function refreshMyCards() {
     if (!isSignedIn) {
       setMyCards([]);
@@ -623,8 +511,6 @@ export default function UserDashboard() {
           setProxyWallet(null);
           setTraderRank(null);
           setStatusText("Session expired. Please connect wallet again.");
-          setMyNfts([]);
-          setMyNftsFetchedAt(null);
           setMyCards([]);
           setMyCardsFetchedAt(null);
           clearStoredSessionMeta();
@@ -656,19 +542,12 @@ export default function UserDashboard() {
     setTraderRank(null);
     setChallengeId("");
     setSignInCount(null);
-    setMyNfts([]);
-    setMyNftsError("");
-    setMyNftsFetchedAt(null);
     setMyCards([]);
     setMyCardsError("");
     setMyCardsFetchedAt(null);
     setGeneratedCardsTotalAvailable(0);
     setGeneratedCardsRemainingAvailable(0);
     setFlippedCardSlugs({});
-    setEligibilitySummary("");
-    setEligibilityChecked(false);
-    setCanMintNow(false);
-    setMintResultText("");
     setGetCardResultText("");
     setStatusText("Logged out");
     setIsWalletButtonHovered(false);
@@ -742,10 +621,6 @@ export default function UserDashboard() {
       setIsSignedIn(Boolean(verify.signed_in));
       setSignInCount(verify.sign_in_count);
       setStatusText(verify.signed_in ? "Signed in" : "Not signed in");
-      setEligibilitySummary("");
-      setEligibilityChecked(false);
-      setCanMintNow(false);
-      setMintResultText("");
       setGetCardResultText("");
       const resolvedProxyWallet = String(verify.proxy_wallet ?? "").trim() || null;
       const resolvedTraderRank = String(verify.trader_rank ?? "").trim() || null;
@@ -765,9 +640,6 @@ export default function UserDashboard() {
       } else {
         setProxyWallet(null);
         setTraderRank(null);
-        setMyNfts([]);
-        setMyNftsError("");
-        setMyNftsFetchedAt(null);
         setMyCards([]);
         setMyCardsError("");
         setMyCardsFetchedAt(null);
@@ -780,17 +652,11 @@ export default function UserDashboard() {
       setStatusText(extractErrorMessage(error));
       setProxyWallet(null);
       setTraderRank(null);
-      setMyNfts([]);
-      setMyNftsError("");
-      setMyNftsFetchedAt(null);
       setMyCards([]);
       setMyCardsError("");
       setMyCardsFetchedAt(null);
       setGeneratedCardsTotalAvailable(0);
       setGeneratedCardsRemainingAvailable(0);
-      setEligibilityChecked(false);
-      setCanMintNow(false);
-      setMintResultText("");
       setGetCardResultText("");
       void clearServerSessionCookie();
       clearStoredSessionMeta();
@@ -827,17 +693,11 @@ export default function UserDashboard() {
       setSignInCount(null);
       setProxyWallet(null);
       setTraderRank(null);
-      setMyNfts([]);
-      setMyNftsError("");
-      setMyNftsFetchedAt(null);
       setMyCards([]);
       setMyCardsError("");
       setMyCardsFetchedAt(null);
       setGeneratedCardsTotalAvailable(0);
       setGeneratedCardsRemainingAvailable(0);
-      setEligibilityChecked(false);
-      setCanMintNow(false);
-      setMintResultText("");
       setGetCardResultText("");
       void clearServerSessionCookie();
       clearStoredSessionMeta();
@@ -855,162 +715,6 @@ export default function UserDashboard() {
       }
     } finally {
       setIsBusy(false);
-    }
-  }
-
-  async function checkMintEligibility() {
-    if (!walletAddress) return;
-    if (!isSignedIn) {
-      setEligibilitySummary("Please sign in again to refresh your secure session.");
-      setEligibilityChecked(true);
-      setCanMintNow(false);
-      return;
-    }
-    setEligibilityLoading(true);
-    setMintResultText("");
-    try {
-      const res = await fetch(buildApiUrl("/api/eligibility"), {
-        method: "POST",
-        credentials: userApiCredentials,
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ wallet: walletAddress }),
-      });
-      if (!res.ok) {
-        if (res.status === 401) {
-          void clearServerSessionCookie();
-          setIsSignedIn(false);
-          setProxyWallet(null);
-          setTraderRank(null);
-          setMyNfts([]);
-          setMyNftsError("");
-          setMyNftsFetchedAt(null);
-          setMyCards([]);
-          setMyCardsError("");
-          setMyCardsFetchedAt(null);
-          setGeneratedCardsTotalAvailable(0);
-          setGeneratedCardsRemainingAvailable(0);
-          setStatusText("Session expired. Please connect wallet again.");
-          clearStoredSessionMeta();
-        }
-        const text = await res.text();
-        throw new Error(text || "Eligibility request failed");
-      }
-      const payload = (await res.json()) as EligibilityResponse;
-      const canMintAny =
-        Boolean(payload.double_mint?.can_claim_genesis) ||
-        Boolean(payload.double_mint?.can_claim_standard);
-      setCanMintNow(canMintAny);
-      setEligibilityChecked(true);
-      const resolvedProxyWallet = String(payload.proxy_wallet ?? "").trim() || proxyWallet;
-      const resolvedTraderRank = String(payload.trader_rank ?? "").trim() || traderRank;
-      setProxyWallet(resolvedProxyWallet);
-      setTraderRank(resolvedTraderRank);
-      saveStoredSessionMeta({
-        walletAddress,
-        selectedWalletName,
-        signInCount,
-        proxyWallet: resolvedProxyWallet ?? null,
-        traderRank: resolvedTraderRank ?? null,
-        challengeId,
-      });
-
-      const details = [
-        `Connected wallet: ${walletAddress}`,
-        `Proxy wallet (PM): ${String(payload.proxy_wallet ?? "Not found")}`,
-        `Trader rank (overall/all by pnl): ${String(payload.trader_rank ?? "No trades yet")}`,
-        `Eligibility wallet: ${String(payload.eligibility_wallet ?? walletAddress)}`,
-        `Can mint now: ${canMintAny ? "YES" : "NO"}`,
-        ...(payload.mint_block_reason ? [`Mint block reason: ${payload.mint_block_reason}`] : []),
-        `Genesis: ${payload.genesis?.eligible_now ? "eligible" : `not eligible${payload.genesis?.ineligible_reason ? ` (${payload.genesis.ineligible_reason})` : ""}`}`,
-        `Standard: ${payload.standard?.eligible_now ? "eligible" : `not eligible${payload.standard?.ineligible_reason ? ` (${payload.standard.ineligible_reason})` : ""}`}`,
-      ];
-      setEligibilitySummary(details.join("\n"));
-    } catch (error) {
-      setEligibilitySummary(`Eligibility check failed: ${extractErrorMessage(error)}`);
-      setEligibilityChecked(true);
-      setCanMintNow(false);
-    } finally {
-      setEligibilityLoading(false);
-    }
-  }
-
-  async function mintOnBaseSepolia() {
-    if (!isSignedIn) {
-      setMintResultText("Mint failed: Please sign in again.");
-      return;
-    }
-    setMintLoading(true);
-    try {
-      const res = await fetch(buildApiUrl("/api/mint/base-sepolia"), {
-        method: "POST",
-        credentials: userApiCredentials,
-      });
-      if (!res.ok) {
-        if (res.status === 401) {
-          void clearServerSessionCookie();
-          setIsSignedIn(false);
-          setProxyWallet(null);
-          setTraderRank(null);
-          setMyNfts([]);
-          setMyNftsError("");
-          setMyNftsFetchedAt(null);
-          setMyCards([]);
-          setMyCardsError("");
-          setMyCardsFetchedAt(null);
-          setGeneratedCardsTotalAvailable(0);
-          setGeneratedCardsRemainingAvailable(0);
-          setStatusText("Session expired. Please connect wallet again.");
-          clearStoredSessionMeta();
-        }
-        const text = await res.text();
-        throw new Error(text || "Mint failed");
-      }
-      const payload = (await res.json()) as {
-        status: string;
-        message: string;
-        minted_count: number;
-        minted_claims: Array<{
-          stream: string;
-          claim_id: number;
-          chain: string;
-          tx_hash: string;
-          asset_address: string;
-          season_id: number;
-          phase: string;
-        }>;
-        failed_claims?: Array<{
-          stream: string;
-          season_id: number;
-          reason: string;
-        }>;
-      };
-      const successLines = payload.minted_claims.flatMap((claim) => [
-        `- [${claim.stream}] claim_id=${claim.claim_id} season_id=${claim.season_id} phase=${claim.phase}`,
-        `  chain=${claim.chain}`,
-        `  tx_hash=${claim.tx_hash}`,
-        `  asset_address=${claim.asset_address}`,
-      ]);
-      const failedLines = (payload.failed_claims ?? []).map(
-        (item) => `- [${item.stream}] season_id=${item.season_id}: ${item.reason}`
-      );
-      setMintResultText(
-        [
-          payload.message || "Mint completed",
-          `minted_count: ${payload.minted_count}`,
-          "Minted claims:",
-          ...successLines,
-          ...(failedLines.length > 0 ? ["Failed claims:", ...failedLines] : []),
-        ].join("\n")
-      );
-      await checkMintEligibility();
-      await refreshMyNfts();
-      await seasonsBoardRef.current?.refresh();
-    } catch (error) {
-      setMintResultText(`Mint failed: ${extractErrorMessage(error)}`);
-    } finally {
-      setMintLoading(false);
     }
   }
 
@@ -1032,9 +736,6 @@ export default function UserDashboard() {
           setIsSignedIn(false);
           setProxyWallet(null);
           setTraderRank(null);
-          setMyNfts([]);
-          setMyNftsError("");
-          setMyNftsFetchedAt(null);
           setMyCards([]);
           setMyCardsError("");
           setMyCardsFetchedAt(null);
@@ -1232,7 +933,7 @@ export default function UserDashboard() {
         footer={
           !isSignedIn ? (
             <p className="season-board-note">
-              To receive NFT, you need to connect your wallet.
+              Connect your wallet to use wallet-linked actions.
             </p>
           ) : (
             <div className="season-board-actions">
@@ -1242,14 +943,6 @@ export default function UserDashboard() {
                   {generatedCardsRemainingAvailable} / {generatedCardsTotalAvailable}
                 </strong>
               </div>
-              <button onClick={() => void checkMintEligibility()} disabled={eligibilityLoading}>
-                {eligibilityLoading ? "Checking..." : "Check mint eligibility"}
-              </button>
-              {eligibilityChecked ? (
-                <button onClick={() => void mintOnBaseSepolia()} disabled={!canMintNow || mintLoading}>
-                  {mintLoading ? "Minting on Base Sepolia..." : "Mint on Base Sepolia"}
-                </button>
-              ) : null}
               <button
                 onClick={() => void getGeneratedCard()}
                 disabled={getCardLoading || generatedCardsRemainingAvailable <= 0}
@@ -1260,12 +953,6 @@ export default function UserDashboard() {
                     ? "All cards claimed"
                     : "Get card"}
               </button>
-              {eligibilitySummary ? (
-                <pre className="eligibility-output">{eligibilitySummary}</pre>
-              ) : null}
-              {mintResultText ? (
-                <pre className="eligibility-output">{mintResultText}</pre>
-              ) : null}
               {getCardResultText ? (
                 <pre className="eligibility-output">{getCardResultText}</pre>
               ) : null}
@@ -1370,87 +1057,6 @@ export default function UserDashboard() {
         )}
       </section>
 
-      <section className="season-board season-board-standalone nft-board-horizontal">
-        <div className="season-board-title">My NFT Collection (on-chain)</div>
-        {!isSignedIn ? (
-          <div className="season-board-muted">Sign in to load your collection.</div>
-        ) : (
-          <>
-            <div className="nft-actions">
-              <button onClick={() => void refreshMyNfts()} disabled={myNftsLoading}>
-                {myNftsLoading ? "Loading NFT..." : "Reload my NFT"}
-              </button>
-              {myNftsFetchedAt ? (
-                <span className="nft-fetched-at">
-                  Updated: {new Date(myNftsFetchedAt).toLocaleString()}
-                </span>
-              ) : null}
-            </div>
-            {myNftsError ? (
-              <pre className="eligibility-output">NFT load failed: {myNftsError}</pre>
-            ) : null}
-            {!myNftsLoading && !myNftsError && myNfts.length === 0 ? (
-              <div className="season-board-muted">No NFT in this wallet yet.</div>
-            ) : null}
-            <div className="nft-grid-wrap">
-              <div
-                className="nft-grid"
-                onMouseMove={(event) =>
-                  handleCardGridMouseMove(event, {
-                    wrapperSelector: ".nft-card-wrapper",
-                    cardSelector: ".nft-card-tilt",
-                  })
-                }
-                onMouseLeave={(event) => handleCardGridMouseLeave(event, ".nft-card-tilt")}
-              >
-                {myNfts.map((item) => {
-                  return (
-                    <div
-                      key={item.token_id}
-                      className="nft-card-wrapper"
-                    >
-                      <article className="nft-card nft-card-tilt theme-vivid">
-                        {item.image_url ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img className="nft-image" src={item.image_url} alt={item.name || `NFT ${item.token_id}`} />
-                        ) : (
-                          <div className="nft-image nft-image-empty">No preview</div>
-                        )}
-                        <div className="nft-card-body">
-                          <strong>{item.name || `Token #${item.token_id}`}</strong>
-                          <span>Token ID: {item.token_id}</span>
-                          {Array.isArray(item.metadata?.attributes) && item.metadata!.attributes.length > 0 ? (
-                            <div className="nft-attributes">
-                              {item.metadata!.attributes.slice(0, 6).map((attr, index) => {
-                                const trait = String(attr?.trait_type ?? "").trim() || "Attribute";
-                                const valueRaw = attr?.value;
-                                const value =
-                                  valueRaw === null || valueRaw === undefined
-                                    ? "N/A"
-                                    : String(valueRaw);
-                                return (
-                                  <span className="nft-attr" key={`${item.token_id}:${trait}:${index}`}>
-                                    {trait}: {value}
-                                  </span>
-                                );
-                              })}
-                            </div>
-                          ) : null}
-                          {item.explorer_url ? (
-                            <a href={item.explorer_url} target="_blank" rel="noreferrer">
-                              Open in Blockscout
-                            </a>
-                          ) : null}
-                        </div>
-                      </article>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </>
-        )}
-      </section>
     </>
   );
 }

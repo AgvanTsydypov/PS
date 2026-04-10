@@ -91,46 +91,9 @@ And updates `.env`:
 
 - `MASTER_COLLECTION_ADDRESS=<new_collection_address>`
 
-## Recreate Base (Zora) collection
+## Base/Zora flow
 
-Use this when you want a brand new Zora 1155 contract (new collection address).
-
-1) Prepare contract metadata URI (IPFS JSON).
-
-2) Run collection setup:
-
-```bash
-npm run setup:zora-collection -- --uri "https://gateway.pinata.cloud/ipfs/<COLLECTION_METADATA_HASH>"
-```
-
-Optional:
-
-```bash
-npm run setup:zora-collection -- --uri "https://gateway.pinata.cloud/ipfs/<COLLECTION_METADATA_HASH>" --name "PolyStars Base"
-```
-
-Important behavior:
-
-- Setup creates only the Zora 1155 collection contract.
-- Setup does **not** create bootstrap `tokenId=1`.
-- First NFT appears only when mint is triggered from app flow (`/api/claims/mint`).
-
-3) Script writes new values to `.env`:
-
-- `ZORA_1155_CONTRACT_ADDRESS=<new_contract_address>`
-- `ZORA_CHAIN=...`
-- `ZORA_RPC_URL=...`
-
-4) Copy the same Zora values to `.env.prod` (if minting on VPS), then restart backend:
-
-```bash
-docker compose --env-file .env.prod up -d --build admin_backend
-```
-
-Important:
-
-- Old and new collections are different contracts. Old minted NFTs stay in the old collection.
-- Royalty/payout settings are applied for newly created tokens in the new contract flow.
+The legacy Base/Zora mint flow has been removed from this repository. `COLLECTION_SETUP.md` now only covers the Solana master collection setup above.
 
 ## Notes
 

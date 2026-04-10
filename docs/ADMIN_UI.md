@@ -70,8 +70,7 @@ Manually triggers an NFT mint for a wallet.
 | Season | Target season for the claim record |
 | Wallet | EVM address of the claimant |
 | Phase | `breach` / `vault` / `scavenge` — used when **Auto phase** is off |
-| Chain | `solana` (Metaplex) or `base_zora` (Zora on Base) |
-| Recipient | Solana pubkey or Base EVM address that receives the NFT |
+| Recipient | Solana pubkey that receives the NFT |
 
 | Checkbox | Effect |
 |---|---|
