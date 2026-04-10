@@ -1630,7 +1630,7 @@ class SeasonTestWorkbench:
                         season_id,
                         phase,
                         "PENDING",
-                        "https://arweave.net/placeholder",
+                        "https://gateway.pinata.cloud/ipfs/QmPendingMetadataPlaceholder",
                         mint_chain,
                     ),
                 )

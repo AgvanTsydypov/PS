@@ -16,7 +16,7 @@ Edit `data/metadata/master_collection.devnet.json`:
 - `name`
 - `symbol`
 - `description`
-- `image` (public URL to image)
+- `image` (public HTTPS URL, typically `https://gateway.pinata.cloud/ipfs/...` after pinning the artwork)
 - `seller_fee_basis_points` (e.g. `500` = 5%)
 - `properties.creators` (shares must sum to `100`)
 
@@ -38,7 +38,7 @@ Add:
 PINATA_JWT=your_pinata_jwt_here
 ```
 
-## 3) Upload metadata JSON to IPFS
+## 3) Upload metadata JSON via Pinata
 
 Run:
 
