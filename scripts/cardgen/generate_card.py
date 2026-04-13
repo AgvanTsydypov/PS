@@ -178,8 +178,10 @@ BACK_META_Y_OFFSET = 10.0
 # tracking (dense caps / dates can touch the right pad). Keep a few px slack so wrap
 # breaks before the renderer does.
 BACK_LORE_WRAP_SLACK_PX = 30.0
-# Desc: limit = 344 px makes "Consensus...active." break before "This" with the updated model.
+# Desc: keep a tiny positive overflow allowance because the analytic width model
+# slightly overestimates some mixed-case lines near the right edge.
 BACK_DESC_WRAP_SLACK_PX = 0.0
+BACK_DESC_WRAP_ALLOWANCE_PX = 4.0
 # Approximate ink below hanging baseline for line-height 22 / Orbitron 14px body.
 BACK_BODY_INK_EXT = 16.0
 BACK_META_INK_EXT = 12.0
@@ -240,6 +242,33 @@ def _orbitron_adv(ch: str, fs: float) -> float:
 
 def _orbitron_width(s: str, fs: float) -> float:
     return sum(_orbitron_adv(c, fs) for c in s)
+
+
+def _fit_single_line_text(
+    text: str,
+    max_px: float,
+    base_font_size: float,
+    *,
+    min_font_size: float = 10.0,
+    step: float = 0.25,
+) -> Tuple[float, Optional[float]]:
+    """Return a font size that keeps *text* on one line, plus optional textLength fallback.
+
+    If the text still does not fit at *min_font_size*, keep that size and force-fit
+    it with SVG textLength so the renderer preserves a single line.
+    """
+    normalized = " ".join(str(text or "").replace("\n", " ").split())
+    if not normalized:
+        return base_font_size, None
+
+    fs = float(base_font_size)
+    min_fs = max(1.0, float(min_font_size))
+    step = max(0.05, float(step))
+    while fs >= min_fs:
+        if _orbitron_width(normalized, fs) <= max_px:
+            return fs, None
+        fs -= step
+    return min_fs, float(max_px)
 
 
 def _bracket_line_pos(eb_name: str, wallet_disp: str) -> Dict[str, float]:
@@ -1156,6 +1185,142 @@ def _wrap_text_by_width(text: str, max_px: float, font_size: float) -> List[str]
     return lines
 
 
+def _balanced_wrap_text_by_width(text: str, max_px: float, font_size: float) -> List[str]:
+    """Wrap text by width while preferring visually balanced line lengths.
+
+    Unlike the greedy wrapper, this uses dynamic programming to avoid awkward
+    ragged endings when a few words can be shifted upward.
+    """
+    base_words = [w for w in str(text or "").replace("\n", " ").split(" ") if w]
+    if not base_words:
+        return []
+
+    words: List[str] = []
+    for word in base_words:
+        if _orbitron_width(word, font_size) <= max_px:
+            words.append(word)
+        else:
+            words.extend(_split_oversized_line(word, max_px, font_size))
+    if not words:
+        return []
+
+    n = len(words)
+    inf = float("inf")
+    dp = [inf] * (n + 1)
+    nxt = [n] * (n + 1)
+    dp[n] = 0.0
+
+    for i in range(n - 1, -1, -1):
+        line = ""
+        for j in range(i, n):
+            line = words[j] if j == i else f"{line} {words[j]}"
+            width = _orbitron_width(line, font_size)
+            if width > max_px:
+                break
+
+            word_count = j - i + 1
+            slack_ratio = max(0.0, (max_px - width) / max(max_px, 1.0))
+            badness = slack_ratio * slack_ratio
+
+            # Penalize very short lines, especially mid-paragraph widows/orphans.
+            if word_count == 1:
+                badness += 4.0
+            elif word_count == 2:
+                badness += 0.75
+
+            # Keep the final line reasonably full too, but not as strict as middle lines.
+            if j == n - 1:
+                if word_count == 1:
+                    badness += 3.0
+                elif word_count == 2:
+                    badness += 0.9
+                else:
+                    badness *= 0.6
+
+            total = badness + dp[j + 1]
+            if total < dp[i]:
+                dp[i] = total
+                nxt[i] = j + 1
+
+    out: List[str] = []
+    i = 0
+    while i < n:
+        j = nxt[i]
+        if j <= i or j > n:
+            j = i + 1
+        out.append(" ".join(words[i:j]))
+        i = j
+    return out
+
+
+def _rebalance_back_wrap_lines(
+    lines: List[str],
+    max_px: float,
+    font_size: float,
+    *,
+    min_words_per_line: int = 2,
+) -> List[str]:
+    """Reduce awkward one-word lines in back-side paragraphs.
+
+    Prefer pulling words from the next line so fragments like ``They`` become
+    ``They possess`` instead of standing alone. If that is not possible on the
+    final line, borrow one trailing word from the previous line.
+    """
+    out = [str(line).strip() for line in lines if str(line).strip()]
+    if len(out) < 2:
+        return out
+
+    def word_count(value: str) -> int:
+        return len([w for w in value.split(" ") if w])
+
+    changed = True
+    max_iterations = max(16, len(out) * 4)
+    iterations = 0
+    while changed and iterations < max_iterations:
+        iterations += 1
+        changed = False
+        for i in range(len(out)):
+            current_words = word_count(out[i])
+            if current_words >= min_words_per_line:
+                continue
+
+            if i + 1 < len(out):
+                next_words = out[i + 1].split()
+                while next_words and word_count(out[i]) < min_words_per_line:
+                    candidate_cur = f"{out[i]} {next_words[0]}".strip()
+                    candidate_next = " ".join(next_words[1:]).strip()
+                    if _orbitron_width(candidate_cur, font_size) > max_px:
+                        break
+                    if candidate_next and _orbitron_width(candidate_next, font_size) > max_px:
+                        break
+                    out[i] = candidate_cur
+                    if candidate_next:
+                        out[i + 1] = candidate_next
+                    else:
+                        del out[i + 1]
+                    next_words = out[i + 1].split() if i + 1 < len(out) else []
+                    changed = True
+                    if i + 1 >= len(out):
+                        break
+                if word_count(out[i]) >= min_words_per_line:
+                    continue
+
+            if i > 0 and " " in out[i - 1]:
+                prev_left, _, prev_right = out[i - 1].rpartition(" ")
+                candidate_prev = prev_left.strip()
+                candidate_cur = f"{prev_right} {out[i]}".strip()
+                if (
+                    candidate_prev
+                    and _orbitron_width(candidate_prev, font_size) <= max_px
+                    and _orbitron_width(candidate_cur, font_size) <= max_px
+                ):
+                    out[i - 1] = candidate_prev
+                    out[i] = candidate_cur
+                    changed = True
+        out = [line for line in out if line.strip()]
+    return out
+
+
 
 def _wrap_back_text(
     text: str,
@@ -1176,7 +1341,7 @@ def _wrap_back_text(
     else:
         slack = float(BACK_LORE_WRAP_SLACK_PX if slack_px is None else slack_px)
         limit = max(40.0, float(max_px) - slack)
-    raw = _wrap_text_by_width(text, limit, font_size)
+    raw = _balanced_wrap_text_by_width(text, limit, font_size)
     out: List[str] = []
     cap_ref = float(cap_px) if cap_px is not None else float(max_px)
     cap = cap_ref - 2.0
@@ -1185,7 +1350,7 @@ def _wrap_back_text(
             out.append(ln)
         else:
             out.extend(_split_oversized_line(ln, cap, font_size))
-    return out
+    return _rebalance_back_wrap_lines(out, cap, font_size)
 
 
 def _title_line_within_band(
@@ -1390,10 +1555,11 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 
     lore = _esc(str(data.get("card_lore", "") or "No topology data available."))
     archetype_desc = _esc(str(data.get("archetype_description", "") or "No archetype description."))
-    archetype_math = str(data.get("archetype_math", "") or "No statistical pattern.")
-    archetype_math_lines = [_esc(s) for s in _format_archetype_math_lines(archetype_math)]
-    if not archetype_math_lines:
-        archetype_math_lines = ["No statistical pattern."]
+    archetype_math = " ".join(
+        str(data.get("archetype_math", "") or "No statistical pattern.").replace("\n", " ").split()
+    )
+    if not archetype_math:
+        archetype_math = "No statistical pattern."
 
     rarity_raw = str(data.get("rarity_bracket", "") or "").strip()
     if not rarity_raw:
@@ -1461,7 +1627,12 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     desc_y        = BACK_DESC_Y        + push_down
 
     desc_lines = _wrap_back_text(
-        archetype_desc, float(BACK_BODY_WRAP_W), 14.0, slack_px=BACK_DESC_WRAP_SLACK_PX
+        archetype_desc,
+        float(BACK_BODY_WRAP_W),
+        14.0,
+        slack_px=BACK_DESC_WRAP_SLACK_PX,
+        greedy_max_px=float(BACK_BODY_WRAP_W) + BACK_DESC_WRAP_ALLOWANCE_PX,
+        cap_px=float(BACK_BODY_WRAP_W) + BACK_DESC_WRAP_ALLOWANCE_PX,
     )
 
     lore_svg = "".join(
@@ -1473,11 +1644,6 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
         for i, line in enumerate(desc_lines)
     )
 
-    math_chunks = [_esc(c.strip()) for c in str(archetype_math or "").split("|") if c.strip()]
-    if not math_chunks:
-        math_chunks = archetype_math_lines[:]
-    if not math_chunks:
-        math_chunks = ["No statistical pattern."]
     archetype_line_text = _esc(f"ARCHETYPE: {archetype_raw}")
     stat_header = "STATISTICAL PATTERN:"
 
@@ -1488,40 +1654,21 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 
     inner_bottom = BACK_DZ_Y + BACK_DZ_H
 
-    flat_metrics: List[Optional[str]] = []
-    for idx, chunk in enumerate(math_chunks):
-        wrapped = _wrap_text_by_width(chunk, float(BACK_BODY_WRAP_W), 14.0) or [chunk]
-        for line in wrapped:
-            flat_metrics.append(line)
-        if idx < len(math_chunks) - 1 and BACK_METRIC_CHUNK_GAP > 0:
-            flat_metrics.append(None)
-
-    def _layout_metric_blocks(seq: List[Optional[str]]) -> List[tuple[float, str]]:
-        out: List[tuple[float, str]] = []
-        y = y_first_metric
-        for item in seq:
-            if item is None:
-                y += BACK_METRIC_CHUNK_GAP
-            else:
-                out.append((y, item))
-                y += lh
-        return out
-
-    metric_line_blocks = _layout_metric_blocks(flat_metrics)
-    if not metric_line_blocks:
-        metric_line_blocks = [(y_first_metric, "No statistical pattern.")]
-
-    metrics_svg = "".join(
-        f'<text x="{BACK_TEXT_X}" y="{round(y, 1)}" text-anchor="start" dominant-baseline="hanging" '
-        f'font-size="14" fill="white" style="{style_lh}">{txt}</text>'
-        for y, txt in metric_line_blocks
+    metric_font_size, metric_text_length = _fit_single_line_text(
+        archetype_math, float(BACK_BODY_WRAP_W), 14.0, min_font_size=10.0
+    )
+    metric_text_length_attr = (
+        f' textLength="{round(metric_text_length, 1)}" lengthAdjust="spacingAndGlyphs"'
+        if metric_text_length is not None
+        else ""
+    )
+    metrics_svg = (
+        f'<text x="{BACK_TEXT_X}" y="{round(y_first_metric, 1)}" text-anchor="start" '
+        f'dominant-baseline="hanging" font-size="{metric_font_size:g}" fill="white" '
+        f'style="{style_lh}"{metric_text_length_attr}>{_esc(archetype_math)}</text>'
     )
 
-    if metric_line_blocks:
-        last_m_baseline = metric_line_blocks[-1][0]
-        meta_y1 = last_m_baseline + BACK_BODY_INK_EXT + BACK_GAP_METRICS_TO_META
-    else:
-        meta_y1 = y_stat_header + BACK_BODY_INK_EXT + BACK_GAP_METRICS_TO_META
+    meta_y1 = y_first_metric + BACK_BODY_INK_EXT + BACK_GAP_METRICS_TO_META
 
     season_card_raw = f"SEASON CARD NUMBER: {mint_str}/{size_str}"
     season_dates_raw = f"SEASON DATES: {d1} - {d2}"
@@ -1682,7 +1829,7 @@ SAMPLE_DATA: Dict[str, Any] = {
     "gravity":           "P99",
     "archetype":         "SUBSTRATE",
     "card_lore":         "Standard edition pricing breach at triple digits signals industry inflection. Historical AAA launch data suggests $69.99 baseline holds. Resolution hinges on store listings by Feb 2026 deadline.",
-    "archetype_description": "Apex-tier consensus exploitation. This entity exhibits extreme risk aversion, refusing to deploy their overwhelming financial mass until absolute mathematical certainty has crystallized. By parking heavy capital into fully resolved timelines, they brutally extract risk-free, low-variance yield from the ecosystems final moments. They possess no predictive foresight, relying entirely on financial gravity to crush the remaining fractional value out of the ledger.",
+    "archetype_description": "Mechanical routing protocol detected. This entity operates with massive kinetic force but generates zero directional trajectory, executing purely on structural arbitrage and fractional spreads. Devoid of human psychology or predictive bias, they exist solely to bridge conditional markets, merge underlying tokens, and enforce absolute liquidity ceilings. They do not predict the future; they mathematically process the emotions of the swarm.",
     "archetype_math":    "(P(E) ≥ 0.97 & Vol < 50) ∪ Mid-Trend Lag",
     "rarity_bracket":    "[ OCCURRENCE: 1.0% - 2.0% ]",
     "leaderboard_rank":  63564,
