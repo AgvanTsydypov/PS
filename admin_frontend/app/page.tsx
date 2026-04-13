@@ -1314,6 +1314,26 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const status = await fetchJSON<{ running: boolean; status: string }>("/api/actions/season-update/status");
+        if (cancelled || !status.running) return;
+        setSeasonUpdateRunning(true);
+        setSeasonUpdateOutput((prev) => {
+          if (prev.includes("Season update restored after page refresh.")) return prev;
+          return `${prev}[${new Date().toISOString()}] Season update restored after page refresh.\n`;
+        });
+      } catch {
+        // ignore transient status probe failures
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!claimSeasonId) return;
     void run(async () => {
       if (tab === "eligibility" || tab === "claims") {
@@ -1497,6 +1517,12 @@ export default function HomePage() {
         setClaimOutput((prev) => `${prev}${msg}\n`);
         if (payload.event === "season_update") {
           setSeasonUpdateOutput((prev) => `${prev}${msg}\n`);
+          if (payload.payload?.status === "ok") {
+            setOk(wsDetails);
+            void refreshOverview();
+          } else if (payload.payload?.status === "error") {
+            setError(wsDetails || "Season update failed");
+          }
           setSeasonUpdateRunning(false);
         }
       } catch {
@@ -1571,16 +1597,18 @@ export default function HomePage() {
                   setSeasonUpdateRunning(true);
                   setSeasonUpdateOutput((prev) => `${prev}[${new Date().toISOString()}] Season update started...\n`);
                   try {
-                    const out = await fetchJSON<{ message: string }>("/api/actions/season-update", { method: "POST" });
-                    setSeasonUpdateOutput((prev) => `${prev}[${new Date().toISOString()}] Season update completed: ${out.message}\n`);
-                    setOk(out.message);
-                    await refreshOverview();
+                    const out = await fetchJSON<{ status: string; message: string }>("/api/actions/season-update", { method: "POST" });
+                    setSeasonUpdateOutput(
+                      (prev) => `${prev}[${new Date().toISOString()}] Season update request accepted: ${out.message}\n`
+                    );
+                    if (out.status !== "started" && out.status !== "running") {
+                      setSeasonUpdateRunning(false);
+                    }
                   } catch (e) {
                     const message = e instanceof Error ? e.message : String(e);
                     setSeasonUpdateOutput((prev) => `${prev}[${new Date().toISOString()}] Season update failed: ${message}\n`);
-                    throw e;
-                  } finally {
                     setSeasonUpdateRunning(false);
+                    throw e;
                   }
                 })
               }
