@@ -419,6 +419,18 @@ def _attach_generated_card_images(payload: Dict[str, Any]) -> Dict[str, Any]:
     return output
 
 
+def _attach_fixed_card_images(
+    payload: Dict[str, Any],
+    *,
+    fixed_front_image_url: str,
+    fixed_back_image_url: str,
+) -> Dict[str, Any]:
+    output = dict(payload)
+    output["front_image_url"] = fixed_front_image_url
+    output["back_image_url"] = fixed_back_image_url
+    return output
+
+
 def build_polystars_card_for_mint(
     manager: DataLoadingManager,
     *,
@@ -426,6 +438,8 @@ def build_polystars_card_for_mint(
     claim_id: int,
     claim_type: str,
     snapshot_event_image_url: str = "",
+    fixed_front_image_url: str = "",
+    fixed_back_image_url: str = "",
 ) -> Dict[str, Any]:
     row = _load_card_source_row(manager, winner_row_id)
     if not row:
@@ -436,4 +450,10 @@ def build_polystars_card_for_mint(
         claim_type=claim_type,
         snapshot_event_image_url=snapshot_event_image_url,
     )
+    if fixed_front_image_url and fixed_back_image_url:
+        return _attach_fixed_card_images(
+            payload,
+            fixed_front_image_url=fixed_front_image_url,
+            fixed_back_image_url=fixed_back_image_url,
+        )
     return _attach_generated_card_images(payload)
