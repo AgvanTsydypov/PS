@@ -101,6 +101,7 @@ class SolanaClient:
         season_name: str,
         claim_id: int | None = None,
         winner_context: dict[str, Any] | None = None,
+        polystars_card: dict[str, Any] | None = None,
     ) -> MintedNftResult:
         """
         Mint a Core NFT for a user wallet and attach it to master collection.
@@ -116,6 +117,7 @@ class SolanaClient:
             pnl_value=pnl_value,
             rank=rank,
             winner_context=winner_context,
+            polystars_card=polystars_card,
         )
 
         asset_keypair = Keypair()
@@ -225,17 +227,26 @@ class SolanaClient:
         pnl_value: float,
         rank: int,
         winner_context: dict[str, Any] | None = None,
+        polystars_card: dict[str, Any] | None = None,
     ) -> str:
         snapshot = winner_context.get("snapshot") if winner_context else {}
         event_image_url = ""
         if isinstance(snapshot, dict):
             event_image_url = str(snapshot.get("event_image_url") or "").strip()
+        card_payload = dict(polystars_card or {})
+        front_image_url = str(card_payload.get("front_image_url") or "").strip()
+        back_image_url = str(card_payload.get("back_image_url") or "").strip()
         pinned_event_image_url = ""
         if event_image_url:
-            pinned_event_image_url = self._pin_remote_image_to_pinata(
-                source_image_url=event_image_url,
-                nft_name=nft_name,
-            )
+            try:
+                pinned_event_image_url = self._pin_remote_image_to_pinata(
+                    source_image_url=event_image_url,
+                    nft_name=nft_name,
+                )
+            except Exception:
+                if not front_image_url:
+                    raise
+        primary_image_url = front_image_url or pinned_event_image_url
 
         metadata = {
             "name": nft_name,
@@ -246,16 +257,31 @@ class SolanaClient:
                 {"trait_type": "Rank", "value": rank},
             ],
         }
-        if pinned_event_image_url:
-            metadata["image"] = pinned_event_image_url
-            metadata["properties"] = {
-                "category": "image",
-                "files": [
+        if primary_image_url:
+            files = [
+                {
+                    "uri": primary_image_url,
+                    "type": self._guess_media_type(primary_image_url),
+                }
+            ]
+            if back_image_url:
+                files.append(
+                    {
+                        "uri": back_image_url,
+                        "type": self._guess_media_type(back_image_url),
+                    }
+                )
+            if pinned_event_image_url and pinned_event_image_url != primary_image_url:
+                files.append(
                     {
                         "uri": pinned_event_image_url,
                         "type": self._guess_media_type(pinned_event_image_url),
                     }
-                ],
+                )
+            metadata["image"] = primary_image_url
+            metadata["properties"] = {
+                "category": "image",
+                "files": files,
             }
         if winner_context:
             metadata["winner_context"] = self._build_metadata_winner_context(
@@ -263,6 +289,8 @@ class SolanaClient:
                 source_event_image_url=event_image_url,
                 pinned_event_image_url=pinned_event_image_url,
             )
+        if card_payload:
+            metadata["polystars_card"] = card_payload
 
         uploaded_uri = self._upload_metadata_to_pinata(metadata)
         if uploaded_uri:
@@ -292,8 +320,8 @@ class SolanaClient:
                 {"trait_type": "Rank", "value": rank},
             ],
         }
-        if pinned_event_image_url:
-            compact_metadata["image"] = pinned_event_image_url
+        if primary_image_url:
+            compact_metadata["image"] = primary_image_url
         if winner_context:
             compact_metadata["winner_ref"] = {
                 "assignment_type": winner_context.get("assignment_type"),
@@ -301,6 +329,8 @@ class SolanaClient:
                 "season_id": winner_context.get("season_id"),
                 "winner_row_id": (winner_context.get("snapshot") or {}).get("winner_row_id"),
             }
+        if card_payload:
+            compact_metadata["polystars_card"] = card_payload
 
         raw_json = json.dumps(compact_metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         encoded = base64.b64encode(raw_json).decode("ascii")

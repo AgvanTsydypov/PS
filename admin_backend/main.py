@@ -44,6 +44,7 @@ if project_root not in sys.path:
 from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE, GENESIS_END_DATE
 from scripts.daily_scheduler_simple import SimplifiedScheduler
 from scripts.cardgen.generate_card import generate_card_back_svg, generate_card_svg
+from scripts.polystars_card_payload import build_polystars_card_for_mint
 from scripts.simulate_user_generated_cards_batch import run_admin_simulated_card_generations
 from scripts.season_manager import SeasonManager
 from scripts.solana_service import MintedNftResult, SolanaClient
@@ -1812,6 +1813,17 @@ class SeasonWorkbenchService:
             "blockchain": BLOCKCHAIN_SOLANA,
         }
 
+        snap = allocation.snapshot if isinstance(allocation.snapshot, dict) else {}
+        event_img = str(snap.get("event_image_url") or "").strip()
+        card_claim_type = "origin" if allocation.assignment_type == "winner_self" else "looter"
+        polystars_card = build_polystars_card_for_mint(
+            self.manager,
+            winner_row_id=allocation.row_id,
+            claim_id=claim_id,
+            claim_type=card_claim_type,
+            snapshot_event_image_url=event_img,
+        )
+
         mint_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
         mint_result = mint_client.mint_user_nft(
             user_wallet_address=recipient_address,
@@ -1820,6 +1832,7 @@ class SeasonWorkbenchService:
             season_name=season_name,
             claim_id=claim_id,
             winner_context=winner_context,
+            polystars_card=polystars_card,
         )
 
         self.insert_completed_claim(
@@ -1850,6 +1863,7 @@ class SeasonWorkbenchService:
             "chain": BLOCKCHAIN_SOLANA,
             "allocation": allocation.__dict__,
             "mint_result": mint_result.__dict__,
+            "polystars_card": polystars_card,
             "warnings": warnings,
             "collection_address": self.get_master_collection_address(),
         }

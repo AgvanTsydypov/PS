@@ -1,8 +1,9 @@
 {
-  "name": "PS DEV",
-  "symbol": "POLS",
-  "description": "Official PS collection on S/B Devnet.",
-  "image": "https://gateway.pinata.cloud/ipfs/QmReplaceWithYourPinnedCollectionImage",
+  "name": "SLOP TEST",
+  "symbol": "SLOP",
+  "description": "SLOP",
+  "category": "image",
+  "image": "https://crimson-glamorous-dragon-957.mypinata.cloud/ipfs/bafkreiasogwyqjusjrarbkiyx3zazy6gebeyvckawlvr2je6vtv56aorxu",
   "external_url": "https://example.com",
   "seller_fee_basis_points": 500,
   "attributes": [],
