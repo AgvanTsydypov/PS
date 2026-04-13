@@ -1178,7 +1178,7 @@ button:disabled {
 }
 
 .card-detail-page {
-  max-width: 1080px;
+  max-width: 1500px;
   margin: 48px auto 72px;
   padding: 0 24px;
 }
@@ -1232,14 +1232,23 @@ button:disabled {
 
 .card-detail-grid {
   display: grid;
-  grid-template-columns: minmax(0, 360px) minmax(0, 1fr);
+  grid-template-columns: minmax(360px, 1fr) minmax(320px, 420px) minmax(360px, 1fr);
   gap: 24px;
   align-items: start;
 }
 
-.card-detail-images {
+.card-detail-image-card-front {
+  grid-column: 1;
+}
+
+.card-detail-info {
+  grid-column: 2;
   display: grid;
-  gap: 16px;
+  gap: 14px;
+}
+
+.card-detail-image-card-back {
+  grid-column: 3;
 }
 
 .card-detail-image-card {
@@ -1264,11 +1273,6 @@ button:disabled {
   display: block;
   border-radius: 0;
   background: #0b1018;
-}
-
-.card-detail-info {
-  display: grid;
-  gap: 14px;
 }
 
 .card-detail-chip-row {
@@ -1323,5 +1327,11 @@ button:disabled {
 @media (max-width: 900px) {
   .card-detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .card-detail-image-card-front,
+  .card-detail-info,
+  .card-detail-image-card-back {
+    grid-column: auto;
   }
 }

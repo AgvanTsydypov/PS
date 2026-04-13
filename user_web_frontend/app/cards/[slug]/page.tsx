@@ -152,22 +152,13 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
             </div>
 
             <div className="card-detail-grid">
-              <div className="card-detail-images">
-                <section
-                  className="card-detail-image-card"
-                  style={{"--card-border-color": (card.card_payload_json as {border_color?: string} | undefined)?.border_color ?? "#B6BBC8"} as React.CSSProperties}
-                >
-                  <h2>Front</h2>
-                  <InlineSvgCard className="card-detail-image" url={card.front_image_url} alt={`${title} front`} />
-                </section>
-                <section
-                  className="card-detail-image-card"
-                  style={{"--card-border-color": (card.card_payload_json as {border_color?: string} | undefined)?.border_color ?? "#B6BBC8"} as React.CSSProperties}
-                >
-                  <h2>Back</h2>
-                  <InlineSvgCard className="card-detail-image" url={card.back_image_url} alt={`${title} back`} />
-                </section>
-              </div>
+              <section
+                className="card-detail-image-card card-detail-image-card-front"
+                style={{"--card-border-color": (card.card_payload_json as {border_color?: string} | undefined)?.border_color ?? "#B6BBC8"} as React.CSSProperties}
+              >
+                <h2>Front</h2>
+                <InlineSvgCard className="card-detail-image" url={card.front_image_url} alt={`${title} front`} />
+              </section>
 
               <div className="card-detail-info">
                 <section className="card-detail-panel">
@@ -188,6 +179,14 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                   </dl>
                 </section>
               </div>
+
+              <section
+                className="card-detail-image-card card-detail-image-card-back"
+                style={{"--card-border-color": (card.card_payload_json as {border_color?: string} | undefined)?.border_color ?? "#B6BBC8"} as React.CSSProperties}
+              >
+                <h2>Back</h2>
+                <InlineSvgCard className="card-detail-image" url={card.back_image_url} alt={`${title} back`} />
+              </section>
             </div>
           </>
         )}
