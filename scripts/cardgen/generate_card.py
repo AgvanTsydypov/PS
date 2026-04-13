@@ -299,6 +299,7 @@ ENTRY_BRACKET_COLORS: Dict[str, str] = {
     "[0.40 - 0.60]": SOFT_TIER_BLUE,
     "[0.60 - 0.80]": "#38BE50",
     "[0.80 - 0.97]": "#B6BBC8",
+    "[0.97 - 1.00]": "#FFFFFF",
 }
 
 PTIER_COLORS: Dict[str, str] = {
@@ -322,6 +323,8 @@ _LEGACY_TO_INTERVAL: Dict[str, str] = {
     "OUTLIER": "[0.40 - 0.60]",
     "VECTOR": "[0.60 - 0.80]",
     "HARVESTER": "[0.80 - 0.97]",
+    "EXTRACTOR": "[0.97 - 1.00]",
+    "PASSENGER": "[0.97 - 1.00]",
 }
 
 
@@ -438,15 +441,21 @@ def figma_gradients_to_svg_defs(gradients: list[Dict[str, Any]]) -> str:
 
 _DZ_ARCHETYPE_STYLES: Dict[str, Tuple[str, str, bool]] = {
     #                     (fill,                        stroke,    is_signal)
-    "ANOMALY":     ("url(#uniform-gradient)",      "#000000", False),
-    "HARVESTER":   ("#1C1B1B",                     "#000000", False),
-    "EQUILIBRIUM": ("#CDD2DE",                     "#000000", True),
-    "MARTYR":      ("#1B1D3A",                     "#000000", False),
-    "SIGNAL":      ("url(#signal-gradient)",       "#000000", False),
+    "ANOMALY":     ("url(#anomaly-gradient)",      "#000000", False),
+    "ICARUS":      ("url(#icarus-gradient)",       "#000000", False),
+    "BOT":         ("url(#bot-gradient)",          "#000000", False),
+    "BURNER":      ("url(#burner-gradient)",       "#000000", False),
+    "EQUILIBRIUM": ("url(#equilibrium-gradient)",  "#000000", True),
     "AMASSER":     ("url(#amasser-gradient)",      "#000000", False),
     "VECTOR":      ("url(#vector-gradient)",       "#000000", False),
+    "SIGNAL":      ("url(#signal-gradient)",       "#000000", False),
+    "EXTRACTOR":   ("#1C1B1B",                     "#000000", False),
+    "PASSENGER":   ("#CDD2DE",                     "#000000", False),
     "OPERATOR":    ("#625F5F",                     "#000000", False),
     "SUBSTRATE":   ("#474332",                     "#000000", False),
+    # Legacy aliases kept so older payloads do not silently degrade to OPERATOR.
+    "HARVESTER":   ("#1C1B1B",                     "#000000", False),
+    "MARTYR":      ("url(#icarus-gradient)",       "#000000", False),
 }
 
 
@@ -789,8 +798,8 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     <stop offset="100%" stop-color="#009999"/>
   </linearGradient>
 
-  <!-- UNIFORM data zone background (Section 10.2) -->
-  <linearGradient id="uniform-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+  <!-- Archetype data zone gradients -->
+  <linearGradient id="anomaly-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
     <stop offset="15%" stop-color="#28AEAE"/>
     <stop offset="30%" stop-color="#4A99BB"/>
     <stop offset="45%" stop-color="#8C92D1"/>
@@ -798,20 +807,43 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     <stop offset="75%" stop-color="#BB7382"/>
     <stop offset="90%" stop-color="#C5CC84"/>
   </linearGradient>
+  <linearGradient id="icarus-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="15%" stop-color="#7F8E3D"/>
+    <stop offset="30%" stop-color="#7A5CBE"/>
+    <stop offset="45%" stop-color="#9D653E"/>
+    <stop offset="60%" stop-color="#2E9F8C"/>
+    <stop offset="75%" stop-color="#2F7346"/>
+    <stop offset="90%" stop-color="#2E3160"/>
+  </linearGradient>
+  <linearGradient id="bot-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%"  stop-color="#554467"/>
+    <stop offset="50%" stop-color="#554467"/>
+    <stop offset="100%" stop-color="#7C6C8D"/>
+  </linearGradient>
+  <linearGradient id="burner-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%"  stop-color="#983232"/>
+    <stop offset="50%" stop-color="#983232"/>
+    <stop offset="100%" stop-color="#321010"/>
+  </linearGradient>
+  <linearGradient id="equilibrium-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%"  stop-color="#915238"/>
+    <stop offset="50%" stop-color="#915238"/>
+    <stop offset="100%" stop-color="#2B1810"/>
+  </linearGradient>
   <linearGradient id="signal-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
     <stop offset="0%"  stop-color="#0A2A2A"/>
     <stop offset="50%" stop-color="#0A2A2A"/>
     <stop offset="100%" stop-color="#134E4E"/>
   </linearGradient>
   <linearGradient id="amasser-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
-    <stop offset="0%"  stop-color="#554467"/>
-    <stop offset="50%" stop-color="#554467"/>
-    <stop offset="100%" stop-color="#7C6C8D"/>
-  </linearGradient>
-  <linearGradient id="vector-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
     <stop offset="0%"  stop-color="#996C2C"/>
     <stop offset="50%" stop-color="#996C2C"/>
     <stop offset="100%" stop-color="#33240F"/>
+  </linearGradient>
+  <linearGradient id="vector-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%"  stop-color="#1D4191"/>
+    <stop offset="50%" stop-color="#1D4191"/>
+    <stop offset="100%" stop-color="#08132B"/>
   </linearGradient>
 
   <!-- Archetype radial gradient (lightened to match reference) -->
@@ -1537,7 +1569,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
       transform: translateY(0.72em);
     }}
   </style>
-  <linearGradient id="uniform-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+  <linearGradient id="anomaly-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
     <stop offset="15%" stop-color="#28AEAE"/>
     <stop offset="30%" stop-color="#4A99BB"/>
     <stop offset="45%" stop-color="#8C92D1"/>
@@ -1545,20 +1577,43 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     <stop offset="75%" stop-color="#BB7382"/>
     <stop offset="90%" stop-color="#C5CC84"/>
   </linearGradient>
+  <linearGradient id="icarus-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="15%" stop-color="#7F8E3D"/>
+    <stop offset="30%" stop-color="#7A5CBE"/>
+    <stop offset="45%" stop-color="#9D653E"/>
+    <stop offset="60%" stop-color="#2E9F8C"/>
+    <stop offset="75%" stop-color="#2F7346"/>
+    <stop offset="90%" stop-color="#2E3160"/>
+  </linearGradient>
+  <linearGradient id="bot-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%" stop-color="#554467"/>
+    <stop offset="50%" stop-color="#554467"/>
+    <stop offset="100%" stop-color="#7C6C8D"/>
+  </linearGradient>
+  <linearGradient id="burner-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%" stop-color="#983232"/>
+    <stop offset="50%" stop-color="#983232"/>
+    <stop offset="100%" stop-color="#321010"/>
+  </linearGradient>
+  <linearGradient id="equilibrium-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%" stop-color="#915238"/>
+    <stop offset="50%" stop-color="#915238"/>
+    <stop offset="100%" stop-color="#2B1810"/>
+  </linearGradient>
   <linearGradient id="signal-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
     <stop offset="0%" stop-color="#0A2A2A"/>
     <stop offset="50%" stop-color="#0A2A2A"/>
     <stop offset="100%" stop-color="#134E4E"/>
   </linearGradient>
   <linearGradient id="amasser-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
-    <stop offset="0%" stop-color="#554467"/>
-    <stop offset="50%" stop-color="#554467"/>
-    <stop offset="100%" stop-color="#7C6C8D"/>
-  </linearGradient>
-  <linearGradient id="vector-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
     <stop offset="0%" stop-color="#996C2C"/>
     <stop offset="50%" stop-color="#996C2C"/>
     <stop offset="100%" stop-color="#33240F"/>
+  </linearGradient>
+  <linearGradient id="vector-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="0%" stop-color="#1D4191"/>
+    <stop offset="50%" stop-color="#1D4191"/>
+    <stop offset="100%" stop-color="#08132B"/>
   </linearGradient>
   <linearGradient id="border-gradient" gradientUnits="userSpaceOnUse" x1="170.904" y1="3" x2="345.096" y2="799">
     <stop offset="0.2" stop-color="#FFBF00"/>
@@ -1620,7 +1675,7 @@ SAMPLE_DATA: Dict[str, Any] = {
     "primary_tag":       "CELEBRITIES",
     "primary_tag_color": "#51E147",
     "secondary_tag":     "NONE",
-    "entry_bracket":     "[0.40 - 0.60]",
+    "entry_bracket":     "[0.97 - 1.00]",
     "proxy_wallet":      "0xBb8E703abc123def456",
     "edge":              "P90",
     "yield":             "P70",
