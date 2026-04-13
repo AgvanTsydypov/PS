@@ -28,21 +28,22 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 
-try:
-    # Works when project root is on PYTHONPATH (e.g. scripts run as package).
-    from scripts.ai import Agent2ColoristGenerator
-except ModuleNotFoundError as exc:
-    # Fallback for direct script execution where only /app/scripts is on sys.path.
-    if getattr(exc, "name", None) != "scripts":
-        raise
-    from ai import Agent2ColoristGenerator
+# Project root (parent of `scripts/`) so `from scripts.ai import ...` works when
+# callers only put a subdirectory (e.g. scripts/fetch/) on sys.path.
+_root = Path(__file__).resolve().parent.parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+from scripts.ai import Agent2ColoristGenerator
 
 load_dotenv()
 

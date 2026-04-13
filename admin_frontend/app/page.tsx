@@ -551,6 +551,7 @@ export default function HomePage() {
   const [claimPhase, setClaimPhase] = useState("breach");
   const [claimAutoPhase, setClaimAutoPhase] = useState(true);
   const [claimDbOnly, setClaimDbOnly] = useState(false);
+  const [claimUseFixedImages, setClaimUseFixedImages] = useState(true);
   const [claimRecipient, setClaimRecipient] = useState("");
   const [claimSeasonInfo, setClaimSeasonInfo] = useState<string>("");
   const [claimOutput, setClaimOutput] = useState<string>("");
@@ -1689,6 +1690,7 @@ export default function HomePage() {
           <div className="row">
             <label><input type="checkbox" checked={claimAutoPhase} onChange={(e) => setClaimAutoPhase(e.target.checked)} /> Auto phase</label>
             <label><input type="checkbox" checked={claimDbOnly} onChange={(e) => setClaimDbOnly(e.target.checked)} /> DB only</label>
+            <label><input type="checkbox" checked={claimUseFixedImages} onChange={(e) => setClaimUseFixedImages(e.target.checked)} /> Use fixed claim images</label>
             <button
               disabled={claimMinting || !claimWallet || !claimSeasonId || !claimRecipient.trim()}
               onClick={() =>
@@ -1705,6 +1707,7 @@ export default function HomePage() {
                         phase: claimPhase,
                         auto_phase: claimAutoPhase,
                         db_only: claimDbOnly,
+                        use_fixed_claim_images: claimUseFixedImages,
                       }),
                     });
                     setClaimOutput((prev) => `${prev}${JSON.stringify(out, null, 2)}\n`);
