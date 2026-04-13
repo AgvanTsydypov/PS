@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -239,6 +240,8 @@ class SeasonWorkbenchService:
         self.season_manager = SeasonManager(use_local_db=True)
         self.scheduler = SimplifiedScheduler(use_local_db=True, dry_run=False)
         self._r2_client: Any = None
+        self._season_update_lock = threading.Lock()
+        self._season_update_running = False
         # Wallet list is mostly stable within a season. Cache for 10 days by default.
         self.wallets_cache_ttl_seconds = int(os.getenv("WALLETS_CACHE_TTL_SECONDS", "864000"))
         # Keep admin snapshot filters aligned with scheduler standard-window logic.
@@ -1878,6 +1881,39 @@ class SeasonWorkbenchService:
         self.clear_wallets_cache()
         return "run_standard_season_update finished"
 
+    def start_season_lifecycle_update_background(self) -> tuple[bool, str]:
+        with self._season_update_lock:
+            if self._season_update_running:
+                return False, "season update already running"
+            self._season_update_running = True
+
+        def _worker() -> None:
+            try:
+                message = self.run_season_lifecycle_update()
+            except Exception as exc:
+                logger.exception("season update background run failed")
+                ws_hub.broadcast_threadsafe("season_update", {"status": "error", "message": str(exc)})
+            else:
+                ws_hub.broadcast_threadsafe("season_update", {"status": "ok", "message": message})
+            finally:
+                with self._season_update_lock:
+                    self._season_update_running = False
+
+        threading.Thread(
+            target=_worker,
+            name="season-update-runner",
+            daemon=True,
+        ).start()
+        return True, "season update started in background"
+
+    def get_season_lifecycle_update_status(self) -> Dict[str, Any]:
+        with self._season_update_lock:
+            running = bool(self._season_update_running)
+        return {
+            "running": running,
+            "status": "running" if running else "idle",
+        }
+
     def load_scenario_season_params(self, season_id: int) -> Dict[str, Any]:
         conn = self.manager.get_connection()
         try:
@@ -3122,12 +3158,20 @@ async def mint_claim(req: MintClaimRequest) -> Dict[str, Any]:
 @app.post("/api/actions/season-update")
 async def run_season_update() -> Dict[str, str]:
     try:
-        message = service.run_season_lifecycle_update()
-        await ws_hub.broadcast("season_update", {"status": "ok", "message": message})
-        return {"status": "ok", "message": message}
+        started, message = service.start_season_lifecycle_update_background()
+        return {"status": "started" if started else "running", "message": message}
     except Exception as exc:
-        await ws_hub.broadcast("season_update", {"status": "error", "message": str(exc)})
-        raise HTTPException(status_code=400, detail=str(exc))
+        logger.exception("could not start season update background run")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/actions/season-update/status")
+def season_update_status() -> Dict[str, Any]:
+    try:
+        return service.get_season_lifecycle_update_status()
+    except Exception as exc:
+        logger.exception("could not read season update status")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/scenarios/season/{season_id}")
