@@ -1055,17 +1055,17 @@ SELECT
         ELSE NULL
     END AS archetype_description,
     CASE at.archetype
-        WHEN 'ICARUS' THEN 'P(E) < 0.60 | PnL < 0'
-        WHEN 'BURNER' THEN 'P(E) ≥ 0.60 | PnL < 0'
-        WHEN 'BOT' THEN 'PnL ≡ 0.00'
-        WHEN 'EXTRACTOR' THEN 'P(E) ≥ 0.97 | Vol ≥ 5000'
-        WHEN 'PASSENGER' THEN 'P(E) ≥ 0.97 | 50 ≤ Vol < 5000'
-        WHEN 'ANOMALY' THEN 'P(E) < 0.80 | Edge ≡ Yield ≡ Gravity ∝ 1 / P(E)'
+        WHEN 'ICARUS' THEN 'P(E) < 0.60 | PnL < $0.00'
+        WHEN 'BURNER' THEN 'P(E) ≥ 0.60 | PnL < $0.00'
+        WHEN 'BOT' THEN 'PnL ≡ $0.00'
+        WHEN 'EXTRACTOR' THEN 'P(E) ≥ 0.97 | Vol ≥ $5,000.00'
+        WHEN 'PASSENGER' THEN 'P(E) ≥ 0.97 | $50.00 ≤ Vol < $5,000.00'
+        WHEN 'ANOMALY' THEN 'P(E) < 0.80 | Edge ≡ Yield ≡ Gravity ∝ 1/P(E)'
         WHEN 'SIGNAL' THEN 'P(E) ∈ [0.00 - 0.40] | Edge ≥ P90 | Yield ≥ P90'
         WHEN 'VECTOR' THEN 'P(E) ∈ [0.40 - 0.60] | Edge ≥ P90 | Yield ≥ P90'
         WHEN 'EQUILIBRIUM' THEN 'Edge ≥ P70 | Yield ≥ P70 | Gravity ≥ P70'
         WHEN 'AMASSER' THEN 'Gravity ≥ P90'
-        WHEN 'SUBSTRATE' THEN '(P(E) ≥ 0.97 & Vol < 50) ∪ Mid-Trend Lag'
+        WHEN 'SUBSTRATE' THEN '(P(E) ≥ 0.97 & Vol < $50.00) ∪ Mid-Trend Lag'
         WHEN 'OPERATOR' THEN 'Gravity ≤ P70 | Edge ⇌ Yield'
         ELSE NULL
     END AS archetype_math,
