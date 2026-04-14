@@ -540,9 +540,9 @@ def _ownership(data: Dict[str, Any]) -> Tuple[str, str]:
 
 
 def _wallet_display(addr: str) -> str:
-    # New display format: 0xaaaaaaaaaaa...
+    # Display format: 0x + 13 wallet characters, then ellipsis.
     value = str(addr)
-    return (value[:13] + "...") if len(value) > 13 else value
+    return (value[:14] + "...") if len(value) > 14 else value
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1555,9 +1555,8 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 
     lore = _esc(str(data.get("card_lore", "") or "No topology data available."))
     archetype_desc = _esc(str(data.get("archetype_description", "") or "No archetype description."))
-    archetype_math = " ".join(
-        str(data.get("archetype_math", "") or "No statistical pattern.").replace("\n", " ").split()
-    )
+    archetype_math_raw = str(data.get("archetype_math", "") or "No statistical pattern.")
+    archetype_math = " ".join(archetype_math_raw.replace("\n", " ").split())
     if not archetype_math:
         archetype_math = "No statistical pattern."
 
@@ -1654,19 +1653,31 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 
     inner_bottom = BACK_DZ_Y + BACK_DZ_H
 
-    metric_font_size, metric_text_length = _fit_single_line_text(
-        archetype_math, float(BACK_BODY_WRAP_W), 14.0, min_font_size=10.0
-    )
-    metric_text_length_attr = (
-        f' textLength="{round(metric_text_length, 1)}" lengthAdjust="spacingAndGlyphs"'
-        if metric_text_length is not None
-        else ""
-    )
-    metrics_svg = (
-        f'<text x="{BACK_TEXT_X}" y="{round(y_first_metric, 1)}" text-anchor="start" '
-        f'dominant-baseline="hanging" font-size="{metric_font_size:g}" fill="white" '
-        f'style="{style_lh}"{metric_text_length_attr}>{_esc(archetype_math)}</text>'
-    )
+    if "|" in archetype_math_raw:
+        metric_lines = _format_archetype_math_lines(archetype_math_raw) or [archetype_math]
+        metrics_body = "".join(
+            f'<tspan x="{BACK_TEXT_X}" dy="{0 if i == 0 else lh}">{_esc(line)}</tspan>'
+            for i, line in enumerate(metric_lines)
+        )
+        metrics_svg = (
+            f'<text x="{BACK_TEXT_X}" y="{round(y_first_metric, 1)}" text-anchor="start" '
+            f'dominant-baseline="hanging" font-size="14" fill="white" '
+            f'style="{style_lh}">{metrics_body}</text>'
+        )
+    else:
+        metric_font_size, metric_text_length = _fit_single_line_text(
+            archetype_math, float(BACK_BODY_WRAP_W), 14.0, min_font_size=10.0
+        )
+        metric_text_length_attr = (
+            f' textLength="{round(metric_text_length, 1)}" lengthAdjust="spacingAndGlyphs"'
+            if metric_text_length is not None
+            else ""
+        )
+        metrics_svg = (
+            f'<text x="{BACK_TEXT_X}" y="{round(y_first_metric, 1)}" text-anchor="start" '
+            f'dominant-baseline="hanging" font-size="{metric_font_size:g}" fill="white" '
+            f'style="{style_lh}"{metric_text_length_attr}>{_esc(archetype_math)}</text>'
+        )
 
     meta_y1 = y_first_metric + BACK_BODY_INK_EXT + BACK_GAP_METRICS_TO_META
 
