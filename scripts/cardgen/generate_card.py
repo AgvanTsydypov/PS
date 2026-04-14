@@ -1827,7 +1827,7 @@ SAMPLE_DATA: Dict[str, Any] = {
     "edge":              "P90",
     "yield":             "P70",
     "gravity":           "P99",
-    "archetype":         "SUBSTRATE",
+    "archetype":         "ICARUS",
     "card_lore":         "Standard edition pricing breach at triple digits signals industry inflection. Historical AAA launch data suggests $69.99 baseline holds. Resolution hinges on store listings by Feb 2026 deadline.",
     "archetype_description": "Mechanical routing protocol detected. This entity operates with massive kinetic force but generates zero directional trajectory, executing purely on structural arbitrage and fractional spreads. Devoid of human psychology or predictive bias, they exist solely to bridge conditional markets, merge underlying tokens, and enforce absolute liquidity ceilings. They do not predict the future; they mathematically process the emotions of the swarm.",
     "archetype_math":    "(P(E) ≥ 0.97 & Vol < 50) ∪ Mid-Trend Lag",
