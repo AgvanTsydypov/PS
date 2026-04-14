@@ -26,13 +26,14 @@ type ActiveSeasonsBoardProps = {
   footer?: ReactNode;
   initialSeasons?: SeasonResponse[];
   initialServerNowIso?: string | null;
+  title?: string;
 };
 
 export const ActiveSeasonsBoard = forwardRef<
   ActiveSeasonsBoardHandle,
   ActiveSeasonsBoardProps
 >(function ActiveSeasonsBoard(
-  { footer, initialSeasons = [], initialServerNowIso = null },
+  { footer, initialSeasons = [], initialServerNowIso = null, title = "Active seasons" },
   ref,
 ) {
   const initialServerNowMs = initialServerNowIso
@@ -185,7 +186,7 @@ export const ActiveSeasonsBoard = forwardRef<
 
   return (
     <section className="season-board season-board-standalone">
-      <div className="season-board-title">Active seasons</div>
+      <div className="season-board-title">{title}</div>
       {seasonError && seasonCards.length === 0 ? (
         <div className="season-board-muted">
           Unable to load seasons right now.
