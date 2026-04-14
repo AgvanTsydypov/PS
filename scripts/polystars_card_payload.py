@@ -39,16 +39,20 @@ CARD_ENTRY_BRACKET_OPTIONS = (
     "[0.40 - 0.60]",
     "[0.60 - 0.80]",
     "[0.80 - 0.97]",
+    "[0.97 - 1.00]",
 )
 CARD_TIER_OPTIONS = ("P99", "P90", "P70", "P50", "BASE")
 CARD_ARCHETYPE_OPTIONS = (
     "ANOMALY",
+    "ICARUS",
+    "BOT",
+    "BURNER",
     "SIGNAL",
     "VECTOR",
     "EQUILIBRIUM",
-    "HARVESTER",
-    "MARTYR",
     "AMASSER",
+    "EXTRACTOR",
+    "PASSENGER",
     "SUBSTRATE",
     "OPERATOR",
 )
@@ -58,6 +62,12 @@ LEGACY_ENTRY_BRACKET_MAP: Dict[str, str] = {
     "OUTLIER": "[0.40 - 0.60]",
     "VECTOR": "[0.60 - 0.80]",
     "HARVESTER": "[0.80 - 0.97]",
+    "EXTRACTOR": "[0.97 - 1.00]",
+    "PASSENGER": "[0.97 - 1.00]",
+}
+LEGACY_ARCHETYPE_MAP: Dict[str, str] = {
+    "HARVESTER": "EXTRACTOR",
+    "MARTYR": "ICARUS",
 }
 _PTIER_CSS_COLORS: Dict[str, str] = {
     "P999": "#FFD700",
@@ -83,6 +93,9 @@ SELECT
     w.event_slug,
     e.title AS event_title,
     COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
+    COALESCE(w.entry_cwap, p.entry_cwap) AS entry_cwap,
+    COALESCE(w.total_volume, p.total_volume) AS total_volume,
+    COALESCE(w.total_pnl, p.total_pnl) AS total_pnl,
     w.entry_bracket,
     COALESCE(w.archetype, p.archetype) AS archetype,
     COALESCE(w.archetype_description, p.archetype_description) AS archetype_description,
@@ -106,6 +119,9 @@ FROM winner_wallets_nft_to_claim w
 JOIN event_cards ec ON ec.event_id = w.event_id
 LEFT JOIN LATERAL (
     SELECT
+        p.entry_cwap,
+        p.total_volume,
+        p.total_pnl,
         p.archetype,
         p.archetype_description,
         p.archetype_math,
@@ -161,6 +177,7 @@ def _normalize_archetype(raw: Optional[str], inferred: str) -> str:
     cleaned = str(raw or "").strip().upper()
     if cleaned.startswith("THE "):
         cleaned = cleaned[4:].strip()
+    cleaned = LEGACY_ARCHETYPE_MAP.get(cleaned, cleaned)
     return _normalize_choice(cleaned, CARD_ARCHETYPE_OPTIONS, inferred)
 
 
@@ -171,15 +188,42 @@ def _normalize_entry_bracket(raw: Optional[str]) -> str:
     return _normalize_choice(value, CARD_ENTRY_BRACKET_OPTIONS, "[0.80 - 0.97]")
 
 
+def _to_float(raw: Any) -> Optional[float]:
+    try:
+        if raw is None or str(raw).strip() == "":
+            return None
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _infer_archetype_from_metrics(
     entry_bracket: str,
     edge_raw: Optional[str],
     yield_raw: Optional[str],
     gravity_raw: Optional[str],
+    entry_cwap_raw: Any = None,
+    total_volume_raw: Any = None,
+    total_pnl_raw: Any = None,
 ) -> str:
     edge = _normalize_choice(edge_raw, CARD_TIER_OPTIONS, "BASE")
     yld = _normalize_choice(yield_raw, CARD_TIER_OPTIONS, "BASE")
     grav = _normalize_choice(gravity_raw, CARD_TIER_OPTIONS, "BASE")
+    entry_cwap = _to_float(entry_cwap_raw)
+    total_volume = _to_float(total_volume_raw)
+    total_pnl = _to_float(total_pnl_raw)
+
+    if total_pnl is not None:
+        if total_pnl < 0 and entry_cwap is not None:
+            return "ICARUS" if entry_cwap < 0.60 else "BURNER"
+        if total_pnl == 0:
+            return "BOT"
+    if entry_bracket == "[0.97 - 1.00]":
+        if total_volume is not None and total_volume >= 5000:
+            return "EXTRACTOR"
+        if total_volume is not None and total_volume >= 50:
+            return "PASSENGER"
+        return "SUBSTRATE"
 
     if (
         entry_bracket != "[0.80 - 0.97]"
@@ -205,19 +249,6 @@ def _infer_archetype_from_metrics(
         and (grav == "P99" or grav == "P90" or grav == "P70")
     ):
         return "EQUILIBRIUM"
-    if (
-        (entry_bracket == "[0.60 - 0.80]" or entry_bracket == "[0.80 - 0.97]")
-        and (grav == "P99" or grav == "P90")
-        and (edge == "BASE" or edge == "P50")
-        and (yld == "BASE" or yld == "P50")
-    ):
-        return "HARVESTER"
-    if (
-        (entry_bracket == "[0.00 - 0.20]" or entry_bracket == "[0.20 - 0.40]")
-        and (edge == "P99" or edge == "P90" or edge == "P70")
-        and (yld == "BASE" or yld == "P50")
-    ):
-        return "MARTYR"
     if grav == "P99" or grav == "P90":
         return "AMASSER"
     if (
@@ -354,6 +385,9 @@ def _build_card_payload_from_source_row(
         normalized_edge,
         normalized_yield,
         normalized_gravity,
+        row.get("entry_cwap"),
+        row.get("total_volume"),
+        row.get("total_pnl"),
     )
     normalized_archetype = _normalize_archetype(row.get("archetype"), inferred_archetype)
 
