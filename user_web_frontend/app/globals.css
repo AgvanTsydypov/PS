@@ -1371,6 +1371,9 @@ button:disabled {
   max-width: 1500px;
   margin: 48px auto 72px;
   padding: 0 24px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .card-detail-backlinks {
@@ -1396,10 +1399,10 @@ button:disabled {
 }
 
 .card-detail-shell {
-  padding: 24px;
-  border: 1px solid #2b3242;
-  border-radius: 16px;
-  background: #151a23;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .card-detail-heading {
@@ -1442,14 +1445,14 @@ button:disabled {
 }
 
 .card-detail-image-card {
-  padding: 12px;
-  border: 1px solid #263044;
-  border-radius: 14px;
-  background: #0f1420;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .card-detail-image-card h2 {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   font-size: 13px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1462,7 +1465,7 @@ button:disabled {
   object-fit: contain;
   display: block;
   border-radius: 0;
-  background: #0b1018;
+  background: transparent;
 }
 
 .card-detail-chip-row {
@@ -1483,14 +1486,14 @@ button:disabled {
 }
 
 .card-detail-panel {
-  padding: 14px 16px;
-  border: 1px solid #263044;
-  border-radius: 12px;
-  background: #101723;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .card-detail-panel h2 {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   font-size: 13px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
