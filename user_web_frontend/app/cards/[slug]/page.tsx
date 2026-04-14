@@ -156,13 +156,11 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                 className="card-detail-image-card card-detail-image-card-front"
                 style={{"--card-border-color": (card.card_payload_json as {border_color?: string} | undefined)?.border_color ?? "#B6BBC8"} as React.CSSProperties}
               >
-                <h2>Front</h2>
                 <InlineSvgCard className="card-detail-image" url={card.front_image_url} alt={`${title} front`} />
               </section>
 
               <div className="card-detail-info">
                 <section className="card-detail-panel">
-                  <h2>Card Details</h2>
                   <dl className="card-detail-kv">
                     <dt>Claimer EOA wallet</dt>
                     <dd>{card.owner_wallet}</dd>
@@ -184,7 +182,6 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                 className="card-detail-image-card card-detail-image-card-back"
                 style={{"--card-border-color": (card.card_payload_json as {border_color?: string} | undefined)?.border_color ?? "#B6BBC8"} as React.CSSProperties}
               >
-                <h2>Back</h2>
                 <InlineSvgCard className="card-detail-image" url={card.back_image_url} alt={`${title} back`} />
               </section>
             </div>
