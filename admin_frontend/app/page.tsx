@@ -1317,7 +1317,7 @@ export default function HomePage() {
     let cancelled = false;
     void (async () => {
       try {
-        const status = await fetchJSON<{ running: boolean; status: string }>("/api/actions/season-update/status");
+        const status = await fetchJSON<{ running: boolean; status: string; message?: string }>("/api/actions/season-update/status");
         if (cancelled || !status.running) return;
         setSeasonUpdateRunning(true);
         setSeasonUpdateOutput((prev) => {
@@ -1332,6 +1332,40 @@ export default function HomePage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!seasonUpdateRunning) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const status = await fetchJSON<{ running: boolean; status: string; message?: string }>(
+          "/api/actions/season-update/status"
+        );
+        if (cancelled) return;
+        if (status.running) return;
+        setSeasonUpdateRunning(false);
+        const statusMessage = status.message || "Season update finished";
+        if (status.status === "success") {
+          setSeasonUpdateOutput((prev) => `${prev}[${new Date().toISOString()}] Season update completed: ${statusMessage}\n`);
+          setOk(statusMessage);
+          void refreshOverview();
+        } else if (status.status === "error") {
+          setSeasonUpdateOutput((prev) => `${prev}[${new Date().toISOString()}] Season update failed: ${statusMessage}\n`);
+          setError(statusMessage);
+        }
+      } catch {
+        // keep polling through transient API failures
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [seasonUpdateRunning]);
 
   useEffect(() => {
     if (!claimSeasonId) return;

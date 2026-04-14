@@ -241,7 +241,8 @@ class SeasonWorkbenchService:
         self.scheduler = SimplifiedScheduler(use_local_db=True, dry_run=False)
         self._r2_client: Any = None
         self._season_update_lock = threading.Lock()
-        self._season_update_running = False
+        self._season_update_status_path = Path(project_root) / "logs" / "season_update_status.json"
+        self._season_update_status_path.parent.mkdir(parents=True, exist_ok=True)
         # Wallet list is mostly stable within a season. Cache for 10 days by default.
         self.wallets_cache_ttl_seconds = int(os.getenv("WALLETS_CACHE_TTL_SECONDS", "864000"))
         # Keep admin snapshot filters aligned with scheduler standard-window logic.
@@ -1881,38 +1882,167 @@ class SeasonWorkbenchService:
         self.clear_wallets_cache()
         return "run_standard_season_update finished"
 
+    @staticmethod
+    def _season_update_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _pid_running(pid: Optional[int]) -> bool:
+        if not pid or int(pid) <= 0:
+            return False
+        try:
+            os.kill(int(pid), 0)
+        except OSError:
+            return False
+        return True
+
+    def _read_season_update_status(self) -> Dict[str, Any]:
+        if not self._season_update_status_path.exists():
+            return {
+                "running": False,
+                "status": "idle",
+                "message": "season update idle",
+                "pid": None,
+                "started_at": None,
+                "finished_at": None,
+                "exit_code": None,
+                "log_file": None,
+            }
+        try:
+            return json.loads(self._season_update_status_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Could not parse season update status file", exc_info=True)
+            return {
+                "running": False,
+                "status": "error",
+                "message": "could not parse season update status",
+                "pid": None,
+                "started_at": None,
+                "finished_at": self._season_update_now_iso(),
+                "exit_code": None,
+                "log_file": None,
+            }
+
+    def _write_season_update_status(self, payload: Dict[str, Any]) -> None:
+        self._season_update_status_path.parent.mkdir(parents=True, exist_ok=True)
+        self._season_update_status_path.write_text(
+            json.dumps(payload, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+
     def start_season_lifecycle_update_background(self) -> tuple[bool, str]:
         with self._season_update_lock:
-            if self._season_update_running:
+            current = self.get_season_lifecycle_update_status()
+            if current.get("running"):
                 return False, "season update already running"
-            self._season_update_running = True
 
-        def _worker() -> None:
+            logs_dir = Path(project_root) / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            log_path = logs_dir / f"admin_triggered_season_update_{timestamp}.log"
+            command = [
+                sys.executable,
+                str(Path(project_root) / "scripts" / "daily_scheduler_simple.py"),
+                "--season-update",
+            ]
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            log_handle = open(log_path, "a", encoding="utf-8")
+            started_at = self._season_update_now_iso()
             try:
-                message = self.run_season_lifecycle_update()
+                proc = subprocess.Popen(
+                    command,
+                    cwd=project_root,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    start_new_session=True,
+                )
+            except Exception:
+                log_handle.close()
+                raise
+
+            self._write_season_update_status(
+                {
+                    "running": True,
+                    "status": "running",
+                    "message": "season update started in background",
+                    "pid": proc.pid,
+                    "started_at": started_at,
+                    "finished_at": None,
+                    "exit_code": None,
+                    "log_file": str(log_path),
+                }
+            )
+
+        def _watch_process() -> None:
+            exit_code: Optional[int] = None
+            try:
+                exit_code = proc.wait()
+                final_status = "success" if exit_code == 0 else "error"
+                final_message = (
+                    "season update finished successfully"
+                    if exit_code == 0
+                    else f"season update failed with exit code {exit_code}"
+                )
+                self._write_season_update_status(
+                    {
+                        "running": False,
+                        "status": final_status,
+                        "message": final_message,
+                        "pid": proc.pid,
+                        "started_at": started_at,
+                        "finished_at": self._season_update_now_iso(),
+                        "exit_code": exit_code,
+                        "log_file": str(log_path),
+                    }
+                )
+                if exit_code == 0:
+                    self.clear_wallets_cache()
+                    ws_hub.broadcast_threadsafe("season_update", {"status": "ok", "message": final_message})
+                else:
+                    ws_hub.broadcast_threadsafe("season_update", {"status": "error", "message": final_message})
             except Exception as exc:
-                logger.exception("season update background run failed")
+                logger.exception("season update subprocess watcher failed")
+                self._write_season_update_status(
+                    {
+                        "running": False,
+                        "status": "error",
+                        "message": f"season update watcher failed: {exc}",
+                        "pid": proc.pid,
+                        "started_at": started_at,
+                        "finished_at": self._season_update_now_iso(),
+                        "exit_code": exit_code,
+                        "log_file": str(log_path),
+                    }
+                )
                 ws_hub.broadcast_threadsafe("season_update", {"status": "error", "message": str(exc)})
-            else:
-                ws_hub.broadcast_threadsafe("season_update", {"status": "ok", "message": message})
             finally:
-                with self._season_update_lock:
-                    self._season_update_running = False
+                try:
+                    log_handle.close()
+                except Exception:
+                    pass
 
         threading.Thread(
-            target=_worker,
-            name="season-update-runner",
+            target=_watch_process,
+            name="season-update-subprocess-watch",
             daemon=True,
         ).start()
         return True, "season update started in background"
 
     def get_season_lifecycle_update_status(self) -> Dict[str, Any]:
-        with self._season_update_lock:
-            running = bool(self._season_update_running)
-        return {
-            "running": running,
-            "status": "running" if running else "idle",
-        }
+        status = self._read_season_update_status()
+        pid = status.get("pid")
+        if status.get("running") and not self._pid_running(pid):
+            status = {
+                **status,
+                "running": False,
+                "status": "error" if status.get("exit_code") not in (0, "0") else "success",
+                "message": status.get("message") or "season update process ended",
+                "finished_at": status.get("finished_at") or self._season_update_now_iso(),
+            }
+            self._write_season_update_status(status)
+        return status
 
     def load_scenario_season_params(self, season_id: int) -> Dict[str, Any]:
         conn = self.manager.get_connection()
