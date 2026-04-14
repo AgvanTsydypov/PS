@@ -109,6 +109,30 @@ def _snapshot_max_single_event_share() -> float:
     return v
 
 
+def _snapshot_candidate_pool_multiplier() -> int:
+    """Multiplier for per-event candidate prefetch cap (default 8)."""
+    raw = os.getenv("POLYSTARS_SNAPSHOT_CANDIDATE_POOL_MULTIPLIER")
+    if raw is None or not str(raw).strip():
+        return 8
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return 8
+    return max(2, min(value, 50))
+
+
+def _snapshot_candidate_fetch_batch_size() -> int:
+    """Server-side cursor batch size for candidate participant streaming."""
+    raw = os.getenv("POLYSTARS_SNAPSHOT_CANDIDATE_FETCH_BATCH_SIZE")
+    if raw is None or not str(raw).strip():
+        return 2000
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return 2000
+    return max(100, min(value, 20000))
+
+
 # Standard snapshot window defaults to previous 10 days:
 # [start - 10d, start) with defaults offset=0/lookback=10.
 STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS = _env_int(
@@ -1443,6 +1467,13 @@ class SimplifiedScheduler:
             source = "participants_randomized_genesis_window"
             rank_limit = GENESIS_SEASON_TOTAL_SUPPLY_TEST
             use_resolution_anchor = False
+        snapshot_max_share = _snapshot_max_single_event_share()
+        if rank_limit <= 1:
+            per_event_cap = 1
+        else:
+            per_event_cap = max(1, int(math.floor(rank_limit * snapshot_max_share + 1e-15)))
+        candidate_pool_cap = max(50, per_event_cap * _snapshot_candidate_pool_multiplier())
+        candidate_fetch_batch_size = _snapshot_candidate_fetch_batch_size()
 
         # Idempotent re-snapshot in case of retries / manual re-initialization.
         cursor.execute(
@@ -1452,8 +1483,7 @@ class SimplifiedScheduler:
             """,
             (season_id,),
         )
-        cursor.execute(
-            """
+        candidate_sql = """
             WITH
             working_events AS (
                 SELECT
@@ -1603,6 +1633,32 @@ class SimplifiedScheduler:
                 FROM candidate_participants
                 WHERE event_id IS NOT NULL OR event_slug IS NOT NULL
                 ORDER BY proxy_wallet, COALESCE(event_id, event_slug), random_key
+            ),
+            ranked_candidate_pool AS (
+                SELECT
+                    proxy_wallet,
+                    event_id,
+                    event_slug,
+                    entry_cwap,
+                    total_volume,
+                    total_pnl,
+                    roi_percentage,
+                    entry_bracket,
+                    edge,
+                    yield,
+                    gravity,
+                    rank,
+                    archetype,
+                    archetype_description,
+                    archetype_math,
+                    rarity_bracket,
+                    event_volume,
+                    random_key,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(event_id, CONCAT('slug:', event_slug))
+                        ORDER BY random_key
+                    ) AS event_candidate_rank
+                FROM per_wallet_per_event_random
             )
             SELECT
                 proxy_wallet,
@@ -1623,58 +1679,85 @@ class SimplifiedScheduler:
                 rarity_bracket,
                 event_volume,
                 random_key
-            FROM per_wallet_per_event_random
+            FROM ranked_candidate_pool
+            WHERE event_candidate_rank <= %s
             ORDER BY random_key
-            """,
-            (
-                use_resolution_anchor,
-                window_start,
-                window_end,
-                is_first_standard_season,
-                first_standard_window_start,
-                GENESIS_START_DATE,
-                GENESIS_END_DATE,
-                use_resolution_anchor,
-                window_start,
-                window_end,
-                season_id,
-                use_resolution_anchor,
-                STANDARD_SNAPSHOT_PRIMARY_TAG_CAP,
-                use_resolution_anchor,
-                STANDARD_SNAPSHOT_EVENT_LIMIT,
-            ),
+            """
+        candidate_params = (
+            use_resolution_anchor,
+            window_start,
+            window_end,
+            is_first_standard_season,
+            first_standard_window_start,
+            GENESIS_START_DATE,
+            GENESIS_END_DATE,
+            use_resolution_anchor,
+            window_start,
+            window_end,
+            season_id,
+            use_resolution_anchor,
+            STANDARD_SNAPSHOT_PRIMARY_TAG_CAP,
+            use_resolution_anchor,
+            STANDARD_SNAPSHOT_EVENT_LIMIT,
+            candidate_pool_cap,
         )
-        candidate_rows = [dict(row) for row in (cursor.fetchall() or [])]
-        if not candidate_rows:
-            return 0
-
+        candidate_cursor_name = (
+            f"season_snapshot_candidates_{season_id}_{int(time.time() * 1000)}"
+        )
+        candidate_cursor = cursor.connection.cursor(
+            name=candidate_cursor_name,
+            cursor_factory=psycopg2.extras.RealDictCursor,
+        )
+        candidate_cursor.itersize = candidate_fetch_batch_size
+        candidate_cursor.execute(
+            candidate_sql,
+            candidate_params,
+        )
         # Group candidates by event and preserve one unique wallet max per season.
         event_candidates: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         event_volume_by_key: Dict[str, float] = {}
         seen_wallet_event: set[tuple[str, str]] = set()
+        total_candidate_rows = 0
+        try:
+            while True:
+                batch = candidate_cursor.fetchmany(candidate_fetch_batch_size)
+                if not batch:
+                    break
+                for raw_row in batch:
+                    total_candidate_rows += 1
+                    row = dict(raw_row)
+                    wallet = str(row.get("proxy_wallet") or "").strip().lower()
+                    if not wallet:
+                        continue
+                    event_id = str(row.get("event_id") or "").strip() or None
+                    event_slug = str(row.get("event_slug") or "").strip() or None
+                    if not event_id and not event_slug:
+                        continue
+                    event_key = event_id or f"slug:{event_slug}"
+                    wallet_event_key = (wallet, event_key)
+                    if wallet_event_key in seen_wallet_event:
+                        continue
+                    seen_wallet_event.add(wallet_event_key)
 
-        for row in candidate_rows:
-            wallet = str(row.get("proxy_wallet") or "").strip().lower()
-            if not wallet:
-                continue
-            event_id = str(row.get("event_id") or "").strip() or None
-            event_slug = str(row.get("event_slug") or "").strip() or None
-            if not event_id and not event_slug:
-                continue
-            event_key = event_id or f"slug:{event_slug}"
-            wallet_event_key = (wallet, event_key)
-            if wallet_event_key in seen_wallet_event:
-                continue
-            seen_wallet_event.add(wallet_event_key)
-
-            raw_event_volume = row.get("event_volume")
-            try:
-                event_volume = float(raw_event_volume or 0)
-            except Exception:
-                event_volume = 0.0
-            event_volume_by_key[event_key] = max(event_volume_by_key.get(event_key, 0.0), max(event_volume, 0.0))
-            event_candidates[event_key].append(row)
-
+                    raw_event_volume = row.get("event_volume")
+                    try:
+                        event_volume = float(raw_event_volume or 0)
+                    except Exception:
+                        event_volume = 0.0
+                    event_volume_by_key[event_key] = max(
+                        event_volume_by_key.get(event_key, 0.0),
+                        max(event_volume, 0.0),
+                    )
+                    event_candidates[event_key].append(row)
+        finally:
+            candidate_cursor.close()
+        if not total_candidate_rows:
+            return 0
+        print(
+            f"📦 Snapshot candidate pool streamed: rows={total_candidate_rows}, "
+            f"events={len(event_candidates)}, per_event_prefetch_cap={candidate_pool_cap}, "
+            f"batch_size={candidate_fetch_batch_size}"
+        )
         event_keys = [key for key, rows in event_candidates.items() if rows]
         if not event_keys:
             return 0
@@ -1714,11 +1797,6 @@ class SimplifiedScheduler:
             for key in remainders[:leftover]:
                 quotas[key] += 1
 
-        max_share = _snapshot_max_single_event_share()
-        if effective_limit <= 1:
-            per_event_cap = 1
-        else:
-            per_event_cap = max(1, int(math.floor(effective_limit * max_share + 1e-15)))
         for key in event_keys:
             quotas[key] = min(quotas[key], per_event_cap)
         # Slots freed by the per-event cap go back proportionally to volume among
