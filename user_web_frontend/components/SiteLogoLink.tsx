@@ -10,22 +10,17 @@ export default function SiteLogoLink({
   className?: string;
   showWordmark?: boolean;
 }) {
+  const wordmarkClassName = showWordmark
+    ? "site-logo-wordmark site-logo-wordmark-hero"
+    : "site-logo-wordmark";
+
   return (
     <Link
       href="/"
       className={`site-logo-link${className ? ` ${className}` : ""}`}
       aria-label="PolyStars home"
     >
-      {/* eslint-disable-next-line @next/next/no-img-element -- static SVG from /public */}
-      <img
-        className="site-logo-img"
-        src="/logo.svg"
-        alt=""
-        width={80}
-        height={80}
-        decoding="async"
-      />
-      {showWordmark ? <span className="site-logo-wordmark">OLYSTARS</span> : null}
+      <span className={wordmarkClassName}>POLYSTARS</span>
     </Link>
   );
 }
