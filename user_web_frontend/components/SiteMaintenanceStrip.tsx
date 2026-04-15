@@ -72,7 +72,7 @@ export default function SiteMaintenanceStrip() {
   }, [loadSiteStatus]);
 
   useLayoutEffect(() => {
-    if (!checked || !active) {
+    if (!checked) {
       document.body.classList.remove("has-site-maintenance-strip");
       document.documentElement.style.removeProperty("--site-maintenance-strip-height");
       return undefined;
@@ -95,19 +95,23 @@ export default function SiteMaintenanceStrip() {
       document.body.classList.remove("has-site-maintenance-strip");
       document.documentElement.style.removeProperty("--site-maintenance-strip-height");
     };
-  }, [checked, active]);
+  }, [checked]);
 
-  if (!checked || !active) return null;
+  if (!checked) return null;
+
+  const message = active
+    ? "Maintenance in progress: some actions are disabled."
+    : "WARNING! THIS IS A BETA VERSION. IT DOES NOT REPRESENT THE FINAL QUALITY OF THE PRODUCT.";
 
   return (
     <div
       ref={stripRef}
       id={STRIP_ID}
-      className="site-maintenance-strip"
+      className={`site-maintenance-strip${active ? " site-maintenance-strip-active" : " site-maintenance-strip-beta"}`}
       role="status"
       aria-live="polite"
     >
-      Maintenance in progress: some actions are disabled.
+      {message}
     </div>
   );
 }
