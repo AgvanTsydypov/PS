@@ -479,7 +479,7 @@ _DZ_ARCHETYPE_STYLES: Dict[str, Tuple[str, str, bool]] = {
     "VECTOR":      ("url(#vector-gradient)",       "#000000", False),
     "SIGNAL":      ("url(#signal-gradient)",       "#000000", False),
     "EXTRACTOR":   ("#1C1B1B",                     "#000000", False),
-    "PASSENGER":   ("#CDD2DE",                     "#000000", False),
+    "PASSENGER":   ("#B8BFCE",                     "#000000", False),
     "OPERATOR":    ("#625F5F",                     "#000000", False),
     "SUBSTRATE":   ("#474332",                     "#000000", False),
     # Legacy aliases kept so older payloads do not silently degrade to OPERATOR.
