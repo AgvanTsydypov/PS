@@ -1059,7 +1059,7 @@ main {
 
 .auth-info-panel {
   position: fixed;
-  top: 20px;
+  top: calc(var(--site-maintenance-strip-height, 0px) + 20px);
   right: 20px;
   width: min(360px, calc(100vw - 24px));
   z-index: 20;
