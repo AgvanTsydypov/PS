@@ -187,6 +187,19 @@ export default function GeneratedCardsTicker({
   }, []);
 
   useEffect(() => {
+    if (typeof document === "undefined") return;
+    const className = "home-page-lock-scroll";
+    if (tickerLiteTheme) {
+      document.body.classList.remove(className);
+      return;
+    }
+    document.body.classList.add(className);
+    return () => {
+      document.body.classList.remove(className);
+    };
+  }, [tickerLiteTheme]);
+
+  useEffect(() => {
     return () => {
       clearFlipTimers(flipTimerRef);
     };

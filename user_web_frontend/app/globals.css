@@ -27,6 +27,17 @@ body {
   overflow-x: hidden;
 }
 
+@media (min-width: 769px) {
+  html:has(body.home-page-lock-scroll) {
+    overflow-y: hidden;
+  }
+
+  body.home-page-lock-scroll {
+    height: 100vh;
+    overflow-y: hidden;
+  }
+}
+
 .site-nav {
   max-width: 680px;
   margin: 24px auto 0;
