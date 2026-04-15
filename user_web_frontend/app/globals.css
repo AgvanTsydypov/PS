@@ -210,6 +210,7 @@ body {
 .home-card-panel-segment {
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 30px;
   padding-bottom: 30px;
 }
@@ -217,6 +218,7 @@ body {
 .home-card-panel-item {
   display: flex;
   justify-content: center;
+  width: fit-content;
 }
 
 .home-panel-card {
@@ -244,8 +246,43 @@ body {
 }
 
 .home-card-panel .card-center-hotspot {
-  width: 58%;
-  height: 58%;
+  width: 50%;
+  height: 50%;
+}
+
+.home-card-panel .card-flip-hitbox {
+  position: absolute;
+  z-index: 35;
+  background: transparent;
+  cursor: grab;
+}
+
+.home-card-panel .card-flip-hitbox-top {
+  left: -18px;
+  right: -18px;
+  top: -18px;
+  height: 23px;
+}
+
+.home-card-panel .card-flip-hitbox-bottom {
+  left: -18px;
+  right: -18px;
+  bottom: -18px;
+  height: 23px;
+}
+
+.home-card-panel .card-flip-hitbox-left {
+  left: -18px;
+  top: 0;
+  bottom: 0;
+  width: 23px;
+}
+
+.home-card-panel .card-flip-hitbox-right {
+  right: -18px;
+  top: 0;
+  bottom: 0;
+  width: 23px;
 }
 
 /* Full-width maintenance strip: fixed, does not participate in page hit-testing (see SiteMaintenanceStrip). */
