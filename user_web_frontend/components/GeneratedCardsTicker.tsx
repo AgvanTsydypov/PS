@@ -165,6 +165,19 @@ export default function GeneratedCardsTicker({
     return Math.max(tickerLiteTheme ? 18 : 28, visibleItems.length * secondsPerCard);
   }, [visibleItems.length, tickerLiteTheme]);
 
+  function handlePanelCardFlip(
+    interactionId: string,
+    target: HTMLElement,
+  ) {
+    triggerCardFlip(
+      interactionId,
+      target,
+      flipTimerRef,
+      setAnimatingCards,
+      setFlippedCards,
+    );
+  }
+
   function renderPanelItem(
     item: CardTickerItem,
     panelSide: "left" | "right",
@@ -172,9 +185,10 @@ export default function GeneratedCardsTicker({
     isClone: boolean,
   ) {
     const cardId = `${panelSide}-${isClone ? "clone" : "primary"}-${item.slug}-${itemIndex}`;
+    const interactionId = `${panelSide}-${item.slug}-${itemIndex}`;
     const label = item.card_title.trim() || item.slug || "Card";
-    const isFlipped = !isClone && Boolean(flippedCards[cardId]);
-    const isAnimating = !isClone && Boolean(animatingCards[cardId]);
+    const isFlipped = Boolean(flippedCards[interactionId]);
+    const isAnimating = Boolean(animatingCards[interactionId]);
     const backImageUrl = item.back_image_url || item.front_image_url;
 
     if (tickerLiteTheme) {
@@ -213,32 +227,36 @@ export default function GeneratedCardsTicker({
       );
     }
 
-    if (isClone) {
-      return (
-        <div key={cardId} className="card-ticker-item home-card-panel-item" aria-hidden="true">
-          <article className="nft-card nft-card-tilt theme-vivid card-ticker-card home-panel-card">
-            <img
-              className="generated-card-image card-ticker-thumb"
-              src={item.front_image_url}
-              alt=""
-              width={TICKER_THUMB_PX}
-              height={TICKER_THUMB_HEIGHT_PX}
-              loading="lazy"
-              decoding="async"
-            />
-          </article>
-        </div>
-      );
-    }
-
     return (
-      <div key={cardId} className="card-ticker-item home-card-panel-item">
+      <div
+        key={cardId}
+        className="card-ticker-item home-card-panel-item"
+        aria-hidden={isClone || undefined}
+      >
         <Link
           href={`/cards/${encodeURIComponent(item.slug)}`}
           className="card-center-hotspot"
           tabIndex={-1}
           aria-label={`Open card: ${label}`}
         />
+        {(["top", "right", "bottom", "left"] as const).map((edge) => (
+          <div
+            key={`${cardId}-${edge}`}
+            className={`card-flip-hitbox card-flip-hitbox-${edge}`}
+            aria-hidden="true"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              const card = event.currentTarget.parentElement?.querySelector<HTMLElement>(".home-panel-card");
+              if (!card) return;
+              handlePanelCardFlip(interactionId, card);
+            }}
+          />
+        ))}
         <article
           className={`nft-card nft-card-tilt theme-vivid card-ticker-card home-panel-card ${isAnimating ? "generated-card-preview-card-flipping" : ""}`}
           data-center-navigate="1"
@@ -256,27 +274,15 @@ export default function GeneratedCardsTicker({
             ) {
               return;
             }
-            triggerCardFlip(
-              cardId,
-              event.currentTarget,
-              flipTimerRef,
-              setAnimatingCards,
-              setFlippedCards,
-            );
+            handlePanelCardFlip(interactionId, event.currentTarget);
           }}
           onKeyDown={(event) => {
             if (event.key !== "Enter" && event.key !== " ") return;
             event.preventDefault();
-            triggerCardFlip(
-              cardId,
-              event.currentTarget,
-              flipTimerRef,
-              setAnimatingCards,
-              setFlippedCards,
-            );
+            handlePanelCardFlip(interactionId, event.currentTarget);
           }}
           role="button"
-          tabIndex={0}
+          tabIndex={isClone ? -1 : 0}
           aria-label={`Open or flip card: ${label}`}
         >
           <div className={`generated-card-flip-inner ${isFlipped ? "is-flipped" : ""}`}>
