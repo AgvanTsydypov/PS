@@ -25,9 +25,38 @@ const TICKER_RETRY_DELAYS_MS = [3000, 8000, 15000, 30000];
 const HOME_TICKER_CARD_SCALE = 0.96 * 1.1;
 const TICKER_THUMB_PX = Math.round(249 * HOME_TICKER_CARD_SCALE);
 const TICKER_THUMB_HEIGHT_PX = Math.round(386 * HOME_TICKER_CARD_SCALE);
+const TICKER_GAP_PX = 28;
+const TICKER_LINK_BORDER_PX = 2;
+const TICKER_MAX_ITEMS_DESKTOP = 24;
 const TICKER_MAX_ITEMS_COARSE = 10;
+const TICKER_MAX_CELLS_COARSE = 56;
+const TICKER_MAX_CELLS_FINE = 220;
+const TICKER_MAX_SEGMENTS_COARSE = 4;
+const CARD_TICKER_PX_PER_SEC = 2124 / 70;
 const PANEL_SECONDS_PER_CARD = 6.5;
 const PANEL_SECONDS_PER_CARD_LITE = 4.5;
+
+function clampTickerSegments(requested: number, itemCount: number, maxCells: number): number {
+  if (itemCount <= 0) return 2;
+  const byMemory = Math.max(2, Math.floor(maxCells / itemCount));
+  return Math.min(requested, byMemory);
+}
+
+function segmentWidthPx(itemCount: number): number {
+  if (itemCount <= 0) return 0;
+  const cell = TICKER_THUMB_PX + TICKER_LINK_BORDER_PX;
+  return itemCount * cell + (itemCount - 1) * TICKER_GAP_PX;
+}
+
+function tickerSegmentCount(itemCount: number, viewportWidthPx: number): number {
+  if (itemCount <= 0) return 2;
+  const seqW = segmentWidthPx(itemCount);
+  if (seqW <= 0) return 2;
+  const stripW = Math.min(1600, Math.max(320, viewportWidthPx - 32));
+  const minTotalW = stripW * 2 + 120;
+  const needed = Math.ceil(minTotalW / seqW);
+  return Math.max(2, Math.min(needed, 24));
+}
 
 function splitPanelItems(items: CardTickerItem[]): {
   leftPanelItems: CardTickerItem[];
@@ -61,6 +90,8 @@ export default function GeneratedCardsTicker({
   const hasInitialItems = initialItems.length > 0;
   const [items, setItems] = useState<CardTickerItem[]>(initialItems);
   const [loading, setLoading] = useState(!hasInitialItems);
+  const [viewportWidth, setViewportWidth] = useState(1200);
+  const [tickerMaxCells, setTickerMaxCells] = useState(TICKER_MAX_CELLS_FINE);
   const [tickerLiteTheme, setTickerLiteTheme] = useState(false);
   const [flippedCards, setFlippedCards] = useState<Record<string, boolean>>({});
   const [animatingCards, setAnimatingCards] = useState<Record<string, boolean>>({});
@@ -129,11 +160,22 @@ export default function GeneratedCardsTicker({
   }, [hasInitialItems]);
 
   useEffect(() => {
+    function onResize() {
+      setViewportWidth(window.innerWidth);
+    }
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     const mqCoarse = window.matchMedia("(pointer: coarse)");
     const mqNarrow = window.matchMedia("(max-width: 768px)");
     const apply = () => {
-      setTickerLiteTheme(mqCoarse.matches || mqNarrow.matches);
+      const reduceLoad = mqCoarse.matches || mqNarrow.matches;
+      setTickerMaxCells(reduceLoad ? TICKER_MAX_CELLS_COARSE : TICKER_MAX_CELLS_FINE);
+      setTickerLiteTheme(reduceLoad);
     };
     apply();
     mqCoarse.addEventListener("change", apply);
@@ -151,9 +193,35 @@ export default function GeneratedCardsTicker({
   }, []);
 
   const visibleItems = useMemo(() => {
-    if (!tickerLiteTheme) return items;
+    if (!tickerLiteTheme) return items.slice(0, TICKER_MAX_ITEMS_DESKTOP);
     return items.slice(0, TICKER_MAX_ITEMS_COARSE);
   }, [items, tickerLiteTheme]);
+
+  const liteSegmentCount = useMemo(() => {
+    const raw = tickerSegmentCount(visibleItems.length, viewportWidth);
+    if (tickerLiteTheme) {
+      const clamped = clampTickerSegments(raw, visibleItems.length, tickerMaxCells);
+      return Math.max(2, Math.min(clamped, TICKER_MAX_SEGMENTS_COARSE));
+    }
+    return clampTickerSegments(raw, visibleItems.length, tickerMaxCells);
+  }, [visibleItems.length, viewportWidth, tickerMaxCells, tickerLiteTheme]);
+
+  const liteTickerDurationSec = useMemo(() => {
+    const widthPx = segmentWidthPx(visibleItems.length);
+    if (widthPx <= 0) return tickerLiteTheme ? 28 : 70;
+    if (tickerLiteTheme) {
+      return Math.max(14, widthPx / 44);
+    }
+    return Math.max(8, widthPx / CARD_TICKER_PX_PER_SEC);
+  }, [visibleItems.length, tickerLiteTheme]);
+
+  const liteLoopItems = useMemo(() => {
+    const out: CardTickerItem[] = [];
+    for (let segmentIndex = 0; segmentIndex < liteSegmentCount; segmentIndex += 1) {
+      out.push(...visibleItems);
+    }
+    return out;
+  }, [visibleItems, liteSegmentCount]);
 
   const { leftPanelItems, rightPanelItems } = useMemo(
     () => splitPanelItems(visibleItems),
@@ -374,6 +442,68 @@ export default function GeneratedCardsTicker({
           </div>
         </div>
       </aside>
+    );
+  }
+
+  function renderLiteTicker() {
+    if (visibleItems.length === 0) {
+      return null;
+    }
+
+    return (
+      <section className="card-ticker-strip card-ticker-strip-lite" aria-label="Home showcase">
+        <div className="card-ticker-viewport card-ticker-viewport-lite">
+          <div
+            className="card-ticker-track card-ticker-track-lite"
+            style={
+              {
+                "--ticker-segments": liteSegmentCount,
+                "--ticker-duration": `${liteTickerDurationSec}s`,
+              } as CSSProperties
+            }
+          >
+            {liteLoopItems.map((item, index) => {
+              const cardId = `${item.slug}-${index}`;
+              const label = item.card_title.trim() || item.slug || "Card";
+              return (
+                <Link
+                  key={cardId}
+                  href={`/cards/${encodeURIComponent(item.slug)}`}
+                  className="card-ticker-item card-ticker-item-lite"
+                  aria-label={`Open card: ${label}`}
+                >
+                  <article className="nft-card card-ticker-card card-ticker-card-lite">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      className="generated-card-image card-ticker-thumb"
+                      src={item.front_image_url}
+                      alt=""
+                      width={TICKER_THUMB_PX}
+                      height={TICKER_THUMB_HEIGHT_PX}
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  </article>
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (tickerLiteTheme) {
+    return (
+      <section className="card-ticker-section card-ticker-section-home" aria-label="Home showcase">
+        <div className="home-showcase-center home-showcase-center-mobile">
+          {centerContent}
+          {loading && items.length === 0 ? (
+            <p className="home-showcase-status season-board-muted">Loading claimed cards...</p>
+          ) : null}
+        </div>
+        {renderLiteTicker()}
+      </section>
     );
   }
 
