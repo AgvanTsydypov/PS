@@ -10,7 +10,6 @@ import socket
 import struct
 import time
 import base64
-import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -41,7 +40,6 @@ MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
 SOLANA_RPC_URL_ENV_KEY = "SOLANA_RPC_URL"
 PINATA_JWT_ENV_KEY = "PINATA_JWT"
 PINATA_API_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
-PINATA_FILE_API_URL = "https://api.pinata.cloud/pinning/pinFileToIPFS"
 LAMPORTS_PER_SOL = 1_000_000_000
 
 
@@ -77,7 +75,6 @@ class SolanaClient:
 
         self._keypair = self._load_keypair(self.keypair_path)
         self.client = Client(self.rpc_url, timeout=timeout_seconds)
-        self._pinned_image_cache: dict[str, str] = {}
 
     @property
     def keypair(self) -> Keypair:
@@ -100,8 +97,6 @@ class SolanaClient:
     def mint_user_nft(
         self,
         user_wallet_address: str,
-        pnl_value: float,
-        rank: int,
         season_name: str,
         claim_id: int | None = None,
         winner_context: dict[str, Any] | None = None,
@@ -114,12 +109,10 @@ class SolanaClient:
         collection_pubkey = self._get_master_collection_pubkey()
 
         resolved_claim_id = claim_id if claim_id is not None else int(time.time())
-        nft_name = f"PS TEST {season_name} #{resolved_claim_id}"
+        nft_name = f"SLOP TEST {season_name} #{resolved_claim_id}"
         metadata_uri = self._build_metadata_uri(
             nft_name=nft_name,
             season_name=season_name,
-            pnl_value=pnl_value,
-            rank=rank,
             winner_context=winner_context,
             polystars_card=polystars_card,
         )
@@ -228,38 +221,20 @@ class SolanaClient:
         self,
         nft_name: str,
         season_name: str,
-        pnl_value: float,
-        rank: int,
         winner_context: dict[str, Any] | None = None,
         polystars_card: dict[str, Any] | None = None,
     ) -> str:
-        snapshot = winner_context.get("snapshot") if winner_context else {}
-        event_image_url = ""
-        if isinstance(snapshot, dict):
-            event_image_url = str(snapshot.get("event_image_url") or "").strip()
         card_payload = dict(polystars_card or {})
         front_image_url = str(card_payload.get("front_image_url") or "").strip()
         back_image_url = str(card_payload.get("back_image_url") or "").strip()
-        pinned_event_image_url = ""
-        if event_image_url:
-            try:
-                pinned_event_image_url = self._pin_remote_image_to_pinata(
-                    source_image_url=event_image_url,
-                    nft_name=nft_name,
-                )
-            except Exception:
-                if not front_image_url:
-                    raise
-        primary_image_url = front_image_url or pinned_event_image_url
+        primary_image_url = front_image_url
+        attributes = self._build_card_attributes(card_payload)
 
         metadata = {
             "name": nft_name,
             "symbol": "POLS",
             "description": f"PS TEST reward NFT for season {season_name}",
-            "attributes": [
-                {"trait_type": "Profit", "value": pnl_value},
-                {"trait_type": "Rank", "value": rank},
-            ],
+            "attributes": attributes,
         }
         if primary_image_url:
             files = [
@@ -275,13 +250,6 @@ class SolanaClient:
                         "type": self._guess_media_type(back_image_url),
                     }
                 )
-            if pinned_event_image_url and pinned_event_image_url != primary_image_url:
-                files.append(
-                    {
-                        "uri": pinned_event_image_url,
-                        "type": self._guess_media_type(pinned_event_image_url),
-                    }
-                )
             metadata["image"] = primary_image_url
             metadata["properties"] = {
                 "category": "image",
@@ -290,8 +258,6 @@ class SolanaClient:
         if winner_context:
             metadata["winner_context"] = self._build_metadata_winner_context(
                 winner_context=winner_context,
-                source_event_image_url=event_image_url,
-                pinned_event_image_url=pinned_event_image_url,
             )
         if card_payload:
             metadata["polystars_card"] = card_payload
@@ -317,12 +283,9 @@ class SolanaClient:
         # transaction size limits. Full winner snapshot remains in DB records.
         compact_metadata = {
             "name": nft_name,
-            "symbol": "POLS",
-            "description": f"PS TEST reward NFT for season {season_name}",
-            "attributes": [
-                {"trait_type": "Profit", "value": pnl_value},
-                {"trait_type": "Rank", "value": rank},
-            ],
+            "symbol": "SLOP",
+            "description": f"SLOP TEST reward NFT for season {season_name}",
+            "attributes": attributes,
         }
         if primary_image_url:
             compact_metadata["image"] = primary_image_url
@@ -357,85 +320,47 @@ class SolanaClient:
         return "image/*"
 
     @staticmethod
+    def _build_card_attributes(card_payload: dict[str, Any]) -> list[dict[str, Any]]:
+        trait_keys = [
+            "season_type",
+            "season_number",
+            "recurrence",
+            "claim_type",
+            "card_title",
+            "primary_tag",
+            "secondary_tag",
+            "entry_bracket",
+            "archetype",
+            "rarity_bracket",
+            "edge",
+            "yield",
+            "gravity",
+            "leaderboard_rank",
+        ]
+        attributes: list[dict[str, Any]] = []
+        for key in trait_keys:
+            value = card_payload.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    continue
+            attributes.append({"trait_type": key, "value": value})
+        return attributes
+
+    @staticmethod
     def _build_metadata_winner_context(
         winner_context: dict[str, Any],
-        source_event_image_url: str,
-        pinned_event_image_url: str,
     ) -> dict[str, Any]:
         context = dict(winner_context)
         snapshot = context.get("snapshot")
         if isinstance(snapshot, dict):
             snapshot_copy = dict(snapshot)
-            if source_event_image_url:
-                snapshot_copy["event_image_source_url"] = source_event_image_url
-            if pinned_event_image_url:
-                snapshot_copy["event_image_url"] = pinned_event_image_url
+            snapshot_copy.pop("event_image_url", None)
+            snapshot_copy.pop("event_image_source_url", None)
             context["snapshot"] = snapshot_copy
         return context
-
-    def _pin_remote_image_to_pinata(self, source_image_url: str, nft_name: str) -> str:
-        cached = self._pinned_image_cache.get(source_image_url)
-        if cached:
-            return cached
-
-        jwt = os.environ.get(PINATA_JWT_ENV_KEY, "").strip()
-        if not jwt:
-            raise RuntimeError(
-                f"{PINATA_JWT_ENV_KEY} is required to pin NFT images to Pinata."
-            )
-
-        response = httpx.get(source_image_url, follow_redirects=True, timeout=20.0)
-        response.raise_for_status()
-        image_bytes = response.content
-        if not image_bytes:
-            raise RuntimeError(f"Event image is empty: {source_image_url}")
-
-        content_type = (response.headers.get("content-type") or "").split(";")[0].strip()
-        if not content_type:
-            content_type = self._guess_media_type(source_image_url)
-        extension = self._guess_extension_from_content_type(content_type)
-        filename_base = re.sub(r"[^a-zA-Z0-9_-]+", "-", nft_name).strip("-").lower() or "ps-test-nft"
-        filename = f"{filename_base}{extension}"
-
-        headers = {
-            "Authorization": f"Bearer {jwt}",
-        }
-        files = {
-            "file": (filename, image_bytes, content_type),
-        }
-        data = {
-            "pinataMetadata": json.dumps({"name": filename}),
-        }
-        upload_resp = httpx.post(
-            PINATA_FILE_API_URL,
-            headers=headers,
-            data=data,
-            files=files,
-            timeout=40.0,
-        )
-        upload_resp.raise_for_status()
-        body = upload_resp.json()
-        ipfs_hash = body.get("IpfsHash")
-        if not ipfs_hash:
-            raise RuntimeError(f"Pinata file upload missing IpfsHash: {body}")
-        pinned_url = f"https://gateway.pinata.cloud/ipfs/{ipfs_hash}"
-        self._pinned_image_cache[source_image_url] = pinned_url
-        return pinned_url
-
-    @staticmethod
-    def _guess_extension_from_content_type(content_type: str) -> str:
-        normalized = content_type.lower()
-        if normalized == "image/png":
-            return ".png"
-        if normalized == "image/jpeg":
-            return ".jpg"
-        if normalized == "image/webp":
-            return ".webp"
-        if normalized == "image/gif":
-            return ".gif"
-        if normalized == "image/svg+xml":
-            return ".svg"
-        return ".bin"
 
     @staticmethod
     def _upload_metadata_to_pinata(metadata: dict[str, Any]) -> str | None:
