@@ -1836,8 +1836,6 @@ class SeasonWorkbenchService:
         mint_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
         mint_result = mint_client.mint_user_nft(
             user_wallet_address=recipient_address,
-            pnl_value=allocation.pnl_value,
-            rank=allocation.rank,
             season_name=season_name,
             claim_id=claim_id,
             winner_context=winner_context,
