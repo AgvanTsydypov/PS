@@ -17,12 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
-import io
-
 import httpx
 import psycopg2.extras
-from reportlab.graphics import renderPM
-from svglib.svglib import svg2rlg
 
 from scripts.cardgen.generate_card import generate_card_back_svg, generate_card_svg
 from scripts.data_loading_manager import DataLoadingManager
@@ -85,6 +81,8 @@ _PTIER_CSS_COLORS: Dict[str, str] = {
 }
 PINATA_JWT_ENV_KEY = "PINATA_JWT"
 PINATA_FILE_API_URL = "https://api.pinata.cloud/pinning/pinFileToIPFS"
+PINATA_UNPIN_API_URL = "https://api.pinata.cloud/pinning/unpin"
+PINATA_GATEWAY_PREFIX = "https://gateway.pinata.cloud/ipfs/"
 
 _CARD_SOURCE_SQL = """
 SELECT
@@ -327,32 +325,35 @@ def _pinata_jwt() -> str:
     return jwt
 
 
-def _svg_to_png_bytes(svg_body: str) -> bytes:
-    """Convert SVG string to PNG bytes using svglib + reportlab (no native deps)."""
-    drawing = svg2rlg(io.BytesIO(svg_body.encode("utf-8")))
-    if drawing is None:
-        raise RuntimeError("svglib failed to parse SVG for PNG conversion")
-    buf = io.BytesIO()
-    renderPM.drawToFile(drawing, buf, fmt="PNG")
-    return buf.getvalue()
+def unpin_pinata_urls(urls: list[str]) -> None:
+    """Best-effort unpin a list of Pinata IPFS gateway URLs. Silently ignores all errors."""
+    jwt = os.environ.get(PINATA_JWT_ENV_KEY, "").strip()
+    if not jwt:
+        return
+    for url in urls:
+        if not url or not url.startswith(PINATA_GATEWAY_PREFIX):
+            continue
+        cid = url[len(PINATA_GATEWAY_PREFIX):]
+        if not cid:
+            continue
+        try:
+            httpx.delete(
+                f"{PINATA_UNPIN_API_URL}/{cid}",
+                headers={"Authorization": f"Bearer {jwt}"},
+                timeout=10.0,
+            )
+        except Exception:
+            pass
 
 
 def _pin_svg_to_pinata(filename: str, svg_body: str) -> str:
-    """Convert SVG to PNG and upload to Pinata.
-
-    Phantom and most wallets/marketplaces do not render SVG images for NFTs.
-    PNG is the universally supported format.
-    """
-    png_filename = filename.replace(".svg", ".png")
-    png_bytes = _svg_to_png_bytes(svg_body)
-
     jwt = _pinata_jwt()
     headers = {"Authorization": f"Bearer {jwt}"}
     files = {
-        "file": (png_filename, png_bytes, "image/png"),
+        "file": (filename, svg_body.encode("utf-8"), "image/svg+xml"),
     }
     data = {
-        "pinataMetadata": json.dumps({"name": png_filename}),
+        "pinataMetadata": json.dumps({"name": filename}),
     }
     response = httpx.post(
         PINATA_FILE_API_URL,
