@@ -29,7 +29,6 @@ from solders.transaction import VersionedTransaction
 
 load_dotenv()
 
-
 MPL_CORE_PROGRAM_ID = Pubkey.from_string(
     "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
 )
@@ -107,6 +106,7 @@ class SolanaClient:
         """
         owner_pubkey = Pubkey.from_string(user_wallet_address.strip())
         collection_pubkey = self._get_master_collection_pubkey()
+        self._validate_core_collection_account(collection_pubkey)
 
         resolved_claim_id = claim_id if claim_id is not None else int(time.time())
         nft_name = f"SLOP TEST {season_name} #{resolved_claim_id}"
@@ -225,6 +225,7 @@ class SolanaClient:
         polystars_card: dict[str, Any] | None = None,
     ) -> str:
         card_payload = dict(polystars_card or {})
+        metadata_card_payload = self._build_metadata_card_payload(card_payload)
         front_image_url = str(card_payload.get("front_image_url") or "").strip()
         back_image_url = str(card_payload.get("back_image_url") or "").strip()
         primary_image_url = front_image_url
@@ -232,8 +233,8 @@ class SolanaClient:
 
         metadata = {
             "name": nft_name,
-            "symbol": "POLS",
-            "description": f"PS TEST reward NFT for season {season_name}",
+            "symbol": "SLOP",
+            "description": f"SLOP TEST reward NFT for season {season_name}",
             "attributes": attributes,
         }
         if primary_image_url:
@@ -259,8 +260,8 @@ class SolanaClient:
             metadata["winner_context"] = self._build_metadata_winner_context(
                 winner_context=winner_context,
             )
-        if card_payload:
-            metadata["polystars_card"] = card_payload
+        if metadata_card_payload:
+            metadata["polystars_card"] = metadata_card_payload
 
         uploaded_uri = self._upload_metadata_to_pinata(metadata)
         if uploaded_uri:
@@ -296,8 +297,8 @@ class SolanaClient:
                 "season_id": winner_context.get("season_id"),
                 "winner_row_id": (winner_context.get("snapshot") or {}).get("winner_row_id"),
             }
-        if card_payload:
-            compact_metadata["polystars_card"] = card_payload
+        if metadata_card_payload:
+            compact_metadata["polystars_card"] = metadata_card_payload
 
         compact_metadata = self._make_json_safe(compact_metadata)
         raw_json = json.dumps(compact_metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -361,6 +362,40 @@ class SolanaClient:
             snapshot_copy.pop("event_image_source_url", None)
             context["snapshot"] = snapshot_copy
         return context
+
+    @staticmethod
+    def _build_metadata_card_payload(card_payload: dict[str, Any]) -> dict[str, Any]:
+        metadata_card_payload = dict(card_payload)
+        metadata_card_payload.pop("image_url", None)
+        return metadata_card_payload
+
+    def _validate_core_collection_account(self, collection_pubkey: Pubkey) -> None:
+        response = self._rpc_call_with_retry(
+            lambda: self.client.get_account_info(collection_pubkey)
+        )
+        account_info = response.value
+        if account_info is None:
+            raise RuntimeError(
+                "MASTER_COLLECTION_ADDRESS does not exist on the configured Solana RPC."
+            )
+        if account_info.owner != MPL_CORE_PROGRAM_ID:
+            raise RuntimeError(
+                "MASTER_COLLECTION_ADDRESS is not owned by the MPL Core program."
+            )
+
+        data = account_info.data
+        if isinstance(data, (bytes, bytearray)):
+            data_len = len(data)
+        elif isinstance(data, (list, tuple)) and data:
+            first = data[0]
+            data_len = len(first) if isinstance(first, (bytes, bytearray, str)) else 0
+        else:
+            data_len = 0
+
+        if data_len == 0:
+            raise RuntimeError(
+                "MASTER_COLLECTION_ADDRESS has empty account data; expected an initialized MPL Core collection."
+            )
 
     @staticmethod
     def _upload_metadata_to_pinata(metadata: dict[str, Any]) -> str | None:
