@@ -19,14 +19,58 @@ import {
   publicKey,
 } from "@metaplex-foundation/umi";
 
-const DEVNET_RPC_URL = "https://api.devnet.solana.com";
+const DEFAULT_SOLANA_RPC_URL = "https://api.devnet.solana.com";
 const DEFAULT_COLLECTION_NAME = "PolyStars Official";
 const MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS";
+const MASTER_COLLECTION_METADATA_URI_ENV_KEY = "MASTER_COLLECTION_METADATA_URI";
+const SOLANA_RPC_URL_ENV_KEY = "SOLANA_RPC_URL";
+
+function resolveEnvPath(argv) {
+  const defaultEnvPath = path.resolve(process.cwd(), ".env");
+  for (let i = 2; i < argv.length; i += 1) {
+    if (argv[i] === "--env-path" && argv[i + 1]) {
+      return path.resolve(process.cwd(), argv[i + 1]);
+    }
+  }
+  return defaultEnvPath;
+}
+
+function loadEnvFile(envPath) {
+  if (!fs.existsSync(envPath)) return;
+  const lines = fs.readFileSync(envPath, "utf8").split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eqIdx = line.indexOf("=");
+    if (eqIdx <= 0) continue;
+    const key = line.slice(0, eqIdx).trim();
+    if (!key || process.env[key]) continue;
+    let value = line.slice(eqIdx + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[key] = value;
+  }
+}
+
+function resolveSolanaRpcUrl() {
+  return process.env[SOLANA_RPC_URL_ENV_KEY]?.trim() || DEFAULT_SOLANA_RPC_URL;
+}
+
+function resolveExplorerClusterSuffix(rpcUrl) {
+  const normalized = rpcUrl.toLowerCase();
+  if (normalized.includes("devnet")) return "?cluster=devnet";
+  if (normalized.includes("testnet")) return "?cluster=testnet";
+  return "";
+}
 
 function parseArgs(argv) {
   const args = {
     keypairPath: path.resolve(process.cwd(), "my-keypair.json"),
-    uri: process.env.MASTER_COLLECTION_METADATA_URI || "",
+    uri: process.env[MASTER_COLLECTION_METADATA_URI_ENV_KEY] || "",
     envPath: path.resolve(process.cwd(), ".env"),
     nameOverride: null,
     royaltyBps: null,
@@ -73,6 +117,7 @@ Notes:
   - --uri should be a REAL public metadata JSON URL (HTTPS, e.g. Pinata gateway).
   - Script validates metadata has name, symbol and image.
   - If --royalty-bps is omitted, uses metadata.seller_fee_basis_points.
+  - RPC URL comes from SOLANA_RPC_URL in .env or shell environment.
 `);
   process.exit(code);
 }
@@ -181,6 +226,7 @@ function resolveCreators(metadata, fallbackAddress) {
 }
 
 async function main() {
+  loadEnvFile(resolveEnvPath(process.argv));
   const args = parseArgs(process.argv);
   if (!args.uri || args.uri.includes("placeholder")) {
     throw new Error(
@@ -190,9 +236,11 @@ async function main() {
   console.log("Fetching and validating metadata JSON...");
   const metadata = await fetchMetadataJson(args.uri);
   const onChainName = args.nameOverride?.trim() || metadata.name.trim() || DEFAULT_COLLECTION_NAME;
+  const rpcUrl = resolveSolanaRpcUrl();
+  const explorerClusterSuffix = resolveExplorerClusterSuffix(rpcUrl);
 
-  console.log("Connecting to Devnet RPC...");
-  const umi = createUmi(DEVNET_RPC_URL).use(mplCore());
+  console.log(`Connecting to Solana RPC: ${rpcUrl}`);
+  const umi = createUmi(rpcUrl).use(mplCore());
 
   console.log(`Loading keypair from ${args.keypairPath}`);
   const secret = loadSecretKey(args.keypairPath);
@@ -223,8 +271,8 @@ async function main() {
 
   const collectionAddress = collectionSigner.publicKey.toString();
   const signature = tx.signature.toString();
-  const explorerCollectionUrl = `https://explorer.solana.com/address/${collectionAddress}?cluster=devnet`;
-  const explorerTxUrl = `https://explorer.solana.com/tx/${signature}?cluster=devnet`;
+  const explorerCollectionUrl = `https://explorer.solana.com/address/${collectionAddress}${explorerClusterSuffix}`;
+  const explorerTxUrl = `https://explorer.solana.com/tx/${signature}${explorerClusterSuffix}`;
 
   upsertEnvValue(args.envPath, MASTER_COLLECTION_ENV_KEY, collectionAddress);
 

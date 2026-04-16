@@ -3279,7 +3279,7 @@ async def mint_claim(req: MintClaimRequest) -> Dict[str, Any]:
             "Mint failed for wallet=%s season_id=%s chain=%s",
             req.wallet,
             req.season_id,
-            req.blockchain,
+            BLOCKCHAIN_SOLANA,
         )
         await ws_hub.broadcast("mint_finished", {"status": "error", "error": str(exc)})
         raise HTTPException(status_code=400, detail=str(exc))

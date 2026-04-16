@@ -1,5 +1,5 @@
 """
-Solana RPC service helpers for Devnet operations.
+Solana RPC service helpers.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ import time
 import base64
 import re
 from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -36,6 +38,7 @@ SPL_NOOP_PROGRAM_ID = Pubkey.from_string(
     "noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmV"
 )
 MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
+SOLANA_RPC_URL_ENV_KEY = "SOLANA_RPC_URL"
 PINATA_JWT_ENV_KEY = "PINATA_JWT"
 PINATA_API_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
 PINATA_FILE_API_URL = "https://api.pinata.cloud/pinning/pinFileToIPFS"
@@ -56,18 +59,19 @@ class MintedNftResult:
 class SolanaClient:
     """Minimal Solana client with timeout retry logic."""
 
-    DEVNET_RPC_URL = "https://api.devnet.solana.com"
+    DEFAULT_RPC_URL = "https://api.devnet.solana.com"
 
     def __init__(
         self,
         keypair_path: str | Path = "my-keypair.json",
-        rpc_url: str = DEVNET_RPC_URL,
+        rpc_url: str | None = None,
         timeout_seconds: float = 10.0,
         max_retries: int = 3,
         retry_delay_seconds: float = 1.0,
     ) -> None:
         self.keypair_path = Path(keypair_path)
-        self.rpc_url = rpc_url
+        env_rpc_url = os.environ.get(SOLANA_RPC_URL_ENV_KEY, "").strip()
+        self.rpc_url = rpc_url or env_rpc_url or self.DEFAULT_RPC_URL
         self.max_retries = max_retries
         self.retry_delay_seconds = retry_delay_seconds
 
@@ -176,9 +180,9 @@ class SolanaClient:
             tx_hash=signature,
             nft_name=nft_name,
             metadata_uri=metadata_uri,
-            explorer_tx_url=f"https://explorer.solana.com/tx/{signature}?cluster=devnet",
+            explorer_tx_url=f"https://explorer.solana.com/tx/{signature}{self._explorer_cluster_suffix()}",
             explorer_asset_url=(
-                f"https://explorer.solana.com/address/{asset_address}?cluster=devnet"
+                f"https://explorer.solana.com/address/{asset_address}{self._explorer_cluster_suffix()}"
             ),
         )
 
@@ -332,6 +336,7 @@ class SolanaClient:
         if card_payload:
             compact_metadata["polystars_card"] = card_payload
 
+        compact_metadata = self._make_json_safe(compact_metadata)
         raw_json = json.dumps(compact_metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         encoded = base64.b64encode(raw_json).decode("ascii")
         return f"data:application/json;base64,{encoded}"
@@ -438,6 +443,7 @@ class SolanaClient:
         if not jwt:
             return None
 
+        metadata = SolanaClient._make_json_safe(metadata)
         headers = {
             "Authorization": f"Bearer {jwt}",
             "Content-Type": "application/json",
@@ -459,6 +465,26 @@ class SolanaClient:
             except Exception:
                 continue
         return None
+
+    @staticmethod
+    def _make_json_safe(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(key): SolanaClient._make_json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [SolanaClient._make_json_safe(item) for item in value]
+        if isinstance(value, Decimal):
+            return int(value) if value == value.to_integral_value() else float(value)
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        return value
+
+    def _explorer_cluster_suffix(self) -> str:
+        normalized = self.rpc_url.lower()
+        if "devnet" in normalized:
+            return "?cluster=devnet"
+        if "testnet" in normalized:
+            return "?cluster=testnet"
+        return ""
 
     @staticmethod
     def _get_master_collection_pubkey() -> Pubkey:
