@@ -98,18 +98,29 @@ class SolanaClient:
         user_wallet_address: str,
         season_name: str,
         claim_id: int | None = None,
+        collection_mint_number: int | None = None,
         winner_context: dict[str, Any] | None = None,
         polystars_card: dict[str, Any] | None = None,
     ) -> MintedNftResult:
         """
         Mint a Core NFT for a user wallet and attach it to master collection.
+
+        The minted NFT name uses the per-season `collection_mint_number` (1..N within
+        each season) when provided so the on-chain name matches the card back label.
+        It falls back to `claim_id` and then to a timestamp for legacy callers.
         """
         owner_pubkey = Pubkey.from_string(user_wallet_address.strip())
         collection_pubkey = self._get_master_collection_pubkey()
         self._validate_core_collection_account(collection_pubkey)
 
         resolved_claim_id = claim_id if claim_id is not None else int(time.time())
-        nft_name = f"SLOP TEST {season_name} #{resolved_claim_id}"
+        if collection_mint_number is not None:
+            nft_number = int(collection_mint_number)
+        elif claim_id is not None:
+            nft_number = int(claim_id)
+        else:
+            nft_number = resolved_claim_id
+        nft_name = f"SLOP TEST {season_name} #{nft_number}"
         metadata_uri = self._build_metadata_uri(
             nft_name=nft_name,
             season_name=season_name,
