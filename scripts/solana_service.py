@@ -215,17 +215,66 @@ class SolanaClient:
         """
         Metaplex Core CreateV2 layout:
         discriminator(20) + data_state(0) + name + uri + plugins + adapters.
+
+        plugins encodes a Royalties plugin so that on-chain creators and
+        royalty basis points are visible to explorers and marketplaces.
+        Royalties plugin discriminant = 4 (per Metaplex Core IDL).
+        RuleSet variant 0 = None (no allowlist/denylist).
         """
         discriminator = bytes([20])
         data_state_account = bytes([0])
-        some_empty_vec = bytes([1]) + struct.pack("<I", 0)
+
+        royalties_plugin = self._build_royalties_plugin()
+
+        # plugins: Some(Vec<PluginAuthorityPair>) — 1 element
+        plugins_some = (
+            bytes([1])                              # Some
+            + struct.pack("<I", 1)                  # vec length = 1
+            + royalties_plugin
+        )
+        # external_plugin_adapters: Some([])
+        external_adapters_some = bytes([1]) + struct.pack("<I", 0)
+
         return (
             discriminator
             + data_state_account
             + self._serialize_string(name)
             + self._serialize_string(uri)
-            + some_empty_vec   # plugins: Some([])
-            + some_empty_vec   # external_plugin_adapters: Some([])
+            + plugins_some
+            + external_adapters_some
+        )
+
+    def _build_royalties_plugin(self) -> bytes:
+        """
+        Encode a PluginAuthorityPair containing a Royalties plugin.
+
+        Borsh layout (Metaplex Core IDL):
+          Plugin discriminant  : u8  = 4  (Royalties)
+          basis_points         : u16      (500 = 5%)
+          creators Vec length  : u32
+          for each creator:
+            address            : [u8; 32]
+            percentage         : u8       (0..100, sum must equal 100)
+          RuleSet variant      : u8  = 0  (None)
+          PluginAuthority      : u8  = 0  (None — collection authority governs)
+        """
+        creator_pubkey = self.public_key
+        basis_points: int = 500  # 5%
+
+        creators_bytes = (
+            struct.pack("<I", 1)            # 1 creator
+            + bytes(creator_pubkey)         # 32-byte address
+            + struct.pack("B", 100)         # 100% share
+        )
+        rule_set = bytes([0])               # RuleSet::None
+        plugin_authority = bytes([0])       # PluginAuthority::None
+
+        return (
+            bytes([4])                      # Plugin::Royalties discriminant
+            + struct.pack("<H", basis_points)
+            + creators_bytes
+            + rule_set
+            + plugin_authority
         )
 
     def _build_metadata_uri(
