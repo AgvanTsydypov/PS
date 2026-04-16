@@ -39,6 +39,8 @@ MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
 SOLANA_RPC_URL_ENV_KEY = "SOLANA_RPC_URL"
 PINATA_JWT_ENV_KEY = "PINATA_JWT"
 PINATA_API_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
+PINATA_UNPIN_API_URL = "https://api.pinata.cloud/pinning/unpin"
+PINATA_GATEWAY_PREFIX = "https://gateway.pinata.cloud/ipfs/"
 LAMPORTS_PER_SOL = 1_000_000_000
 
 
@@ -159,23 +161,29 @@ class SolanaClient:
         )
         transaction = VersionedTransaction(message, [self._keypair, asset_keypair])
 
-        send_resp = self._rpc_call_with_retry(
-            lambda: self.client.send_transaction(transaction)
-        )
-        signature = str(send_resp.value)
-
-        confirm_resp = self._rpc_call_with_retry(
-            lambda: self.client.confirm_transaction(
-                send_resp.value,
-                commitment=Confirmed,
-                sleep_seconds=0.8,
+        try:
+            send_resp = self._rpc_call_with_retry(
+                lambda: self.client.send_transaction(transaction)
             )
-        )
-        status = confirm_resp.value[0] if confirm_resp.value else None
-        if status is None:
-            raise RuntimeError("Transaction confirmation status is empty")
-        if status.err is not None:
-            raise RuntimeError(f"Mint transaction failed: {status.err}")
+            signature = str(send_resp.value)
+
+            confirm_resp = self._rpc_call_with_retry(
+                lambda: self.client.confirm_transaction(
+                    send_resp.value,
+                    commitment=Confirmed,
+                    sleep_seconds=0.8,
+                )
+            )
+            status = confirm_resp.value[0] if confirm_resp.value else None
+            if status is None:
+                raise RuntimeError("Transaction confirmation status is empty")
+            if status.err is not None:
+                raise RuntimeError(f"Mint transaction failed: {status.err}")
+        except Exception:
+            # Unpin the metadata JSON that was already uploaded to Pinata so it
+            # doesn't accumulate as orphaned pins on failed attempts.
+            self._unpin_pinata_url(metadata_uri)
+            raise
 
         asset_address = str(asset_keypair.pubkey())
         return MintedNftResult(
@@ -249,14 +257,14 @@ class SolanaClient:
         Encode a PluginAuthorityPair containing a Royalties plugin.
 
         Borsh layout (Metaplex Core IDL):
-          Plugin discriminant  : u8  = 4  (Royalties)
+          Plugin discriminant  : u8  = 0  (Royalties — first variant in Plugin enum)
           basis_points         : u16      (500 = 5%)
           creators Vec length  : u32
           for each creator:
             address            : [u8; 32]
             percentage         : u8       (0..100, sum must equal 100)
           RuleSet variant      : u8  = 0  (None)
-          PluginAuthority      : u8  = 0  (None — collection authority governs)
+          authority            : u8  = 0  (Option::None — inherit from collection)
         """
         creator_pubkey = self.public_key
         basis_points: int = 500  # 5%
@@ -267,14 +275,14 @@ class SolanaClient:
             + struct.pack("B", 100)         # 100% share
         )
         rule_set = bytes([0])               # RuleSet::None
-        plugin_authority = bytes([0])       # PluginAuthority::None
+        authority = bytes([0])              # Option<PluginAuthority>::None
 
         return (
-            bytes([4])                      # Plugin::Royalties discriminant
+            bytes([0])                      # Plugin::Royalties discriminant (index 0)
             + struct.pack("<H", basis_points)
             + creators_bytes
             + rule_set
-            + plugin_authority
+            + authority
         )
 
     def _build_metadata_uri(
@@ -456,6 +464,26 @@ class SolanaClient:
             raise RuntimeError(
                 "MASTER_COLLECTION_ADDRESS has empty account data; expected an initialized MPL Core collection."
             )
+
+    @staticmethod
+    def _unpin_pinata_url(url: str) -> None:
+        """Best-effort unpin a Pinata IPFS URL. Silently ignores all errors."""
+        if not url or not url.startswith(PINATA_GATEWAY_PREFIX):
+            return
+        cid = url[len(PINATA_GATEWAY_PREFIX):]
+        if not cid:
+            return
+        jwt = os.environ.get(PINATA_JWT_ENV_KEY, "").strip()
+        if not jwt:
+            return
+        try:
+            httpx.delete(
+                f"{PINATA_UNPIN_API_URL}/{cid}",
+                headers={"Authorization": f"Bearer {jwt}"},
+                timeout=10.0,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _upload_metadata_to_pinata(metadata: dict[str, Any]) -> str | None:

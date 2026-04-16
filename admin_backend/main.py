@@ -45,7 +45,7 @@ if project_root not in sys.path:
 from scripts.data_loading_manager import DataLoadingManager, GENESIS_START_DATE, GENESIS_END_DATE
 from scripts.daily_scheduler_simple import SimplifiedScheduler
 from scripts.cardgen.generate_card import generate_card_back_svg, generate_card_svg
-from scripts.polystars_card_payload import build_polystars_card_for_mint
+from scripts.polystars_card_payload import build_polystars_card_for_mint, unpin_pinata_urls
 from scripts.simulate_user_generated_cards_batch import run_admin_simulated_card_generations
 from scripts.season_manager import SeasonManager
 from scripts.solana_service import MintedNftResult, SolanaClient
@@ -64,8 +64,8 @@ def _user_web_wallet_actions_env_override() -> bool:
 MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
 BLOCKCHAIN_SOLANA = "solana"
 DEFAULT_SOLANA_RECIPIENT = "H1wsggroxpW3LwCCv8dVeiJW73oYPkcDGgSqhiT5Zbz3"
-FIXED_CLAIM_FRONT_IMAGE_URL = "https://crimson-glamorous-dragon-957.mypinata.cloud/ipfs/bafkreieucptbdshpv6pegj74maofwd3frc4666vh7wzwksg5pxtkbc3td4"
-FIXED_CLAIM_BACK_IMAGE_URL = "https://crimson-glamorous-dragon-957.mypinata.cloud/ipfs/bafkreierblyo7tqhbq2qlcyxtorxx76oufadsd2cyvy4ojeigstajpiyx4"
+FIXED_CLAIM_FRONT_IMAGE_URL = "https://crimson-glamorous-dragon-957.mypinata.cloud/ipfs/bafkreihw4mc4muhoqi4ufwry3uimsfldc6k7mrnmo2dekm5poxgu7tytha"
+FIXED_CLAIM_BACK_IMAGE_URL = "https://crimson-glamorous-dragon-957.mypinata.cloud/ipfs/bafkreica4kbci6kyw6vihix4hdewfyxoaecxqjsrf3vuibecawft2mdlbi"
 
 
 @dataclass(frozen=True)
@@ -1918,10 +1918,12 @@ class SeasonWorkbenchService:
         card_claim_type = "origin" if allocation.assignment_type == "winner_self" else "looter"
 
         # Everything between reservation and finalize can fail (Pinata upload,
-        # Solana RPC, transaction confirmation). On any failure we release the
-        # PENDING claim row so its per-season collection_mint_number becomes
-        # available again for the next attempt — otherwise the failed attempt
-        # would permanently burn that number and create a gap in the sequence.
+        # Solana RPC, transaction confirmation). On any failure we:
+        #   1. Release the PENDING claim row so collection_mint_number stays gapless.
+        #   2. Unpin any card images already uploaded to Pinata so they don't
+        #      accumulate as orphaned pins. Metadata JSON unpin is handled inside
+        #      mint_user_nft itself (it knows the URI at the point of failure).
+        polystars_card: dict[str, Any] | None = None
         try:
             polystars_card = build_polystars_card_for_mint(
                 self.manager,
@@ -1957,6 +1959,16 @@ class SeasonWorkbenchService:
                 self.release_reserved_claim(claim_id)
             except Exception:
                 pass
+            # Unpin card images that were already uploaded to Pinata.
+            # Metadata JSON unpin is handled inside mint_user_nft.
+            if polystars_card:
+                try:
+                    unpin_pinata_urls([
+                        str(polystars_card.get("front_image_url") or ""),
+                        str(polystars_card.get("back_image_url") or ""),
+                    ])
+                except Exception:
+                    pass
             raise
         self.mark_winner_row_as_minted(
             allocation=allocation,
