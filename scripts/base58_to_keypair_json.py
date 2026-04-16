@@ -41,6 +41,7 @@ def main() -> None:
     args = parser.parse_args()
 
     key_bytes = b58decode(args.private_key_base58.strip())
+    print(args.private_key_base58.strip())
     if len(key_bytes) not in (32, 64):
         raise ValueError(
             f"Unexpected key length: {len(key_bytes)} bytes. Expected 32 or 64 bytes."
