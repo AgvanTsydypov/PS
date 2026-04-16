@@ -375,6 +375,7 @@ def _build_card_payload_from_source_row(
     claim_id: int,
     claim_type: str,
     snapshot_event_image_url: str = "",
+    collection_mint_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     normalized_entry_bracket = _normalize_entry_bracket(row.get("entry_bracket"))
     normalized_edge = _normalize_choice(row.get("edge"), CARD_TIER_OPTIONS, "BASE")
@@ -432,7 +433,9 @@ def _build_card_payload_from_source_row(
             GENESIS_END_DATE if season_type == "genesis" and GENESIS_END_DATE else _fmt_date_field(row.get("season_end_date"))
         ),
         "season_size": row.get("season_size"),
-        "collection_mint_number": int(claim_id),
+        "collection_mint_number": int(
+            collection_mint_number if collection_mint_number is not None else claim_id
+        ),
         "qr_payload": f"{CARD_BASE_URL}/cards/{slug}",
     }
     return payload
@@ -474,6 +477,7 @@ def build_polystars_card_for_mint(
     snapshot_event_image_url: str = "",
     fixed_front_image_url: str = "",
     fixed_back_image_url: str = "",
+    collection_mint_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     row = _load_card_source_row(manager, winner_row_id)
     if not row:
@@ -483,6 +487,7 @@ def build_polystars_card_for_mint(
         claim_id=claim_id,
         claim_type=claim_type,
         snapshot_event_image_url=snapshot_event_image_url,
+        collection_mint_number=collection_mint_number,
     )
     if fixed_front_image_url and fixed_back_image_url:
         return _attach_fixed_card_images(

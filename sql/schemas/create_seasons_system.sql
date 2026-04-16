@@ -169,8 +169,65 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_active_season_user_wallet_lower
     ON claims(season_id, LOWER(user_wallet))
     WHERE status IN ('PENDING', 'PROCESSING', 'COMPLETED');
 
+-- Per-season collection mint # on claims (1..N within each season_id), mirroring user_generated_cards.
+DO $$
+BEGIN
+    IF to_regclass('public.claims') IS NULL THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE claims
+        ADD COLUMN IF NOT EXISTS collection_mint_number BIGINT;
+
+    ALTER TABLE claims
+        ALTER COLUMN collection_mint_number DROP DEFAULT;
+
+    -- Backfill any existing rows that predate this column, numbering within each season
+    -- by chronological order so current production data keeps deterministic ordering.
+    WITH numbered AS (
+        SELECT
+            id,
+            ROW_NUMBER() OVER (
+                PARTITION BY season_id
+                ORDER BY COALESCE(timestamp, created_at) ASC, id ASC
+            ) AS rn
+        FROM claims
+        WHERE collection_mint_number IS NULL
+    )
+    UPDATE claims c
+    SET collection_mint_number = n.rn
+    FROM numbered n
+    WHERE c.id = n.id;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_season_collection_mint
+        ON claims(season_id, collection_mint_number);
+END $$;
+
+CREATE OR REPLACE FUNCTION claims_assign_season_mint_number()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.collection_mint_number IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+    -- Distinct namespace from user_generated_cards (9283741) to avoid cross-lock contention.
+    PERFORM pg_advisory_xact_lock(9283742, NEW.season_id);
+    SELECT COALESCE(MAX(collection_mint_number), 0) + 1
+    INTO NEW.collection_mint_number
+    FROM claims
+    WHERE season_id = NEW.season_id;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS tr_claims_assign_season_mint ON claims;
+CREATE TRIGGER tr_claims_assign_season_mint
+    BEFORE INSERT ON claims
+    FOR EACH ROW
+    EXECUTE PROCEDURE claims_assign_season_mint_number();
+
 -- Add comments
 COMMENT ON TABLE claims IS 'NFT claims for each season - tracks all mint requests';
+COMMENT ON COLUMN claims.collection_mint_number IS 'Per-season sequential mint number (1..N within each season_id); assigned by trigger';
 COMMENT ON COLUMN claims.user_wallet IS 'Ethereum wallet address of the claimant';
 COMMENT ON COLUMN claims.recipient_solana_wallet IS 'Solana wallet where minted NFT should be delivered';
 COMMENT ON COLUMN claims.season_id IS 'Reference to the season being claimed';

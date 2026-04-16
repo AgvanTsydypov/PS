@@ -313,6 +313,7 @@ class SeasonWorkbenchService:
                 cursor.execute("ALTER TABLE claims ADD COLUMN IF NOT EXISTS recipient_solana_wallet TEXT")
                 cursor.execute("ALTER TABLE claims ADD COLUMN IF NOT EXISTS asset_address TEXT")
                 cursor.execute("ALTER TABLE claims ADD COLUMN IF NOT EXISTS mint_chain TEXT")
+                cursor.execute("ALTER TABLE claims ADD COLUMN IF NOT EXISTS collection_mint_number BIGINT")
                 cursor.execute("ALTER TABLE claims ALTER COLUMN tx_hash TYPE TEXT")
                 cursor.execute("ALTER TABLE claims ALTER COLUMN metadata_uri TYPE TEXT")
                 cursor.execute("ALTER TABLE claims ALTER COLUMN asset_address TYPE TEXT")
@@ -325,6 +326,60 @@ class SeasonWorkbenchService:
                         user_wallet ~* '^0x[a-f0-9]{40}$'
                         OR user_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'
                     )
+                    """
+                )
+                # Backfill collection_mint_number for any pre-existing rows, numbering
+                # chronologically per season so legacy data keeps deterministic ordering.
+                cursor.execute(
+                    """
+                    WITH numbered AS (
+                        SELECT
+                            id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY season_id
+                                ORDER BY COALESCE(timestamp, created_at) ASC, id ASC
+                            ) AS rn
+                        FROM claims
+                        WHERE collection_mint_number IS NULL
+                    )
+                    UPDATE claims c
+                    SET collection_mint_number = n.rn
+                    FROM numbered n
+                    WHERE c.id = n.id
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_season_collection_mint
+                        ON claims(season_id, collection_mint_number)
+                    """
+                )
+                # Trigger assigns a per-season sequential collection_mint_number on INSERT.
+                cursor.execute(
+                    """
+                    CREATE OR REPLACE FUNCTION claims_assign_season_mint_number()
+                    RETURNS TRIGGER AS $$
+                    BEGIN
+                        IF NEW.collection_mint_number IS NOT NULL THEN
+                            RETURN NEW;
+                        END IF;
+                        PERFORM pg_advisory_xact_lock(9283742, NEW.season_id);
+                        SELECT COALESCE(MAX(collection_mint_number), 0) + 1
+                        INTO NEW.collection_mint_number
+                        FROM claims
+                        WHERE season_id = NEW.season_id;
+                        RETURN NEW;
+                    END;
+                    $$ LANGUAGE plpgsql
+                    """
+                )
+                cursor.execute("DROP TRIGGER IF EXISTS tr_claims_assign_season_mint ON claims")
+                cursor.execute(
+                    """
+                    CREATE TRIGGER tr_claims_assign_season_mint
+                        BEFORE INSERT ON claims
+                        FOR EACH ROW
+                        EXECUTE PROCEDURE claims_assign_season_mint_number()
                     """
                 )
             conn.commit()
@@ -1548,15 +1603,154 @@ class SeasonWorkbenchService:
         finally:
             conn.close()
 
-    def reserve_claim_id(self) -> int:
+    def reserve_pending_claim(
+        self,
+        *,
+        wallet: str,
+        recipient_wallet: str,
+        season_id: int,
+        phase: str,
+        mint_chain: str,
+        placeholder_metadata_uri: str = "https://gateway.pinata.cloud/ipfs/QmPendingMetadataPlaceholder",
+    ) -> Dict[str, int]:
+        """
+        Insert a PENDING claim row up-front so the BEFORE-INSERT trigger assigns a
+        per-season collection_mint_number. Returns both the freshly issued claim id
+        and its per-season mint number, which are later used to name the NFT and
+        finalize the row once the mint transaction succeeds.
+        """
+        insert_sql = """
+            INSERT INTO claims (
+                user_wallet,
+                recipient_solana_wallet,
+                season_id,
+                phase_type,
+                timestamp,
+                status,
+                metadata_uri,
+                mint_chain,
+                created_at,
+                updated_at
+            )
+            VALUES (%s, %s, %s, %s, NOW(), %s, %s, %s, NOW(), NOW())
+            RETURNING id, collection_mint_number
+        """
+        for attempt in range(2):
+            conn = self.manager.get_connection()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        insert_sql,
+                        (
+                            wallet,
+                            recipient_wallet,
+                            season_id,
+                            phase,
+                            "PENDING",
+                            placeholder_metadata_uri,
+                            mint_chain,
+                        ),
+                    )
+                    row = cursor.fetchone()
+                    if not row:
+                        raise RuntimeError("Failed to reserve pending claim row")
+                    claim_id = int(row[0])
+                    collection_mint_number = int(row[1]) if row[1] is not None else None
+                conn.commit()
+                if collection_mint_number is None:
+                    raise RuntimeError("collection_mint_number was not assigned by trigger")
+                return {
+                    "claim_id": claim_id,
+                    "collection_mint_number": collection_mint_number,
+                }
+            except Exception as exc:
+                conn.rollback()
+                text = str(exc).lower()
+                if attempt == 0 and (
+                    "value too long for type character varying" in text
+                    or "column \"collection_mint_number\" of relation \"claims\"" in text
+                    or "function claims_assign_season_mint_number" in text
+                ):
+                    self.ensure_claims_schema_for_mint()
+                    continue
+                raise
+            finally:
+                conn.close()
+        raise RuntimeError("Failed to reserve pending claim row after schema retry")
+
+    def release_reserved_claim(self, claim_id: int) -> bool:
+        """
+        Free a PENDING claim row reserved by `reserve_pending_claim` when the
+        subsequent mint pipeline fails. Only deletes rows that are still PENDING
+        and have no on-chain artefacts (tx_hash / asset_address), so a successful
+        finalize can never be undone by a stray rollback. Returns True if a row
+        was actually released.
+        """
         conn = self.manager.get_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT nextval(pg_get_serial_sequence('claims', 'id'))")
-                row = cursor.fetchone()
-                if not row:
-                    raise RuntimeError("Could not reserve claim id")
-                return int(row[0])
+                cursor.execute(
+                    """
+                    DELETE FROM claims
+                    WHERE id = %s
+                      AND status = 'PENDING'
+                      AND tx_hash IS NULL
+                      AND asset_address IS NULL
+                    """,
+                    (claim_id,),
+                )
+                deleted = cursor.rowcount == 1
+            conn.commit()
+            return deleted
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def finalize_completed_claim(
+        self,
+        *,
+        claim_id: int,
+        mint_result: MintedNftResult,
+        mint_chain: str,
+    ) -> None:
+        """
+        Mark a previously reserved PENDING claim row as COMPLETED and attach the
+        on-chain mint artefacts. Used after `reserve_pending_claim` + successful mint.
+        """
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE claims
+                    SET
+                        tx_hash = %s,
+                        metadata_uri = %s,
+                        asset_address = %s,
+                        status = 'COMPLETED',
+                        mint_chain = %s,
+                        timestamp = NOW(),
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        mint_result.tx_hash,
+                        mint_result.metadata_uri,
+                        mint_result.asset_address,
+                        mint_chain,
+                        claim_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        f"Failed to finalize claim {claim_id}: row not found or updated twice"
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -1608,112 +1802,6 @@ class SeasonWorkbenchService:
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError("Winner row is already marked as minted.")
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-    def insert_completed_claim(
-        self,
-        claim_id: int,
-        wallet: str,
-        recipient_wallet: str,
-        season_id: int,
-        phase: str,
-        mint_result: MintedNftResult,
-        mint_chain: str,
-    ) -> None:
-        payload = (
-            claim_id,
-            wallet,
-            recipient_wallet,
-            season_id,
-            phase,
-            mint_result.tx_hash,
-            None,
-            mint_result.metadata_uri,
-            mint_result.asset_address,
-            "COMPLETED",
-            mint_chain,
-        )
-        insert_sql = """
-            INSERT INTO claims (
-                id,
-                user_wallet,
-                recipient_solana_wallet,
-                season_id,
-                phase_type,
-                timestamp,
-                tx_hash,
-                token_id,
-                metadata_uri,
-                asset_address,
-                status,
-                mint_chain,
-                created_at,
-                updated_at
-            )
-            VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, NOW(), NOW())
-        """
-        for attempt in range(2):
-            conn = self.manager.get_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute(insert_sql, payload)
-                conn.commit()
-                return
-            except Exception as exc:
-                conn.rollback()
-                text = str(exc).lower()
-                if attempt == 0 and "value too long for type character varying" in text:
-                    self.ensure_claims_schema_for_mint()
-                    continue
-                raise
-            finally:
-                conn.close()
-
-    def insert_pending_claim_db_only(
-        self,
-        claim_id: int,
-        wallet: str,
-        recipient_wallet: str,
-        season_id: int,
-        phase: str,
-        mint_chain: str,
-    ) -> None:
-        conn = self.manager.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO claims (
-                        id,
-                        user_wallet,
-                        recipient_solana_wallet,
-                        season_id,
-                        phase_type,
-                        timestamp,
-                        status,
-                        metadata_uri,
-                        mint_chain,
-                        created_at,
-                        updated_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, NOW(), NOW())
-                    """,
-                    (
-                        claim_id,
-                        wallet,
-                        recipient_wallet,
-                        season_id,
-                        phase,
-                        "PENDING",
-                        "https://gateway.pinata.cloud/ipfs/QmPendingMetadataPlaceholder",
-                        mint_chain,
-                    ),
-                )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1788,20 +1876,25 @@ class SeasonWorkbenchService:
 
         allocation = self.allocate_winner_claim_row(wallet=wallet, season_id=req.season_id)
         season_name = self.get_season_name(req.season_id)
-        claim_id = self.reserve_claim_id()
+
+        # Reserve a PENDING claim row up-front so the DB trigger assigns a per-season
+        # collection_mint_number we can use for both the NFT name and the card payload.
+        reservation = self.reserve_pending_claim(
+            wallet=wallet,
+            recipient_wallet=recipient_address,
+            season_id=req.season_id,
+            phase=phase,
+            mint_chain=BLOCKCHAIN_SOLANA,
+        )
+        claim_id = reservation["claim_id"]
+        collection_mint_number = reservation["collection_mint_number"]
+
         if req.db_only:
-            self.insert_pending_claim_db_only(
-                claim_id=claim_id,
-                wallet=wallet,
-                recipient_wallet=recipient_address,
-                season_id=req.season_id,
-                phase=phase,
-                mint_chain=BLOCKCHAIN_SOLANA,
-            )
             self.clear_wallets_cache()
             return {
                 "status": "db_only_inserted",
                 "claim_id": claim_id,
+                "collection_mint_number": collection_mint_number,
                 "wallet": wallet,
                 "recipient_address": recipient_address,
                 "season_id": req.season_id,
@@ -1823,34 +1916,48 @@ class SeasonWorkbenchService:
         snap = allocation.snapshot if isinstance(allocation.snapshot, dict) else {}
         event_img = str(snap.get("event_image_url") or "").strip()
         card_claim_type = "origin" if allocation.assignment_type == "winner_self" else "looter"
-        polystars_card = build_polystars_card_for_mint(
-            self.manager,
-            winner_row_id=allocation.row_id,
-            claim_id=claim_id,
-            claim_type=card_claim_type,
-            snapshot_event_image_url=event_img,
-            fixed_front_image_url=FIXED_CLAIM_FRONT_IMAGE_URL if req.use_fixed_claim_images else "",
-            fixed_back_image_url=FIXED_CLAIM_BACK_IMAGE_URL if req.use_fixed_claim_images else "",
-        )
 
-        mint_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
-        mint_result = mint_client.mint_user_nft(
-            user_wallet_address=recipient_address,
-            season_name=season_name,
-            claim_id=claim_id,
-            winner_context=winner_context,
-            polystars_card=polystars_card,
-        )
+        # Everything between reservation and finalize can fail (Pinata upload,
+        # Solana RPC, transaction confirmation). On any failure we release the
+        # PENDING claim row so its per-season collection_mint_number becomes
+        # available again for the next attempt — otherwise the failed attempt
+        # would permanently burn that number and create a gap in the sequence.
+        try:
+            polystars_card = build_polystars_card_for_mint(
+                self.manager,
+                winner_row_id=allocation.row_id,
+                claim_id=claim_id,
+                collection_mint_number=collection_mint_number,
+                claim_type=card_claim_type,
+                snapshot_event_image_url=event_img,
+                fixed_front_image_url=FIXED_CLAIM_FRONT_IMAGE_URL if req.use_fixed_claim_images else "",
+                fixed_back_image_url=FIXED_CLAIM_BACK_IMAGE_URL if req.use_fixed_claim_images else "",
+            )
 
-        self.insert_completed_claim(
-            claim_id=claim_id,
-            wallet=wallet,
-            recipient_wallet=recipient_address,
-            season_id=req.season_id,
-            phase=phase,
-            mint_result=mint_result,
-            mint_chain=BLOCKCHAIN_SOLANA,
-        )
+            mint_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
+            mint_result = mint_client.mint_user_nft(
+                user_wallet_address=recipient_address,
+                season_name=season_name,
+                claim_id=claim_id,
+                collection_mint_number=collection_mint_number,
+                winner_context=winner_context,
+                polystars_card=polystars_card,
+            )
+
+            self.finalize_completed_claim(
+                claim_id=claim_id,
+                mint_result=mint_result,
+                mint_chain=BLOCKCHAIN_SOLANA,
+            )
+        except Exception:
+            # release_reserved_claim is a no-op once finalize_completed_claim
+            # has set tx_hash / asset_address, so a partial success is never
+            # silently erased.
+            try:
+                self.release_reserved_claim(claim_id)
+            except Exception:
+                pass
+            raise
         self.mark_winner_row_as_minted(
             allocation=allocation,
             claim_id=claim_id,
@@ -1863,6 +1970,7 @@ class SeasonWorkbenchService:
         return {
             "status": "mint_completed",
             "claim_id": claim_id,
+            "collection_mint_number": collection_mint_number,
             "wallet": wallet,
             "recipient_address": recipient_address,
             "season_id": req.season_id,
