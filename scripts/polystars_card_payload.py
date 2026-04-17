@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import pathlib
 import secrets
 import urllib.request
 import uuid
@@ -17,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
+_CARDGEN_DIR = pathlib.Path(__file__).resolve().parent / "cardgen"
 import httpx
 import psycopg2.extras
 
@@ -465,6 +467,8 @@ def _attach_generated_card_images(payload: Dict[str, Any]) -> Dict[str, Any]:
     render_payload = _build_render_payload(payload)
     front_svg = generate_card_svg(render_payload)
     back_svg = generate_card_back_svg(render_payload)
+    (_CARDGEN_DIR / "output.svg").write_text(front_svg, encoding="utf-8")
+    (_CARDGEN_DIR / "output_back.svg").write_text(back_svg, encoding="utf-8")
     slug = str(payload.get("qr_payload") or "").rstrip("/").rsplit("/", 1)[-1] or _generated_card_slug(
         payload.get("season_type"),
         payload.get("season_number"),
