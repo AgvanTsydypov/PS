@@ -39,7 +39,7 @@ FRAME_X, FRAME_Y, FRAME_W, FRAME_H, FRAME_RX = 3, 3, 510, 796, 0
 IMG_X, IMG_Y, IMG_W, IMG_H, IMG_RX = 13, 13, 490, 490, 0
 
 # Logo overlay (top-left of image zone)
-LOGO_X, LOGO_Y, LOGO_W, LOGO_H = 20, 20, 48, 48
+LOGO_X, LOGO_Y, LOGO_W, LOGO_H = 20, 20, 44, 44
 LOGO_HREF = "logo.svg"
 
 # Metadata badge (top-right)
