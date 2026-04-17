@@ -397,7 +397,6 @@ def _build_card_payload_from_source_row(
     *,
     claim_id: int,
     claim_type: str,
-    snapshot_event_image_url: str = "",
     collection_mint_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     normalized_entry_bracket = _normalize_entry_bracket(row.get("entry_bracket"))
@@ -418,11 +417,9 @@ def _build_card_payload_from_source_row(
     rec_raw = row.get("reccurence")
     recurrence_out = None if rec_raw is None else (str(rec_raw).strip() or None)
 
-    manual = str(row.get("manual_image_url") or "").strip()
-    event_image = str(row.get("event_image_url") or "").strip()
-    image_url = manual or str(snapshot_event_image_url or "").strip() or event_image
+    image_url = str(row.get("manual_image_url") or "").strip()
     if not image_url:
-        raise ValueError("Card payload requires an image source URL")
+        raise ValueError("Card payload requires manual_image_url in the DB row")
 
     season_type = _normalize_choice(row.get("season_type"), CARD_SEASON_TYPE_OPTIONS, "standard").lower()
     slug = _generated_card_slug(season_type, row.get("season_number"))
@@ -497,7 +494,6 @@ def build_polystars_card_for_mint(
     winner_row_id: int,
     claim_id: int,
     claim_type: str,
-    snapshot_event_image_url: str = "",
     fixed_front_image_url: str = "",
     fixed_back_image_url: str = "",
     collection_mint_number: Optional[int] = None,
@@ -509,7 +505,6 @@ def build_polystars_card_for_mint(
         row,
         claim_id=claim_id,
         claim_type=claim_type,
-        snapshot_event_image_url=snapshot_event_image_url,
         collection_mint_number=collection_mint_number,
     )
     if fixed_front_image_url and fixed_back_image_url:

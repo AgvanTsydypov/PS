@@ -405,6 +405,7 @@ class SolanaClient:
             "yield",
             "gravity",
             "leaderboard_rank",
+            "proxy_wallet",
         ]
         attributes: list[dict[str, Any]] = []
         for key in trait_keys:

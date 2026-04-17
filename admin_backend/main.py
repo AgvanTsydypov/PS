@@ -64,8 +64,8 @@ def _user_web_wallet_actions_env_override() -> bool:
 MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
 BLOCKCHAIN_SOLANA = "solana"
 DEFAULT_SOLANA_RECIPIENT = "H1wsggroxpW3LwCCv8dVeiJW73oYPkcDGgSqhiT5Zbz3"
-FIXED_CLAIM_FRONT_IMAGE_URL = "https://crimson-glamorous-dragon-957.mypinata.cloud/ipfs/bafkreihw4mc4muhoqi4ufwry3uimsfldc6k7mrnmo2dekm5poxgu7tytha"
-FIXED_CLAIM_BACK_IMAGE_URL = "https://crimson-glamorous-dragon-957.mypinata.cloud/ipfs/bafkreica4kbci6kyw6vihix4hdewfyxoaecxqjsrf3vuibecawft2mdlbi"
+FIXED_CLAIM_FRONT_IMAGE_URL = "https://gateway.pinata.cloud/ipfs/bafkreieucptbdshpv6pegj74maofwd3frc4666vh7wzwksg5pxtkbc3td4"
+FIXED_CLAIM_BACK_IMAGE_URL = "https://gateway.pinata.cloud/ipfs/bafkreierblyo7tqhbq2qlcyxtorxx76oufadsd2cyvy4ojeigstajpiyx4"
 
 
 @dataclass(frozen=True)
@@ -1913,8 +1913,6 @@ class SeasonWorkbenchService:
             "blockchain": BLOCKCHAIN_SOLANA,
         }
 
-        snap = allocation.snapshot if isinstance(allocation.snapshot, dict) else {}
-        event_img = str(snap.get("event_image_url") or "").strip()
         card_claim_type = "origin" if allocation.assignment_type == "winner_self" else "looter"
 
         # Everything between reservation and finalize can fail (Pinata upload,
@@ -1931,7 +1929,6 @@ class SeasonWorkbenchService:
                 claim_id=claim_id,
                 collection_mint_number=collection_mint_number,
                 claim_type=card_claim_type,
-                snapshot_event_image_url=event_img,
                 fixed_front_image_url=FIXED_CLAIM_FRONT_IMAGE_URL if req.use_fixed_claim_images else "",
                 fixed_back_image_url=FIXED_CLAIM_BACK_IMAGE_URL if req.use_fixed_claim_images else "",
             )
