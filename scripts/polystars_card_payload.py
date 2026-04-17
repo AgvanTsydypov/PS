@@ -23,6 +23,7 @@ import httpx
 import psycopg2.extras
 
 from scripts.cardgen.generate_card import generate_card_back_svg, generate_card_svg
+from scripts.cardgen.rasterize import svg_to_png
 from scripts.data_loading_manager import DataLoadingManager
 
 CARD_BASE_URL = (
@@ -85,6 +86,12 @@ PINATA_JWT_ENV_KEY = "PINATA_JWT"
 PINATA_FILE_API_URL = "https://api.pinata.cloud/pinning/pinFileToIPFS"
 PINATA_UNPIN_API_URL = "https://api.pinata.cloud/pinning/unpin"
 PINATA_GATEWAY_PREFIX = "https://gateway.pinata.cloud/ipfs/"
+
+# Rendered card PNG dimensions. Source SVG is 516x802 (viewBox); we rasterize
+# at 2x for crisp rendering on high-DPI marketplaces and wallet previews.
+CARD_PNG_SCALE = int(os.getenv("CARD_PNG_SCALE", "2"))
+CARD_PNG_WIDTH = 516 * CARD_PNG_SCALE
+CARD_PNG_HEIGHT = 802 * CARD_PNG_SCALE
 
 _CARD_SOURCE_SQL = """
 SELECT
@@ -348,11 +355,11 @@ def unpin_pinata_urls(urls: list[str]) -> None:
             pass
 
 
-def _pin_svg_to_pinata(filename: str, svg_body: str) -> str:
+def _pin_bytes_to_pinata(filename: str, body: bytes, content_type: str) -> str:
     jwt = _pinata_jwt()
     headers = {"Authorization": f"Bearer {jwt}"}
     files = {
-        "file": (filename, svg_body.encode("utf-8"), "image/svg+xml"),
+        "file": (filename, body, content_type),
     }
     data = {
         "pinataMetadata": json.dumps({"name": filename}),
@@ -365,21 +372,21 @@ def _pin_svg_to_pinata(filename: str, svg_body: str) -> str:
         timeout=40.0,
     )
     response.raise_for_status()
-    body = response.json()
-    ipfs_hash = body.get("IpfsHash")
+    payload = response.json()
+    ipfs_hash = payload.get("IpfsHash")
     if not ipfs_hash:
-        raise RuntimeError(f"Pinata file upload missing IpfsHash: {body}")
+        raise RuntimeError(f"Pinata file upload missing IpfsHash: {payload}")
     return f"https://gateway.pinata.cloud/ipfs/{ipfs_hash}"
 
 
-def _upload_generated_card_assets_to_pinata(slug: str, front_svg: str, back_svg: str) -> Tuple[str, str]:
+def _upload_generated_card_assets_to_pinata(slug: str, front_png: bytes, back_png: bytes) -> Tuple[str, str]:
     safe_slug = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(slug or "").strip()) or "card"
-    front_name = f"{safe_slug}-front.svg"
-    back_name = f"{safe_slug}-back.svg"
+    front_name = f"{safe_slug}-front.png"
+    back_name = f"{safe_slug}-back.png"
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        front_f = pool.submit(_pin_svg_to_pinata, front_name, front_svg)
-        back_f = pool.submit(_pin_svg_to_pinata, back_name, back_svg)
+        front_f = pool.submit(_pin_bytes_to_pinata, front_name, front_png, "image/png")
+        back_f = pool.submit(_pin_bytes_to_pinata, back_name, back_png, "image/png")
         return front_f.result(), back_f.result()
 
 
@@ -469,14 +476,26 @@ def _attach_generated_card_images(payload: Dict[str, Any]) -> Dict[str, Any]:
     back_svg = generate_card_back_svg(render_payload)
     (_CARDGEN_DIR / "output.svg").write_text(front_svg, encoding="utf-8")
     (_CARDGEN_DIR / "output_back.svg").write_text(back_svg, encoding="utf-8")
+
+    # Rasterize SVG -> PNG locally via headless Chromium so the on-chain/IPFS
+    # asset is a plain PNG that every marketplace and wallet renders identically
+    # (no dependency on remote @font-face resolution). The rasterizer reuses
+    # one browser/page across calls, so sequential calls are cheap.
+    front_png = svg_to_png(front_svg, width=CARD_PNG_WIDTH, height=CARD_PNG_HEIGHT)
+    back_png = svg_to_png(back_svg, width=CARD_PNG_WIDTH, height=CARD_PNG_HEIGHT)
+    (_CARDGEN_DIR / "output.png").write_bytes(front_png)
+    (_CARDGEN_DIR / "output_back.png").write_bytes(back_png)
+
     slug = str(payload.get("qr_payload") or "").rstrip("/").rsplit("/", 1)[-1] or _generated_card_slug(
         payload.get("season_type"),
         payload.get("season_number"),
     )
-    front_image_url, back_image_url = _upload_generated_card_assets_to_pinata(slug, front_svg, back_svg)
+    front_image_url, back_image_url = _upload_generated_card_assets_to_pinata(slug, front_png, back_png)
     output = dict(payload)
     output["front_image_url"] = front_image_url
     output["back_image_url"] = back_image_url
+    output["front_image_mime"] = "image/png"
+    output["back_image_mime"] = "image/png"
     return output
 
 

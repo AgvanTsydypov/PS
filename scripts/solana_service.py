@@ -296,6 +296,8 @@ class SolanaClient:
         metadata_card_payload = self._build_metadata_card_payload(card_payload)
         front_image_url = str(card_payload.get("front_image_url") or "").strip()
         back_image_url = str(card_payload.get("back_image_url") or "").strip()
+        front_image_mime = str(card_payload.get("front_image_mime") or "").strip()
+        back_image_mime = str(card_payload.get("back_image_mime") or "").strip()
         primary_image_url = front_image_url
         attributes = self._build_card_attributes(card_payload)
 
@@ -309,14 +311,14 @@ class SolanaClient:
             files = [
                 {
                     "uri": primary_image_url,
-                    "type": self._guess_media_type(primary_image_url),
+                    "type": front_image_mime or self._guess_media_type(primary_image_url),
                 }
             ]
             if back_image_url:
                 files.append(
                     {
                         "uri": back_image_url,
-                        "type": self._guess_media_type(back_image_url),
+                        "type": back_image_mime or self._guess_media_type(back_image_url),
                     }
                 )
             metadata["image"] = primary_image_url
