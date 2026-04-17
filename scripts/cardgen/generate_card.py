@@ -738,7 +738,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     parts.append(f'''<svg viewBox="0 0 {CANVAS_W} {CANVAS_H}"
      fill="none"
      xml:space="preserve"
-     font-family="Orbitron, 'Arial Black', 'Helvetica Neue', Impact, sans-serif"
+     font-family="Orbitron, sans-serif"
      font-weight="700"
      letter-spacing="0.1em"
      xmlns="http://www.w3.org/2000/svg"
@@ -748,7 +748,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
   <style>
     {font_css}
     text {{
-      font-family: 'Orbitron', 'Arial Black', 'Helvetica Neue', Impact, sans-serif;
+      font-family: 'Orbitron', sans-serif;
       font-stretch: normal;
       font-style: normal;
       font-weight: 700;
@@ -1719,7 +1719,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     return f'''<svg viewBox="0 0 {CANVAS_W} {CANVAS_H}"
     fill="none"
     xml:space="preserve"
-    font-family="Orbitron, 'Arial Black', 'Helvetica Neue', Impact, sans-serif"
+    font-family="Orbitron, sans-serif"
     font-weight="700"
     letter-spacing="0.1em"
     xmlns="http://www.w3.org/2000/svg">
@@ -1727,7 +1727,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
   <style>
     {font_css}
     text {{
-      font-family: 'Orbitron', 'Arial Black', 'Helvetica Neue', Impact, sans-serif;
+      font-family: 'Orbitron', sans-serif;
       font-stretch: normal;
       font-style: normal;
       font-weight: 700;
