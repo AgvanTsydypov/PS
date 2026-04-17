@@ -74,9 +74,9 @@ COL_YIELD   = 263   # label x=212 w=103 → 263.5; value x=237 w=53 → 263.5
 COL_GRAVITY = 391   # label x=339 w=105 → 391.5; value x=365 w=53 → 391.5
 
 # Y-coordinates for every text anchor (from Figma JSON)
-Y_SEASON        = 31
-Y_INSTANCE      = 47
-Y_OWNERSHIP     = 63
+Y_SEASON        = 33
+Y_INSTANCE      = 49
+Y_OWNERSHIP     = 65
 Y_SECTOR        = 543
 Y_NODE          = 566
 Y_UPPER_SEP     = 589
@@ -737,6 +737,10 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     # ---- SVG root & defs ----
     parts.append(f'''<svg viewBox="0 0 {CANVAS_W} {CANVAS_H}"
      fill="none"
+     xml:space="preserve"
+     font-family="Orbitron, 'Arial Black', 'Helvetica Neue', Impact, sans-serif"
+     font-weight="700"
+     letter-spacing="0.1em"
      xmlns="http://www.w3.org/2000/svg"
      xmlns:xlink="http://www.w3.org/1999/xlink">
 
@@ -744,7 +748,9 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
   <style>
     {font_css}
     text {{
-      font-family: 'Orbitron', sans-serif;
+      font-family: 'Orbitron', 'Arial Black', 'Helvetica Neue', Impact, sans-serif;
+      font-stretch: normal;
+      font-style: normal;
       font-weight: 700;
       letter-spacing: 0.1em;
       text-rendering: optimizeLegibility;
@@ -954,23 +960,23 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <text x="{BADGE_CX}" y="{Y_SEASON}"
       text-anchor="middle" dominant-baseline="hanging"
       font-size="10">
-  <tspan fill="white">SEASON: </tspan>
+  <tspan fill="white">SEASON:&#160;</tspan>
   <tspan fill="{season_clr}">{_esc(season_val)}</tspan>
 </text>
 
 <text x="{BADGE_CX}" y="{Y_INSTANCE}"
       text-anchor="middle" dominant-baseline="hanging"
       font-size="10">
-  <tspan fill="white">INSTANCE: </tspan>
+  <tspan fill="white">INSTANCE:&#160;</tspan>
   <tspan fill="{instance_clr}">{_esc(instance_val)}</tspan>
 </text>
 
 <text x="{BADGE_CX}" y="{Y_OWNERSHIP}"
       text-anchor="middle" dominant-baseline="hanging"
       font-size="10">
-  <tspan fill="white">[ </tspan>
+  <tspan fill="white">[&#160;</tspan>
   <tspan fill="{ownership_clr}">{_esc(ownership_val)}</tspan>
-  <tspan fill="white"> ]</tspan>
+  <tspan fill="white">&#160;]</tspan>
 </text>''')
 
     # ---- Layer 6: Data zone background ----
@@ -1025,7 +1031,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
   <text x="{DZ_CX}" y="{Y_SECTOR}"
         text-anchor="middle" dominant-baseline="hanging"
         font-size="18"{sig}>
-    <tspan fill="white">SECTOR: </tspan>
+    <tspan fill="white">SECTOR:&#160;</tspan>
     <tspan fill="{sector_clr}">{sector}</tspan>
   </text>
 </g>''')
@@ -1059,7 +1065,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
   <text x="{X_PE_DIVIDER + X_PE_GAP}" y="{Y_BRACKET}"
         text-anchor="start" dominant-baseline="hanging"
         font-size="15"{sig}>
-    <tspan fill="white">P (E) ∈ [</tspan>
+    <tspan fill="white">P&#160;(E)&#160;∈&#160;[</tspan>
     <tspan fill="{bracket_fill}">{eb_inner}</tspan>
     <tspan fill="white">]</tspan>
   </text>
@@ -1118,7 +1124,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <g class="css-drop-shadow">
   <text x="{DZ_CX}" y="{Y_ARCHETYPE}"
         text-anchor="middle" dominant-baseline="alphabetic"{sig}>
-    <tspan font-size="18" fill="white">ARCHETYPE: </tspan>
+    <tspan font-size="18" fill="white">ARCHETYPE:&#160;</tspan>
     <tspan font-size="20" fill="{archetype_fill}">{archetype}</tspan>
   </text>
 </g>''')
@@ -1130,7 +1136,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
   <text x="{DZ_CX}" y="{Y_FOOTER}"
         text-anchor="middle" dominant-baseline="hanging"
         font-size="16"{sig}>
-    <tspan fill="#2E5CFF">POLYMARKET</tspan><tspan fill="#828181"> GLOBAL RANK: </tspan><tspan fill="#FFFFFF" stroke="#000000" stroke-width="1" paint-order="stroke fill">{rank_str}</tspan>
+    <tspan fill="#2E5CFF">POLYMARKET</tspan><tspan fill="#828181">&#160;GLOBAL&#160;RANK:&#160;</tspan><tspan fill="#FFFFFF" stroke="#000000" stroke-width="1" paint-order="stroke fill">{rank_str}</tspan>
   </text>
 </g>
 
@@ -1643,8 +1649,8 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
         for i, line in enumerate(desc_lines)
     )
 
-    archetype_line_text = _esc(f"ARCHETYPE: {archetype_raw}")
-    stat_header = "STATISTICAL PATTERN:"
+    archetype_line_text = _esc(f"ARCHETYPE:\u00a0{archetype_raw}")
+    stat_header = "STATISTICAL\u00a0PATTERN:"
 
     desc_bottom = _back_block_bottom(desc_y, len(desc_lines), lh, BACK_BODY_INK_EXT)
     back_rarity_y = desc_bottom + BACK_GAP_SECTION
@@ -1681,8 +1687,8 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 
     meta_y1 = y_first_metric + BACK_BODY_INK_EXT + BACK_GAP_METRICS_TO_META
 
-    season_card_raw = f"SEASON CARD NUMBER: {mint_str}/{size_str}"
-    season_dates_raw = f"SEASON DATES: {d1} - {d2}"
+    season_card_raw = f"SEASON CARD NUMBER:\u00a0{mint_str}/{size_str}"
+    season_dates_raw = f"SEASON DATES:\u00a0{d1}\u00a0-\u00a0{d2}"
     sc_wrap = _wrap_text_by_width(season_card_raw, float(BACK_META_WRAP_W), 10.0)
     if not sc_wrap:
         sc_wrap = [season_card_raw]
@@ -1712,12 +1718,18 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 
     return f'''<svg viewBox="0 0 {CANVAS_W} {CANVAS_H}"
     fill="none"
+    xml:space="preserve"
+    font-family="Orbitron, 'Arial Black', 'Helvetica Neue', Impact, sans-serif"
+    font-weight="700"
+    letter-spacing="0.1em"
     xmlns="http://www.w3.org/2000/svg">
 <defs>
   <style>
     {font_css}
     text {{
-      font-family: 'Orbitron', sans-serif;
+      font-family: 'Orbitron', 'Arial Black', 'Helvetica Neue', Impact, sans-serif;
+      font-stretch: normal;
+      font-style: normal;
       font-weight: 700;
       letter-spacing: 0.1em;
       text-rendering: optimizeLegibility;
@@ -1789,14 +1801,14 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
       filter="url(#frame-blur)"/>
 <rect x="{BACK_DZ_X}" y="{BACK_DZ_Y}" width="{BACK_DZ_W}" height="{BACK_DZ_H}" fill="{dz_fill}" stroke="black"/>
 
-<text x="{BACK_TEXT_X_HEAD}" y="40" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="{style_lh}">[ EVENT TOPOLOGY ]</text>
+<text x="{BACK_TEXT_X_HEAD}" y="40" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="{style_lh}">[&#160;EVENT&#160;TOPOLOGY&#160;]</text>
 <text x="{BACK_TEXT_X}" y="{BACK_LORE_Y}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh}">{lore_svg}</text>
 
 <line x1="{BACK_SEP_X1}" y1="{round(sep_y, 1)}" x2="{BACK_SEP_X2}" y2="{round(sep_y, 1)}" stroke="#333333" stroke-width="2"/>
 <rect x="{BACK_SEP_CAP_LEFT_X}" y="{round(sep_y - 2, 1)}" width="4" height="4" fill="#333333"/>
 <rect x="{BACK_SEP_CAP_RIGHT_X}" y="{round(sep_y - 2, 1)}" width="4" height="4" fill="#333333"/>
 
-<text x="{BACK_TEXT_X_HEAD}" y="{round(arch_header_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="{style_lh}">[ BEHAVIORAL SIGNATURE ]</text>
+<text x="{BACK_TEXT_X_HEAD}" y="{round(arch_header_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="{style_lh}">[&#160;BEHAVIORAL&#160;SIGNATURE&#160;]</text>
 <text x="{BACK_TEXT_X}" y="{round(arch_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh};{arch_ud}">{archetype_line_text}</text>
 <text x="{BACK_TEXT_X}" y="{round(desc_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh}">{desc_svg}</text>
 <text x="{BACK_TEXT_X}" y="{round(back_rarity_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="12" fill="white" style="{style_lh}">{rarity_esc}</text>
