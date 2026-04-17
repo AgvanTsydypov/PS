@@ -556,6 +556,8 @@ export default function HomePage() {
   const [claimSeasonInfo, setClaimSeasonInfo] = useState<string>("");
   const [claimOutput, setClaimOutput] = useState<string>("");
   const [claimMinting, setClaimMinting] = useState(false);
+  const [claimMintableTotal, setClaimMintableTotal] = useState<number | null>(null);
+  const [claimMintableRemaining, setClaimMintableRemaining] = useState<number | null>(null);
   const [serverNowBaseMs, setServerNowBaseMs] = useState<number | null>(null);
   const [clientNowAtSyncMs, setClientNowAtSyncMs] = useState<number | null>(null);
   const [syncedNowMs, setSyncedNowMs] = useState<number | null>(null);
@@ -1109,6 +1111,15 @@ export default function HomePage() {
     setClaimSeasonInfo(data.lines.join("\n"));
   };
 
+  const refreshClaimMintableCount = async () => {
+    if (!claimSeasonId) return;
+    const data = await fetchJSON<{ total_mintable: number; remaining_mintable: number }>(
+      `/api/claims/mintable-count?season_id=${claimSeasonId}`,
+    );
+    setClaimMintableTotal(data.total_mintable);
+    setClaimMintableRemaining(data.remaining_mintable);
+  };
+
   const refreshSeasonClaims = async () => {
     if (!seasonClaimsSeasonId) return;
     const data = await fetchJSON<{ rows: ClaimRow[]; stats: Record<string, number> }>(
@@ -1375,6 +1386,7 @@ export default function HomePage() {
       }
       if (tab === "claims") {
         await refreshClaimSeasonInfo();
+        await refreshClaimMintableCount();
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1753,8 +1765,13 @@ export default function HomePage() {
             <label><input type="checkbox" checked={claimAutoPhase} onChange={(e) => setClaimAutoPhase(e.target.checked)} /> Auto phase</label>
             <label><input type="checkbox" checked={claimDbOnly} onChange={(e) => setClaimDbOnly(e.target.checked)} /> DB only</label>
             <label><input type="checkbox" checked={claimUseFixedImages} onChange={(e) => setClaimUseFixedImages(e.target.checked)} /> Use fixed claim images</label>
+            {claimMintableTotal !== null && (
+              <span className="muted">
+                Mintable remaining: {claimMintableRemaining} / {claimMintableTotal}
+              </span>
+            )}
             <button
-              disabled={claimMinting || !claimWallet || !claimSeasonId || !claimRecipient.trim()}
+              disabled={claimMinting || !claimWallet || !claimSeasonId || !claimRecipient.trim() || (!claimUseFixedImages && claimMintableRemaining !== null && claimMintableRemaining <= 0)}
               onClick={() =>
                 void run(async () => {
                   setClaimMinting(true);
@@ -1774,6 +1791,7 @@ export default function HomePage() {
                     });
                     setClaimOutput((prev) => `${prev}${JSON.stringify(out, null, 2)}\n`);
                     await refreshClaimSeasonInfo();
+                    await refreshClaimMintableCount();
                     await refreshSeasonClaims();
                     await refreshOverview();
                   } catch (e) {

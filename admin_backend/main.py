@@ -1528,28 +1528,31 @@ class SeasonWorkbenchService:
                 cursor.execute(
                     """
                     SELECT
-                        id,
-                        proxy_wallet AS wallet_address,
-                        source,
-                        window_start,
-                        window_end,
-                        snapshot_at,
-                        event_id,
-                        event_slug,
-                        entry_cwap,
-                        total_volume,
-                        total_pnl,
-                        roi_percentage,
-                        entry_bracket,
-                        edge,
-                        yield,
-                        gravity,
-                        rank,
-                        COALESCE(is_minted, FALSE) AS is_minted,
-                        minted_to_wallet
-                    FROM winner_wallets_nft_to_claim
-                    WHERE season_id = %s
-                      AND LOWER(proxy_wallet) = LOWER(%s)
+                        w.id,
+                        w.proxy_wallet AS wallet_address,
+                        w.source,
+                        w.window_start,
+                        w.window_end,
+                        w.snapshot_at,
+                        w.event_id,
+                        w.event_slug,
+                        w.entry_cwap,
+                        w.total_volume,
+                        w.total_pnl,
+                        w.roi_percentage,
+                        w.entry_bracket,
+                        w.edge,
+                        w.yield,
+                        w.gravity,
+                        w.rank,
+                        COALESCE(w.is_minted, FALSE) AS is_minted,
+                        w.minted_to_wallet
+                    FROM winner_wallets_nft_to_claim w
+                    JOIN event_cards ec ON ec.event_id = w.event_id
+                    WHERE w.season_id = %s
+                      AND LOWER(w.proxy_wallet) = LOWER(%s)
+                      AND ec.manual_image_url IS NOT NULL
+                      AND BTRIM(ec.manual_image_url) <> ''
                     LIMIT 1
                     """,
                     (season_id, wallet),
@@ -1566,26 +1569,29 @@ class SeasonWorkbenchService:
                 cursor.execute(
                     """
                     SELECT
-                        id,
-                        proxy_wallet AS wallet_address,
-                        source,
-                        window_start,
-                        window_end,
-                        snapshot_at,
-                        event_id,
-                        event_slug,
-                        entry_cwap,
-                        total_volume,
-                        total_pnl,
-                        roi_percentage,
-                        entry_bracket,
-                        edge,
-                        yield,
-                        gravity,
-                        rank
-                    FROM winner_wallets_nft_to_claim
-                    WHERE season_id = %s
-                      AND COALESCE(is_minted, FALSE) = FALSE
+                        w.id,
+                        w.proxy_wallet AS wallet_address,
+                        w.source,
+                        w.window_start,
+                        w.window_end,
+                        w.snapshot_at,
+                        w.event_id,
+                        w.event_slug,
+                        w.entry_cwap,
+                        w.total_volume,
+                        w.total_pnl,
+                        w.roi_percentage,
+                        w.entry_bracket,
+                        w.edge,
+                        w.yield,
+                        w.gravity,
+                        w.rank
+                    FROM winner_wallets_nft_to_claim w
+                    JOIN event_cards ec ON ec.event_id = w.event_id
+                    WHERE w.season_id = %s
+                      AND COALESCE(w.is_minted, FALSE) = FALSE
+                      AND ec.manual_image_url IS NOT NULL
+                      AND BTRIM(ec.manual_image_url) <> ''
                     ORDER BY RANDOM()
                     LIMIT 1
                     """,
@@ -1593,7 +1599,7 @@ class SeasonWorkbenchService:
                 )
                 fallback_row = cursor.fetchone()
                 if not fallback_row:
-                    raise ValueError("No unminted winner rows left in this season.")
+                    raise ValueError("No unminted winner rows with manual_image_url left in this season.")
                 event_image_url = self._resolve_event_image_url(cursor, fallback_row)
                 return self._build_winner_allocation(
                     row=fallback_row,
@@ -3381,6 +3387,35 @@ def season_claims(season_id: int) -> Dict[str, Any]:
         return service.get_season_claims(season_id)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/claims/mintable-count")
+def claims_mintable_count(season_id: int) -> Dict[str, Any]:
+    try:
+        conn = service.manager.get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total_mintable,
+                        COUNT(*) FILTER (WHERE COALESCE(w.is_minted, FALSE) = FALSE) AS remaining_mintable
+                    FROM winner_wallets_nft_to_claim w
+                    JOIN event_cards ec ON ec.event_id = w.event_id
+                    WHERE w.season_id = %s
+                      AND ec.manual_image_url IS NOT NULL
+                      AND BTRIM(ec.manual_image_url) <> ''
+                    """,
+                    (season_id,),
+                )
+                row = cursor.fetchone()
+                total = int(row["total_mintable"]) if row else 0
+                remaining = int(row["remaining_mintable"]) if row else 0
+                return {"season_id": season_id, "total_mintable": total, "remaining_mintable": remaining}
+        finally:
+            conn.close()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/claims/mint")
