@@ -88,10 +88,15 @@ PINATA_UNPIN_API_URL = "https://api.pinata.cloud/pinning/unpin"
 PINATA_GATEWAY_PREFIX = "https://gateway.pinata.cloud/ipfs/"
 
 # Rendered card PNG dimensions. Source SVG is 516x802 (viewBox); we rasterize
-# at 2x for crisp rendering on high-DPI marketplaces and wallet previews.
-CARD_PNG_SCALE = int(os.getenv("CARD_PNG_SCALE", "2"))
-CARD_PNG_WIDTH = 516 * CARD_PNG_SCALE
-CARD_PNG_HEIGHT = 802 * CARD_PNG_SCALE
+# at 2x by default for crisp rendering on high-DPI marketplaces and wallet
+# previews. Supports fractional scale (e.g. CARD_PNG_SCALE=1.5) for a size /
+# quality tradeoff.
+try:
+    CARD_PNG_SCALE = float(os.getenv("CARD_PNG_SCALE", "1.5"))
+except ValueError:
+    CARD_PNG_SCALE = 2.0
+CARD_PNG_WIDTH = int(round(516 * CARD_PNG_SCALE))
+CARD_PNG_HEIGHT = int(round(802 * CARD_PNG_SCALE))
 
 _CARD_SOURCE_SQL = """
 SELECT
