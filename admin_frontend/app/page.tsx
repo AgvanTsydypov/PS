@@ -2665,6 +2665,31 @@ export default function HomePage() {
               <option value="ok">ok</option>
               <option value="error">error</option>
             </select>
+            <label>snapshot</label>
+            <select
+              value={eventCardsSnapshotScope}
+              onChange={(e) => setEventCardsSnapshotScope(e.target.value)}
+            >
+              {eventCardsSnapshotOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <label className="inline-flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={eventCardsFutureStandardFiltered}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setEventCardsFutureStandardFiltered(checked);
+                  if (
+                    checked &&
+                    eventCardsSnapshotScope !== "next_window" &&
+                    !eventCardsSnapshotScope.startsWith("standard_season:")
+                  ) {
+                    setEventCardsSnapshotScope("next_window");
+                  }
+                }}
+              />
+              TOP20TAG5
+            </label>
             <label>event_id</label>
             <input
               value={eventCardsEventIdFilter}
