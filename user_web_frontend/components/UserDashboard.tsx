@@ -7,6 +7,7 @@ import { InlineSvgCard } from "./InlineSvgCard";
 
 import {
   ActiveSeasonsBoard,
+  type ActiveSeasonView,
   type ActiveSeasonsBoardHandle,
 } from "./ActiveSeasonsBoard";
 import {
@@ -73,6 +74,53 @@ type WalletSessionResponse = {
   sign_in_count?: number;
   proxy_wallet?: string | null;
   trader_rank?: string | null;
+  solana_wallet?: string | null;
+};
+
+type EligibilityStream = {
+  season_id: number | null;
+  season_type: string | null;
+  phase: string | null;
+  phase_reason?: string | null;
+  already_claimed: boolean;
+  eligible_now: boolean;
+  ineligible_reason?: string | null;
+  requires_origin?: boolean;
+  is_claim_open?: boolean;
+  is_origin_wallet?: boolean;
+};
+
+type EligibilityResponse = {
+  wallet_address: string;
+  is_origin_wallet: boolean;
+  genesis: EligibilityStream;
+  standard: EligibilityStream;
+  double_mint?: {
+    can_claim_genesis: boolean;
+    can_claim_standard: boolean;
+    can_claim_both_now: boolean;
+  };
+};
+
+type SolanaWalletResponse = {
+  wallet_address?: string;
+  solana_wallet: string | null;
+};
+
+type MintApiResult = {
+  status?: string;
+  claim_id?: number;
+  collection_mint_number?: number;
+  recipient_address?: string;
+  season_id?: number;
+  phase?: string;
+  mint_result?: {
+    asset_address?: string;
+    tx_hash?: string;
+  };
+  collection_address?: string;
+  warnings?: string[];
+  [key: string]: unknown;
 };
 
 type StoredSessionMeta = {
@@ -122,14 +170,6 @@ type GeneratedCardsResponse = {
   total_available: number;
   remaining_available: number;
   fetched_at: string;
-};
-
-type GeneratedCardCreateResponse = {
-  status: string;
-  message: string;
-  card: GeneratedCardItem;
-  total_available: number;
-  remaining_available: number;
 };
 
 const apiBase =
@@ -258,9 +298,19 @@ export default function UserDashboard() {
   const [myCardsFetchedAt, setMyCardsFetchedAt] = useState<string | null>(null);
   const [generatedCardsTotalAvailable, setGeneratedCardsTotalAvailable] = useState(0);
   const [generatedCardsRemainingAvailable, setGeneratedCardsRemainingAvailable] = useState(0);
-  const [getCardLoading, setGetCardLoading] = useState(false);
-  const [getCardResultText, setGetCardResultText] = useState("");
   const [flippedCardSlugs, setFlippedCardSlugs] = useState<Record<string, boolean>>({});
+  const [solanaWallet, setSolanaWallet] = useState<string | null>(null);
+  const [solanaWalletInput, setSolanaWalletInput] = useState("");
+  const [solanaWalletLoading, setSolanaWalletLoading] = useState(false);
+  const [solanaWalletSaving, setSolanaWalletSaving] = useState(false);
+  const [solanaWalletError, setSolanaWalletError] = useState("");
+  const [solanaWalletNotice, setSolanaWalletNotice] = useState("");
+  const [eligibility, setEligibility] = useState<EligibilityResponse | null>(null);
+  const [eligibilityLoading, setEligibilityLoading] = useState(false);
+  const [eligibilityError, setEligibilityError] = useState("");
+  const [mintingSeasonId, setMintingSeasonId] = useState<number | null>(null);
+  const [mintResultText, setMintResultText] = useState("");
+  const [mintError, setMintError] = useState("");
   const [animatingCardSlugs, setAnimatingCardSlugs] = useState<Record<string, boolean>>({});
   const generatedCardFlipTimerRef = useRef<Record<string, number | null>>({});
   const didHydrateMyCardFlipsRef = useRef(false);
@@ -331,6 +381,9 @@ export default function UserDashboard() {
         }
         setProxyWallet(data.proxy_wallet ?? null);
         setTraderRank(data.trader_rank ?? null);
+        const initialSolana = (data.solana_wallet ?? "").trim() || null;
+        setSolanaWallet(initialSolana);
+        setSolanaWalletInput(initialSolana ?? "");
 
         const meta = loadStoredSessionMeta();
         if (typeof meta?.selectedWalletName === "string" && meta.selectedWalletName.trim()) {
@@ -358,9 +411,19 @@ export default function UserDashboard() {
       setGeneratedCardsTotalAvailable(0);
       setGeneratedCardsRemainingAvailable(0);
       setFlippedCardSlugs({});
+      setSolanaWallet(null);
+      setSolanaWalletInput("");
+      setSolanaWalletError("");
+      setSolanaWalletNotice("");
+      setEligibility(null);
+      setEligibilityError("");
+      setMintResultText("");
+      setMintError("");
       return;
     }
     void refreshMyCards();
+    void refreshSolanaWallet();
+    void refreshEligibility();
   }, [isSignedIn, walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -548,7 +611,14 @@ export default function UserDashboard() {
     setGeneratedCardsTotalAvailable(0);
     setGeneratedCardsRemainingAvailable(0);
     setFlippedCardSlugs({});
-    setGetCardResultText("");
+    setSolanaWallet(null);
+    setSolanaWalletInput("");
+    setSolanaWalletError("");
+    setSolanaWalletNotice("");
+    setEligibility(null);
+    setEligibilityError("");
+    setMintResultText("");
+    setMintError("");
     setStatusText("Logged out");
     setIsWalletButtonHovered(false);
     selectedProviderRef.current = null;
@@ -621,7 +691,8 @@ export default function UserDashboard() {
       setIsSignedIn(Boolean(verify.signed_in));
       setSignInCount(verify.sign_in_count);
       setStatusText(verify.signed_in ? "Signed in" : "Not signed in");
-      setGetCardResultText("");
+      setMintResultText("");
+      setMintError("");
       const resolvedProxyWallet = String(verify.proxy_wallet ?? "").trim() || null;
       const resolvedTraderRank = String(verify.trader_rank ?? "").trim() || null;
       setProxyWallet(null);
@@ -657,7 +728,8 @@ export default function UserDashboard() {
       setMyCardsFetchedAt(null);
       setGeneratedCardsTotalAvailable(0);
       setGeneratedCardsRemainingAvailable(0);
-      setGetCardResultText("");
+      setMintResultText("");
+      setMintError("");
       void clearServerSessionCookie();
       clearStoredSessionMeta();
     } finally {
@@ -698,7 +770,8 @@ export default function UserDashboard() {
       setMyCardsFetchedAt(null);
       setGeneratedCardsTotalAvailable(0);
       setGeneratedCardsRemainingAvailable(0);
-      setGetCardResultText("");
+      setMintResultText("");
+      setMintError("");
       void clearServerSessionCookie();
       clearStoredSessionMeta();
       await signInWith(provider, address, name);
@@ -718,56 +791,204 @@ export default function UserDashboard() {
     }
   }
 
-  async function getGeneratedCard() {
-    if (!isSignedIn) {
-      setGetCardResultText("Get card failed: Please sign in again.");
-      return;
-    }
-    setGetCardLoading(true);
-    setGetCardResultText("");
+  async function refreshSolanaWallet() {
+    setSolanaWalletLoading(true);
+    setSolanaWalletError("");
     try {
-      const res = await fetch(buildApiUrl("/api/cards/get"), {
-        method: "POST",
+      const res = await fetch(buildApiUrl("/api/me/solana-wallet"), {
+        method: "GET",
         credentials: userApiCredentials,
       });
       if (!res.ok) {
         if (res.status === 401) {
-          void clearServerSessionCookie();
           setIsSignedIn(false);
-          setProxyWallet(null);
-          setTraderRank(null);
-          setMyCards([]);
-          setMyCardsError("");
-          setMyCardsFetchedAt(null);
-          setGeneratedCardsTotalAvailable(0);
-          setGeneratedCardsRemainingAvailable(0);
-          setStatusText("Session expired. Please connect wallet again.");
           clearStoredSessionMeta();
         }
         const text = await res.text();
-        throw new Error(text || "Get card failed");
+        throw new Error(text || "Failed to load Solana wallet");
       }
-      const payload = (await res.json()) as GeneratedCardCreateResponse;
-      const createdCard = payload.card;
-      const title =
-        String(createdCard.card_title ?? createdCard.card_payload_json?.card_title ?? "").trim() ||
-        "Untitled card";
-      setGeneratedCardsTotalAvailable(Number(payload.total_available) || 0);
-      setGeneratedCardsRemainingAvailable(Number(payload.remaining_available) || 0);
-      setGetCardResultText(
-        [
-          payload.message || "Card generated",
-          `slug: ${createdCard.slug}`,
-          `title: ${title}`,
-          `remaining_available: ${Number(payload.remaining_available) || 0} / ${Number(payload.total_available) || 0}`,
-        ].join("\n")
-      );
-      await refreshMyCards();
+      const payload = (await res.json()) as SolanaWalletResponse;
+      const value = (payload.solana_wallet ?? "").trim() || null;
+      setSolanaWallet(value);
+      setSolanaWalletInput(value ?? "");
     } catch (error) {
-      setGetCardResultText(`Get card failed: ${extractErrorMessage(error)}`);
+      setSolanaWalletError(extractErrorMessage(error));
     } finally {
-      setGetCardLoading(false);
+      setSolanaWalletLoading(false);
     }
+  }
+
+  async function saveSolanaWallet() {
+    setSolanaWalletSaving(true);
+    setSolanaWalletError("");
+    setSolanaWalletNotice("");
+    try {
+      const res = await fetch(buildApiUrl("/api/me/solana-wallet"), {
+        method: "PUT",
+        credentials: userApiCredentials,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ solana_wallet: solanaWalletInput.trim() || null }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        let detail = text;
+        try {
+          const parsed = JSON.parse(text) as { detail?: string };
+          if (parsed?.detail) detail = parsed.detail;
+        } catch {
+          /* keep raw text */
+        }
+        throw new Error(detail || "Failed to save Solana wallet");
+      }
+      const payload = (await res.json()) as SolanaWalletResponse;
+      const value = (payload.solana_wallet ?? "").trim() || null;
+      setSolanaWallet(value);
+      setSolanaWalletInput(value ?? "");
+      setSolanaWalletNotice(value ? "Solana wallet saved." : "Solana wallet cleared.");
+    } catch (error) {
+      setSolanaWalletError(extractErrorMessage(error));
+    } finally {
+      setSolanaWalletSaving(false);
+    }
+  }
+
+  async function refreshEligibility() {
+    setEligibilityLoading(true);
+    setEligibilityError("");
+    try {
+      const res = await fetch(buildApiUrl("/api/me/eligibility"), {
+        method: "GET",
+        credentials: userApiCredentials,
+      });
+      if (!res.ok) {
+        if (res.status === 401) {
+          setIsSignedIn(false);
+          clearStoredSessionMeta();
+        }
+        const text = await res.text();
+        throw new Error(text || "Failed to load mint eligibility");
+      }
+      const payload = (await res.json()) as EligibilityResponse;
+      setEligibility(payload);
+    } catch (error) {
+      setEligibility(null);
+      setEligibilityError(extractErrorMessage(error));
+    } finally {
+      setEligibilityLoading(false);
+    }
+  }
+
+  async function mintForSeason(seasonId: number) {
+    if (!isSignedIn) {
+      setMintError("Please sign in again to mint.");
+      return;
+    }
+    if (!solanaWallet) {
+      setMintError("Set your Solana recipient wallet first.");
+      return;
+    }
+    setMintingSeasonId(seasonId);
+    setMintError("");
+    setMintResultText(`[${new Date().toISOString()}] Mint request started for season ${seasonId}...`);
+    try {
+      const res = await fetch(buildApiUrl("/api/me/mint"), {
+        method: "POST",
+        credentials: userApiCredentials,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ season_id: seasonId }),
+      });
+      const text = await res.text();
+      let parsed: MintApiResult | null = null;
+      try {
+        parsed = text ? (JSON.parse(text) as MintApiResult) : null;
+      } catch {
+        parsed = null;
+      }
+      if (!res.ok) {
+        const detail = parsed && typeof parsed === "object" && "detail" in parsed
+          ? String((parsed as { detail?: unknown }).detail ?? "")
+          : "";
+        throw new Error(detail || text || "Mint failed");
+      }
+      const summaryLines: string[] = [];
+      if (parsed?.status) summaryLines.push(`status: ${parsed.status}`);
+      if (parsed?.claim_id != null) summaryLines.push(`claim_id: ${parsed.claim_id}`);
+      if (parsed?.collection_mint_number != null) {
+        summaryLines.push(`mint #: ${parsed.collection_mint_number}`);
+      }
+      if (parsed?.phase) summaryLines.push(`phase: ${parsed.phase}`);
+      if (parsed?.recipient_address) {
+        summaryLines.push(`recipient: ${parsed.recipient_address}`);
+      }
+      if (parsed?.mint_result?.asset_address) {
+        summaryLines.push(`asset: ${parsed.mint_result.asset_address}`);
+      }
+      if (parsed?.mint_result?.tx_hash) {
+        summaryLines.push(`tx: ${parsed.mint_result.tx_hash}`);
+      }
+      if (parsed?.warnings && parsed.warnings.length > 0) {
+        summaryLines.push(`warnings: ${parsed.warnings.join("; ")}`);
+      }
+      setMintResultText(
+        [`[${new Date().toISOString()}] Mint completed for season ${seasonId}.`, ...summaryLines].join("\n"),
+      );
+      await Promise.all([refreshEligibility(), refreshMyCards()]);
+    } catch (error) {
+      setMintError(extractErrorMessage(error));
+      setMintResultText("");
+    } finally {
+      setMintingSeasonId(null);
+    }
+  }
+
+  function streamForSeason(seasonId: number): EligibilityStream | null {
+    if (!eligibility) return null;
+    if (eligibility.genesis?.season_id === seasonId) return eligibility.genesis;
+    if (eligibility.standard?.season_id === seasonId) return eligibility.standard;
+    return null;
+  }
+
+  function renderSeasonMintAction(season: ActiveSeasonView) {
+    const stream = streamForSeason(season.id);
+    const isThisMinting = mintingSeasonId === season.id;
+    const isAnyMinting = mintingSeasonId !== null;
+    const hasSolanaWallet = Boolean(solanaWallet);
+    const supplyEmpty = season.remaining <= 0;
+
+    let blockedReason = "";
+    if (!hasSolanaWallet) {
+      blockedReason = "Set your Solana recipient wallet to enable minting.";
+    } else if (supplyEmpty) {
+      blockedReason = "No supply remaining for this season.";
+    } else if (eligibilityLoading && !stream) {
+      blockedReason = "Checking eligibility...";
+    } else if (eligibilityError) {
+      blockedReason = `Eligibility unavailable: ${eligibilityError}`;
+    } else if (stream && !stream.eligible_now) {
+      blockedReason = stream.ineligible_reason || "Wallet not eligible for this season right now.";
+    } else if (!stream) {
+      blockedReason = "Eligibility for this season is not available.";
+    }
+
+    const canMint = !blockedReason && !isAnyMinting;
+
+    return (
+      <div className="season-mint-action">
+        <button
+          className="season-mint-button"
+          onClick={() => void mintForSeason(season.id)}
+          disabled={!canMint}
+          title={blockedReason || "Mint NFT for this season"}
+        >
+          {isThisMinting ? "Minting..." : "Mint NFT"}
+        </button>
+        {blockedReason ? (
+          <span className="season-mint-reason">{blockedReason}</span>
+        ) : (
+          <span className="season-mint-reason ok">Eligible to mint now</span>
+        )}
+      </div>
+    );
   }
 
   if (siteWalletActionsDown === null) {
@@ -922,6 +1143,14 @@ export default function UserDashboard() {
               <span>Trader rank</span>
               <strong>{traderRank ?? "No trades yet"}</strong>
             </div>
+            <div className="auth-info-row">
+              <span>Solana wallet</span>
+              <strong>
+                {solanaWallet
+                  ? `${solanaWallet.slice(0, 4)}...${solanaWallet.slice(-4)}`
+                  : "Not set"}
+              </strong>
+            </div>
           </>
         ) : null}
       </aside>
@@ -930,6 +1159,11 @@ export default function UserDashboard() {
 
       <ActiveSeasonsBoard
         ref={seasonsBoardRef}
+        renderSeasonAction={
+          isSignedIn
+            ? (season) => renderSeasonMintAction(season)
+            : undefined
+        }
         footer={
           !isSignedIn ? (
             <p className="season-board-note">
@@ -937,34 +1171,100 @@ export default function UserDashboard() {
             </p>
           ) : (
             <div className="season-board-actions">
-              <div className="season-board-stats">
-                <span>Test cards remaining</span>
-                <strong>
-                  {generatedCardsRemainingAvailable} / {generatedCardsTotalAvailable}
-                </strong>
+              <div className="season-board-actions-row">
+                <button
+                  onClick={() => void refreshEligibility()}
+                  disabled={eligibilityLoading}
+                >
+                  {eligibilityLoading ? "Refreshing eligibility..." : "Refresh eligibility"}
+                </button>
+                {eligibility?.is_origin_wallet ? (
+                  <span className="nft-fetched-at">Origin wallet</span>
+                ) : null}
               </div>
-              <button
-                onClick={() => void getGeneratedCard()}
-                disabled={getCardLoading || generatedCardsRemainingAvailable <= 0}
-              >
-                {getCardLoading
-                  ? "Generating card..."
-                  : generatedCardsRemainingAvailable <= 0
-                    ? "All cards claimed"
-                    : "Get card"}
-              </button>
-              {getCardResultText ? (
-                <pre className="eligibility-output">{getCardResultText}</pre>
+              {eligibilityError ? (
+                <pre className="eligibility-output">Eligibility load failed: {eligibilityError}</pre>
+              ) : null}
+              {mintError ? (
+                <pre className="eligibility-output">Mint failed: {mintError}</pre>
+              ) : null}
+              {mintResultText ? (
+                <pre className="eligibility-output">{mintResultText}</pre>
               ) : null}
             </div>
           )
         }
       />
 
+      <section className="season-board season-board-standalone solana-wallet-board">
+        <div className="season-board-title">Solana recipient wallet</div>
+        {!isSignedIn ? (
+          <div className="season-board-muted">
+            Sign in with your EVM wallet to set the Solana address that will receive your minted NFTs.
+          </div>
+        ) : (
+          <>
+            <p className="season-board-note">
+              Your minted PolyStars NFTs are issued on Solana. Provide the Solana address that should receive them.
+              Minting is disabled until a Solana wallet is saved.
+            </p>
+            <div className="solana-wallet-row">
+              <input
+                type="text"
+                className="solana-wallet-input"
+                placeholder="Your Solana wallet address (base58)"
+                value={solanaWalletInput}
+                onChange={(e) => {
+                  setSolanaWalletInput(e.target.value);
+                  setSolanaWalletNotice("");
+                  setSolanaWalletError("");
+                }}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={solanaWalletSaving || solanaWalletLoading}
+              />
+              <button
+                onClick={() => void saveSolanaWallet()}
+                disabled={
+                  solanaWalletSaving ||
+                  solanaWalletLoading ||
+                  solanaWalletInput.trim() === (solanaWallet ?? "")
+                }
+              >
+                {solanaWalletSaving ? "Saving..." : "Save"}
+              </button>
+              {solanaWallet ? (
+                <button
+                  onClick={() => {
+                    setSolanaWalletInput("");
+                    void saveSolanaWallet();
+                  }}
+                  disabled={solanaWalletSaving || solanaWalletLoading}
+                >
+                  Clear
+                </button>
+              ) : null}
+            </div>
+            <div className="solana-wallet-status">
+              <span>Saved address</span>
+              <strong className="solana-wallet-saved">
+                {solanaWalletLoading ? "Loading..." : solanaWallet ?? "Not set"}
+              </strong>
+            </div>
+            {solanaWalletError ? (
+              <pre className="eligibility-output">{solanaWalletError}</pre>
+            ) : null}
+            {solanaWalletNotice ? (
+              <p className="season-board-note">{solanaWalletNotice}</p>
+            ) : null}
+          </>
+        )}
+      </section>
+
       <section className="season-board season-board-standalone nft-board-horizontal">
         <div className="season-board-title">My Cards</div>
         {!isSignedIn ? (
-          <div className="season-board-muted">Sign in to generate and view your test cards.</div>
+          <div className="season-board-muted">Sign in to view your minted cards.</div>
         ) : (
           <>
             <div className="nft-actions">
