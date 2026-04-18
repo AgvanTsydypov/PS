@@ -9,7 +9,7 @@ export default function HomePage() {
       centerContent={
         <div className="home-showcase-center-stack">
           <div className="home-hero-logo" aria-label="PolyStars">
-            <div className="home-hero-wordmark">POLYSTARS</div>
+            <img src="/polystars-long.svg" alt="PolyStars" className="home-hero-wordmark" />
           </div>
           <ActiveSeasonsBoard
             title="Seasons activity"
