@@ -2068,6 +2068,7 @@ class SeasonWorkbenchService:
             ]
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
             log_handle = open(log_path, "a", encoding="utf-8")
             started_at = self._season_update_now_iso()
             try:
