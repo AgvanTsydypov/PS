@@ -55,8 +55,13 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from scripts.season_manager import SeasonManager
-from admin_backend.main import SeasonWorkbenchService
+from admin_backend.main import MintClaimRequest, SeasonWorkbenchService
 from scripts.cardgen.generate_card import generate_card_back_svg, generate_card_svg
+
+try:
+    from solders.pubkey import Pubkey  # type: ignore
+except Exception:  # pragma: no cover - solders should be installed alongside admin
+    Pubkey = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +120,18 @@ class UserGeneratedCardResponse(BaseModel):
 class RateLimitConfig(BaseModel):
     window_seconds: int
     max_requests: int
+
+
+class SolanaWalletUpdateRequest(BaseModel):
+    """Body for PUT /api/me/solana-wallet — empty/null clears the saved wallet."""
+
+    solana_wallet: Optional[str] = None
+
+
+class MintMyNftRequest(BaseModel):
+    """Body for POST /api/me/mint — recipient comes from the saved Solana wallet on the session."""
+
+    season_id: int
 
 
 app = FastAPI(title="PolyStars User Web API", version="1.0.0")
@@ -198,6 +215,18 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
     "/api/cards/get": RateLimitConfig(
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
         max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_GET_CARD_MAX", "20")),
+    ),
+    "/api/me/solana-wallet": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_SOLANA_WALLET_MAX", "30")),
+    ),
+    "/api/me/eligibility": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_ELIGIBILITY_MAX", "30")),
+    ),
+    "/api/me/mint": RateLimitConfig(
+        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_MINT_MAX", "10")),
     ),
     "/api/cards/ticker": RateLimitConfig(
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
@@ -460,6 +489,25 @@ def _warn_if_claims_uniqueness_index_missing() -> None:
             )
     except Exception:
         logger.exception("Could not verify presence of index %s", CLAIMS_UNIQUENESS_INDEX_NAME)
+    finally:
+        conn.close()
+
+
+def _ensure_user_solana_wallet_column() -> None:
+    """Adds the optional solana_wallet column to user_wallet_signins for existing DBs."""
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                ALTER TABLE user_wallet_signins
+                    ADD COLUMN IF NOT EXISTS solana_wallet TEXT
+                """
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("Failed to ensure user_wallet_signins.solana_wallet column")
     finally:
         conn.close()
 
@@ -1339,13 +1387,79 @@ def _load_wallet_signin_snapshot(user_wallet_address: str) -> Tuple[str, str]:
         conn.close()
 
 
+def _validate_solana_address(raw: str) -> str:
+    """Validates a Solana base58 pubkey and returns its canonical form."""
+    candidate = (raw or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="Solana wallet is required")
+    if Pubkey is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Solana support is unavailable on this server (solders not installed)",
+        )
+    try:
+        pubkey = Pubkey.from_string(candidate)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid Solana wallet address")
+    return str(pubkey)
+
+
+def _load_user_solana_wallet(user_wallet_address: str) -> Optional[str]:
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT solana_wallet
+                FROM user_wallet_signins
+                WHERE wallet_address = %s
+                """,
+                (user_wallet_address.lower(),),
+            )
+            row = cursor.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    value = row[0]
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _save_user_solana_wallet(user_wallet_address: str, solana_wallet: Optional[str]) -> None:
+    """Persist (or clear) the Solana recipient for the given EVM session wallet."""
+    normalized_evm = user_wallet_address.lower()
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO user_wallet_signins (
+                    wallet_address, first_seen_at, last_signed_in_at, sign_in_count, solana_wallet
+                ) VALUES (%s, NOW(), NOW(), 1, %s)
+                ON CONFLICT (wallet_address)
+                DO UPDATE SET solana_wallet = EXCLUDED.solana_wallet
+                """,
+                (normalized_evm, solana_wallet),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("Failed to save user solana wallet for %s", normalized_evm)
+        raise HTTPException(status_code=500, detail="Failed to save Solana wallet")
+    finally:
+        conn.close()
+
+
 def _load_wallet_session_row(user_wallet_address: str) -> Optional[Dict[str, Any]]:
     conn = _get_connection()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT sign_in_count, proxy_wallet, trader_rank
+                SELECT sign_in_count, proxy_wallet, trader_rank, solana_wallet
                 FROM user_wallet_signins
                 WHERE LOWER(wallet_address) = LOWER(%s)
                 LIMIT 1
@@ -1470,6 +1584,7 @@ def startup_checks() -> None:
     _configure_user_web_timing_logging()
     _warn_if_claims_uniqueness_index_missing()
     _ensure_user_generated_cards_schema()
+    _ensure_user_solana_wallet_column()
     if os.getenv("NODE_ENV", "development") != "development" and not _allowed_origins():
         logger.warning(
             "USER_WEB_CORS_ORIGINS is empty: set it to your user web origins (e.g. https://app.example.com) "
@@ -1730,6 +1845,7 @@ def wallet_session(request: Request) -> Dict[str, Any]:
             "sign_in_count": 0,
             "proxy_wallet": None,
             "trader_rank": None,
+            "solana_wallet": None,
         }
     return {
         "signed_in": True,
@@ -1737,6 +1853,9 @@ def wallet_session(request: Request) -> Dict[str, Any]:
         "sign_in_count": int(db_row.get("sign_in_count") or 0),
         "proxy_wallet": str(db_row.get("proxy_wallet") or "").strip() or None,
         "trader_rank": str(db_row.get("trader_rank") or "").strip() or None,
+        "solana_wallet": (str(db_row.get("solana_wallet") or "").strip() or None)
+        if db_row.get("solana_wallet") is not None
+        else None,
     }
 
 
@@ -2150,5 +2269,100 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
         remaining_available=remaining_available,
         total_available=total_available,
     )
+
+
+@app.get("/api/master-collection")
+def me_master_collection() -> Dict[str, str]:
+    """Public master collection address used as the parent for minted user NFTs."""
+    address = ""
+    try:
+        address = mint_service.get_master_collection_address()
+    except Exception:
+        logger.exception("Could not resolve master collection address")
+        address = ""
+    return {"address": address}
+
+
+@app.get("/api/me/solana-wallet")
+def me_get_solana_wallet(request: Request) -> Dict[str, Optional[str]]:
+    """Returns the saved Solana recipient for the signed-in EVM wallet."""
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    saved = _load_user_solana_wallet(wallet)
+    return {"wallet_address": wallet, "solana_wallet": saved}
+
+
+@app.put("/api/me/solana-wallet")
+def me_put_solana_wallet(payload: SolanaWalletUpdateRequest, request: Request) -> Dict[str, Optional[str]]:
+    """Saves (or clears with empty/null) the Solana recipient for the signed-in EVM wallet."""
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    raw = (payload.solana_wallet or "").strip()
+    if not raw:
+        _save_user_solana_wallet(wallet, None)
+        return {"wallet_address": wallet, "solana_wallet": None}
+    canonical = _validate_solana_address(raw)
+    _save_user_solana_wallet(wallet, canonical)
+    return {"wallet_address": wallet, "solana_wallet": canonical}
+
+
+@app.get("/api/me/eligibility")
+def me_eligibility(request: Request) -> Dict[str, Any]:
+    """Mint eligibility for the signed-in wallet across the current Genesis and Standard streams."""
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+    try:
+        return season_manager.check_user_eligibility(wallet)
+    except Exception as exc:
+        logger.exception("Failed to compute eligibility for wallet=%s", wallet)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/me/mint")
+def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
+    """Mints the next eligible NFT to the user's saved Solana wallet for the given season."""
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+
+    saved_solana = _load_user_solana_wallet(wallet)
+    if not saved_solana:
+        raise HTTPException(
+            status_code=400,
+            detail="Set your Solana recipient wallet before minting",
+        )
+    recipient = _validate_solana_address(saved_solana)
+
+    try:
+        season_id = int(payload.season_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid season_id")
+    if season_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid season_id")
+
+    mint_request = MintClaimRequest(
+        wallet=wallet,
+        recipient_address=recipient,
+        season_id=season_id,
+        phase="breach",
+        auto_phase=True,
+        db_only=False,
+        use_fixed_claim_images=True,
+    )
+    try:
+        return mint_service.run_mint_claim(mint_request)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Mint failed for wallet=%s season_id=%s recipient=%s",
+            wallet,
+            season_id,
+            recipient,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 

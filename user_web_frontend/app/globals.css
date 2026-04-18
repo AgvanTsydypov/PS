@@ -1617,3 +1617,103 @@ button:disabled {
     grid-column: auto;
   }
 }
+
+/* ── Solana wallet block (between Active seasons and My Cards) ─────────────── */
+.solana-wallet-board {
+  max-width: 680px;
+}
+
+.solana-wallet-row {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.solana-wallet-input {
+  flex: 1 1 320px;
+  min-width: 220px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #2b3242;
+  background: #0f1420;
+  color: #f3f6fb;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}
+
+.solana-wallet-input:focus {
+  outline: none;
+  border-color: #3a86ff;
+}
+
+.solana-wallet-status {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid #263044;
+  border-radius: 10px;
+  background: #101723;
+  font-size: 13px;
+  color: #aeb7c6;
+}
+
+.solana-wallet-saved {
+  color: #f3f6fb;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  word-break: break-all;
+  text-align: right;
+}
+
+/* ── Per-season Mint button + reason inside each Active Season card ─────────── */
+.season-card-action {
+  margin-top: 8px;
+}
+
+.season-mint-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.season-mint-button {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid #2b3242;
+  background: #1a2233;
+  color: #f3f6fb;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.season-mint-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.season-mint-button:not(:disabled):hover {
+  border-color: #3a86ff;
+}
+
+.season-mint-reason {
+  font-size: 12px;
+  color: #8b95a6;
+}
+
+.season-mint-reason.ok {
+  color: #6abf69;
+}
+
+.season-board-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}

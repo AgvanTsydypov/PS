@@ -22,18 +22,39 @@ export type ActiveSeasonsBoardHandle = {
   refresh: () => Promise<void>;
 };
 
+export type ActiveSeasonView = {
+  id: number;
+  type: string;
+  season_number: number;
+  name: string;
+  description: string;
+  timeLeft: string;
+  remaining: number;
+  total: number;
+  phase: string;
+  phaseReason: string;
+};
+
 type ActiveSeasonsBoardProps = {
   footer?: ReactNode;
   initialSeasons?: SeasonResponse[];
   initialServerNowIso?: string | null;
   title?: string;
+  /** Optional per-season slot rendered below the season's stats (e.g. mint button). */
+  renderSeasonAction?: (season: ActiveSeasonView) => ReactNode;
 };
 
 export const ActiveSeasonsBoard = forwardRef<
   ActiveSeasonsBoardHandle,
   ActiveSeasonsBoardProps
 >(function ActiveSeasonsBoard(
-  { footer, initialSeasons = [], initialServerNowIso = null, title = "Active seasons" },
+  {
+    footer,
+    initialSeasons = [],
+    initialServerNowIso = null,
+    title = "Active seasons",
+    renderSeasonAction,
+  },
   ref,
 ) {
   const initialServerNowMs = initialServerNowIso
@@ -173,6 +194,8 @@ export const ActiveSeasonsBoard = forwardRef<
 
       return {
         id: season.id,
+        type: season.type,
+        season_number: season.season_number,
         name: seasonName,
         description,
         timeLeft,
@@ -180,7 +203,7 @@ export const ActiveSeasonsBoard = forwardRef<
         total,
         phase: season.phase || "unknown",
         phaseReason: season.phase_reason || "",
-      };
+      } satisfies ActiveSeasonView;
     });
   }, [activeSeasons, syncedNowMs]);
 
@@ -216,6 +239,9 @@ export const ActiveSeasonsBoard = forwardRef<
                   {season.remaining} / {season.total}
                 </strong>
               </div>
+              {renderSeasonAction ? (
+                <div className="season-card-action">{renderSeasonAction(season)}</div>
+              ) : null}
               <div className="season-tooltip">
                 {season.description}
                 {season.phaseReason ? ` ${season.phaseReason}` : ""}
