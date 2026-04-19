@@ -286,6 +286,16 @@ POLYMARKET_RANK_SENTINEL_VALUES = frozenset({
     PM_NOT_REGISTERED_VALUE.casefold(),
     NO_TRADES_YET_VALUE.casefold(),
 })
+# How often /api/auth/wallet/session is allowed to re-query Polymarket per wallet
+# when the cached proxy_wallet is the "Not registered in PM" sentinel. Users who
+# sign in BEFORE registering with Polymarket (or during a transient PM outage)
+# get the sentinel cached in the DB; without this opportunistic refresh they
+# would have to log out + log back in to see their real proxy wallet.
+PM_SESSION_REFRESH_TTL_SECONDS = float(
+    os.getenv("PM_SESSION_REFRESH_TTL_SECONDS", "60")
+)
+_pm_session_refresh_attempts: Dict[str, float] = {}
+_pm_session_refresh_lock = threading.Lock()
 # Solana / minted NFT lookup configuration. Used by /api/me/cards to render the
 # user's actual on-chain NFTs (claims rows that finalized on Solana) instead of
 # previewed/generated cards from user_generated_cards.
@@ -1604,6 +1614,91 @@ def _is_registered_on_polymarket(proxy_wallet: Optional[str]) -> bool:
     return value.casefold() != PM_NOT_REGISTERED_VALUE.casefold()
 
 
+def _maybe_refresh_polymarket_session_snapshot(
+    wallet_address: str,
+    cached_proxy_wallet: Optional[str],
+    cached_trader_rank: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Opportunistically re-resolve PM proxy/rank when the DB has the "not registered" sentinel.
+
+    Background: ``/api/auth/wallet/verify`` resolves the Polymarket profile at
+    sign-in time and caches the result in ``user_wallet_signins``. If the user
+    signed in *before* registering on Polymarket (or while the PM gamma API was
+    unavailable), the cached value is the sentinel ``PM_NOT_REGISTERED_VALUE``
+    and ``/api/auth/wallet/session`` would keep returning it forever — the only
+    way to refresh was to log out and log back in.
+
+    To make this self-healing, we re-fetch the profile here when the cached
+    value is the sentinel, throttled per-wallet by
+    ``PM_SESSION_REFRESH_TTL_SECONDS`` so we don't hammer the PM API on every
+    page hit for users who genuinely aren't registered.
+
+    Returns the (possibly updated) ``(proxy_wallet, trader_rank)`` tuple and,
+    on success, persists the new values to ``user_wallet_signins``.
+    """
+    # Real proxy already cached → nothing to refresh.
+    if _is_registered_on_polymarket(cached_proxy_wallet):
+        return cached_proxy_wallet, cached_trader_rank
+
+    key = wallet_address.lower()
+    now = monotonic()
+    with _pm_session_refresh_lock:
+        last_attempt = _pm_session_refresh_attempts.get(key, 0.0)
+        if now - last_attempt < PM_SESSION_REFRESH_TTL_SECONDS:
+            return cached_proxy_wallet, cached_trader_rank
+        _pm_session_refresh_attempts[key] = now
+
+    try:
+        profile = _fetch_polymarket_public_profile(wallet_address)
+    except Exception as exc:
+        logger.warning(
+            "Session-time PM refresh failed wallet=%s: %s",
+            wallet_address,
+            str(exc),
+        )
+        return cached_proxy_wallet, cached_trader_rank
+
+    new_proxy = _proxy_wallet_from_profile(profile)
+    if not new_proxy:
+        # Still not registered on Polymarket — keep the sentinel as-is and let
+        # the throttle window expire before we try again.
+        return cached_proxy_wallet, cached_trader_rank
+
+    leaderboard_rank, leaderboard_api_available = _fetch_polymarket_trader_rank(new_proxy)
+    if leaderboard_api_available:
+        new_trader_rank = leaderboard_rank or NO_TRADES_YET_VALUE
+    else:
+        new_trader_rank = NO_TRADES_YET_VALUE
+
+    try:
+        conn = _get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE user_wallet_signins
+                    SET proxy_wallet = %s, trader_rank = %s
+                    WHERE lower(wallet_address) = lower(%s)
+                    """,
+                    (new_proxy, new_trader_rank, wallet_address),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        logger.info(
+            "Session-time PM refresh updated wallet=%s proxy=%s trader_rank=%s",
+            wallet_address,
+            new_proxy,
+            new_trader_rank,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to persist session-time PM refresh wallet=%s", wallet_address
+        )
+
+    return new_proxy, new_trader_rank
+
+
 def _load_wallet_signin_snapshot(user_wallet_address: str) -> Tuple[str, str]:
     conn = _get_connection()
     try:
@@ -2087,12 +2182,17 @@ def wallet_session(request: Request) -> Dict[str, Any]:
             "trader_rank": None,
             "solana_wallet": None,
         }
+    cached_proxy = str(db_row.get("proxy_wallet") or "").strip() or None
+    cached_rank = str(db_row.get("trader_rank") or "").strip() or None
+    refreshed_proxy, refreshed_rank = _maybe_refresh_polymarket_session_snapshot(
+        wallet, cached_proxy, cached_rank
+    )
     return {
         "signed_in": True,
         "wallet_address": wallet,
         "sign_in_count": int(db_row.get("sign_in_count") or 0),
-        "proxy_wallet": str(db_row.get("proxy_wallet") or "").strip() or None,
-        "trader_rank": str(db_row.get("trader_rank") or "").strip() or None,
+        "proxy_wallet": refreshed_proxy,
+        "trader_rank": refreshed_rank,
         "solana_wallet": (str(db_row.get("solana_wallet") or "").strip() or None)
         if db_row.get("solana_wallet") is not None
         else None,
