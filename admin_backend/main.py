@@ -2071,15 +2071,25 @@ class SeasonWorkbenchService:
             env["PYTHONIOENCODING"] = "utf-8"
             log_handle = open(log_path, "a", encoding="utf-8")
             started_at = self._season_update_now_iso()
-            try:
-                proc = subprocess.Popen(
-                    command,
-                    cwd=project_root,
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    start_new_session=True,
+            popen_kwargs: Dict[str, Any] = dict(
+                cwd=project_root,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                env=env,
+            )
+            if os.name == "nt":
+                # On Windows `start_new_session` is silently ignored, so the child
+                # stays in the same console process group as uvicorn and dies from
+                # any CTRL_C_EVENT delivered to that console (exit code 0xC000013A).
+                # Detach explicitly so season-update cannot take the server down.
+                popen_kwargs["creationflags"] = (
+                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
                 )
+            else:
+                popen_kwargs["start_new_session"] = True
+            try:
+                proc = subprocess.Popen(command, **popen_kwargs)
             except Exception:
                 log_handle.close()
                 raise
