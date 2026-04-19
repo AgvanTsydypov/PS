@@ -175,6 +175,20 @@ type GeneratedCardsResponse = {
 const apiBase =
   process.env.NEXT_PUBLIC_USER_API_BASE_URL ??
   (process.env.NODE_ENV === "development" ? "http://localhost:8011" : "/");
+// Sentinel trader_rank values returned by the user-web backend that mean the
+// wallet has NO real Polymarket leaderboard rank yet. Mirrors
+// POLYMARKET_RANK_SENTINEL_VALUES in user_web_backend/main.py — keep in sync.
+const POLYMARKET_RANK_SENTINEL_VALUES = new Set<string>([
+  "not registered in pm",
+  "no trades yet",
+]);
+
+function hasPolymarketRank(traderRank: string | null | undefined): boolean {
+  if (traderRank == null) return false;
+  const value = String(traderRank).trim();
+  if (!value) return false;
+  return !POLYMARKET_RANK_SENTINEL_VALUES.has(value.toLowerCase());
+}
 /** Legacy localStorage JWT (removed); cleared on load for one-time migration. */
 const LEGACY_JWT_LOCAL_STORAGE_KEY = "polystars_user_access_token";
 const AUTH_SESSION_META_STORAGE_KEY = "polystars_user_session_meta";
@@ -883,6 +897,14 @@ export default function UserDashboard() {
       setMintError("Please sign in again to mint.");
       return;
     }
+    if (!hasPolymarketRank(traderRank)) {
+      setMintError(
+        traderRank && traderRank.trim().toLowerCase() === "not registered in pm"
+          ? "Wallet is not registered on Polymarket — minting is not allowed."
+          : "Wallet has no Polymarket trader rank yet — minting is not allowed.",
+      );
+      return;
+    }
     if (!solanaWallet) {
       setMintError("Set your Solana recipient wallet first.");
       return;
@@ -954,9 +976,15 @@ export default function UserDashboard() {
     const isAnyMinting = mintingSeasonId !== null;
     const hasSolanaWallet = Boolean(solanaWallet);
     const supplyEmpty = season.remaining <= 0;
+    const hasRank = hasPolymarketRank(traderRank);
 
     let blockedReason = "";
-    if (!hasSolanaWallet) {
+    if (!hasRank) {
+      blockedReason =
+        traderRank && traderRank.trim().toLowerCase() === "not registered in pm"
+          ? "Wallet is not registered on Polymarket — minting is not allowed."
+          : "Wallet has no Polymarket trader rank yet — minting is not allowed.";
+    } else if (!hasSolanaWallet) {
       blockedReason = "Set your Solana recipient wallet to enable minting.";
     } else if (supplyEmpty) {
       blockedReason = "No supply remaining for this season.";
