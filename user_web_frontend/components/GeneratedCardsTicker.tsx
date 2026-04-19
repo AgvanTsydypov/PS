@@ -419,8 +419,19 @@ export default function GeneratedCardsTicker({
     panelItems: CardTickerItem[],
     direction: "up" | "down",
   ) {
+    // Always render the side <aside> on desktop so the 3-column grid in
+    // .home-showcase-shell keeps its center column in the middle of the
+    // viewport. Without this, while ticker items are still loading (or if
+    // the API returned an empty list), the center block would be auto-
+    // placed into the first grid column and the whole hero would visibly
+    // jump from the top-left to the center once items arrive.
     if (panelItems.length === 0) {
-      return null;
+      return (
+        <aside
+          className={`home-card-panel home-card-panel-${panelSide} home-card-panel-empty`}
+          aria-hidden="true"
+        />
+      );
     }
 
     return (
