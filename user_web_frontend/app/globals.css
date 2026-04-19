@@ -266,35 +266,40 @@ body {
   height: 50%;
 }
 
-.home-card-panel .card-flip-hitbox {
+.home-card-panel .card-flip-hitbox,
+.generated-card-preview-wrapper .card-flip-hitbox {
   position: absolute;
   z-index: 35;
   background: transparent;
   cursor: grab;
 }
 
-.home-card-panel .card-flip-hitbox-top {
+.home-card-panel .card-flip-hitbox-top,
+.generated-card-preview-wrapper .card-flip-hitbox-top {
   left: -18px;
   right: -18px;
   top: -18px;
   height: 23px;
 }
 
-.home-card-panel .card-flip-hitbox-bottom {
+.home-card-panel .card-flip-hitbox-bottom,
+.generated-card-preview-wrapper .card-flip-hitbox-bottom {
   left: -18px;
   right: -18px;
   bottom: -18px;
   height: 23px;
 }
 
-.home-card-panel .card-flip-hitbox-left {
+.home-card-panel .card-flip-hitbox-left,
+.generated-card-preview-wrapper .card-flip-hitbox-left {
   left: -18px;
   top: 0;
   bottom: 0;
   width: 23px;
 }
 
-.home-card-panel .card-flip-hitbox-right {
+.home-card-panel .card-flip-hitbox-right,
+.generated-card-preview-wrapper .card-flip-hitbox-right {
   right: -18px;
   top: 0;
   bottom: 0;

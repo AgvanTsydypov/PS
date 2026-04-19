@@ -1169,9 +1169,18 @@ def _ensure_generated_card_assets_on_r2(row: Dict[str, Any]) -> Dict[str, Any]:
     slug = str(row.get("slug") or "").strip()
     if not slug:
         return row
-    cfg = _r2_required_env()
     current_front = str(row.get("front_image_path") or "").strip()
     current_back = str(row.get("back_image_path") or "").strip()
+    # Mint-time rows persist absolute IPFS URLs (Pinata gateway) directly in
+    # *_image_path. They don't need to be re-hosted on R2 — the existing URLs
+    # are already publicly servable, and re-rendering on every detail-page
+    # load would waste a Chromium roundtrip per request.
+    if (
+        current_front.startswith(("http://", "https://"))
+        and current_back.startswith(("http://", "https://"))
+    ):
+        return row
+    cfg = _r2_required_env()
     front_key = _extract_r2_key_from_public_url(cfg["public_base_url"], current_front)
     back_key = _extract_r2_key_from_public_url(cfg["public_base_url"], current_back)
     if front_key and back_key:
@@ -1330,6 +1339,19 @@ def _build_solana_explorer_tx_url(tx_hash: str) -> Optional[str]:
     return f"https://explorer.solana.com/tx/{tx}{_solana_explorer_cluster_suffix()}"
 
 
+def _build_magiceden_item_url(asset_address: str) -> Optional[str]:
+    """Public Magic Eden item page for a Solana NFT mint/asset address.
+
+    Magic Eden only indexes mainnet assets, so on devnet/testnet the link will
+    404 — we still emit it for parity with the Explorer link; the frontend can
+    decide whether to surface it based on the cluster.
+    """
+    addr = (asset_address or "").strip()
+    if not addr:
+        return None
+    return f"https://magiceden.io/item-details/{addr}"
+
+
 def _decode_data_uri_json(metadata_uri: str) -> Optional[Dict[str, Any]]:
     """Decode a data:application/json[;base64],... metadata URI used as Pinata fallback."""
     if not metadata_uri.startswith("data:"):
@@ -1348,12 +1370,35 @@ def _decode_data_uri_json(metadata_uri: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _extract_card_slug_from_polystars_card(polystars_card: Any) -> Optional[str]:
+    """Extract the in-app card slug from the embedded ``polystars_card.qr_payload``.
+
+    Mint-time payload shape (see ``scripts/polystars_card_payload.py``):
+    ``qr_payload = "{CARD_BASE_URL}/cards/{slug}"`` — the slug is the last
+    non-empty path segment. Returns ``None`` for any malformed input.
+    """
+    if not isinstance(polystars_card, dict):
+        return None
+    qr = str(polystars_card.get("qr_payload") or "").strip()
+    if not qr:
+        return None
+    try:
+        path = urllib.parse.urlparse(qr).path or qr
+    except Exception:
+        path = qr
+    tail = path.rstrip("/").rsplit("/", 1)[-1]
+    tail = tail.strip()
+    return tail or None
+
+
 def _extract_nft_visuals_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Optional[str]]:
-    """Pull (name, front, back) image URLs out of a Metaplex-style NFT metadata JSON.
+    """Pull (name, front, back, card_slug) details out of a Metaplex-style NFT metadata JSON.
 
     Mirrors the layout produced by ``SolanaClient._build_metadata_uri``: the
     primary front image is in ``image``, and ``properties.files`` lists ``[front, back]``
     so the back image is the first ``files[].uri`` that differs from ``image``.
+    The in-app card slug is recovered from the embedded ``polystars_card.qr_payload``
+    so minted NFTs can deep-link to the same ``/cards/{slug}`` page used by previews.
     """
     name = str(metadata.get("name") or "").strip() or None
     front = str(metadata.get("image") or "").strip() or None
@@ -1372,20 +1417,31 @@ def _extract_nft_visuals_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Op
                     continue
                 back = uri_value
                 break
-    return {"name": name, "front_image_url": front, "back_image_url": back}
+    card_slug = _extract_card_slug_from_polystars_card(metadata.get("polystars_card"))
+    return {
+        "name": name,
+        "front_image_url": front,
+        "back_image_url": back,
+        "card_slug": card_slug,
+    }
 
 
 def _resolve_nft_visuals_for_metadata_uri(metadata_uri: str) -> Dict[str, Optional[str]]:
-    """Fetch (with caching) NFT image URLs by metadata URI.
+    """Fetch (with caching) NFT image URLs + card slug by metadata URI.
 
     The cache is keyed by the URI itself; IPFS content is immutable so a single
     successful fetch can be reused across requests. Returns a dict with
-    ``name``, ``front_image_url``, ``back_image_url`` (any of which may be None).
-    A negative result (failed fetch) is also cached as empty values to avoid
-    hammering a slow gateway on every page load.
+    ``name``, ``front_image_url``, ``back_image_url``, ``card_slug`` (any of
+    which may be ``None``). A negative result (failed fetch) is also cached as
+    empty values to avoid hammering a slow gateway on every page load.
     """
     uri = (metadata_uri or "").strip()
-    empty: Dict[str, Optional[str]] = {"name": None, "front_image_url": None, "back_image_url": None}
+    empty: Dict[str, Optional[str]] = {
+        "name": None,
+        "front_image_url": None,
+        "back_image_url": None,
+        "card_slug": None,
+    }
     if not uri:
         return empty
 
@@ -1518,7 +1574,10 @@ def _has_valid_polymarket_rank(trader_rank: Optional[str]) -> bool:
     """Returns True only when ``trader_rank`` is a real Polymarket leaderboard rank.
 
     Empty/null values, "Not registered in PM" and "No trades yet" all mean the
-    user does not have a rank yet and therefore is NOT allowed to mint.
+    user does not have a leaderboard rank yet. Used for UI surfaces only —
+    minting eligibility uses ``_is_registered_on_polymarket`` because users
+    that are registered with Polymarket but haven't traded yet must still be
+    allowed to mint.
     """
     if trader_rank is None:
         return False
@@ -1526,6 +1585,23 @@ def _has_valid_polymarket_rank(trader_rank: Optional[str]) -> bool:
     if not value:
         return False
     return value.casefold() not in POLYMARKET_RANK_SENTINEL_VALUES
+
+
+def _is_registered_on_polymarket(proxy_wallet: Optional[str]) -> bool:
+    """Returns True when ``proxy_wallet`` is a real Polymarket proxy address.
+
+    Polymarket assigns each registered EVM wallet a deterministic proxy. We
+    persist that value in ``user_wallet_signins.proxy_wallet`` at sign-in; if
+    Polymarket has no profile for the wallet we instead persist the sentinel
+    string ``PM_NOT_REGISTERED_VALUE``. So "registered" simply means the
+    stored value is non-empty and not the sentinel.
+    """
+    if proxy_wallet is None:
+        return False
+    value = str(proxy_wallet).strip()
+    if not value:
+        return False
+    return value.casefold() != PM_NOT_REGISTERED_VALUE.casefold()
 
 
 def _load_wallet_signin_snapshot(user_wallet_address: str) -> Tuple[str, str]:
@@ -2125,6 +2201,7 @@ def me_cards(request: Request) -> Dict[str, Any]:
             "name": None,
             "front_image_url": None,
             "back_image_url": None,
+            "card_slug": None,
         })
         season_type = str(row.get("season_type") or "").strip() or None
         season_number_raw = row.get("season_number")
@@ -2163,6 +2240,7 @@ def me_cards(request: Request) -> Dict[str, Any]:
             "name": visuals.get("name"),
             "front_image_url": visuals.get("front_image_url"),
             "back_image_url": visuals.get("back_image_url"),
+            "card_slug": visuals.get("card_slug"),
             "explorer_asset_url": _build_solana_explorer_asset_url(asset_address),
             "explorer_tx_url": _build_solana_explorer_tx_url(tx_hash) if tx_hash else None,
             "minted_at": minted_at_iso,
@@ -2289,7 +2367,8 @@ def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
                     e.start_date AS event_start_date,
                     e.end_date AS event_end_date,
                     e.closed_time AS event_closed_time,
-                    wwin.proxy_wallet AS winner_proxy_wallet
+                    wwin.proxy_wallet AS winner_proxy_wallet,
+                    wwin.minted_asset_address AS minted_asset_address
                 FROM user_generated_cards gc
                 LEFT JOIN events e ON e.id = gc.event_id
                 LEFT JOIN winner_wallets_nft_to_claim wwin ON wwin.id = gc.winner_row_id
@@ -2331,6 +2410,14 @@ def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
         if isinstance(value, datetime):
             event_snapshot[key] = value.astimezone(timezone.utc).isoformat()
     card["event_snapshot"] = event_snapshot
+    minted_asset_address = str(row_dict.get("minted_asset_address") or "").strip() or None
+    card["asset_address"] = minted_asset_address
+    card["explorer_asset_url"] = (
+        _build_solana_explorer_asset_url(minted_asset_address) if minted_asset_address else None
+    )
+    card["magiceden_url"] = (
+        _build_magiceden_item_url(minted_asset_address) if minted_asset_address else None
+    )
     return {"card": card}
 
 
@@ -2564,16 +2651,53 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
     if not Web3.is_address(wallet):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
 
-    # Strict server-side gate: only wallets that already have a real Polymarket
-    # leaderboard rank may mint. The frontend mirrors this check, but we MUST
-    # also enforce it here so the API cannot be bypassed.
-    proxy_wallet, trader_rank = _load_wallet_signin_snapshot(wallet)
-    if not _has_valid_polymarket_rank(trader_rank):
-        if str(proxy_wallet or "").strip().casefold() == PM_NOT_REGISTERED_VALUE.casefold():
-            detail = "Wallet is not registered on Polymarket — minting is not allowed."
-        else:
-            detail = "Wallet has no Polymarket trader rank yet — minting is not allowed."
-        raise HTTPException(status_code=403, detail=detail)
+    # Strict server-side gate: only wallets that are registered on Polymarket
+    # (i.e. have a real Polymarket proxy wallet) may mint. The trader rank
+    # itself is irrelevant — registered users with no trades yet must also be
+    # allowed to mint. Frontend mirrors this check, but we MUST also enforce
+    # it here so the API cannot be bypassed.
+    #
+    # We do a *live* lookup against Polymarket's public profile API so the
+    # gate does not depend on whatever was cached in ``user_wallet_signins``
+    # at sign-in time (which can be stale or empty if the profile API was
+    # temporarily unavailable then). If the live call fails, we fall back to
+    # the cached snapshot so a transient Polymarket outage does not lock
+    # legitimately-registered users out of minting.
+    cached_proxy_wallet, _cached_trader_rank = _load_wallet_signin_snapshot(wallet)
+    live_proxy_wallet: Optional[str] = None
+    live_lookup_succeeded = False
+    try:
+        profile = _fetch_polymarket_public_profile(wallet)
+        live_proxy_wallet = _proxy_wallet_from_profile(profile)
+        live_lookup_succeeded = True
+    except Exception as exc:
+        logger.warning(
+            "Live Polymarket profile lookup failed for wallet=%s: %s; "
+            "falling back to cached proxy_wallet=%r",
+            wallet,
+            str(exc),
+            cached_proxy_wallet,
+        )
+
+    effective_proxy_wallet = (
+        live_proxy_wallet if live_lookup_succeeded else cached_proxy_wallet
+    )
+    is_registered = _is_registered_on_polymarket(effective_proxy_wallet)
+    logger.info(
+        "Polymarket mint gate check: wallet=%s live_ok=%s live_proxy=%r "
+        "cached_proxy=%r effective_proxy=%r is_registered=%s",
+        wallet,
+        live_lookup_succeeded,
+        live_proxy_wallet,
+        cached_proxy_wallet,
+        effective_proxy_wallet,
+        is_registered,
+    )
+    if not is_registered:
+        raise HTTPException(
+            status_code=403,
+            detail="Wallet is not registered on Polymarket — minting is not allowed.",
+        )
 
     saved_solana = _load_user_solana_wallet(wallet)
     if not saved_solana:

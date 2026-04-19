@@ -56,6 +56,9 @@ type GeneratedCardItem = {
     closed_time?: string | null;
   };
   created_at: string;
+  asset_address?: string | null;
+  explorer_asset_url?: string | null;
+  magiceden_url?: string | null;
 };
 
 const apiBase =
@@ -174,6 +177,34 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                     <dd>{card.event_id ?? "N/A"}</dd>
                     <dt>Event slug</dt>
                     <dd>{event.slug ?? card.event_slug ?? "N/A"}</dd>
+                    <dt>Solana Explorer</dt>
+                    <dd>
+                      {card.explorer_asset_url ? (
+                        <a
+                          href={card.explorer_asset_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {card.asset_address ?? "Open on Explorer"}
+                        </a>
+                      ) : (
+                        "N/A"
+                      )}
+                    </dd>
+                    <dt>Magic Eden</dt>
+                    <dd>
+                      {card.magiceden_url ? (
+                        <a
+                          href={card.magiceden_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {card.asset_address ?? "Open on Magic Eden"}
+                        </a>
+                      ) : (
+                        "N/A"
+                      )}
+                    </dd>
                   </dl>
                 </section>
               </div>
