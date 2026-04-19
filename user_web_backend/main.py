@@ -311,6 +311,38 @@ SOLANA_NFT_METADATA_PARALLEL_FETCHES = max(
 )
 _nft_metadata_cache_lock = threading.Lock()
 _nft_metadata_cache: "Dict[str, Dict[str, Optional[str]]]" = {}
+# Full off-chain JSON metadata cache, keyed by URI. Mirrors
+# ``_nft_metadata_cache`` but stores the entire parsed JSON object so the
+# DAS-backed /api/me/cards endpoint can read ``polystars_card`` and any
+# custom top-level fields without re-fetching from IPFS. Negative results
+# are stored as an empty dict to act as a "checked, missing" marker.
+_nft_metadata_full_cache_lock = threading.Lock()
+_nft_metadata_full_cache: Dict[str, Dict[str, Any]] = {}
+# Solana DAS (Digital Asset Standard) configuration. Used by /api/me/cards to
+# enumerate the user's currently-owned NFTs from MASTER_COLLECTION_ADDRESS
+# directly from on-chain state, so transferred/sold NFTs disappear from the
+# dashboard automatically. SOLANA_DAS_RPC_URL must point to a DAS-compatible
+# provider (Helius, Triton, Quicknode, Shyft, …); plain mainnet-beta does not
+# implement searchAssets / getAssetsByOwner.
+SOLANA_DAS_RPC_URL = (
+    os.getenv("SOLANA_DAS_RPC_URL", "").strip()
+    or os.getenv("SOLANA_RPC_URL", "").strip()
+)
+SOLANA_DAS_REQUEST_TIMEOUT_SECONDS = float(
+    os.getenv("USER_WEB_SOLANA_DAS_REQUEST_TIMEOUT_SECONDS", "8")
+)
+SOLANA_DAS_PAGE_LIMIT = max(
+    1, min(int(os.getenv("USER_WEB_SOLANA_DAS_PAGE_LIMIT", "200")), 1000)
+)
+SOLANA_DAS_MAX_PAGES = max(
+    1, int(os.getenv("USER_WEB_SOLANA_DAS_MAX_PAGES", "10"))
+)
+ME_CARDS_ONCHAIN_CACHE_TTL_SECONDS = float(
+    os.getenv("USER_WEB_ME_CARDS_ONCHAIN_CACHE_TTL_SECONDS", "20")
+)
+_me_cards_onchain_cache_lock = threading.Lock()
+# (owner_solana_wallet_lower, collection_lower) -> (expires_at_monotonic, payload)
+_me_cards_onchain_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
 CLAIMS_UNIQUENESS_INDEX_NAME = "ux_claims_active_season_user_wallet_lower"
 _r2_client: Any = None
 
@@ -1500,6 +1532,436 @@ def _resolve_nft_visuals_for_metadata_uri(metadata_uri: str) -> Dict[str, Option
     return visuals
 
 
+def _fetch_full_nft_metadata_for_uri(metadata_uri: str) -> Optional[Dict[str, Any]]:
+    """Returns the parsed off-chain NFT metadata JSON, or ``None`` on failure.
+
+    Unlike ``_resolve_nft_visuals_for_metadata_uri`` (which returns a small
+    projection), this returns the full JSON object so callers can read the
+    embedded ``polystars_card`` block, attributes, and any other custom
+    top-level fields. Caches negative results as ``None`` for the lifetime of
+    the process via ``_nft_metadata_full_cache`` to avoid hammering a slow
+    gateway on every page render.
+    """
+    uri = (metadata_uri or "").strip()
+    if not uri:
+        return None
+    with _nft_metadata_full_cache_lock:
+        cached = _nft_metadata_full_cache.get(uri)
+        if cached is not None:
+            return cached if isinstance(cached, dict) else None
+
+    metadata: Optional[Dict[str, Any]] = None
+    if uri.startswith("data:"):
+        metadata = _decode_data_uri_json(uri)
+    else:
+        try:
+            req = urllib.request.Request(
+                uri,
+                method="GET",
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (PolyStars user-web)",
+                },
+            )
+            with urllib.request.urlopen(
+                req, timeout=SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS
+            ) as response:
+                status_code = int(getattr(response, "status", 200))
+                if 200 <= status_code < 300:
+                    body = response.read().decode("utf-8", errors="replace")
+                    if body:
+                        try:
+                            metadata = json.loads(body)
+                        except json.JSONDecodeError:
+                            metadata = None
+        except Exception:
+            metadata = None
+
+    with _nft_metadata_full_cache_lock:
+        if len(_nft_metadata_full_cache) >= SOLANA_NFT_METADATA_CACHE_MAX_ENTRIES:
+            try:
+                _nft_metadata_full_cache.pop(next(iter(_nft_metadata_full_cache)))
+            except StopIteration:
+                pass
+        _nft_metadata_full_cache[uri] = metadata if isinstance(metadata, dict) else {}
+    return metadata if isinstance(metadata, dict) else None
+
+
+def _iso_to_epoch_seconds(value: Optional[str]) -> int:
+    """Best-effort ISO-8601 → epoch seconds converter for stable sort ordering.
+
+    Returns ``0`` for any unparseable / empty input so callers can use the
+    result in a sort key without branching on ``None``.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        return int(dt.timestamp())
+    except (OverflowError, OSError, ValueError):
+        return 0
+
+
+def _das_search_assets_by_owner_and_collection(
+    owner_solana_wallet: str,
+    collection_address: str,
+) -> List[Dict[str, Any]]:
+    """Returns all DAS Asset records owned by ``owner`` that belong to ``collection``.
+
+    Uses the Metaplex DAS ``searchAssets`` RPC method. Iterates pages until
+    the provider returns fewer items than the page size or until we hit the
+    safety cap ``SOLANA_DAS_MAX_PAGES``. Raises ``HTTPException(503)`` if the
+    RPC is misconfigured / unreachable / returns a JSON-RPC error so the
+    caller can surface a clean "service unavailable" to the dashboard
+    instead of silently rendering an empty list.
+
+    The DAS endpoint must be a provider that implements DAS (Helius, Triton,
+    Quicknode, Shyft, …); plain ``api.mainnet-beta.solana.com`` does NOT.
+    """
+    rpc_url = SOLANA_DAS_RPC_URL.strip()
+    if not rpc_url:
+        logger.error(
+            "SOLANA_DAS_RPC_URL (or SOLANA_RPC_URL) is not configured; cannot list on-chain NFTs"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="On-chain NFT lookup is not configured on the server",
+        )
+    owner = (owner_solana_wallet or "").strip()
+    collection = (collection_address or "").strip()
+    if not owner or not collection:
+        return []
+
+    aggregated: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    page = 1
+    while page <= SOLANA_DAS_MAX_PAGES:
+        body = json.dumps({
+            "jsonrpc": "2.0",
+            "id": f"polystars-me-cards-p{page}",
+            "method": "searchAssets",
+            "params": {
+                "ownerAddress": owner,
+                "grouping": ["collection", collection],
+                "burnt": False,
+                "page": page,
+                "limit": SOLANA_DAS_PAGE_LIMIT,
+            },
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            rpc_url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "PolyStars user-web/1.0 (+DAS me-cards)",
+            },
+        )
+        try:
+            with urllib.request.urlopen(
+                req, timeout=SOLANA_DAS_REQUEST_TIMEOUT_SECONDS
+            ) as response:
+                status_code = int(getattr(response, "status", 200))
+                raw = response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            err_body = ""
+            try:
+                err_body = exc.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                pass
+            logger.warning(
+                "DAS searchAssets HTTP error code=%s owner=%s collection=%s body=%s",
+                exc.code,
+                owner,
+                collection,
+                err_body,
+            )
+            raise HTTPException(
+                status_code=503, detail="On-chain NFT lookup failed"
+            ) from exc
+        except (urllib.error.URLError, TimeoutError):
+            logger.exception(
+                "DAS searchAssets transport failure owner=%s collection=%s",
+                owner,
+                collection,
+            )
+            raise HTTPException(
+                status_code=503, detail="On-chain NFT lookup failed"
+            )
+
+        if status_code < 200 or status_code >= 300:
+            logger.warning(
+                "DAS searchAssets non-2xx status=%s body=%s",
+                status_code,
+                raw[:300],
+            )
+            raise HTTPException(
+                status_code=503, detail="On-chain NFT lookup failed"
+            )
+
+        try:
+            envelope = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            logger.warning("DAS searchAssets returned invalid JSON: %s", raw[:300])
+            raise HTTPException(
+                status_code=503, detail="On-chain NFT lookup failed"
+            )
+
+        if not isinstance(envelope, dict):
+            raise HTTPException(
+                status_code=503, detail="On-chain NFT lookup failed"
+            )
+        if envelope.get("error"):
+            logger.warning(
+                "DAS searchAssets returned RPC error owner=%s collection=%s error=%s",
+                owner,
+                collection,
+                envelope.get("error"),
+            )
+            raise HTTPException(
+                status_code=503, detail="On-chain NFT lookup failed"
+            )
+        result = envelope.get("result") or {}
+        items = result.get("items") if isinstance(result, dict) else None
+        if not isinstance(items, list):
+            items = []
+
+        # Defensive de-dup: some providers return overlapping pages.
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            asset_id = str(item.get("id") or "").strip()
+            if not asset_id or asset_id in seen_ids:
+                continue
+            seen_ids.add(asset_id)
+            aggregated.append(item)
+
+        if len(items) < SOLANA_DAS_PAGE_LIMIT:
+            break
+        page += 1
+
+    return aggregated
+
+
+def _extract_attribute_map(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Returns a flat ``{trait_type: value}`` mapping from a metadata JSON.
+
+    Mirrors the attribute layout produced by ``SolanaClient._build_card_attributes``
+    so the dashboard can hydrate ``season_type`` / ``season_number`` / ``phase``
+    purely from on-chain metadata. Unknown trait types are preserved as-is.
+    """
+    if not isinstance(metadata, dict):
+        return {}
+    raw_attrs = metadata.get("attributes")
+    if not isinstance(raw_attrs, list):
+        return {}
+    out: Dict[str, Any] = {}
+    for entry in raw_attrs:
+        if not isinstance(entry, dict):
+            continue
+        trait = str(entry.get("trait_type") or "").strip()
+        if not trait:
+            continue
+        out[trait] = entry.get("value")
+    return out
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, bool):
+            return int(value)
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+
+def _build_me_card_item_from_das_asset(
+    asset: Dict[str, Any],
+    metadata_json: Optional[Dict[str, Any]],
+    claims_enrichment: Dict[str, Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Maps a DAS Asset (+ off-chain JSON + DB row) to /api/me/cards item shape.
+
+    On-chain data is the source of truth for the *list* and for the visible
+    card content (name, images, slug, season type/number, phase,
+    collection_mint_number). The optional ``claims_enrichment`` lookup is
+    used solely to add ``claim_id``, ``season_id``, ``tx_hash``, ``minted_at``
+    when the same asset_address still has a matching DB row — these are not
+    available from DAS and are nice-to-have for explorer/timestamp links.
+    """
+    asset_address = str(asset.get("id") or "").strip()
+    if not asset_address:
+        return None
+
+    content = asset.get("content") if isinstance(asset.get("content"), dict) else {}
+    metadata_inline = (
+        content.get("metadata") if isinstance(content.get("metadata"), dict) else {}
+    )
+    json_uri = ""
+    if isinstance(content, dict):
+        json_uri = str(content.get("json_uri") or "").strip()
+
+    # Prefer the freshly-fetched off-chain JSON because it contains the full
+    # ``polystars_card`` block and any custom top-level fields. Fall back to
+    # the metadata inline-projected by the DAS provider if the URI fetch
+    # failed or returned nothing.
+    metadata_source: Dict[str, Any] = {}
+    if isinstance(metadata_json, dict) and metadata_json:
+        metadata_source = metadata_json
+    elif isinstance(metadata_inline, dict) and metadata_inline:
+        metadata_source = metadata_inline
+
+    visuals = _extract_nft_visuals_from_metadata(metadata_source) if metadata_source else {
+        "name": None,
+        "front_image_url": None,
+        "back_image_url": None,
+        "card_slug": None,
+    }
+
+    # If the off-chain JSON didn't yield images, fall back to DAS-supplied
+    # links/files (provider may host its own image proxy).
+    if not visuals.get("front_image_url"):
+        links = content.get("links") if isinstance(content.get("links"), dict) else {}
+        if isinstance(links, dict):
+            link_image = str(links.get("image") or "").strip() or None
+            if link_image:
+                visuals["front_image_url"] = link_image
+    if not visuals.get("front_image_url") or not visuals.get("back_image_url"):
+        files = content.get("files") if isinstance(content.get("files"), list) else []
+        for entry in files:
+            if not isinstance(entry, dict):
+                continue
+            uri_value = str(entry.get("uri") or "").strip()
+            if not uri_value:
+                continue
+            if not visuals.get("front_image_url"):
+                visuals["front_image_url"] = uri_value
+                continue
+            if uri_value != visuals.get("front_image_url") and not visuals.get("back_image_url"):
+                visuals["back_image_url"] = uri_value
+
+    if not visuals.get("name"):
+        inline_name = str(metadata_inline.get("name") or "").strip() if isinstance(metadata_inline, dict) else ""
+        if inline_name:
+            visuals["name"] = inline_name
+
+    attributes = _extract_attribute_map(metadata_source)
+    season_type = (
+        str(attributes.get("season_type") or "").strip().lower() or None
+    )
+    season_number = _coerce_int(attributes.get("season_number"))
+    phase = (
+        str(attributes.get("claim_type") or "").strip() or None
+    )
+
+    collection_mint_number: Optional[int] = None
+    polystars_card = metadata_source.get("polystars_card") if metadata_source else None
+    if isinstance(polystars_card, dict):
+        collection_mint_number = _coerce_int(polystars_card.get("collection_mint_number"))
+
+    ownership = asset.get("ownership") if isinstance(asset.get("ownership"), dict) else {}
+    owner_address = (
+        str(ownership.get("owner") or "").strip() or None if isinstance(ownership, dict) else None
+    )
+
+    enrichment = claims_enrichment.get(asset_address) or {}
+    claim_id = enrichment.get("claim_id")
+    season_id = enrichment.get("season_id")
+    tx_hash = enrichment.get("tx_hash")
+    minted_at_iso = enrichment.get("minted_at_iso")
+
+    return {
+        "claim_id": claim_id,
+        "asset_address": asset_address,
+        "tx_hash": tx_hash,
+        "metadata_uri": json_uri or None,
+        "recipient_solana_wallet": owner_address,
+        "season_id": season_id,
+        "season_type": season_type,
+        "season_number": season_number,
+        "phase": phase,
+        "collection_mint_number": collection_mint_number,
+        "name": visuals.get("name"),
+        "front_image_url": visuals.get("front_image_url"),
+        "back_image_url": visuals.get("back_image_url"),
+        "card_slug": visuals.get("card_slug"),
+        "explorer_asset_url": _build_solana_explorer_asset_url(asset_address),
+        "explorer_tx_url": _build_solana_explorer_tx_url(tx_hash) if tx_hash else None,
+        "minted_at": minted_at_iso,
+    }
+
+
+def _load_claims_enrichment_for_assets(
+    asset_addresses: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Best-effort lookup of DB-only fields (claim_id, season_id, tx_hash, minted_at).
+
+    We intentionally don't filter by ``user_wallet`` here: the source of truth
+    for ownership is on-chain. The DB enrichment is keyed purely on
+    ``asset_address`` so even an NFT that was transferred to the current owner
+    from another PolyStars user gets a tx_hash/minted_at if those exist in our
+    claims table.
+    """
+    cleaned = [str(addr or "").strip() for addr in asset_addresses if str(addr or "").strip()]
+    if not cleaned:
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    conn = _get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    c.id AS claim_id,
+                    c.asset_address,
+                    c.season_id,
+                    c.tx_hash,
+                    c.timestamp AS minted_at
+                FROM claims c
+                WHERE c.asset_address = ANY(%s)
+                  AND c.status = 'COMPLETED'
+                """,
+                (cleaned,),
+            )
+            for row in cursor.fetchall():
+                addr = str(row.get("asset_address") or "").strip()
+                if not addr:
+                    continue
+                minted_at = row.get("minted_at")
+                minted_at_iso: Optional[str] = None
+                if isinstance(minted_at, datetime):
+                    minted_at_iso = minted_at.astimezone(timezone.utc).isoformat()
+                out[addr] = {
+                    "claim_id": _coerce_int(row.get("claim_id")),
+                    "season_id": _coerce_int(row.get("season_id")),
+                    "tx_hash": (str(row.get("tx_hash") or "").strip() or None),
+                    "minted_at_iso": minted_at_iso,
+                }
+    except Exception:
+        # Enrichment is best-effort. A DB hiccup must not break the on-chain
+        # listing — the caller will simply render those auxiliary fields as
+        # null.
+        logger.exception("Failed to enrich on-chain NFTs from claims table")
+        return {}
+    finally:
+        conn.close()
+    return out
+
+
 def _fetch_polymarket_public_profile(wallet_address: str) -> Dict[str, Any]:
     query = urllib.parse.urlencode({"address": wallet_address})
     url = f"{POLYMARKET_GAMMA_API_BASE}/public-profile?{query}"
@@ -2228,129 +2690,154 @@ def polymarket_public_profile(request: Request) -> Dict[str, Any]:
 
 @app.get("/api/me/cards")
 def me_cards(request: Request) -> Dict[str, Any]:
-    """Returns the user's *actually-minted* on-chain Solana NFTs from this collection.
+    """Returns the NFTs the user's linked Solana wallet currently holds on-chain.
 
-    Source of truth is the ``claims`` table: only rows that finalized on Solana
-    (``status='COMPLETED'`` and ``asset_address IS NOT NULL``) represent real
-    NFTs the wallet received. Card visuals (front/back images) are pulled from
-    each NFT's on-chain ``metadata_uri`` JSON (Pinata IPFS), with a process-local
-    cache because IPFS content is immutable.
+    Source of truth is **on-chain ownership** of assets in
+    ``MASTER_COLLECTION_ADDRESS`` for the user's saved Solana wallet (set via
+    ``PUT /api/me/solana-wallet``). The list is queried through the Metaplex
+    DAS ``searchAssets`` RPC method on ``SOLANA_DAS_RPC_URL``. As a result:
+
+    * Selling/transferring an NFT immediately removes it from the dashboard.
+    * Receiving someone else's PolyStars NFT immediately shows it.
+    * Minting on-chain failures (no asset_address) never appear here even
+      if a row exists in the local ``claims`` table.
+
+    Card content (name, images, slug, season type/number, phase,
+    collection_mint_number) is hydrated from the asset's off-chain JSON
+    metadata (referenced by ``content.json_uri``), which is cached in
+    ``_nft_metadata_cache``. Auxiliary DB-only fields (``claim_id``,
+    ``season_id``, ``tx_hash``, ``minted_at``) are best-effort joined from
+    our ``claims`` table by ``asset_address`` to keep explorer-tx links
+    working; they are ``None`` for NFTs that were not minted via PolyStars
+    (e.g. transferred in from another wallet).
     """
     _require_wallet_actions_enabled()
     connected_wallet = _extract_wallet_from_request(request).lower()
     if not Web3.is_address(connected_wallet):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
 
-    conn = _get_connection()
+    linked_solana_wallet = _load_user_solana_wallet(connected_wallet)
+    collection_address = ""
     try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-            cursor.execute(
-                """
-                SELECT
-                    c.id AS claim_id,
-                    c.collection_mint_number,
-                    c.user_wallet,
-                    c.recipient_solana_wallet,
-                    c.season_id,
-                    c.phase_type,
-                    c.tx_hash,
-                    c.metadata_uri,
-                    c.asset_address,
-                    c.timestamp AS minted_at,
-                    s.type AS season_type,
-                    s.season_number AS season_number
-                FROM claims c
-                LEFT JOIN seasons s ON s.id = c.season_id
-                WHERE LOWER(c.user_wallet) = LOWER(%s)
-                  AND c.status = 'COMPLETED'
-                  AND c.asset_address IS NOT NULL
-                  AND BTRIM(c.asset_address) <> ''
-                ORDER BY c.timestamp DESC, c.id DESC
-                """,
-                (connected_wallet,),
-            )
-            rows = [dict(row) for row in cursor.fetchall()]
+        collection_address = (mint_service.get_master_collection_address() or "").strip()
     except Exception:
-        logger.exception("Failed to load minted NFTs for wallet=%s", connected_wallet)
-        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
-    finally:
-        conn.close()
+        logger.exception("Failed to resolve MASTER_COLLECTION_ADDRESS for /api/me/cards")
+        collection_address = ""
 
-    # Resolve front/back images by fetching each NFT's metadata JSON in parallel.
-    # Cache hits resolve instantly; only first sighting of a metadata_uri pays the
-    # network roundtrip.
-    metadata_uris = [str(row.get("metadata_uri") or "").strip() for row in rows]
-    visuals_by_uri: Dict[str, Dict[str, Optional[str]]] = {}
-    unique_uris = [uri for uri in dict.fromkeys(metadata_uris) if uri]
+    response_envelope_base: Dict[str, Any] = {
+        "wallet_address": connected_wallet,
+        "linked_solana_wallet": linked_solana_wallet,
+        "collection_address": collection_address or None,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # No linked Solana wallet → nothing to query on-chain. Return an empty
+    # listing rather than an error so the dashboard can prompt the user to
+    # link a Solana wallet via the existing UX.
+    if not linked_solana_wallet:
+        return {
+            **response_envelope_base,
+            "items": [],
+            "total": 0,
+            "source": "onchain",
+            "reason": "no_linked_solana_wallet",
+        }
+
+    if not collection_address:
+        logger.error(
+            "MASTER_COLLECTION_ADDRESS is not configured; /api/me/cards cannot list on-chain NFTs"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Collection address is not configured on the server",
+        )
+
+    cache_key = (linked_solana_wallet.lower(), collection_address.lower())
+    now_monotonic = monotonic()
+    if ME_CARDS_ONCHAIN_CACHE_TTL_SECONDS > 0:
+        with _me_cards_onchain_cache_lock:
+            cached = _me_cards_onchain_cache.get(cache_key)
+            if cached and cached[0] > now_monotonic:
+                return {
+                    **response_envelope_base,
+                    **cached[1],
+                    "source": "onchain",
+                    "cached": True,
+                }
+
+    assets = _das_search_assets_by_owner_and_collection(
+        owner_solana_wallet=linked_solana_wallet,
+        collection_address=collection_address,
+    )
+
+    # Defensive double-check: filter out anything DAS may have leaked through
+    # without an owner match (provider bugs / cached responses). Compare
+    # case-sensitively because Solana addresses are base58 — case matters.
+    owned_assets: List[Dict[str, Any]] = []
+    for asset in assets:
+        ownership = asset.get("ownership") if isinstance(asset.get("ownership"), dict) else {}
+        owner_addr = str(ownership.get("owner") or "").strip() if isinstance(ownership, dict) else ""
+        burnt = bool(asset.get("burnt"))
+        if burnt:
+            continue
+        if owner_addr and owner_addr != linked_solana_wallet:
+            continue
+        owned_assets.append(asset)
+
+    # Hydrate off-chain metadata in parallel (cached → near-instant on warm hits).
+    json_uris = [
+        str((a.get("content") or {}).get("json_uri") or "").strip() for a in owned_assets
+    ]
+    metadata_by_uri: Dict[str, Dict[str, Any]] = {}
+    unique_uris = [uri for uri in dict.fromkeys(json_uris) if uri]
     if unique_uris:
         max_workers = min(SOLANA_NFT_METADATA_PARALLEL_FETCHES, len(unique_uris))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            for uri, visuals in zip(
+            for uri, raw_metadata in zip(
                 unique_uris,
-                pool.map(_resolve_nft_visuals_for_metadata_uri, unique_uris),
+                pool.map(_fetch_full_nft_metadata_for_uri, unique_uris),
             ):
-                visuals_by_uri[uri] = visuals
+                if isinstance(raw_metadata, dict):
+                    metadata_by_uri[uri] = raw_metadata
+
+    asset_addresses = [str(a.get("id") or "").strip() for a in owned_assets]
+    enrichment = _load_claims_enrichment_for_assets(asset_addresses)
 
     items: List[Dict[str, Any]] = []
-    for row in rows:
-        asset_address = str(row.get("asset_address") or "").strip()
-        if not asset_address:
+    for asset, json_uri in zip(owned_assets, json_uris):
+        item = _build_me_card_item_from_das_asset(
+            asset=asset,
+            metadata_json=metadata_by_uri.get(json_uri),
+            claims_enrichment=enrichment,
+        )
+        if item is None:
             continue
-        metadata_uri = str(row.get("metadata_uri") or "").strip()
-        visuals = visuals_by_uri.get(metadata_uri, {
-            "name": None,
-            "front_image_url": None,
-            "back_image_url": None,
-            "card_slug": None,
-        })
-        season_type = str(row.get("season_type") or "").strip() or None
-        season_number_raw = row.get("season_number")
-        try:
-            season_number = int(season_number_raw) if season_number_raw is not None else None
-        except (TypeError, ValueError):
-            season_number = None
-        collection_mint_number_raw = row.get("collection_mint_number")
-        try:
-            collection_mint_number = (
-                int(collection_mint_number_raw) if collection_mint_number_raw is not None else None
-            )
-        except (TypeError, ValueError):
-            collection_mint_number = None
-        minted_at = row.get("minted_at")
-        if isinstance(minted_at, datetime):
-            minted_at_iso: Optional[str] = minted_at.astimezone(timezone.utc).isoformat()
-        else:
-            minted_at_iso = None
-        tx_hash = str(row.get("tx_hash") or "").strip() or None
-        recipient_solana_wallet = str(row.get("recipient_solana_wallet") or "").strip() or None
-        phase_type_raw = row.get("phase_type")
-        phase_type = str(phase_type_raw).strip() if phase_type_raw is not None else None
+        items.append(item)
 
-        items.append({
-            "claim_id": int(row.get("claim_id")),
-            "asset_address": asset_address,
-            "tx_hash": tx_hash,
-            "metadata_uri": metadata_uri or None,
-            "recipient_solana_wallet": recipient_solana_wallet,
-            "season_id": int(row.get("season_id")) if row.get("season_id") is not None else None,
-            "season_type": season_type,
-            "season_number": season_number,
-            "phase": phase_type,
-            "collection_mint_number": collection_mint_number,
-            "name": visuals.get("name"),
-            "front_image_url": visuals.get("front_image_url"),
-            "back_image_url": visuals.get("back_image_url"),
-            "card_slug": visuals.get("card_slug"),
-            "explorer_asset_url": _build_solana_explorer_asset_url(asset_address),
-            "explorer_tx_url": _build_solana_explorer_tx_url(tx_hash) if tx_hash else None,
-            "minted_at": minted_at_iso,
-        })
+    # Sort newest-first using the best timestamp we have. Items without a
+    # known minted_at (no matching DB row) are kept at the end so they remain
+    # visible but don't pollute the "recently minted" head of the list.
+    items.sort(
+        key=lambda entry: (
+            0 if entry.get("minted_at") else 1,
+            -(_iso_to_epoch_seconds(entry.get("minted_at"))),
+            str(entry.get("asset_address") or ""),
+        )
+    )
+
+    payload_body = {"items": items, "total": len(items)}
+    if ME_CARDS_ONCHAIN_CACHE_TTL_SECONDS > 0:
+        with _me_cards_onchain_cache_lock:
+            _me_cards_onchain_cache[cache_key] = (
+                now_monotonic + ME_CARDS_ONCHAIN_CACHE_TTL_SECONDS,
+                payload_body,
+            )
 
     return {
-        "wallet_address": connected_wallet,
-        "items": items,
-        "total": len(items),
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        **response_envelope_base,
+        **payload_body,
+        "source": "onchain",
+        "cached": False,
     }
 
 
