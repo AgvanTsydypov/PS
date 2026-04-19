@@ -459,12 +459,16 @@ export default function UserDashboard() {
       didHydrateMyCardFlipsRef.current = true;
       return;
     }
-    const existingSlugs = new Set(myCards.map((item) => item.slug));
+    // The flip map is keyed by asset_address (see flipKey = item.asset_address
+    // below), not by card_slug. The historical variable name `existingSlugs`
+    // is kept to match the surrounding code, but the values are NFT mint
+    // (asset) addresses.
+    const existingKeys = new Set(myCards.map((item) => item.asset_address));
     const restored: Record<string, boolean> = {};
-    Object.entries(persisted).forEach(([slug, flipped]) => {
+    Object.entries(persisted).forEach(([key, flipped]) => {
       if (!flipped) return;
-      if (!existingSlugs.has(slug)) return;
-      restored[slug] = true;
+      if (!existingKeys.has(key)) return;
+      restored[key] = true;
     });
     setFlippedCardSlugs(restored);
     didHydrateMyCardFlipsRef.current = true;
