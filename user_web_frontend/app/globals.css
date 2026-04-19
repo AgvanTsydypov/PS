@@ -394,6 +394,8 @@ main {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+  position: relative;
+  z-index: 5;
 }
 
 .nft-fetched-at {

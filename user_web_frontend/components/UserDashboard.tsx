@@ -15,7 +15,6 @@ import {
   handleCardGridMouseLeave,
   handleCardGridMouseMove,
   markCardPressStart,
-  navigateToCardIfCenterClick,
   triggerCardFlip,
 } from "./cardInteractions";
 import SiteLogoLink from "./SiteLogoLink";
@@ -132,43 +131,29 @@ type StoredSessionMeta = {
   challengeId?: string;
 };
 
-type GeneratedCardPayload = {
-  card_title?: string;
-  primary_tag?: string;
-  secondary_tag?: string;
-  season_type?: string;
-  season_number?: number;
-  archetype?: string;
-  leaderboard_rank?: number;
-  border_color?: string;
-  [key: string]: unknown;
+type MyMintedNftItem = {
+  claim_id: number;
+  asset_address: string;
+  tx_hash: string | null;
+  metadata_uri: string | null;
+  recipient_solana_wallet: string | null;
+  season_id: number | null;
+  season_type: string | null;
+  season_number: number | null;
+  phase: string | null;
+  collection_mint_number: number | null;
+  name: string | null;
+  front_image_url: string | null;
+  back_image_url: string | null;
+  explorer_asset_url: string | null;
+  explorer_tx_url: string | null;
+  minted_at: string | null;
 };
 
-type GeneratedCardItem = {
-  id: number;
-  slug: string;
-  owner_wallet: string;
-  owner_proxy_wallet?: string | null;
-  winner_row_id: number;
-  season_id: number;
-  event_id?: string | null;
-  event_slug?: string | null;
-  card_title?: string | null;
-  primary_tag?: string | null;
-  secondary_tag?: string | null;
-  pattern?: string | null;
-  front_image_url: string;
-  back_image_url: string;
-  card_payload_json?: GeneratedCardPayload;
-  created_at: string;
-};
-
-type GeneratedCardsResponse = {
+type MyMintedNftsResponse = {
   wallet_address: string;
-  items: GeneratedCardItem[];
+  items: MyMintedNftItem[];
   total: number;
-  total_available: number;
-  remaining_available: number;
   fetched_at: string;
 };
 
@@ -306,12 +291,10 @@ export default function UserDashboard() {
   const [signInCount, setSignInCount] = useState<number | null>(null);
   const [proxyWallet, setProxyWallet] = useState<string | null>(null);
   const [traderRank, setTraderRank] = useState<string | null>(null);
-  const [myCards, setMyCards] = useState<GeneratedCardItem[]>([]);
+  const [myCards, setMyCards] = useState<MyMintedNftItem[]>([]);
   const [myCardsLoading, setMyCardsLoading] = useState(false);
   const [myCardsError, setMyCardsError] = useState("");
   const [myCardsFetchedAt, setMyCardsFetchedAt] = useState<string | null>(null);
-  const [generatedCardsTotalAvailable, setGeneratedCardsTotalAvailable] = useState(0);
-  const [generatedCardsRemainingAvailable, setGeneratedCardsRemainingAvailable] = useState(0);
   const [flippedCardSlugs, setFlippedCardSlugs] = useState<Record<string, boolean>>({});
   const [solanaWallet, setSolanaWallet] = useState<string | null>(null);
   const [solanaWalletInput, setSolanaWalletInput] = useState("");
@@ -422,8 +405,6 @@ export default function UserDashboard() {
       setMyCards([]);
       setMyCardsError("");
       setMyCardsFetchedAt(null);
-      setGeneratedCardsTotalAvailable(0);
-      setGeneratedCardsRemainingAvailable(0);
       setFlippedCardSlugs({});
       setSolanaWallet(null);
       setSolanaWalletInput("");
@@ -569,8 +550,6 @@ export default function UserDashboard() {
       setMyCards([]);
       setMyCardsError("");
       setMyCardsFetchedAt(null);
-      setGeneratedCardsTotalAvailable(0);
-      setGeneratedCardsRemainingAvailable(0);
       return;
     }
 
@@ -593,20 +572,16 @@ export default function UserDashboard() {
           clearStoredSessionMeta();
         }
         const text = await res.text();
-        throw new Error(text || "Failed to load generated cards");
+        throw new Error(text || "Failed to load minted NFTs");
       }
-      const payload = (await res.json()) as GeneratedCardsResponse;
+      const payload = (await res.json()) as MyMintedNftsResponse;
       setMyCards(Array.isArray(payload.items) ? payload.items : []);
       setMyCardsFetchedAt(String(payload.fetched_at ?? ""));
-      setGeneratedCardsTotalAvailable(Number(payload.total_available) || 0);
-      setGeneratedCardsRemainingAvailable(Number(payload.remaining_available) || 0);
       setMyCardsError("");
     } catch (error) {
       setMyCardsError(extractErrorMessage(error));
       setMyCards([]);
       setMyCardsFetchedAt(null);
-      setGeneratedCardsTotalAvailable(0);
-      setGeneratedCardsRemainingAvailable(0);
     } finally {
       setMyCardsLoading(false);
     }
@@ -622,8 +597,6 @@ export default function UserDashboard() {
     setMyCards([]);
     setMyCardsError("");
     setMyCardsFetchedAt(null);
-    setGeneratedCardsTotalAvailable(0);
-    setGeneratedCardsRemainingAvailable(0);
     setFlippedCardSlugs({});
     setSolanaWallet(null);
     setSolanaWalletInput("");
@@ -728,8 +701,6 @@ export default function UserDashboard() {
         setMyCards([]);
         setMyCardsError("");
         setMyCardsFetchedAt(null);
-        setGeneratedCardsTotalAvailable(0);
-        setGeneratedCardsRemainingAvailable(0);
         clearStoredSessionMeta();
       }
     } catch (error) {
@@ -740,8 +711,6 @@ export default function UserDashboard() {
       setMyCards([]);
       setMyCardsError("");
       setMyCardsFetchedAt(null);
-      setGeneratedCardsTotalAvailable(0);
-      setGeneratedCardsRemainingAvailable(0);
       setMintResultText("");
       setMintError("");
       void clearServerSessionCookie();
@@ -782,8 +751,6 @@ export default function UserDashboard() {
       setMyCards([]);
       setMyCardsError("");
       setMyCardsFetchedAt(null);
-      setGeneratedCardsTotalAvailable(0);
-      setGeneratedCardsRemainingAvailable(0);
       setMintResultText("");
       setMintError("");
       void clearServerSessionCookie();
@@ -1296,14 +1263,14 @@ export default function UserDashboard() {
       </section>
 
       <section className="season-board season-board-standalone nft-board-horizontal">
-        <div className="season-board-title">My Cards</div>
+        <div className="season-board-title">My NFTs</div>
         {!isSignedIn ? (
-          <div className="season-board-muted">Sign in to view your minted cards.</div>
+          <div className="season-board-muted">Sign in to view your minted NFTs.</div>
         ) : (
           <>
             <div className="nft-actions">
               <button onClick={() => void refreshMyCards()} disabled={myCardsLoading}>
-                {myCardsLoading ? "Loading cards..." : "Reload my cards"}
+                {myCardsLoading ? "Loading NFTs..." : "Reload my NFTs"}
               </button>
               {myCardsFetchedAt ? (
                 <span className="nft-fetched-at">
@@ -1312,10 +1279,10 @@ export default function UserDashboard() {
               ) : null}
             </div>
             {myCardsError ? (
-              <pre className="eligibility-output">Card load failed: {myCardsError}</pre>
+              <pre className="eligibility-output">NFT load failed: {myCardsError}</pre>
             ) : null}
             {!myCardsLoading && !myCardsError && myCards.length === 0 ? (
-              <div className="season-board-muted">No generated cards in this wallet yet.</div>
+              <div className="season-board-muted">No minted NFTs for this wallet yet.</div>
             ) : null}
             <div className="nft-grid-wrap">
               <div
@@ -1329,52 +1296,56 @@ export default function UserDashboard() {
                 onMouseLeave={(event) => handleCardGridMouseLeave(event, ".nft-card-tilt")}
               >
                 {myCards.map((item) => {
-                  const isFlipped = Boolean(flippedCardSlugs[item.slug]);
-                  const isAnimating = Boolean(animatingCardSlugs[item.slug]);
+                  const flipKey = item.asset_address;
+                  const isFlipped = Boolean(flippedCardSlugs[flipKey]);
+                  const isAnimating = Boolean(animatingCardSlugs[flipKey]);
+                  const explorerUrl = item.explorer_asset_url ?? null;
+                  const titleParts: string[] = [];
+                  if (item.name) titleParts.push(item.name);
+                  if (item.season_type && item.season_number != null) {
+                    titleParts.push(`${item.season_type} #${item.season_number}`);
+                  }
+                  if (item.collection_mint_number != null) {
+                    titleParts.push(`mint #${item.collection_mint_number}`);
+                  }
+                  const cardLabel = titleParts.join(" · ") || item.asset_address;
                   return (
                     <div
-                      key={item.slug}
+                      key={item.asset_address}
                       className="generated-card-wrapper"
                     >
                       <div className="nft-card-wrapper generated-card-preview-wrapper">
-                        <Link
-                          href={`/cards/${encodeURIComponent(item.slug)}`}
-                          className="card-center-hotspot"
-                          tabIndex={-1}
-                          aria-label={`Open card: ${item.slug}`}
-                        />
+                        {explorerUrl ? (
+                          <a
+                            href={explorerUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="card-center-hotspot"
+                            tabIndex={-1}
+                            aria-label={`Open NFT on Solana Explorer: ${cardLabel}`}
+                          />
+                        ) : null}
                         <article
                           className={`nft-card nft-card-tilt theme-vivid generated-card-shell generated-card-preview-card ${isAnimating ? "generated-card-preview-card-flipping" : ""}`}
-                          style={{"--card-border-color": item.card_payload_json?.border_color ?? "#B6BBC8"} as React.CSSProperties}
-                          data-center-navigate="1"
+                          style={{"--card-border-color": "#B6BBC8"} as React.CSSProperties}
                           onPointerDown={(event) => {
                             markCardPressStart(event.currentTarget, event.clientX, event.clientY);
                           }}
                           onClick={(event) => {
-                            if (
-                              navigateToCardIfCenterClick(
-                                event.currentTarget,
-                                item.slug,
-                                event.clientX,
-                                event.clientY,
-                              )
-                            ) {
-                              return;
-                            }
-                            triggerGeneratedCardFlip(item.slug, event.currentTarget);
+                            triggerGeneratedCardFlip(flipKey, event.currentTarget);
                           }}
                         >
                           <div className={`generated-card-flip-inner ${isFlipped ? "is-flipped" : ""}`}>
                             <div className="generated-card-flip-face generated-card-flip-face-front">
                               {item.front_image_url ? (
-                                <InlineSvgCard className="generated-card-image" url={item.front_image_url} alt={item.slug} />
+                                <InlineSvgCard className="generated-card-image" url={item.front_image_url} alt={cardLabel} />
                               ) : (
                                 <div className="generated-card-image nft-image-empty">No preview</div>
                               )}
                             </div>
                             <div className="generated-card-flip-face generated-card-flip-face-back">
                               {item.back_image_url ? (
-                                <InlineSvgCard className="generated-card-image" url={item.back_image_url} alt={`${item.slug} back`} />
+                                <InlineSvgCard className="generated-card-image" url={item.back_image_url} alt={`${cardLabel} back`} />
                               ) : (
                                 <div className="generated-card-image nft-image-empty">No back preview</div>
                               )}
