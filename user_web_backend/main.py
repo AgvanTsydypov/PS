@@ -286,6 +286,21 @@ POLYMARKET_RANK_SENTINEL_VALUES = frozenset({
     PM_NOT_REGISTERED_VALUE.casefold(),
     NO_TRADES_YET_VALUE.casefold(),
 })
+# Solana / minted NFT lookup configuration. Used by /api/me/cards to render the
+# user's actual on-chain NFTs (claims rows that finalized on Solana) instead of
+# previewed/generated cards from user_generated_cards.
+SOLANA_RPC_URL_FOR_EXPLORER = os.getenv("SOLANA_RPC_URL", "").strip()
+SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS = float(
+    os.getenv("USER_WEB_NFT_METADATA_FETCH_TIMEOUT_SECONDS", "6")
+)
+SOLANA_NFT_METADATA_CACHE_MAX_ENTRIES = int(
+    os.getenv("USER_WEB_NFT_METADATA_CACHE_MAX_ENTRIES", "2000")
+)
+SOLANA_NFT_METADATA_PARALLEL_FETCHES = max(
+    1, int(os.getenv("USER_WEB_NFT_METADATA_PARALLEL_FETCHES", "8"))
+)
+_nft_metadata_cache_lock = threading.Lock()
+_nft_metadata_cache: "Dict[str, Dict[str, Optional[str]]]" = {}
 CLAIMS_UNIQUENESS_INDEX_NAME = "ux_claims_active_season_user_wallet_lower"
 _r2_client: Any = None
 
@@ -1291,6 +1306,134 @@ def _format_generated_card_row(row: Dict[str, Any], request: Request, include_pa
     return payload
 
 
+def _solana_explorer_cluster_suffix() -> str:
+    """Returns the ?cluster=... suffix matching SOLANA_RPC_URL for explorer links."""
+    rpc = SOLANA_RPC_URL_FOR_EXPLORER.lower()
+    if "devnet" in rpc:
+        return "?cluster=devnet"
+    if "testnet" in rpc:
+        return "?cluster=testnet"
+    return ""
+
+
+def _build_solana_explorer_asset_url(asset_address: str) -> Optional[str]:
+    addr = (asset_address or "").strip()
+    if not addr:
+        return None
+    return f"https://explorer.solana.com/address/{addr}{_solana_explorer_cluster_suffix()}"
+
+
+def _build_solana_explorer_tx_url(tx_hash: str) -> Optional[str]:
+    tx = (tx_hash or "").strip()
+    if not tx:
+        return None
+    return f"https://explorer.solana.com/tx/{tx}{_solana_explorer_cluster_suffix()}"
+
+
+def _decode_data_uri_json(metadata_uri: str) -> Optional[Dict[str, Any]]:
+    """Decode a data:application/json[;base64],... metadata URI used as Pinata fallback."""
+    if not metadata_uri.startswith("data:"):
+        return None
+    try:
+        header, _, body = metadata_uri.partition(",")
+        if not body:
+            return None
+        if ";base64" in header:
+            raw = base64.b64decode(body)
+            text = raw.decode("utf-8", errors="replace")
+        else:
+            text = urllib.parse.unquote(body)
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _extract_nft_visuals_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    """Pull (name, front, back) image URLs out of a Metaplex-style NFT metadata JSON.
+
+    Mirrors the layout produced by ``SolanaClient._build_metadata_uri``: the
+    primary front image is in ``image``, and ``properties.files`` lists ``[front, back]``
+    so the back image is the first ``files[].uri`` that differs from ``image``.
+    """
+    name = str(metadata.get("name") or "").strip() or None
+    front = str(metadata.get("image") or "").strip() or None
+    back: Optional[str] = None
+    properties = metadata.get("properties")
+    if isinstance(properties, dict):
+        files = properties.get("files")
+        if isinstance(files, list):
+            for entry in files:
+                if not isinstance(entry, dict):
+                    continue
+                uri_value = str(entry.get("uri") or "").strip()
+                if not uri_value:
+                    continue
+                if front and uri_value == front:
+                    continue
+                back = uri_value
+                break
+    return {"name": name, "front_image_url": front, "back_image_url": back}
+
+
+def _resolve_nft_visuals_for_metadata_uri(metadata_uri: str) -> Dict[str, Optional[str]]:
+    """Fetch (with caching) NFT image URLs by metadata URI.
+
+    The cache is keyed by the URI itself; IPFS content is immutable so a single
+    successful fetch can be reused across requests. Returns a dict with
+    ``name``, ``front_image_url``, ``back_image_url`` (any of which may be None).
+    A negative result (failed fetch) is also cached as empty values to avoid
+    hammering a slow gateway on every page load.
+    """
+    uri = (metadata_uri or "").strip()
+    empty: Dict[str, Optional[str]] = {"name": None, "front_image_url": None, "back_image_url": None}
+    if not uri:
+        return empty
+
+    with _nft_metadata_cache_lock:
+        cached = _nft_metadata_cache.get(uri)
+        if cached is not None:
+            return dict(cached)
+
+    metadata: Optional[Dict[str, Any]] = None
+    if uri.startswith("data:"):
+        metadata = _decode_data_uri_json(uri)
+    else:
+        try:
+            req = urllib.request.Request(
+                uri,
+                method="GET",
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (PolyStars user-web)",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS) as response:
+                status_code = int(getattr(response, "status", 200))
+                if 200 <= status_code < 300:
+                    body = response.read().decode("utf-8", errors="replace")
+                    if body:
+                        try:
+                            metadata = json.loads(body)
+                        except json.JSONDecodeError:
+                            metadata = None
+        except Exception:
+            metadata = None
+
+    visuals = _extract_nft_visuals_from_metadata(metadata) if isinstance(metadata, dict) else dict(empty)
+
+    with _nft_metadata_cache_lock:
+        if len(_nft_metadata_cache) >= SOLANA_NFT_METADATA_CACHE_MAX_ENTRIES:
+            # Drop one arbitrary entry; not LRU but bounded — enough for a
+            # process-local cache backed by immutable IPFS content.
+            try:
+                _nft_metadata_cache.pop(next(iter(_nft_metadata_cache)))
+            except StopIteration:
+                pass
+        _nft_metadata_cache[uri] = dict(visuals)
+
+    return visuals
+
+
 def _fetch_polymarket_public_profile(wallet_address: str) -> Dict[str, Any]:
     query = urllib.parse.urlencode({"address": wallet_address})
     url = f"{POLYMARKET_GAMMA_API_BASE}/public-profile?{query}"
@@ -1909,6 +2052,14 @@ def polymarket_public_profile(request: Request) -> Dict[str, Any]:
 
 @app.get("/api/me/cards")
 def me_cards(request: Request) -> Dict[str, Any]:
+    """Returns the user's *actually-minted* on-chain Solana NFTs from this collection.
+
+    Source of truth is the ``claims`` table: only rows that finalized on Solana
+    (``status='COMPLETED'`` and ``asset_address IS NOT NULL``) represent real
+    NFTs the wallet received. Card visuals (front/back images) are pulled from
+    each NFT's on-chain ``metadata_uri`` JSON (Pinata IPFS), with a process-local
+    cache because IPFS content is immutable.
+    """
     _require_wallet_actions_enabled()
     connected_wallet = _extract_wallet_from_request(request).lower()
     if not Web3.is_address(connected_wallet):
@@ -1920,43 +2071,107 @@ def me_cards(request: Request) -> Dict[str, Any]:
             cursor.execute(
                 """
                 SELECT
-                    id,
-                    collection_mint_number,
-                    slug,
-                    owner_wallet,
-                    owner_proxy_wallet,
-                    winner_row_id,
-                    season_id,
-                    event_id,
-                    event_slug,
-                    card_title,
-                    primary_tag,
-                    secondary_tag,
-                    pattern,
-                    front_image_path,
-                    back_image_path,
-                    card_payload_json,
-                    created_at
-                FROM user_generated_cards
-                WHERE LOWER(owner_wallet) = LOWER(%s)
-                ORDER BY created_at DESC, id DESC
+                    c.id AS claim_id,
+                    c.collection_mint_number,
+                    c.user_wallet,
+                    c.recipient_solana_wallet,
+                    c.season_id,
+                    c.phase_type,
+                    c.tx_hash,
+                    c.metadata_uri,
+                    c.asset_address,
+                    c.timestamp AS minted_at,
+                    s.type AS season_type,
+                    s.season_number AS season_number
+                FROM claims c
+                LEFT JOIN seasons s ON s.id = c.season_id
+                WHERE LOWER(c.user_wallet) = LOWER(%s)
+                  AND c.status = 'COMPLETED'
+                  AND c.asset_address IS NOT NULL
+                  AND BTRIM(c.asset_address) <> ''
+                ORDER BY c.timestamp DESC, c.id DESC
                 """,
                 (connected_wallet,),
             )
             rows = [dict(row) for row in cursor.fetchall()]
-            total_available, remaining_available = _generated_cards_supply_counts(cursor)
     except Exception:
-        logger.exception("Failed to load generated cards for wallet=%s", connected_wallet)
+        logger.exception("Failed to load minted NFTs for wallet=%s", connected_wallet)
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
     finally:
         conn.close()
 
+    # Resolve front/back images by fetching each NFT's metadata JSON in parallel.
+    # Cache hits resolve instantly; only first sighting of a metadata_uri pays the
+    # network roundtrip.
+    metadata_uris = [str(row.get("metadata_uri") or "").strip() for row in rows]
+    visuals_by_uri: Dict[str, Dict[str, Optional[str]]] = {}
+    unique_uris = [uri for uri in dict.fromkeys(metadata_uris) if uri]
+    if unique_uris:
+        max_workers = min(SOLANA_NFT_METADATA_PARALLEL_FETCHES, len(unique_uris))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for uri, visuals in zip(
+                unique_uris,
+                pool.map(_resolve_nft_visuals_for_metadata_uri, unique_uris),
+            ):
+                visuals_by_uri[uri] = visuals
+
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        asset_address = str(row.get("asset_address") or "").strip()
+        if not asset_address:
+            continue
+        metadata_uri = str(row.get("metadata_uri") or "").strip()
+        visuals = visuals_by_uri.get(metadata_uri, {
+            "name": None,
+            "front_image_url": None,
+            "back_image_url": None,
+        })
+        season_type = str(row.get("season_type") or "").strip() or None
+        season_number_raw = row.get("season_number")
+        try:
+            season_number = int(season_number_raw) if season_number_raw is not None else None
+        except (TypeError, ValueError):
+            season_number = None
+        collection_mint_number_raw = row.get("collection_mint_number")
+        try:
+            collection_mint_number = (
+                int(collection_mint_number_raw) if collection_mint_number_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            collection_mint_number = None
+        minted_at = row.get("minted_at")
+        if isinstance(minted_at, datetime):
+            minted_at_iso: Optional[str] = minted_at.astimezone(timezone.utc).isoformat()
+        else:
+            minted_at_iso = None
+        tx_hash = str(row.get("tx_hash") or "").strip() or None
+        recipient_solana_wallet = str(row.get("recipient_solana_wallet") or "").strip() or None
+        phase_type_raw = row.get("phase_type")
+        phase_type = str(phase_type_raw).strip() if phase_type_raw is not None else None
+
+        items.append({
+            "claim_id": int(row.get("claim_id")),
+            "asset_address": asset_address,
+            "tx_hash": tx_hash,
+            "metadata_uri": metadata_uri or None,
+            "recipient_solana_wallet": recipient_solana_wallet,
+            "season_id": int(row.get("season_id")) if row.get("season_id") is not None else None,
+            "season_type": season_type,
+            "season_number": season_number,
+            "phase": phase_type,
+            "collection_mint_number": collection_mint_number,
+            "name": visuals.get("name"),
+            "front_image_url": visuals.get("front_image_url"),
+            "back_image_url": visuals.get("back_image_url"),
+            "explorer_asset_url": _build_solana_explorer_asset_url(asset_address),
+            "explorer_tx_url": _build_solana_explorer_tx_url(tx_hash) if tx_hash else None,
+            "minted_at": minted_at_iso,
+        })
+
     return {
         "wallet_address": connected_wallet,
-        "items": [_format_generated_card_row(row, request=request, include_payload=True) for row in rows],
-        "total": len(rows),
-        "total_available": total_available,
-        "remaining_available": remaining_available,
+        "items": items,
+        "total": len(items),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
 
