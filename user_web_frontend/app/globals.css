@@ -165,6 +165,11 @@ body {
   width: min(100%, 680px);
   min-width: 0;
   justify-self: center;
+  /* Pin the central column explicitly so the layout does not collapse to
+     the top-left when the side ticker panels are not rendered yet (initial
+     load before /api/cards/ticker resolves) or are empty. Without this,
+     CSS Grid auto-places the only child into the first column. */
+  grid-column: 2 / 3;
 }
 
 .home-showcase-center-mobile {
@@ -204,6 +209,18 @@ body {
 
 .home-card-panel-right {
   justify-self: start;
+}
+
+/* Placeholder rendered while the ticker has no items so the 3-column grid
+   keeps its shape from the very first paint. Holds the column width but
+   does not contribute any visible content/height. */
+.home-card-panel-empty {
+  min-height: 0;
+  height: 0;
+  padding: 0;
+  border: 0;
+  pointer-events: none;
+  visibility: hidden;
 }
 
 .home-card-panel-viewport {
@@ -938,6 +955,9 @@ main {
 
   .home-showcase-center {
     order: 1;
+    /* Reset the desktop pin (grid-column: 2/3) for the single-column
+       mobile grid, otherwise the center would land in an implicit column. */
+    grid-column: auto;
   }
 
   .home-card-panel-left {
@@ -1349,19 +1369,63 @@ button:disabled {
 
 .generated-card-preview-wrapper {
   width: 249px;
-}
+  /* Fix the layout box at the visual rest size so the supersampled card-shell
+     (rendered at --card-render-scale × native size and counter-scaled below)
+     can be absolutely centered inside without disturbing surrounding layout
+     or the card-flip-hitbox positions.
 
-.generated-card-shell {
-  width: 249px;
+     The explicit `flex: 0 0 386px` overrides the generic `.nft-card-wrapper`
+     rule (`flex: 0 0 calc((100% - 60px) / 7)`). That generic rule was
+     designed for a row flex container (`.nft-grid`), but here the wrapper
+     lives inside a column-flex `.generated-card-wrapper` with no explicit
+     height — the calc()'s indefinite percentage collapses, and since the
+     supersampled `.generated-card-shell` is now position: absolute (so it no
+     longer contributes to the wrapper's content height), the wrapper would
+     otherwise shrink and clip the card's top/bottom. */
   height: 386px;
-  min-height: 386px;
-  border-radius: 0;
-  cursor: pointer;
+  flex: 0 0 386px;
+  position: relative;
   overflow: visible;
 }
 
+/* ── Card supersampling ──────────────────────────────────────────────────────
+   The .nft-card-tilt has will-change: transform + transform-style: preserve-3d,
+   so Chrome promotes it to a GPU compositor layer. That layer is rasterized
+   once at its CSS size, then bitmap-stretched when transform: scale(1.33) is
+   applied on hover — which makes the inline SVG look blurry even though the
+   source is vector.
+
+   The fix: render the layer at --card-render-scale × the visual size and
+   counter-scale at rest. The cached bitmap has enough pixels that the hover
+   scale (1.33) still falls below the supersample factor (1.5), so the visual
+   ends up DOWNsampled from the bitmap → stays crisp. */
+.generated-card-shell {
+  --card-render-scale: 1.5;
+  width: calc(249px * var(--card-render-scale));
+  height: calc(386px * var(--card-render-scale));
+  min-height: calc(386px * var(--card-render-scale));
+  border-radius: 0;
+  cursor: pointer;
+  overflow: visible;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+}
+
+/* Override .nft-card-tilt's transform to add the centering translate and the
+   counter-scale (1 / --card-render-scale) on top of the existing tilt + hover
+   scale. Net visual = (--nft-scale ÷ --card-render-scale) × supersampled box,
+   so at rest visual = 1 × 249×386 and on hover visual = 1.33 × 249×386. */
+.generated-card-shell.nft-card-tilt {
+  transform:
+    translate(-50%, -50%)
+    rotateX(var(--nft-tilt-x, 0deg))
+    rotateY(var(--nft-tilt-y, 0deg))
+    scale(calc(var(--nft-scale, 1) / var(--card-render-scale, 1)));
+}
+
 .generated-card-preview-card {
-  position: relative;
+  position: absolute;
   background: transparent;
   border: 0;
   box-shadow: none;
