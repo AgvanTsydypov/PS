@@ -279,6 +279,13 @@ _user_web_timing_log_handler_installed = False
 USER_WEB_CARD_SUPPLY_JOIN_TOTAL_CACHE_TTL = float(os.getenv("USER_WEB_CARD_SUPPLY_JOIN_TOTAL_CACHE_TTL", "60"))
 PM_NOT_REGISTERED_VALUE = "Not registered in PM"
 NO_TRADES_YET_VALUE = "No trades yet"
+# Sentinel trader_rank values that mean "no real Polymarket leaderboard rank yet".
+# Used by both the eligibility response and the /api/me/mint guard so the rank
+# requirement can be enforced consistently on client and server.
+POLYMARKET_RANK_SENTINEL_VALUES = frozenset({
+    PM_NOT_REGISTERED_VALUE.casefold(),
+    NO_TRADES_YET_VALUE.casefold(),
+})
 CLAIMS_UNIQUENESS_INDEX_NAME = "ux_claims_active_season_user_wallet_lower"
 _r2_client: Any = None
 
@@ -1364,6 +1371,20 @@ def _load_proxy_wallet_for_user_wallet(user_wallet_address: str) -> str:
         conn.close()
 
 
+def _has_valid_polymarket_rank(trader_rank: Optional[str]) -> bool:
+    """Returns True only when ``trader_rank`` is a real Polymarket leaderboard rank.
+
+    Empty/null values, "Not registered in PM" and "No trades yet" all mean the
+    user does not have a rank yet and therefore is NOT allowed to mint.
+    """
+    if trader_rank is None:
+        return False
+    value = str(trader_rank).strip()
+    if not value:
+        return False
+    return value.casefold() not in POLYMARKET_RANK_SENTINEL_VALUES
+
+
 def _load_wallet_signin_snapshot(user_wallet_address: str) -> Tuple[str, str]:
     conn = _get_connection()
     try:
@@ -2327,6 +2348,17 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
     wallet = _extract_wallet_from_request(request).lower()
     if not Web3.is_address(wallet):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
+
+    # Strict server-side gate: only wallets that already have a real Polymarket
+    # leaderboard rank may mint. The frontend mirrors this check, but we MUST
+    # also enforce it here so the API cannot be bypassed.
+    proxy_wallet, trader_rank = _load_wallet_signin_snapshot(wallet)
+    if not _has_valid_polymarket_rank(trader_rank):
+        if str(proxy_wallet or "").strip().casefold() == PM_NOT_REGISTERED_VALUE.casefold():
+            detail = "Wallet is not registered on Polymarket — minting is not allowed."
+        else:
+            detail = "Wallet has no Polymarket trader rank yet — minting is not allowed."
+        raise HTTPException(status_code=403, detail=detail)
 
     saved_solana = _load_user_solana_wallet(wallet)
     if not saved_solana:
