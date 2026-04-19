@@ -832,7 +832,13 @@ export default function UserDashboard() {
     }
   }
 
-  async function saveSolanaWallet() {
+  async function saveSolanaWallet(overrideValue?: string | null) {
+    // The Clear button passes "" explicitly because React state updates are
+    // async — reading solanaWalletInput from the closure right after a
+    // setState would still see the stale (non-empty) value and re-save it.
+    const rawValue =
+      overrideValue !== undefined ? overrideValue ?? "" : solanaWalletInput;
+    const trimmed = String(rawValue).trim();
     setSolanaWalletSaving(true);
     setSolanaWalletError("");
     setSolanaWalletNotice("");
@@ -841,7 +847,7 @@ export default function UserDashboard() {
         method: "PUT",
         credentials: userApiCredentials,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ solana_wallet: solanaWalletInput.trim() || null }),
+        body: JSON.stringify({ solana_wallet: trimmed || null }),
       });
       if (!res.ok) {
         const text = await res.text();
@@ -1265,7 +1271,7 @@ export default function UserDashboard() {
                 <button
                   onClick={() => {
                     setSolanaWalletInput("");
-                    void saveSolanaWallet();
+                    void saveSolanaWallet("");
                   }}
                   disabled={solanaWalletSaving || solanaWalletLoading}
                 >
