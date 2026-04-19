@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import secrets
+import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -542,3 +543,143 @@ def build_polystars_card_for_mint(
             fixed_back_image_url=fixed_back_image_url,
         )
     return _attach_generated_card_images(payload)
+
+
+def _slug_from_qr_payload(qr_payload: Any) -> Optional[str]:
+    qr = str(qr_payload or "").strip()
+    if not qr:
+        return None
+    try:
+        path = urllib.parse.urlparse(qr).path or qr
+    except Exception:
+        path = qr
+    tail = path.rstrip("/").rsplit("/", 1)[-1].strip()
+    return tail or None
+
+
+def _lookup_owner_proxy_wallet(manager: DataLoadingManager, owner_wallet: str) -> Optional[str]:
+    wallet = str(owner_wallet or "").strip()
+    if not wallet:
+        return None
+    conn = manager.get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT proxy_wallet
+                FROM user_wallet_signins
+                WHERE LOWER(wallet_address) = LOWER(%s)
+                LIMIT 1
+                """,
+                (wallet,),
+            )
+            row = cursor.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    proxy = str((row[0] if not isinstance(row, dict) else row.get("proxy_wallet")) or "").strip()
+    return proxy or None
+
+
+def persist_user_generated_card_for_mint(
+    manager: DataLoadingManager,
+    *,
+    winner_row_id: int,
+    owner_wallet: str,
+    polystars_card: Dict[str, Any],
+) -> None:
+    """Mirror the freshly minted card into ``user_generated_cards``.
+
+    Uses the same persistence pattern as ``user_web_backend`` ``/api/cards/get``
+    so the public ``/cards/{slug}`` page renders minted NFTs without any
+    fallback logic. Slug is the value embedded in ``polystars_card.qr_payload``;
+    images are the on-chain Pinata URLs already in the payload. ``ON CONFLICT
+    (winner_row_id)`` makes the call idempotent and safely overwrites a
+    pre-existing preview row with the on-chain truth.
+    """
+    slug = _slug_from_qr_payload(polystars_card.get("qr_payload"))
+    if not slug:
+        return
+    front_image_url = str(polystars_card.get("front_image_url") or "").strip()
+    back_image_url = str(polystars_card.get("back_image_url") or "").strip()
+    if not front_image_url or not back_image_url:
+        return
+
+    source_row = _load_card_source_row(manager, winner_row_id)
+    if not source_row:
+        return
+
+    season_id_raw = source_row.get("season_id")
+    try:
+        season_id = int(season_id_raw)
+    except (TypeError, ValueError):
+        return
+    event_id = source_row.get("event_id")
+    event_slug = source_row.get("event_slug")
+    card_title = str(polystars_card.get("card_title") or "").strip() or None
+    primary_tag = str(polystars_card.get("primary_tag") or "").strip() or None
+    secondary_tag = str(polystars_card.get("secondary_tag") or "").strip() or None
+    pattern = str(polystars_card.get("pattern") or "").strip() or None
+    owner_proxy_wallet = _lookup_owner_proxy_wallet(manager, owner_wallet)
+
+    conn = manager.get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO user_generated_cards (
+                    slug,
+                    owner_wallet,
+                    owner_proxy_wallet,
+                    winner_row_id,
+                    season_id,
+                    event_id,
+                    event_slug,
+                    card_title,
+                    primary_tag,
+                    secondary_tag,
+                    pattern,
+                    front_image_path,
+                    back_image_path,
+                    card_payload_json
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+                )
+                ON CONFLICT (winner_row_id) DO UPDATE SET
+                    slug = EXCLUDED.slug,
+                    owner_wallet = EXCLUDED.owner_wallet,
+                    owner_proxy_wallet = EXCLUDED.owner_proxy_wallet,
+                    event_id = EXCLUDED.event_id,
+                    event_slug = EXCLUDED.event_slug,
+                    card_title = EXCLUDED.card_title,
+                    primary_tag = EXCLUDED.primary_tag,
+                    secondary_tag = EXCLUDED.secondary_tag,
+                    pattern = EXCLUDED.pattern,
+                    front_image_path = EXCLUDED.front_image_path,
+                    back_image_path = EXCLUDED.back_image_path,
+                    card_payload_json = EXCLUDED.card_payload_json
+                """,
+                (
+                    slug,
+                    owner_wallet,
+                    owner_proxy_wallet,
+                    winner_row_id,
+                    season_id,
+                    event_id,
+                    event_slug,
+                    card_title,
+                    primary_tag,
+                    secondary_tag,
+                    pattern,
+                    front_image_url,
+                    back_image_url,
+                    json.dumps(polystars_card),
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()

@@ -15,6 +15,7 @@ import {
   handleCardGridMouseLeave,
   handleCardGridMouseMove,
   markCardPressStart,
+  navigateToCardIfCenterClick,
   triggerCardFlip,
 } from "./cardInteractions";
 import SiteLogoLink from "./SiteLogoLink";
@@ -145,6 +146,7 @@ type MyMintedNftItem = {
   name: string | null;
   front_image_url: string | null;
   back_image_url: string | null;
+  card_slug: string | null;
   explorer_asset_url: string | null;
   explorer_tx_url: string | null;
   minted_at: string | null;
@@ -167,12 +169,23 @@ const POLYMARKET_RANK_SENTINEL_VALUES = new Set<string>([
   "not registered in pm",
   "no trades yet",
 ]);
+// Sentinel proxy_wallet value persisted by the backend when Polymarket has no
+// profile for the EVM wallet. Mirrors PM_NOT_REGISTERED_VALUE in
+// user_web_backend/main.py — keep in sync.
+const PM_NOT_REGISTERED_VALUE = "Not registered in PM";
 
 function hasPolymarketRank(traderRank: string | null | undefined): boolean {
   if (traderRank == null) return false;
   const value = String(traderRank).trim();
   if (!value) return false;
   return !POLYMARKET_RANK_SENTINEL_VALUES.has(value.toLowerCase());
+}
+
+function isRegisteredOnPolymarket(proxyWallet: string | null | undefined): boolean {
+  if (proxyWallet == null) return false;
+  const value = String(proxyWallet).trim();
+  if (!value) return false;
+  return value.toLowerCase() !== PM_NOT_REGISTERED_VALUE.toLowerCase();
 }
 /** Legacy localStorage JWT (removed); cleared on load for one-time migration. */
 const LEGACY_JWT_LOCAL_STORAGE_KEY = "polystars_user_access_token";
@@ -870,12 +883,8 @@ export default function UserDashboard() {
       setMintError("Please sign in again to mint.");
       return;
     }
-    if (!hasPolymarketRank(traderRank)) {
-      setMintError(
-        traderRank && traderRank.trim().toLowerCase() === "not registered in pm"
-          ? "Wallet is not registered on Polymarket — minting is not allowed."
-          : "Wallet has no Polymarket trader rank yet — minting is not allowed.",
-      );
+    if (!isRegisteredOnPolymarket(proxyWallet)) {
+      setMintError("Wallet is not registered on Polymarket — minting is not allowed.");
       return;
     }
     if (!solanaWallet) {
@@ -949,14 +958,11 @@ export default function UserDashboard() {
     const isAnyMinting = mintingSeasonId !== null;
     const hasSolanaWallet = Boolean(solanaWallet);
     const supplyEmpty = season.remaining <= 0;
-    const hasRank = hasPolymarketRank(traderRank);
+    const isPmRegistered = isRegisteredOnPolymarket(proxyWallet);
 
     let blockedReason = "";
-    if (!hasRank) {
-      blockedReason =
-        traderRank && traderRank.trim().toLowerCase() === "not registered in pm"
-          ? "Wallet is not registered on Polymarket — minting is not allowed."
-          : "Wallet has no Polymarket trader rank yet — minting is not allowed.";
+    if (!isPmRegistered) {
+      blockedReason = "Wallet is not registered on Polymarket — minting is not allowed.";
     } else if (!hasSolanaWallet) {
       blockedReason = "Set your Solana recipient wallet to enable minting.";
     } else if (supplyEmpty) {
@@ -1299,7 +1305,10 @@ export default function UserDashboard() {
                   const flipKey = item.asset_address;
                   const isFlipped = Boolean(flippedCardSlugs[flipKey]);
                   const isAnimating = Boolean(animatingCardSlugs[flipKey]);
-                  const explorerUrl = item.explorer_asset_url ?? null;
+                  const cardSlug = (item.card_slug ?? "").trim();
+                  const cardDetailUrl = cardSlug
+                    ? `/cards/${encodeURIComponent(cardSlug)}`
+                    : null;
                   const titleParts: string[] = [];
                   if (item.name) titleParts.push(item.name);
                   if (item.season_type && item.season_number != null) {
@@ -1309,29 +1318,70 @@ export default function UserDashboard() {
                     titleParts.push(`mint #${item.collection_mint_number}`);
                   }
                   const cardLabel = titleParts.join(" · ") || item.asset_address;
+                  const ariaActionLabel = cardDetailUrl
+                    ? `Open or flip NFT: ${cardLabel}`
+                    : `Flip NFT: ${cardLabel}`;
                   return (
                     <div
                       key={item.asset_address}
                       className="generated-card-wrapper"
                     >
                       <div className="nft-card-wrapper generated-card-preview-wrapper">
-                        {explorerUrl ? (
-                          <a
-                            href={explorerUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
+                        {cardDetailUrl ? (
+                          <Link
+                            href={cardDetailUrl}
                             className="card-center-hotspot"
                             tabIndex={-1}
-                            aria-label={`Open NFT on Solana Explorer: ${cardLabel}`}
+                            aria-label={`Open card: ${cardLabel}`}
                           />
                         ) : null}
+                        {(["top", "right", "bottom", "left"] as const).map((edge) => (
+                          <div
+                            key={`${flipKey}-${edge}`}
+                            className={`card-flip-hitbox card-flip-hitbox-${edge}`}
+                            aria-hidden="true"
+                            onPointerDown={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                            }}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              const card = event.currentTarget.parentElement?.querySelector<HTMLElement>(
+                                ".generated-card-preview-card",
+                              );
+                              if (!card) return;
+                              triggerGeneratedCardFlip(flipKey, card);
+                            }}
+                          />
+                        ))}
                         <article
                           className={`nft-card nft-card-tilt theme-vivid generated-card-shell generated-card-preview-card ${isAnimating ? "generated-card-preview-card-flipping" : ""}`}
                           style={{"--card-border-color": "#B6BBC8"} as React.CSSProperties}
+                          data-center-navigate={cardDetailUrl ? "1" : undefined}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={ariaActionLabel}
                           onPointerDown={(event) => {
                             markCardPressStart(event.currentTarget, event.clientX, event.clientY);
                           }}
                           onClick={(event) => {
+                            if (
+                              cardSlug &&
+                              navigateToCardIfCenterClick(
+                                event.currentTarget,
+                                cardSlug,
+                                event.clientX,
+                                event.clientY,
+                              )
+                            ) {
+                              return;
+                            }
+                            triggerGeneratedCardFlip(flipKey, event.currentTarget);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Enter" && event.key !== " ") return;
+                            event.preventDefault();
                             triggerGeneratedCardFlip(flipKey, event.currentTarget);
                           }}
                         >
