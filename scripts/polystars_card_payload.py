@@ -592,7 +592,7 @@ def persist_user_generated_card_for_mint(
     """Mirror the freshly minted card into ``user_generated_cards``.
 
     Uses the same persistence pattern as ``user_web_backend`` ``/api/cards/get``
-    so the public ``/cards/{slug}`` page renders minted NFTs without any
+    so the public ``/cards/{slug}`` page renders minted STARs without any
     fallback logic. Slug is the value embedded in ``polystars_card.qr_payload``;
     images are the on-chain Pinata URLs already in the payload. ``ON CONFLICT
     (winner_row_id)`` makes the call idempotent and safely overwrites a

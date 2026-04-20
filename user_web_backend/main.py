@@ -1506,7 +1506,7 @@ def _extract_nft_visuals_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Op
     primary front image is in ``image``, and ``properties.files`` lists ``[front, back]``
     so the back image is the first ``files[].uri`` that differs from ``image``.
     The in-app card slug is recovered from the embedded ``polystars_card.qr_payload``
-    so minted NFTs can deep-link to the same ``/cards/{slug}`` page used by previews.
+    so minted STARs can deep-link to the same ``/cards/{slug}`` page used by previews.
 
     All image URLs are normalized through ``_normalize_ipfs_gateway_url`` so
     that metadata written against a private dedicated Pinata gateway still
@@ -1773,7 +1773,7 @@ def _das_search_assets_by_owner_and_collection(
     rpc_url = SOLANA_DAS_RPC_URL.strip()
     if not rpc_url:
         logger.error(
-            "SOLANA_DAS_RPC_URL (or SOLANA_RPC_URL) is not configured; cannot list on-chain NFTs"
+            "SOLANA_DAS_RPC_URL (or SOLANA_RPC_URL) is not configured; cannot list on-chain STARs"
         )
         raise HTTPException(
             status_code=503,
@@ -2101,7 +2101,7 @@ def _load_claims_enrichment_for_assets(
         # Enrichment is best-effort. A DB hiccup must not break the on-chain
         # listing — the caller will simply render those auxiliary fields as
         # null.
-        logger.exception("Failed to enrich on-chain NFTs from claims table")
+        logger.exception("Failed to enrich on-chain STARs from claims table")
         return {}
     finally:
         conn.close()
@@ -3329,7 +3329,7 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
 
 @app.get("/api/master-collection")
 def me_master_collection() -> Dict[str, str]:
-    """Public master collection address used as the parent for minted user NFTs."""
+    """Public master collection address used as the parent for minted user STARs."""
     address = ""
     try:
         address = mint_service.get_master_collection_address()

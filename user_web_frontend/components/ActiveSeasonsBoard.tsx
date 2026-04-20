@@ -234,7 +234,7 @@ export const ActiveSeasonsBoard = forwardRef<
                 <strong>{season.phase}</strong>
               </div>
               <div className="season-card-bottom">
-                <span>NFT left</span>
+                <span>STARs left</span>
                 <strong>
                   {season.remaining} / {season.total}
                 </strong>
