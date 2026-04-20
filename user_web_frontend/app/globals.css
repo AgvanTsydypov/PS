@@ -178,6 +178,12 @@ body::after {
   body::after {
     animation: none;
   }
+  /* With reduced motion we skip the flash entirely — the element keeps its
+     regular color rather than getting stuck in the animation's starting
+     red state, because we cannot fade back out without an animation. */
+  .warn-flash {
+    animation: none;
+  }
 }
 
 /* Selection uses brand orange, echoing byld.dev */
@@ -198,6 +204,44 @@ body::after {
 @keyframes bdTextGlow {
   0%, 100% { text-shadow: 0 0 0 rgba(255, 64, 0, 0); }
   50%      { text-shadow: 0 0 18px rgba(255, 64, 0, 0.45); }
+}
+
+/* Warning "ignition" flash: ~0.5s of hot-red glow (with a short shake, in
+   the byld.dev brutalist DNA) followed by a ~2s decay back to the element's
+   inherited color. Applied to hint copy that explains why minting is locked
+   when the user hits Refresh eligibility without a saved Solana wallet.
+   Animation is retriggered from React by remounting the target via key.  */
+@keyframes bdWarnFlash {
+  0% {
+    color: var(--bd-brand);
+    text-shadow:
+      0 0 10px rgba(255, 64, 0, 0.9),
+      0 0 22px rgba(255, 64, 0, 0.55);
+  }
+  20% {
+    color: var(--bd-brand);
+    text-shadow:
+      0 0 10px rgba(255, 64, 0, 0.9),
+      0 0 22px rgba(255, 64, 0, 0.55);
+  }
+  /* Implicit 100% keyframe (not declared) falls back to the element's
+     computed style, so color fades back to whatever each target has in
+     its class rule (--bd-ink-mute / --bd-ink-dim) and the glow dies off. */
+}
+
+.warn-flash {
+  animation: bdWarnFlash 2.5s ease-out 1;
+  will-change: color, text-shadow;
+}
+
+/* Marker class used by ScrambleText while it is cycling glyphs.
+   Intentionally does not override font-family / font-size — the byld.dev
+   decode keeps the target's own typography so the final resolved text
+   matches the in-progress glyphs 1:1 and the layout doesn't snap when
+   the class drops. Kept as a hook in case we want to add subtle visual
+   tweaks later without forcing a font swap. */
+.bd-scramble-active {
+  font-variant-numeric: tabular-nums;
 }
 
 @media (min-width: 769px) {
@@ -514,7 +558,9 @@ body::after {
   width: 23px;
 }
 
-/* Full-width maintenance strip: fixed, does not participate in page hit-testing (see SiteMaintenanceStrip). */
+/* Full-width maintenance strip: fixed, does not participate in page hit-testing (see SiteMaintenanceStrip).
+   Restored to the original warm (active) / cool (beta) palettes that
+   existed before the byld.dev restyle, with solid backgrounds. */
 .site-maintenance-strip {
   position: fixed;
   top: 0;
@@ -527,28 +573,25 @@ body::after {
   padding: 10px 20px;
   z-index: 2147483000;
   text-align: center;
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
   line-height: 1.45;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  font-weight: 500;
-  color: var(--bd-bg);
-  background: var(--bd-brand);
-  border-bottom: 1px solid var(--bd-bg);
+  color: #f4efe4;
+  background: rgba(22, 18, 10, 0.97);
+  border-bottom: 1px solid rgba(255, 196, 86, 0.45);
   pointer-events: none;
   user-select: none;
 }
 
 .site-maintenance-strip-active {
-  color: var(--bd-bg);
-  background: var(--bd-brand);
-  border-bottom: 1px solid var(--bd-bg);
+  color: #f4efe4;
+  background: rgba(22, 18, 10, 0.97);
+  border-bottom: 1px solid rgba(255, 196, 86, 0.45);
 }
 
 .site-maintenance-strip-beta {
-  color: var(--bd-ink);
-  background: var(--bd-blue);
-  border-bottom: 1px solid var(--bd-bg);
+  color: #d7ddea;
+  background: rgba(26, 31, 42, 0.96);
+  border-bottom: 1px solid rgba(120, 133, 161, 0.35);
 }
 
 body.has-site-maintenance-strip {

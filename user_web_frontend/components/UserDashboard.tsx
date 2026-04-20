@@ -295,6 +295,102 @@ type WalletOption =
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Text shown in the Solana hint paragraph. Extracted so it can be fed
+// through ScrambleText without a JSX fragment / whitespace ambiguity.
+const SOLANA_NOTE_TEXT =
+  "Your minted PolyStars STARs are issued on Solana. Provide the Solana address that should receive them. Minting is disabled until a Solana wallet is saved.";
+
+// Charset used to cycle characters during the byld.dev-style decode.
+// Mix of letters + common punctuation glyphs gives a "terminal decrypt"
+// feel similar to the hero copy on byld.dev.
+const SCRAMBLE_CHARSET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!<>-_[]{}=+*^?#%&@/\\";
+
+/**
+ * Byld-style "decode" text effect: each character cycles through random
+ * glyphs and locks into the real letter at its own random moment during
+ * `duration`, so the line reads like a terminal decryption resolving
+ * into the original sentence. Whitespace is preserved.
+ *
+ * Only runs when `triggerKey > 0` so the component can be safely mounted
+ * before the user has actually requested a flash (e.g. on initial page
+ * load). Parents are expected to also set a React `key` that changes per
+ * flash so the animation restarts cleanly on repeated clicks.
+ */
+function ScrambleText({
+  text,
+  triggerKey,
+  duration = 4000,
+}: {
+  text: string;
+  triggerKey: number;
+  duration?: number;
+}) {
+  const [display, setDisplay] = useState(text);
+  const [isScrambling, setIsScrambling] = useState(false);
+
+  useEffect(() => {
+    if (triggerKey <= 0) {
+      setDisplay(text);
+      setIsScrambling(false);
+      return;
+    }
+    // Respect users who opted out of motion — just render the real text
+    // with no cycling animation.
+    const prefersReducedMotion =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReducedMotion) {
+      setDisplay(text);
+      setIsScrambling(false);
+      return;
+    }
+
+    const chars = Array.from(text);
+    // Each non-whitespace character locks into its real glyph at a
+    // random moment within the first 90% of the duration, giving the
+    // line a staggered "resolve" rather than a uniform flicker.
+    const revealTimes = chars.map(() => Math.random() * duration * 0.9);
+    const start =
+      typeof performance !== "undefined" ? performance.now() : Date.now();
+    let rafId = 0;
+    setIsScrambling(true);
+
+    const tick = () => {
+      const now =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+      const elapsed = now - start;
+      const next = chars
+        .map((ch, i) => {
+          if (/\s/.test(ch)) return ch;
+          if (elapsed >= revealTimes[i]) return ch;
+          const rand = Math.floor(Math.random() * SCRAMBLE_CHARSET.length);
+          return SCRAMBLE_CHARSET[rand];
+        })
+        .join("");
+      setDisplay(next);
+      if (elapsed < duration) {
+        rafId = requestAnimationFrame(tick);
+      } else {
+        setDisplay(text);
+        setIsScrambling(false);
+      }
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [triggerKey, text, duration]);
+
+  return (
+    <span className={isScrambling ? "bd-scramble-active" : undefined}>
+      {display}
+    </span>
+  );
+}
+
 export default function UserDashboard() {
   const [walletAddress, setWalletAddress] = useState("");
   const [challengeId, setChallengeId] = useState("");
@@ -329,6 +425,13 @@ export default function UserDashboard() {
   const [isWalletPanelHovered, setIsWalletPanelHovered] = useState(false);
   const [isWalletPanelCollapsed, setIsWalletPanelCollapsed] = useState(false);
   const walletPanelCollapseTimerRef = useRef<number | null>(null);
+
+  // Incremented each time the user hits "Refresh eligibility" without a
+  // saved Solana wallet. Used as a React `key` on the two Solana hint
+  // elements so they remount and restart the CSS ignition/fade animation.
+  // 0 means the flash has never fired yet → hint renders without the
+  // `.warn-flash` class.
+  const [warnFlashKey, setWarnFlashKey] = useState(0);
 
   // Wallet that was selected by the user in the picker — used for sign-in
   const selectedProviderRef = useRef<EthProvider | null>(null);
@@ -849,6 +952,14 @@ export default function UserDashboard() {
       setSolanaWallet(value);
       setSolanaWalletInput(value ?? "");
       setSolanaWalletNotice(value ? "Solana wallet saved." : "Solana wallet cleared.");
+      // Once a recipient wallet is saved successfully, mirror what the
+      // user would do manually: trigger the "Reload my STARs" action and
+      // refresh mint eligibility, so the dashboard reflects the new
+      // recipient without an extra click.
+      if (value) {
+        void refreshMyCards();
+        void refreshEligibility();
+      }
     } catch (error) {
       setSolanaWalletError(extractErrorMessage(error));
     } finally {
@@ -949,6 +1060,17 @@ export default function UserDashboard() {
     }
   }
 
+  function handleRefreshEligibilityClick() {
+    // When the user clicks "Refresh eligibility" without a saved Solana
+    // recipient wallet, briefly ignite the two blocking hints in red so
+    // the reason minting is locked is visually unmissable (0.5s of glow
+    // + 2s fade handled entirely in CSS via the .warn-flash keyframe).
+    if (!solanaWallet) {
+      setWarnFlashKey((k) => k + 1);
+    }
+    void refreshEligibility();
+  }
+
   function streamForSeason(seasonId: number): EligibilityStream | null {
     if (!eligibility) return null;
     if (eligibility.genesis?.season_id === seasonId) return eligibility.genesis;
@@ -982,6 +1104,12 @@ export default function UserDashboard() {
     }
 
     const canMint = !blockedReason && !isAnyMinting;
+    // Only the "Solana wallet not set" reason participates in the
+    // ignition/fade flash. Other blockers (PM not registered, supply,
+    // eligibility loading/errors) are unrelated to the Solana button.
+    const isSolanaMissingReason =
+      blockedReason === "Set your Solana recipient wallet to enable minting.";
+    const shouldFlashReason = isSolanaMissingReason && warnFlashKey > 0;
 
     return (
       <div className="season-mint-action">
@@ -994,7 +1122,16 @@ export default function UserDashboard() {
           {isThisMinting ? "Minting..." : "Mint STAR"}
         </button>
         {blockedReason ? (
-          <span className="season-mint-reason">{blockedReason}</span>
+          shouldFlashReason ? (
+            <span
+              key={`flash-${warnFlashKey}`}
+              className="season-mint-reason warn-flash"
+            >
+              <ScrambleText text={blockedReason} triggerKey={warnFlashKey} />
+            </span>
+          ) : (
+            <span className="season-mint-reason">{blockedReason}</span>
+          )
         ) : (
           <span className="season-mint-reason ok">Eligible to mint now</span>
         )}
@@ -1184,7 +1321,7 @@ export default function UserDashboard() {
             <div className="season-board-actions">
               <div className="season-board-actions-row">
                 <button
-                  onClick={() => void refreshEligibility()}
+                  onClick={handleRefreshEligibilityClick}
                   disabled={eligibilityLoading}
                 >
                   {eligibilityLoading ? "Refreshing eligibility..." : "Refresh eligibility"}
@@ -1215,10 +1352,18 @@ export default function UserDashboard() {
           </div>
         ) : (
           <>
-            <p className="season-board-note">
-              Your minted PolyStars STARs are issued on Solana. Provide the Solana address that should receive them.
-              Minting is disabled until a Solana wallet is saved.
-            </p>
+            {!solanaWallet ? (
+              warnFlashKey > 0 ? (
+                <p
+                  key={`flash-${warnFlashKey}`}
+                  className="season-board-note warn-flash"
+                >
+                  <ScrambleText text={SOLANA_NOTE_TEXT} triggerKey={warnFlashKey} />
+                </p>
+              ) : (
+                <p className="season-board-note">{SOLANA_NOTE_TEXT}</p>
+              )
+            ) : null}
             <div className="solana-wallet-row">
               <input
                 type="text"
