@@ -21,8 +21,11 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             ensures the font is always available when SVGs are rendered inline. */}
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        {/* Orbitron for card SVGs + display type; Space Grotesk for UI body;
+            JetBrains Mono for addresses / monospaced metadata. Matches byld.dev's
+            angular, brutalist design language while keeping strong readability. */}
         <link
-          href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap"
+          href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
           rel="stylesheet"
         />
         {/* FOUC guard — hide the body until React has hydrated so that
