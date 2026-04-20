@@ -653,6 +653,37 @@ main {
 
 .nft-board-horizontal {
   max-width: min(1600px, calc(100vw - 32px));
+  /* The inner .nft-grid intentionally uses `margin: -72px -48px -72px;` so
+     hover-scaled cards have breathing room in all 4 directions. Without
+     containment that bleed becomes visible during horizontal scroll too,
+     and cards slide past the section's left/right borders.
+
+     Strategy: clip horizontally by default (no scroll bleed), but reopen
+     the horizontal clip box as soon as the user is *hovering* a card —
+     detected via the `.nft-card-active` / `.nft-card-wrapper-active`
+     classes that `cardInteractions.ts` toggles on pointer enter. This way
+     the lifted card visually escapes the section on the sides too, while
+     plain horizontal scrolling stays contained.
+
+     `overflow-x: clip` (vs `hidden`) does not establish a scroll context,
+     so `overflow-y: visible` keeps working and vertical hover bleed is
+     never affected. */
+  overflow-x: clip;
+  overflow-y: visible;
+  overflow-clip-margin: 0;
+  transition: overflow-clip-margin 160ms ease-out;
+}
+
+/* When any card inside the strip is hovered/active, open the horizontal
+   clip box wide enough to fully reveal the .nft-grid's negative-margin
+   bleed zone (currently 48px on each side; 64px gives a small safety
+   buffer + room for the hover-scale transform). The :has() selector
+   reacts to runtime class toggles and to native :hover, so this works
+   for both mouse moves over a card and the JS-applied active states. */
+.nft-board-horizontal:has(.nft-card-tilt:hover),
+.nft-board-horizontal:has(.nft-card-active),
+.nft-board-horizontal:has(.nft-card-wrapper-active) {
+  overflow-clip-margin: 64px;
 }
 
 @media (prefers-reduced-motion: reduce) {
