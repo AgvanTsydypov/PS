@@ -1804,7 +1804,7 @@ export default function HomePage() {
                 })
               }
             >
-              {claimMinting ? "Minting..." : "Claim (Mint NFT)"}
+              {claimMinting ? "Minting..." : "Claim (Mint STAR)"}
             </button>
             <button
               onClick={() =>

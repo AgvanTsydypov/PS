@@ -10,10 +10,10 @@
 
 ```bash
 # admin_backend — порт 8001
-uvicorn admin_backend.main:app --host 0.0.0.0 --port 8001 --reload
+.\venv\Scripts\Activate.ps1 uvicorn admin_backend.main:app --host 0.0.0.0 --port 8001 --reload
 
 # user_web_backend — порт 8011
-uvicorn user_web_backend.main:app --host 0.0.0.0 --port 8011 --reload
+.\venv\Scripts\Activate.ps1 uvicorn user_web_backend.main:app --host 0.0.0.0 --port 8011 --reload
 ```
 
 ## Frontends

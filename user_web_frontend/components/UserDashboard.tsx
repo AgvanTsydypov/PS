@@ -589,7 +589,7 @@ export default function UserDashboard() {
           clearStoredSessionMeta();
         }
         const text = await res.text();
-        throw new Error(text || "Failed to load minted NFTs");
+        throw new Error(text || "Failed to load minted STARs");
       }
       const payload = (await res.json()) as MyMintedNftsResponse;
       setMyCards(Array.isArray(payload.items) ? payload.items : []);
@@ -989,9 +989,9 @@ export default function UserDashboard() {
           className="season-mint-button"
           onClick={() => void mintForSeason(season.id)}
           disabled={!canMint}
-          title={blockedReason || "Mint NFT for this season"}
+          title={blockedReason || "Mint STAR for this season"}
         >
-          {isThisMinting ? "Minting..." : "Mint NFT"}
+          {isThisMinting ? "Minting..." : "Mint STAR"}
         </button>
         {blockedReason ? (
           <span className="season-mint-reason">{blockedReason}</span>
@@ -1211,12 +1211,12 @@ export default function UserDashboard() {
         <div className="season-board-title">Solana recipient wallet</div>
         {!isSignedIn ? (
           <div className="season-board-muted">
-            Sign in with your EVM wallet to set the Solana address that will receive your minted NFTs.
+            Sign in with your EVM wallet to set the Solana address that will receive your minted STARs.
           </div>
         ) : (
           <>
             <p className="season-board-note">
-              Your minted PolyStars NFTs are issued on Solana. Provide the Solana address that should receive them.
+              Your minted PolyStars STARs are issued on Solana. Provide the Solana address that should receive them.
               Minting is disabled until a Solana wallet is saved.
             </p>
             <div className="solana-wallet-row">
@@ -1273,14 +1273,14 @@ export default function UserDashboard() {
       </section>
 
       <section className="season-board season-board-standalone nft-board-horizontal">
-        <div className="season-board-title">My NFTs</div>
+        <div className="season-board-title">My STARs</div>
         {!isSignedIn ? (
-          <div className="season-board-muted">Sign in to view your minted NFTs.</div>
+          <div className="season-board-muted">Sign in to view your minted STARs.</div>
         ) : (
           <>
             <div className="nft-actions">
               <button onClick={() => void refreshMyCards()} disabled={myCardsLoading}>
-                {myCardsLoading ? "Loading NFTs..." : "Reload my NFTs"}
+                {myCardsLoading ? "Loading STARs..." : "Reload my STARs"}
               </button>
               {myCardsFetchedAt ? (
                 <span className="nft-fetched-at">
@@ -1292,7 +1292,7 @@ export default function UserDashboard() {
               <pre className="eligibility-output">NFT load failed: {myCardsError}</pre>
             ) : null}
             {!myCardsLoading && !myCardsError && myCards.length === 0 ? (
-              <div className="season-board-muted">No minted NFTs for this wallet yet.</div>
+              <div className="season-board-muted">No minted STARs for this wallet yet.</div>
             ) : null}
             <div className="nft-grid-wrap">
               <div

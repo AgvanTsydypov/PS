@@ -16,7 +16,7 @@ export default function HomePage() {
             footer={
               <p className="season-board-note">
                 <Link href="/me">Open your dashboard</Link> to connect a wallet, check mint
-                eligibility, and generate cards.
+                eligibility, and generate stars.
               </p>
             }
           />
