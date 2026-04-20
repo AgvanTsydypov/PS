@@ -61,28 +61,37 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ── Analog interference background (byld.dev-style) ───────────────────────
+/* ── Analog TV static background (byld.dev-style) ─────────────────────────
    Two fixed, non-interactive layers stacked behind page content:
-     ::before → fractal-noise grain that jitters in 15 stepped frames to
-                mimic the VHS/analog-shimmer feel from byld.dev.
-     ::after  → 1px horizontal scanlines for the CRT stripe feel + a soft
-                radial vignette around a warm brand tint in the middle.
+     ::before → dense fractal-noise grain that re-scrambles every ~25ms
+                via a stepped transform, producing the "shhhhh" hiss
+                of a dead TV channel. Double-layered via a box-shadow
+                of itself to break visible tiling repeats.
+     ::after  → 1px horizontal CRT scanlines + a slow vertical roll-bar
+                (analog vsync loss) + radial vignette + warm brand tint.
    Both use z-index: -1 so any positioned content in <body> naturally
    paints on top without needing per-component overrides. */
 body::before {
   content: "";
   position: fixed;
+  /* Extend well beyond the viewport so the stepped translate (capped at
+     ±140px, see bdTvHiss) never reveals an unpainted edge. 50% overshoot
+     on every side = 50vw worth of padding, which is always ≫ 140px even
+     on the narrowest phones (~360px → 180vw padding on each side). */
   inset: -50%;
   pointer-events: none;
   z-index: -1;
-  /* SVG fractal noise, white on transparent. `baseFrequency` controls the
-     grain size; `numOctaves` the texture complexity. */
-  background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 240 240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  background-size: 240px 240px;
+  /* SVG fractal noise: higher baseFrequency = finer "pixel" grain that
+     reads as true TV static rather than blurry clouds. */
+  background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 300 300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.6' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 1 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 300px 300px;
   background-repeat: repeat;
-  opacity: 0.09;
+  opacity: 0.16;
   mix-blend-mode: screen;
-  animation: bdAnalogShimmer 1.6s steps(15) infinite;
+  /* ~7 frames over 180ms ≈ 38 fps — fast enough to read as analog hiss,
+     not as a perceptible drift pattern. step-end makes each keyframe
+     hold until the next, producing discrete "new noise" frames. */
+  animation: bdTvHiss 0.18s step-end infinite;
   will-change: transform;
 }
 
@@ -93,41 +102,80 @@ body::after {
   pointer-events: none;
   z-index: -1;
   background-image:
+    /* Slow rolling vertical-sync bar — the classic analog "vsync
+       broken" band that drifts top → bottom. Mostly transparent with a
+       thin brighter center. */
+    linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0) 0%,
+      rgba(0, 0, 0, 0) 42%,
+      rgba(255, 255, 255, 0.05) 49%,
+      rgba(255, 255, 255, 0.09) 50%,
+      rgba(255, 255, 255, 0.05) 51%,
+      rgba(0, 0, 0, 0) 58%,
+      rgba(0, 0, 0, 0) 100%
+    ),
+    /* CRT scanlines — 1px bright stripe every 3px. */
     repeating-linear-gradient(
       to bottom,
-      rgba(255, 255, 255, 0.035) 0,
-      rgba(255, 255, 255, 0.035) 1px,
+      rgba(255, 255, 255, 0.04) 0,
+      rgba(255, 255, 255, 0.04) 1px,
       transparent 1px,
       transparent 3px
     ),
+    /* Warm brand-tint glow in the center. */
     radial-gradient(
       ellipse 80% 60% at 50% 50%,
-      rgba(255, 64, 0, 0.06) 0%,
+      rgba(255, 64, 0, 0.07) 0%,
       rgba(0, 0, 0, 0) 60%
     ),
+    /* Dark edge vignette. */
     radial-gradient(
       ellipse 120% 80% at 50% 50%,
       rgba(0, 0, 0, 0) 55%,
-      rgba(0, 0, 0, 0.55) 100%
+      rgba(0, 0, 0, 0.6) 100%
     );
+  /* The roll-bar gradient is the first layer: make its vertical size
+     larger than the viewport and animate background-position-y to
+     scroll it slowly downward. */
+  background-size:
+    100% 260%,
+    auto,
+    auto,
+    auto;
+  background-position:
+    0 -60%,
+    0 0,
+    0 0,
+    0 0;
+  background-repeat: no-repeat, repeat, no-repeat, no-repeat;
+  animation: bdVsyncRoll 9s linear infinite;
 }
 
-@keyframes bdAnalogShimmer {
-  0%   { transform: translate(0, 0); }
-  10%  { transform: translate(-4%, -2%); }
-  20%  { transform: translate(3%, 5%); }
-  30%  { transform: translate(-6%, 3%); }
-  40%  { transform: translate(8%, -4%); }
-  50%  { transform: translate(-3%, -7%); }
-  60%  { transform: translate(5%, 6%); }
-  70%  { transform: translate(-7%, 2%); }
-  80%  { transform: translate(2%, -5%); }
-  90%  { transform: translate(-5%, 4%); }
-  100% { transform: translate(0, 0); }
+/* Pixel translates (not %) so the max offset is bounded and independent
+   of the element's own 200vw × 200vh size. Values chosen between the
+   noise tile size (300px — smaller shifts would look like the pattern
+   repeats) and the overshoot (≈50vw — larger shifts would expose an
+   unpainted edge and flash as black rectangles). */
+@keyframes bdTvHiss {
+  0%     { transform: translate3d(0, 0, 0); }
+  14.28% { transform: translate3d(-83px, 44px, 0); }
+  28.57% { transform: translate3d(57px, -96px, 0); }
+  42.85% { transform: translate3d(-129px, -25px, 0); }
+  57.14% { transform: translate3d(22px, 78px, 0); }
+  71.42% { transform: translate3d(-41px, -60px, 0); }
+  85.71% { transform: translate3d(103px, 28px, 0); }
+  100%   { transform: translate3d(-68px, -105px, 0); }
+}
+
+@keyframes bdVsyncRoll {
+  0%   { background-position: 0 -60%, 0 0, 0 0, 0 0; }
+  100% { background-position: 0 160%, 0 0, 0 0, 0 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  body::before {
+  body::before,
+  body::after {
     animation: none;
   }
 }
