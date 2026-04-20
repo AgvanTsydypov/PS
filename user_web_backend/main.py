@@ -5,6 +5,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import sys
 import threading
@@ -1450,6 +1451,54 @@ def _extract_card_slug_from_polystars_card(polystars_card: Any) -> Optional[str]
     return tail or None
 
 
+# Match any Pinata-style IPFS gateway host so URLs written for private
+# dedicated gateways (e.g. ``crimson-glamorous-dragon-957.mypinata.cloud``)
+# are rewritten to the canonical public gateway. Without this rewrite the
+# browser has to call the private gateway directly, which returns 403 unless
+# a per-request ``pinataGatewayToken`` is supplied — something we can't
+# reasonably bake into NFT metadata for end users.
+_PINATA_GATEWAY_HOST_PATTERN = re.compile(
+    r"^(?:gateway\.pinata\.cloud|[a-z0-9-]+\.mypinata\.cloud)$",
+    re.IGNORECASE,
+)
+_CANONICAL_PINATA_GATEWAY = "https://gateway.pinata.cloud/ipfs/"
+
+
+def _normalize_ipfs_gateway_url(value: Any) -> Optional[str]:
+    """Rewrite Pinata / ipfs:// URLs to the canonical public Pinata gateway.
+
+    Any ``*.mypinata.cloud/ipfs/<CID>`` URL (including private dedicated
+    gateways that require a ``pinataGatewayToken``) and any ``ipfs://<CID>``
+    URL is normalized to ``https://gateway.pinata.cloud/ipfs/<CID>`` so the
+    browser can load the asset without per-gateway auth. Query strings
+    (e.g. expired gateway tokens) are stripped. Non-Pinata / non-IPFS URLs
+    are returned unchanged, and empty / non-string inputs return ``None``.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("ipfs://"):
+        cid_and_path = raw[len("ipfs://"):].lstrip("/")
+        return f"{_CANONICAL_PINATA_GATEWAY}{cid_and_path}" if cid_and_path else raw
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except Exception:
+        return raw
+    if parsed.scheme not in {"http", "https"}:
+        return raw
+    if not _PINATA_GATEWAY_HOST_PATTERN.match(parsed.hostname or ""):
+        return raw
+    path = parsed.path or ""
+    ipfs_marker = "/ipfs/"
+    idx = path.find(ipfs_marker)
+    if idx < 0:
+        return raw
+    cid_and_path = path[idx + len(ipfs_marker):].lstrip("/")
+    if not cid_and_path:
+        return raw
+    return f"{_CANONICAL_PINATA_GATEWAY}{cid_and_path}"
+
+
 def _extract_nft_visuals_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Optional[str]]:
     """Pull (name, front, back, card_slug) details out of a Metaplex-style NFT metadata JSON.
 
@@ -1458,9 +1507,13 @@ def _extract_nft_visuals_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Op
     so the back image is the first ``files[].uri`` that differs from ``image``.
     The in-app card slug is recovered from the embedded ``polystars_card.qr_payload``
     so minted NFTs can deep-link to the same ``/cards/{slug}`` page used by previews.
+
+    All image URLs are normalized through ``_normalize_ipfs_gateway_url`` so
+    that metadata written against a private dedicated Pinata gateway still
+    resolves on the public gateway for end users.
     """
     name = str(metadata.get("name") or "").strip() or None
-    front = str(metadata.get("image") or "").strip() or None
+    front = _normalize_ipfs_gateway_url(metadata.get("image"))
     back: Optional[str] = None
     properties = metadata.get("properties")
     if isinstance(properties, dict):
@@ -1469,7 +1522,7 @@ def _extract_nft_visuals_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Op
             for entry in files:
                 if not isinstance(entry, dict):
                     continue
-                uri_value = str(entry.get("uri") or "").strip()
+                uri_value = _normalize_ipfs_gateway_url(entry.get("uri"))
                 if not uri_value:
                     continue
                 if front and uri_value == front:
@@ -1924,11 +1977,13 @@ def _build_me_card_item_from_das_asset(
     }
 
     # If the off-chain JSON didn't yield images, fall back to DAS-supplied
-    # links/files (provider may host its own image proxy).
+    # links/files (provider may host its own image proxy). Normalize Pinata
+    # gateway URLs here too so private gateway URLs emitted by the DAS
+    # provider are rewritten to the canonical public gateway.
     if not visuals.get("front_image_url"):
         links = content.get("links") if isinstance(content.get("links"), dict) else {}
         if isinstance(links, dict):
-            link_image = str(links.get("image") or "").strip() or None
+            link_image = _normalize_ipfs_gateway_url(links.get("image"))
             if link_image:
                 visuals["front_image_url"] = link_image
     if not visuals.get("front_image_url") or not visuals.get("back_image_url"):
@@ -1936,7 +1991,7 @@ def _build_me_card_item_from_das_asset(
         for entry in files:
             if not isinstance(entry, dict):
                 continue
-            uri_value = str(entry.get("uri") or "").strip()
+            uri_value = _normalize_ipfs_gateway_url(entry.get("uri"))
             if not uri_value:
                 continue
             if not visuals.get("front_image_url"):
