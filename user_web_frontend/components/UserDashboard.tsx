@@ -1054,13 +1054,13 @@ export default function UserDashboard() {
 
             {walletOptions.length === 0 ? (
               <div className="wallet-list">
-                <p style={{ color: "#e06c75", margin: 0 }}>
+                <p style={{ color: "var(--bd-brand)", margin: 0 }}>
                   No wallets detected.{" "}
                   <a
                     href="https://metamask.io/download/"
                     target="_blank"
                     rel="noopener noreferrer"
-                    style={{ color: "#3a86ff" }}
+                    style={{ color: "var(--bd-ink)", textDecoration: "underline" }}
                   >
                     Install MetaMask
                   </a>
