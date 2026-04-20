@@ -45,16 +45,91 @@
 
 html {
   overflow-x: hidden;
+  /* Base colour lives on <html> so the body pseudo-element noise layers
+     (z-index: -1) render above it but below the page content. */
+  background: var(--bd-bg);
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  background: var(--bd-bg);
+  position: relative;
+  background: transparent;
   color: var(--bd-ink);
   font-family: var(--bd-font-ui);
   overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
+}
+
+/* ── Analog interference background (byld.dev-style) ───────────────────────
+   Two fixed, non-interactive layers stacked behind page content:
+     ::before → fractal-noise grain that jitters in 15 stepped frames to
+                mimic the VHS/analog-shimmer feel from byld.dev.
+     ::after  → 1px horizontal scanlines for the CRT stripe feel + a soft
+                radial vignette around a warm brand tint in the middle.
+   Both use z-index: -1 so any positioned content in <body> naturally
+   paints on top without needing per-component overrides. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -50%;
+  pointer-events: none;
+  z-index: -1;
+  /* SVG fractal noise, white on transparent. `baseFrequency` controls the
+     grain size; `numOctaves` the texture complexity. */
+  background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 240 240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 240px 240px;
+  background-repeat: repeat;
+  opacity: 0.09;
+  mix-blend-mode: screen;
+  animation: bdAnalogShimmer 1.6s steps(15) infinite;
+  will-change: transform;
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background-image:
+    repeating-linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.035) 0,
+      rgba(255, 255, 255, 0.035) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    radial-gradient(
+      ellipse 80% 60% at 50% 50%,
+      rgba(255, 64, 0, 0.06) 0%,
+      rgba(0, 0, 0, 0) 60%
+    ),
+    radial-gradient(
+      ellipse 120% 80% at 50% 50%,
+      rgba(0, 0, 0, 0) 55%,
+      rgba(0, 0, 0, 0.55) 100%
+    );
+}
+
+@keyframes bdAnalogShimmer {
+  0%   { transform: translate(0, 0); }
+  10%  { transform: translate(-4%, -2%); }
+  20%  { transform: translate(3%, 5%); }
+  30%  { transform: translate(-6%, 3%); }
+  40%  { transform: translate(8%, -4%); }
+  50%  { transform: translate(-3%, -7%); }
+  60%  { transform: translate(5%, 6%); }
+  70%  { transform: translate(-7%, 2%); }
+  80%  { transform: translate(2%, -5%); }
+  90%  { transform: translate(-5%, 4%); }
+  100% { transform: translate(0, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body::before {
+    animation: none;
+  }
 }
 
 /* Selection uses brand orange, echoing byld.dev */
