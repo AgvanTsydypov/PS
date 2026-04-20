@@ -4,6 +4,7 @@ import { ReactNode } from "react";
 
 import FoucGuard from "../components/FoucGuard";
 import SiteMaintenanceStrip from "../components/SiteMaintenanceStrip";
+import SiteSocialFooter from "../components/SiteSocialFooter";
 
 export const metadata: Metadata = {
   title: "PolyStars User",
@@ -56,6 +57,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <FoucGuard />
         <SiteMaintenanceStrip />
         {children}
+        <SiteSocialFooter />
       </body>
     </html>
   );

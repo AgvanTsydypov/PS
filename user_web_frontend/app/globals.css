@@ -2288,3 +2288,131 @@ button:disabled {
   gap: 10px;
   flex-wrap: wrap;
 }
+
+/* ── Site social footer (alphakek.ai "Social" block, reimagined) ──────────
+   Fixed overlay pinned to the bottom of the viewport. Does NOT reserve
+   layout space (unlike a sticky header), so the vertical ticker panels
+   on the home page can keep scrolling their cards all the way to the
+   bottom edge. The outer <footer> is pointer-events: none so hovers on
+   the ticker cards behind pass straight through; only the .site-social-
+   footer-inner bar captures pointer events for the actual icon links.
+   Background is near-transparent with only a thin brutalist top rule so
+   cards stay readable while a subtle dark glass separates them from
+   the icons. */
+.site-social-footer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: center;
+  padding: 0;
+  pointer-events: none;
+}
+
+.site-social-footer-inner {
+  pointer-events: auto;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 8px 16px;
+  background: rgba(0, 0, 0, 0.22);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  border-top: 1px solid rgba(255, 64, 0, 0.35);
+}
+
+.site-social-footer-heading {
+  font-family: var(--bd-font-display);
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--bd-ink-dim);
+  padding-right: 10px;
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.site-social-footer-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.site-social-footer-item {
+  display: inline-flex;
+}
+
+.site-social-footer-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  color: var(--bd-ink-dim);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--bd-radius);
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background 120ms ease,
+    transform 120ms ease;
+}
+
+.site-social-footer-link:hover,
+.site-social-footer-link:focus-visible {
+  color: var(--bd-brand-ink);
+  background: var(--bd-brand);
+  border-color: var(--bd-brand);
+  transform: translate(-1px, -1px);
+  box-shadow: 2px 2px 0 var(--bd-ink);
+  outline: none;
+}
+
+.site-social-footer-link:active {
+  transform: translate(0, 0);
+  box-shadow: 0 0 0 var(--bd-ink);
+}
+
+.site-social-footer-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+}
+
+.site-social-footer-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+@media (max-width: 520px) {
+  .site-social-footer {
+    padding: 0;
+  }
+
+  .site-social-footer-inner {
+    gap: 8px;
+    padding: 6px 10px;
+  }
+
+  .site-social-footer-heading {
+    display: none;
+  }
+
+  .site-social-footer-link {
+    width: 28px;
+    height: 28px;
+  }
+
+  .site-social-footer-icon {
+    width: 14px;
+    height: 14px;
+  }
+}
