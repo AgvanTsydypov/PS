@@ -314,10 +314,27 @@ _nft_metadata_cache: "Dict[str, Dict[str, Optional[str]]]" = {}
 # Full off-chain JSON metadata cache, keyed by URI. Mirrors
 # ``_nft_metadata_cache`` but stores the entire parsed JSON object so the
 # DAS-backed /api/me/cards endpoint can read ``polystars_card`` and any
-# custom top-level fields without re-fetching from IPFS. Negative results
-# are stored as an empty dict to act as a "checked, missing" marker.
+# custom top-level fields without re-fetching from IPFS. Each entry is a
+# (cached_at_monotonic, payload) tuple — payload is the parsed JSON for
+# successful fetches and an empty dict for negative results. Negative
+# entries are kept only for ``USER_WEB_NFT_METADATA_NEGATIVE_TTL_SECONDS``
+# so a transient gateway 429/timeout does not permanently hide a card's
+# image and slug until the container restarts.
 _nft_metadata_full_cache_lock = threading.Lock()
-_nft_metadata_full_cache: Dict[str, Dict[str, Any]] = {}
+_nft_metadata_full_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+NFT_METADATA_NEGATIVE_TTL_SECONDS = float(
+    os.getenv("USER_WEB_NFT_METADATA_NEGATIVE_TTL_SECONDS", "60")
+)
+# Public IPFS gateways used as automatic fallbacks when the primary URL is
+# rate-limited / down. Order matters — cheapest/fastest first. Pinata's
+# public gateway is intentionally NOT in this list because it's the most
+# common primary URL we want to fall AWAY from.
+_IPFS_FALLBACK_GATEWAYS: Tuple[str, ...] = (
+    "https://cloudflare-ipfs.com/ipfs/",
+    "https://ipfs.io/ipfs/",
+    "https://dweb.link/ipfs/",
+    "https://nftstorage.link/ipfs/",
+)
 # Solana DAS (Digital Asset Standard) configuration. Used by /api/me/cards to
 # enumerate the user's currently-owned NFTs from MASTER_COLLECTION_ADDRESS
 # directly from on-chain state, so transferred/sold NFTs disappear from the
@@ -1532,50 +1549,121 @@ def _resolve_nft_visuals_for_metadata_uri(metadata_uri: str) -> Dict[str, Option
     return visuals
 
 
+def _extract_ipfs_cid_path(uri: str) -> Optional[str]:
+    """Extract the ``<cid>[/...path]`` portion from any IPFS-like URI.
+
+    Recognises ``ipfs://``, ``ipfs://ipfs/``, and HTTPS gateway URLs that
+    contain ``/ipfs/<cid>``. Returns ``None`` if the URI does not look like
+    IPFS content (e.g. an Arweave URL or a regular HTTPS asset).
+    """
+    if not uri:
+        return None
+    text = uri.strip()
+    lower = text.lower()
+    if lower.startswith("ipfs://"):
+        rest = text[len("ipfs://"):]
+        if rest.lower().startswith("ipfs/"):
+            rest = rest[len("ipfs/"):]
+        return rest.lstrip("/") or None
+    marker = "/ipfs/"
+    idx = lower.find(marker)
+    if idx >= 0:
+        return text[idx + len(marker):].lstrip("/") or None
+    return None
+
+
+def _candidate_metadata_uris(uri: str) -> List[str]:
+    """Return ``uri`` plus any alternative IPFS gateway URLs to try in order.
+
+    Helps recover from transient 429 / 5xx / timeouts on a single gateway
+    (most commonly Pinata's public ``gateway.pinata.cloud``). Because IPFS
+    content is content-addressed by CID, every gateway returns the same
+    bytes — we just need *any* of them to succeed.
+    """
+    candidates: List[str] = []
+    if uri:
+        candidates.append(uri)
+    cid_path = _extract_ipfs_cid_path(uri)
+    if cid_path:
+        for gateway in _IPFS_FALLBACK_GATEWAYS:
+            alt = gateway + cid_path
+            if alt not in candidates:
+                candidates.append(alt)
+    return candidates
+
+
+def _try_fetch_metadata_json(uri: str) -> Optional[Dict[str, Any]]:
+    """Single-shot HTTP GET that returns parsed JSON or ``None`` on any failure.
+
+    Treats any non-2xx, network error, or non-JSON body as a soft failure so
+    the caller can move on to the next fallback gateway.
+    """
+    if not uri:
+        return None
+    if uri.startswith("data:"):
+        return _decode_data_uri_json(uri)
+    try:
+        req = urllib.request.Request(
+            uri,
+            method="GET",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (PolyStars user-web)",
+            },
+        )
+        with urllib.request.urlopen(
+            req, timeout=SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS
+        ) as response:
+            status_code = int(getattr(response, "status", 200))
+            if not (200 <= status_code < 300):
+                return None
+            body = response.read().decode("utf-8", errors="replace")
+            if not body:
+                return None
+            try:
+                parsed = json.loads(body)
+            except json.JSONDecodeError:
+                return None
+            return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
 def _fetch_full_nft_metadata_for_uri(metadata_uri: str) -> Optional[Dict[str, Any]]:
     """Returns the parsed off-chain NFT metadata JSON, or ``None`` on failure.
 
     Unlike ``_resolve_nft_visuals_for_metadata_uri`` (which returns a small
     projection), this returns the full JSON object so callers can read the
     embedded ``polystars_card`` block, attributes, and any other custom
-    top-level fields. Caches negative results as ``None`` for the lifetime of
-    the process via ``_nft_metadata_full_cache`` to avoid hammering a slow
-    gateway on every page render.
+    top-level fields.
+
+    Successful results are cached forever (IPFS content is immutable).
+    Negative results are kept only for ``NFT_METADATA_NEGATIVE_TTL_SECONDS``
+    so a single transient gateway 429/timeout does not permanently hide a
+    card's image and slug. On a cold or expired entry we also try a small
+    set of public IPFS fallback gateways before giving up.
     """
     uri = (metadata_uri or "").strip()
     if not uri:
         return None
+
+    now = monotonic()
     with _nft_metadata_full_cache_lock:
         cached = _nft_metadata_full_cache.get(uri)
         if cached is not None:
-            return cached if isinstance(cached, dict) else None
+            cached_at, payload = cached
+            if payload:
+                return payload
+            if now - cached_at < NFT_METADATA_NEGATIVE_TTL_SECONDS:
+                return None
+            # Negative entry expired — fall through and refetch.
 
     metadata: Optional[Dict[str, Any]] = None
-    if uri.startswith("data:"):
-        metadata = _decode_data_uri_json(uri)
-    else:
-        try:
-            req = urllib.request.Request(
-                uri,
-                method="GET",
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": "Mozilla/5.0 (PolyStars user-web)",
-                },
-            )
-            with urllib.request.urlopen(
-                req, timeout=SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS
-            ) as response:
-                status_code = int(getattr(response, "status", 200))
-                if 200 <= status_code < 300:
-                    body = response.read().decode("utf-8", errors="replace")
-                    if body:
-                        try:
-                            metadata = json.loads(body)
-                        except json.JSONDecodeError:
-                            metadata = None
-        except Exception:
-            metadata = None
+    for candidate in _candidate_metadata_uris(uri):
+        result = _try_fetch_metadata_json(candidate)
+        if isinstance(result, dict) and result:
+            metadata = result
+            break
 
     with _nft_metadata_full_cache_lock:
         if len(_nft_metadata_full_cache) >= SOLANA_NFT_METADATA_CACHE_MAX_ENTRIES:
@@ -1583,7 +1671,10 @@ def _fetch_full_nft_metadata_for_uri(metadata_uri: str) -> Optional[Dict[str, An
                 _nft_metadata_full_cache.pop(next(iter(_nft_metadata_full_cache)))
             except StopIteration:
                 pass
-        _nft_metadata_full_cache[uri] = metadata if isinstance(metadata, dict) else {}
+        _nft_metadata_full_cache[uri] = (
+            now,
+            metadata if isinstance(metadata, dict) else {},
+        )
     return metadata if isinstance(metadata, dict) else None
 
 
