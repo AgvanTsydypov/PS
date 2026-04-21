@@ -2426,11 +2426,35 @@ def startup_checks() -> None:
     _warn_if_claims_uniqueness_index_missing()
     _ensure_user_generated_cards_schema()
     _ensure_user_solana_wallet_column()
+    _warm_rasterizer_pool_in_background()
     if os.getenv("NODE_ENV", "development") != "development" and not _allowed_origins():
         logger.warning(
             "USER_WEB_CORS_ORIGINS is empty: set it to your user web origins (e.g. https://app.example.com) "
             "so browsers can send the session cookie."
         )
+
+
+def _warm_rasterizer_pool_in_background() -> None:
+    """Boot the Playwright worker pool off the startup thread.
+
+    ``/api/cards/get`` lazily rasterizes showcase SVGs to PNG on first access,
+    and the first ``svg_to_png`` call otherwise pays the full Chromium cold
+    start (~12s for 4 workers). Pre-warming here makes the first real request
+    land on an already-ready pool while keeping uvicorn's startup
+    non-blocking — if Playwright is missing or browsers crash, the warm
+    thread logs and exits without breaking health checks.
+    """
+    import threading
+
+    def _warm() -> None:
+        try:
+            from scripts.cardgen.rasterize import warmup
+
+            warmup()
+        except Exception:
+            logger.warning("rasterizer pool warmup failed; continuing lazy", exc_info=True)
+
+    threading.Thread(target=_warm, name="rasterizer-warmup", daemon=True).start()
 
 
 @app.get("/api/health")

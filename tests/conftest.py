@@ -31,3 +31,11 @@ _mock_psycopg2.extras.RealDictCursor = MagicMock()
 
 sys.modules.setdefault("psycopg2", _mock_psycopg2)
 sys.modules.setdefault("psycopg2.extras", _mock_psycopg2.extras)
+
+# ---------------------------------------------------------------------------
+# Stub scripts.cardgen.assets so polystars_card_payload can be imported
+# without Playwright or a browser being installed.
+# ---------------------------------------------------------------------------
+
+_mock_cardgen_assets = MagicMock()
+sys.modules.setdefault("scripts.cardgen.assets", _mock_cardgen_assets)

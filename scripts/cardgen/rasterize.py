@@ -1,28 +1,51 @@
 """
-SVG → PNG rasterization via a pooled headless Chromium (Playwright).
+SVG → PNG rasterization via a pool of headless Chromium workers (Playwright).
 
-Why a dedicated worker thread:
-  * Playwright's sync API refuses to start if an asyncio event loop exists
-    in the current thread. FastAPI endpoints run on the main async thread,
-    so we delegate all rasterization to a daemon thread that owns the
-    browser for the lifetime of the process.
-  * Starting Chromium costs ~500ms–1s; reusing one browser + page across
-    mints keeps per-card rasterization at ~100–250 ms.
+Architecture:
+  * Each worker thread owns its own ``sync_playwright()`` instance, Browser
+    and Page. Playwright's sync API refuses to start if an asyncio loop
+    exists in the current thread, so we keep every browser off the FastAPI
+    event loop and off each other.
+  * All workers pull from a single shared request queue. ``svg_to_png``
+    submits work and blocks on a per-request reply queue, so it is safe
+    to call from any thread (sync or async-via-to_thread).
+  * Pool size defaults to 4 (override with ``PLAYWRIGHT_WORKERS``). A
+    pool of N renders up to N cards in parallel, which matters for batch
+    simulators that used to be O(N) × per-card latency.
+
+Cold start cost:
+  * Launching a Chromium is ~500 ms – 3 s on warm disks (up to ~20-40 s the
+    very first time Chromium has ever been spawned on the machine).
+  * Call :func:`warmup` at process startup if you want the first request to
+    skip that cost.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import queue
 import threading
 from typing import Optional, Tuple
 
+logger = logging.getLogger(__name__)
+
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 
-# (svg_body, width, height, reply_queue)
+try:
+    _DEFAULT_WORKER_COUNT = max(1, int(os.getenv("PLAYWRIGHT_WORKERS", "4")))
+except ValueError:
+    _DEFAULT_WORKER_COUNT = 4
+
+# (svg_body, width, height, reply_queue); None is a shutdown sentinel.
 _REQUEST_QUEUE: "queue.Queue[Optional[Tuple[str, int, int, queue.Queue]]]" = queue.Queue()
-_WORKER_STARTED = False
-_WORKER_LOCK = threading.Lock()
-_WORKER_READY = threading.Event()
+
+_POOL_LOCK = threading.Lock()
+_POOL_STARTED = False
+_ALL_WORKERS_READY = threading.Event()
+_READY_COUNT_LOCK = threading.Lock()
+_READY_COUNT = 0
+_WORKER_COUNT = _DEFAULT_WORKER_COUNT
 
 
 def _wrap_svg_html(svg_body: str, width: int, height: int) -> str:
@@ -43,13 +66,21 @@ def _wrap_svg_html(svg_body: str, width: int, height: int) -> str:
     )
 
 
-def _worker_loop() -> None:
+def _mark_worker_ready() -> None:
+    global _READY_COUNT
+    with _READY_COUNT_LOCK:
+        _READY_COUNT += 1
+        if _READY_COUNT >= _WORKER_COUNT:
+            _ALL_WORKERS_READY.set()
+
+
+def _worker_loop(worker_index: int) -> None:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         # Drain the queue by replying with errors so callers don't hang.
         err = f"playwright not installed: {exc}"
-        _WORKER_READY.set()
+        _mark_worker_ready()
         while True:
             item = _REQUEST_QUEUE.get()
             if item is None:
@@ -57,58 +88,80 @@ def _worker_loop() -> None:
             _, _, _, reply_q = item
             reply_q.put(("error", err))
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            viewport={"width": 1024, "height": 1024},
-            device_scale_factor=1.0,
-        )
-        page = context.new_page()
-        _WORKER_READY.set()
-        try:
-            while True:
-                item = _REQUEST_QUEUE.get()
-                if item is None:
-                    return
-                svg_body, width, height, reply_q = item
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                viewport={"width": 1024, "height": 1024},
+                device_scale_factor=1.0,
+            )
+            page = context.new_page()
+            _mark_worker_ready()
+            try:
+                while True:
+                    item = _REQUEST_QUEUE.get()
+                    if item is None:
+                        return
+                    svg_body, width, height, reply_q = item
+                    try:
+                        page.set_viewport_size({"width": int(width), "height": int(height)})
+                        html = _wrap_svg_html(svg_body, int(width), int(height))
+                        page.set_content(html, wait_until="load")
+                        # Ensure embedded @font-face (data-URI) has finished loading.
+                        page.evaluate("() => document.fonts.ready")
+                        png_bytes = page.screenshot(
+                            type="png",
+                            omit_background=False,
+                            full_page=False,
+                            clip={"x": 0, "y": 0, "width": int(width), "height": int(height)},
+                        )
+                        reply_q.put(("ok", png_bytes))
+                    except Exception as exc:
+                        reply_q.put(("error", f"{type(exc).__name__}: {exc}"))
+            finally:
                 try:
-                    page.set_viewport_size({"width": int(width), "height": int(height)})
-                    html = _wrap_svg_html(svg_body, int(width), int(height))
-                    page.set_content(html, wait_until="load")
-                    # Ensure embedded @font-face (data-URI) has finished loading.
-                    page.evaluate("() => document.fonts.ready")
-                    png_bytes = page.screenshot(
-                        type="png",
-                        omit_background=False,
-                        full_page=False,
-                        clip={"x": 0, "y": 0, "width": int(width), "height": int(height)},
-                    )
-                    reply_q.put(("ok", png_bytes))
-                except Exception as exc:
-                    reply_q.put(("error", f"{type(exc).__name__}: {exc}"))
-        finally:
-            try:
-                context.close()
-            except Exception:
-                pass
-            try:
-                browser.close()
-            except Exception:
-                pass
+                    context.close()
+                except Exception:
+                    pass
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception:
+        # Worker died mid-startup; mark ready anyway so the main caller doesn't
+        # block forever waiting for a browser that will never come, and log.
+        logger.exception("rasterizer worker %d crashed", worker_index)
+        _mark_worker_ready()
 
 
-def _ensure_worker() -> None:
-    global _WORKER_STARTED
-    with _WORKER_LOCK:
-        if _WORKER_STARTED:
+def _ensure_pool() -> None:
+    global _POOL_STARTED
+    with _POOL_LOCK:
+        if _POOL_STARTED:
             return
-        thread = threading.Thread(target=_worker_loop, name="svg-rasterizer", daemon=True)
-        thread.start()
-        _WORKER_STARTED = True
-    # Wait for the worker to reach its request loop (browser booted) so the
+        for i in range(_WORKER_COUNT):
+            thread = threading.Thread(
+                target=_worker_loop,
+                args=(i,),
+                name=f"svg-rasterizer-{i}",
+                daemon=True,
+            )
+            thread.start()
+        _POOL_STARTED = True
+    # Wait for the pool to reach steady state (all browsers booted) so the
     # first caller isn't racing with Chromium startup. Cold start can take
-    # 20-40s on Windows the very first time Chromium is launched in a process.
-    _WORKER_READY.wait(timeout=90.0)
+    # 20-40s on Windows the very first time Chromium is ever launched.
+    _ALL_WORKERS_READY.wait(timeout=90.0)
+
+
+def warmup() -> None:
+    """Spawn the worker pool eagerly, so the first real request is instant.
+
+    Safe to call multiple times; subsequent calls are no-ops. Typical usage
+    is from a FastAPI ``startup`` event on processes that will rasterize
+    cards (admin_backend, user_web_backend).
+    """
+    _ensure_pool()
 
 
 def svg_to_png(
@@ -120,16 +173,17 @@ def svg_to_png(
 ) -> bytes:
     """Rasterize an SVG document to PNG bytes at the requested pixel size.
 
-    Blocks until the dedicated worker thread returns the PNG. Safe to call
-    from sync or async code (under async, invoke via ``asyncio.to_thread``
-    if you need to avoid blocking the event loop).
+    Blocks until a worker in the pool returns the PNG. Safe to call from
+    multiple threads concurrently: each call gets its own reply queue and
+    pulls a free worker from the shared pool. Up to ``PLAYWRIGHT_WORKERS``
+    rasterizations run in parallel.
     """
     if not svg_body:
         raise ValueError("svg_to_png: svg_body is empty")
     if width <= 0 or height <= 0:
         raise ValueError(f"svg_to_png: invalid size {width}x{height}")
 
-    _ensure_worker()
+    _ensure_pool()
     reply_q: "queue.Queue[Tuple[str, object]]" = queue.Queue(maxsize=1)
     _REQUEST_QUEUE.put((svg_body, int(width), int(height), reply_q))
     status, payload = reply_q.get(timeout=timeout_seconds)

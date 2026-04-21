@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(venv/Scripts/python.exe *)",
-      "Bash(cmd *)"
+      "Bash(cmd *)",
+      "Bash(python -m pytest tests/test_infer_archetype.py tests/test_card_payload.py tests/test_claude_client.py tests/test_double_mint_eligibility.py -v)",
+      "Bash(.\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/test_infer_archetype.py tests/test_card_payload.py tests/test_claude_client.py tests/test_double_mint_eligibility.py -v)",
+      "Bash(\"venv/Scripts/python.exe\" -m pytest tests/test_infer_archetype.py tests/test_card_payload.py tests/test_claude_client.py tests/test_double_mint_eligibility.py -v)",
+      "Bash(\"venv/Scripts/python.exe\" -m pytest tests/)",
+      "Bash(\"venv/Scripts/python.exe\" -m pytest tests/test_card_title_wrap.py --tb=short)",
+      "Bash(\"venv/Scripts/python.exe\" -m pytest tests/ -q)"
     ]
   }
 }
