@@ -79,6 +79,32 @@ def _mark_worker_ready() -> None:
             _ALL_WORKERS_READY.set()
 
 
+_BROWSER_CLOSED_MARKERS = (
+    "target page, context or browser has been closed",
+    "target closed",
+    "browser has been closed",
+    "browser closed",
+    "connection closed",
+    "browser context has been closed",
+)
+
+
+def _is_browser_closed_error(exc: BaseException) -> bool:
+    """Return True if the exception indicates the Chromium page/context died.
+
+    These errors leave the worker's ``page`` unusable: every subsequent call
+    (``set_viewport_size``, ``set_content``, …) will re-raise the same
+    ``TargetClosedError``. The worker must relaunch Chromium before it can
+    process more work, otherwise it silently fails every request routed to
+    it and the batch (e.g. the showcase simulator) stalls at zero progress.
+    """
+    name = type(exc).__name__
+    if name in ("TargetClosedError", "BrowserClosedError"):
+        return True
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _BROWSER_CLOSED_MARKERS)
+
+
 def _worker_loop(worker_index: int) -> None:
     try:
         from playwright.sync_api import sync_playwright
@@ -93,16 +119,30 @@ def _worker_loop(worker_index: int) -> None:
             _, _, _, reply_q = item
             reply_q.put(("error", err))
 
+    def _launch(p):
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": 1024, "height": 1024},
+            device_scale_factor=1.0,
+        )
+        page = context.new_page()
+        return browser, context, page
+
+    def _close_quietly(browser, context) -> None:
+        for closer in (context, browser):
+            if closer is None:
+                continue
+            try:
+                closer.close()
+            except Exception:
+                pass
+
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                viewport={"width": 1024, "height": 1024},
-                device_scale_factor=1.0,
-            )
-            page = context.new_page()
-            _mark_worker_ready()
+            browser = context = page = None
             try:
+                browser, context, page = _launch(p)
+                _mark_worker_ready()
                 while True:
                     item = _REQUEST_QUEUE.get()
                     if item is None:
@@ -122,16 +162,32 @@ def _worker_loop(worker_index: int) -> None:
                         )
                         reply_q.put(("ok", png_bytes))
                     except Exception as exc:
-                        reply_q.put(("error", f"{type(exc).__name__}: {exc}"))
+                        err_msg = f"{type(exc).__name__}: {exc}"
+                        reply_q.put(("error", err_msg))
+                        # If the page/browser is dead, every subsequent request
+                        # routed to this worker will fail with the same
+                        # TargetClosedError. Relaunch Chromium in-place so the
+                        # worker can keep serving. Common after uvicorn
+                        # ``--reload`` tears down the previous process and the
+                        # new Chromium instance exits right after startup.
+                        if _is_browser_closed_error(exc):
+                            logger.warning(
+                                "rasterizer worker %d: browser closed mid-request (%s); relaunching",
+                                worker_index,
+                                err_msg,
+                            )
+                            _close_quietly(browser, context)
+                            browser = context = page = None
+                            try:
+                                browser, context, page = _launch(p)
+                            except Exception:
+                                logger.exception(
+                                    "rasterizer worker %d: failed to relaunch Chromium; exiting",
+                                    worker_index,
+                                )
+                                return
             finally:
-                try:
-                    context.close()
-                except Exception:
-                    pass
-                try:
-                    browser.close()
-                except Exception:
-                    pass
+                _close_quietly(browser, context)
     except Exception:
         # Worker died mid-startup; mark ready anyway so the main caller doesn't
         # block forever waiting for a browser that will never come, and log.
@@ -199,6 +255,22 @@ def shutdown(timeout_seconds: float = 5.0) -> None:
         thread.join(timeout=timeout_seconds)
 
 
+_MAX_RENDER_ATTEMPTS = max(1, int(os.getenv("PLAYWRIGHT_MAX_ATTEMPTS", "3")))
+
+
+def _is_retryable_render_error(message: object) -> bool:
+    """Transient failures worth another trip through the pool.
+
+    Mostly ``TargetClosedError`` from a worker whose Chromium has just died.
+    That worker relaunches itself in-place, so a fresh submission almost
+    always lands on a healthy worker (or the same one after it recovered).
+    """
+    text = str(message).lower()
+    if "targetclosederror" in text:
+        return True
+    return any(marker in text for marker in _BROWSER_CLOSED_MARKERS)
+
+
 def svg_to_png(
     svg_body: str,
     *,
@@ -212,6 +284,11 @@ def svg_to_png(
     multiple threads concurrently: each call gets its own reply queue and
     pulls a free worker from the shared pool. Up to ``PLAYWRIGHT_WORKERS``
     rasterizations run in parallel.
+
+    On transient browser-closed errors (common right after ``uvicorn --reload``
+    leaves a worker with a dead Chromium) the call is re-submitted up to
+    ``PLAYWRIGHT_MAX_ATTEMPTS`` times; the offending worker relaunches its
+    browser in parallel, so the retry usually succeeds immediately.
     """
     if not svg_body:
         raise ValueError("svg_to_png: svg_body is empty")
@@ -219,10 +296,21 @@ def svg_to_png(
         raise ValueError(f"svg_to_png: invalid size {width}x{height}")
 
     _ensure_pool()
-    reply_q: "queue.Queue[Tuple[str, object]]" = queue.Queue(maxsize=1)
-    _REQUEST_QUEUE.put((svg_body, int(width), int(height), reply_q))
-    status, payload = reply_q.get(timeout=timeout_seconds)
-    if status != "ok":
-        raise RuntimeError(f"SVG rasterization failed: {payload}")
-    assert isinstance(payload, (bytes, bytearray))
-    return bytes(payload)
+    last_error: object = "unknown"
+    for attempt in range(1, _MAX_RENDER_ATTEMPTS + 1):
+        reply_q: "queue.Queue[Tuple[str, object]]" = queue.Queue(maxsize=1)
+        _REQUEST_QUEUE.put((svg_body, int(width), int(height), reply_q))
+        status, payload = reply_q.get(timeout=timeout_seconds)
+        if status == "ok":
+            assert isinstance(payload, (bytes, bytearray))
+            return bytes(payload)
+        last_error = payload
+        if attempt >= _MAX_RENDER_ATTEMPTS or not _is_retryable_render_error(payload):
+            break
+        logger.warning(
+            "svg_to_png attempt %d/%d hit a dead worker (%s); retrying",
+            attempt,
+            _MAX_RENDER_ATTEMPTS,
+            payload,
+        )
+    raise RuntimeError(f"SVG rasterization failed: {last_error}")
