@@ -978,6 +978,16 @@ def run_admin_simulated_card_generations(
                     render_payload = _build_render_payload(payload)
                     # Showcase cards use the same SVG -> PNG pipeline as NFT mints;
                     # only the destination differs (R2 here, Pinata for real mints).
+                    # Emit an intra-iteration heartbeat so the UI progress bar
+                    # doesn't look frozen during the Playwright rasterization
+                    # (which is the slowest step, ~200-400 ms per side).
+                    emit(
+                        "rendering",
+                        iteration=i + 1,
+                        current_chunk_size=n_run,
+                        winner_row_id=winner_row_id,
+                        slug=slug,
+                    )
                     front_png, back_png = render_card_pngs(render_payload)
                     front_image_path, back_image_path, uploaded_front_key, uploaded_back_key = (
                         upload_card_assets_to_r2(slug, front_png, back_png)

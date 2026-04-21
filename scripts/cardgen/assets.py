@@ -84,14 +84,21 @@ def rasterize_card_svgs(
 ) -> Tuple[bytes, bytes]:
     """Rasterize front+back SVG -> PNG bytes via the shared headless browser pool.
 
+    Front and back are rasterized in parallel: each ``svg_to_png`` call grabs
+    a free worker from the shared Playwright pool, so on a pool with 2+
+    workers this cuts per-card latency roughly in half vs the previous
+    sequential implementation. On a 1-worker pool the two calls are simply
+    serialized by the queue, so this fan-out never makes things slower.
+
     Width/height default to ``CARD_PNG_WIDTH``/``CARD_PNG_HEIGHT``. Callers can
     override for special cases (e.g. larger off-screen preview) but should
     generally rely on the shared constants so every card has the same pixel
     dimensions regardless of who rendered it.
     """
-    front_png = svg_to_png(front_svg, width=width, height=height)
-    back_png = svg_to_png(back_svg, width=width, height=height)
-    return front_png, back_png
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_front = pool.submit(svg_to_png, front_svg, width=width, height=height)
+        f_back = pool.submit(svg_to_png, back_svg, width=width, height=height)
+        return f_front.result(), f_back.result()
 
 
 def render_card_pngs(render_payload: Dict[str, Any]) -> Tuple[bytes, bytes]:
