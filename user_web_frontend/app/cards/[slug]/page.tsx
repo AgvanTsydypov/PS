@@ -3,7 +3,6 @@
 import Link from "next/link";
 import React, { useEffect, useState } from "react";
 
-import { InlineSvgCard } from "../../../components/InlineSvgCard";
 import SiteLogoLink from "../../../components/SiteLogoLink";
 import { fetchPublicUserApiJsonResult } from "../../../lib/userApiBase";
 
@@ -154,7 +153,8 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                 className="card-detail-image-card card-detail-image-card-front"
                 style={{"--card-border-color": (card.card_payload_json as {border_color?: string} | undefined)?.border_color ?? "#B6BBC8"} as React.CSSProperties}
               >
-                <InlineSvgCard className="card-detail-image" url={card.front_image_url} alt={`${title} front`} />
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img className="card-detail-image" src={card.front_image_url} alt={`${title} front`} />
               </section>
 
               <div className="card-detail-info">
@@ -208,7 +208,8 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                 className="card-detail-image-card card-detail-image-card-back"
                 style={{"--card-border-color": (card.card_payload_json as {border_color?: string} | undefined)?.border_color ?? "#B6BBC8"} as React.CSSProperties}
               >
-                <InlineSvgCard className="card-detail-image" url={card.back_image_url} alt={`${title} back`} />
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img className="card-detail-image" src={card.back_image_url} alt={`${title} back`} />
               </section>
             </div>
           </>

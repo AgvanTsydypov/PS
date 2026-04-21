@@ -3,8 +3,6 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { InlineSvgCard } from "./InlineSvgCard";
-
 import {
   ActiveSeasonsBoard,
   type ActiveSeasonView,
@@ -1537,14 +1535,16 @@ export default function UserDashboard() {
                           <div className={`generated-card-flip-inner ${isFlipped ? "is-flipped" : ""}`}>
                             <div className="generated-card-flip-face generated-card-flip-face-front">
                               {item.front_image_url ? (
-                                <InlineSvgCard className="generated-card-image" url={item.front_image_url} alt={cardLabel} />
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img className="generated-card-image" src={item.front_image_url} alt={cardLabel} />
                               ) : (
                                 <div className="generated-card-image nft-image-empty">No preview</div>
                               )}
                             </div>
                             <div className="generated-card-flip-face generated-card-flip-face-back">
                               {item.back_image_url ? (
-                                <InlineSvgCard className="generated-card-image" url={item.back_image_url} alt={`${cardLabel} back`} />
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img className="generated-card-image" src={item.back_image_url} alt={`${cardLabel} back`} />
                               ) : (
                                 <div className="generated-card-image nft-image-empty">No back preview</div>
                               )}
