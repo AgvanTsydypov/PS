@@ -22,20 +22,24 @@ Cold start cost:
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import queue
 import threading
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 
+# Default 2 workers: a balance between batch throughput and RAM (each
+# Chromium costs ~200-300 MB resident). Bump via ``PLAYWRIGHT_WORKERS`` on
+# hosts with more cores/RAM; drop to 1 for memory-constrained dev machines.
 try:
-    _DEFAULT_WORKER_COUNT = max(1, int(os.getenv("PLAYWRIGHT_WORKERS", "4")))
+    _DEFAULT_WORKER_COUNT = max(1, int(os.getenv("PLAYWRIGHT_WORKERS", "2")))
 except ValueError:
-    _DEFAULT_WORKER_COUNT = 4
+    _DEFAULT_WORKER_COUNT = 2
 
 # (svg_body, width, height, reply_queue); None is a shutdown sentinel.
 _REQUEST_QUEUE: "queue.Queue[Optional[Tuple[str, int, int, queue.Queue]]]" = queue.Queue()
@@ -46,6 +50,7 @@ _ALL_WORKERS_READY = threading.Event()
 _READY_COUNT_LOCK = threading.Lock()
 _READY_COUNT = 0
 _WORKER_COUNT = _DEFAULT_WORKER_COUNT
+_WORKER_THREADS: List[threading.Thread] = []
 
 
 def _wrap_svg_html(svg_body: str, width: int, height: int) -> str:
@@ -147,7 +152,9 @@ def _ensure_pool() -> None:
                 daemon=True,
             )
             thread.start()
+            _WORKER_THREADS.append(thread)
         _POOL_STARTED = True
+        atexit.register(shutdown)
     # Wait for the pool to reach steady state (all browsers booted) so the
     # first caller isn't racing with Chromium startup. Cold start can take
     # 20-40s on Windows the very first time Chromium is ever launched.
@@ -162,6 +169,34 @@ def warmup() -> None:
     cards (admin_backend, user_web_backend).
     """
     _ensure_pool()
+
+
+def shutdown(timeout_seconds: float = 5.0) -> None:
+    """Stop every worker and close its Chromium cleanly.
+
+    CRITICAL on dev servers running under ``uvicorn --reload``: worker
+    threads are daemons, so a plain process exit would skip their
+    ``browser.close()`` and leave zombie Chromium subprocesses behind.
+    On Windows a dozen reloads can pile up 50+ orphaned ``chrome-headless-shell``
+    processes, consume several GB of RAM, and wedge the machine until it
+    swaps. We send one sentinel per worker and join briefly so each worker
+    exits its ``sync_playwright()`` context and shuts down its browser.
+
+    Registered via ``atexit`` the first time the pool starts, and callable
+    directly from a FastAPI ``@app.on_event("shutdown")`` hook for belt-
+    and-suspenders cleanup. Idempotent.
+    """
+    global _POOL_STARTED
+    with _POOL_LOCK:
+        if not _POOL_STARTED:
+            return
+        threads = list(_WORKER_THREADS)
+        _WORKER_THREADS.clear()
+        _POOL_STARTED = False
+    for _ in threads:
+        _REQUEST_QUEUE.put(None)
+    for thread in threads:
+        thread.join(timeout=timeout_seconds)
 
 
 def svg_to_png(

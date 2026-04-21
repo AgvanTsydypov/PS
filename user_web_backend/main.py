@@ -2439,10 +2439,10 @@ def _warm_rasterizer_pool_in_background() -> None:
 
     ``/api/cards/get`` lazily rasterizes showcase SVGs to PNG on first access,
     and the first ``svg_to_png`` call otherwise pays the full Chromium cold
-    start (~12s for 4 workers). Pre-warming here makes the first real request
-    land on an already-ready pool while keeping uvicorn's startup
-    non-blocking — if Playwright is missing or browsers crash, the warm
-    thread logs and exits without breaking health checks.
+    start. Pre-warming here makes the first real request land on an
+    already-ready pool while keeping uvicorn's startup non-blocking —
+    if Playwright is missing or browsers crash, the warm thread logs and
+    exits without breaking health checks.
     """
     import threading
 
@@ -2455,6 +2455,18 @@ def _warm_rasterizer_pool_in_background() -> None:
             logger.warning("rasterizer pool warmup failed; continuing lazy", exc_info=True)
 
     threading.Thread(target=_warm, name="rasterizer-warmup", daemon=True).start()
+
+
+@app.on_event("shutdown")
+def _shutdown_rasterizer_pool() -> None:
+    """Close Chromium workers cleanly on uvicorn reload/stop so we don't
+    leak ``chrome-headless-shell`` zombie processes."""
+    try:
+        from scripts.cardgen.rasterize import shutdown
+
+        shutdown()
+    except Exception:
+        logger.warning("rasterizer shutdown failed", exc_info=True)
 
 
 @app.get("/api/health")
