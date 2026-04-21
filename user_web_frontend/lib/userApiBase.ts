@@ -104,6 +104,84 @@ async function fetchJsonWithTimeout<T>(
   }
 }
 
+/**
+ * Richer result variant of the public JSON fetcher. Unlike `fetchPublicUserApiJson`
+ * (which collapses every failure into `null`), this returns a discriminated union so
+ * callers can tell a legit 404 apart from a transient 5xx / network drop that was
+ * retried and ultimately gave up. Retries only fire for 429/5xx/network/timeout; 4xx
+ * (other than 429) short-circuits immediately.
+ */
+export type PublicFetchResult<T> =
+  | { kind: "ok"; data: T }
+  | { kind: "not-found" }
+  | { kind: "error"; status?: number; retryable: boolean };
+
+async function fetchJsonResultWithTimeout<T>(
+  input: string,
+  timeoutMs: number,
+): Promise<PublicFetchResult<T>> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const res = await fetch(input, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (res.status === 404) {
+      return { kind: "not-found" };
+    }
+    if (!res.ok) {
+      if (isRetryableStatus(res.status)) {
+        throw new Error(`Retryable status ${res.status}`);
+      }
+      return { kind: "error", status: res.status, retryable: false };
+    }
+    const data = (await res.json()) as T;
+    return { kind: "ok", data };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw error;
+    }
+    if (error instanceof Error && error.message.startsWith("Retryable status ")) {
+      throw error;
+    }
+    throw Object.assign(new Error("network-error"), { cause: error });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function fetchPublicUserApiJsonResult<T>(
+  path: string,
+  { retries = 3, origin, timeoutMs = PUBLIC_API_TIMEOUT_MS }: PublicFetchOptions = {},
+): Promise<PublicFetchResult<T>> {
+  const attemptCount = Math.max(1, retries + 1);
+  const url = buildUserApiUrl(path, origin);
+
+  for (let attempt = 0; attempt < attemptCount; attempt += 1) {
+    try {
+      return await fetchJsonResultWithTimeout<T>(url, timeoutMs);
+    } catch {
+      if (attempt === attemptCount - 1) {
+        return { kind: "error", retryable: true };
+      }
+    }
+
+    const delayMs =
+      PUBLIC_API_RETRY_DELAYS_MS[
+        Math.min(attempt, PUBLIC_API_RETRY_DELAYS_MS.length - 1)
+      ] ?? 0;
+    if (delayMs > 0) {
+      await sleep(delayMs);
+    }
+  }
+
+  return { kind: "error", retryable: true };
+}
+
 async function fetchPublicUserApiJson<T>(
   path: string,
   { retries = 2, origin, timeoutMs = PUBLIC_API_TIMEOUT_MS }: PublicFetchOptions = {},

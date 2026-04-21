@@ -5,6 +5,7 @@ import React, { useEffect, useState } from "react";
 
 import { InlineSvgCard } from "../../../components/InlineSvgCard";
 import SiteLogoLink from "../../../components/SiteLogoLink";
+import { fetchPublicUserApiJsonResult } from "../../../lib/userApiBase";
 
 type GeneratedCardPayload = {
   card_title?: string;
@@ -61,60 +62,45 @@ type GeneratedCardItem = {
   magiceden_url?: string | null;
 };
 
-const apiBase =
-  process.env.NEXT_PUBLIC_USER_API_BASE_URL ??
-  (process.env.NODE_ENV === "development" ? "http://localhost:8011" : "/");
-
-function buildApiUrl(path: string): string {
-  if (apiBase === "/") return path;
-  return `${apiBase.replace(/\/$/, "")}${path}`;
-}
-
-function extractErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) return error.message;
-  return "Request failed";
-}
+type LoadStatus = "loading" | "ok" | "not-found" | "error";
 
 export default function CardDetailPage({ params }: { params: { slug: string } }) {
   const [card, setCard] = useState<GeneratedCardItem | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [status, setStatus] = useState<LoadStatus>("loading");
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
 
     async function loadCard() {
-      setLoading(true);
-      setError("");
-      try {
-        const res = await fetch(buildApiUrl(`/api/cards/${encodeURIComponent(params.slug)}`), {
-          cache: "no-store",
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || "Failed to load card");
-        }
-        const payload = (await res.json()) as { card?: GeneratedCardItem };
-        if (!cancelled) {
-          setCard(payload.card ?? null);
-        }
-      } catch (loadError) {
-        if (!cancelled) {
-          setError(extractErrorMessage(loadError));
-          setCard(null);
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+      setStatus("loading");
+      // The upstream sporadically 503s (nginx -> backend), so retry transient
+      // failures with exponential backoff before surfacing an error to the user.
+      const result = await fetchPublicUserApiJsonResult<{ card?: GeneratedCardItem }>(
+        `/api/cards/${encodeURIComponent(params.slug)}`,
+        { retries: 3 },
+      );
+      if (cancelled) return;
+
+      if (result.kind === "ok") {
+        setCard(result.data.card ?? null);
+        setStatus(result.data.card ? "ok" : "not-found");
+        return;
       }
+      if (result.kind === "not-found") {
+        setCard(null);
+        setStatus("not-found");
+        return;
+      }
+      setCard(null);
+      setStatus("error");
     }
 
     void loadCard();
     return () => {
       cancelled = true;
     };
-  }, [params.slug]);
+  }, [params.slug, reloadTick]);
 
   const payload = card?.card_payload_json ?? {};
   const event = card?.event_snapshot ?? {};
@@ -131,11 +117,20 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
       </div>
 
       <section className="card-detail-shell">
-        {loading ? (
+        {status === "loading" ? (
           <div className="season-board-muted">Loading card...</div>
-        ) : error ? (
-          <pre className="eligibility-output">Card load failed: {error}</pre>
-        ) : !card ? (
+        ) : status === "error" ? (
+          <div className="season-board-muted card-detail-error">
+            <p>Card is temporarily unavailable. Please try again in a moment.</p>
+            <button
+              type="button"
+              className="card-detail-retry"
+              onClick={() => setReloadTick((n) => n + 1)}
+            >
+              Retry
+            </button>
+          </div>
+        ) : status === "not-found" || !card ? (
           <div className="season-board-muted">Card not found.</div>
         ) : (
           <>
