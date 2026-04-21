@@ -953,7 +953,7 @@ main {
    looks natural instead of broken. */
 .nft-board-horizontal {
   max-width: min(1600px, calc(100vw - 32px));
-  padding: 0;
+  padding: 0 0 72px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -1767,7 +1767,7 @@ button:disabled {
 
   .season-board-standalone.nft-board-horizontal {
     margin: 16px 0;
-    padding: 0;
+    padding: 0 0 64px;
   }
 }
 
