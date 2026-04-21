@@ -349,6 +349,15 @@ body::after {
   margin-left: calc(50% - 50vw);
   margin-right: calc(50% - 50vw);
   padding: 32px 0 22px;
+  /* The hero banner is stretched to full viewport width via negative
+     margins so the signature stripe spans the page. Its transparent
+     side areas sit on top of the home ticker panels' top cards and
+     would otherwise intercept hover/click, creating an invisible
+     dead zone near the top-left (and top-right) of the page. The
+     logo itself is purely decorative (no link, no handlers), so we
+     make the whole banner transparent to pointer events and keep
+     only the wordmark image/stripe visually. */
+  pointer-events: none;
 }
 
 /* Thin brand accent bar under the hero — byld.dev-style signature stripe */
@@ -362,6 +371,7 @@ body::after {
   height: 2px;
   background: var(--bd-brand);
   animation: bdFadeIn 600ms ease 200ms both;
+  pointer-events: none;
 }
 
 .home-hero-wordmark {
