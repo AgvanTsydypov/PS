@@ -50,6 +50,24 @@ python scripts/db/backfill_tag_colors.py --batch-size 50
 psql -h localhost -U postgres -d polystars -f sql/schemas/init-db.sql  # init schema
 ```
 
+### Tests
+```bash
+# Run all tests
+venv/Scripts/python.exe -m pytest tests/ --tb=short -q
+
+# Run a specific file
+venv/Scripts/python.exe -m pytest tests/test_simulate_batch_helpers.py -v
+
+# Run a specific test class or test
+venv/Scripts/python.exe -m pytest tests/test_scenarios_service.py::TestApplyAdvancedScenarioValidation -v
+
+# Run only failed tests from last run
+venv/Scripts/python.exe -m pytest tests/ --lf --tb=short
+```
+
+> Python interpreter: always use `venv/Scripts/python.exe` (not the system `python` at C:\Python314).
+> conftest.py stubs psycopg2 and scripts.cardgen.assets globally — no live DB or browser needed.
+
 ## Architecture
 
 ### Directory Layout

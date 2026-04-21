@@ -3350,6 +3350,29 @@ def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/health/playwright")
+def health_playwright() -> Dict[str, Any]:
+    """Smoke-test the Playwright rasterizer pool with a 1×1 SVG.
+
+    Returns ``{"ok": true}`` if a worker responds within 30 s, or
+    ``{"ok": false, "error": "..."}`` otherwise.  Use this to verify that
+    Chromium can actually launch on the current host before running a
+    showcase batch.
+    """
+    try:
+        from scripts.cardgen.rasterize import svg_to_png
+
+        tiny_svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1">'
+            '<rect width="1" height="1" fill="red"/>'
+            "</svg>"
+        )
+        png_bytes = svg_to_png(tiny_svg, width=1, height=1, timeout_seconds=30.0)
+        return {"ok": True, "png_bytes": len(png_bytes)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @app.get("/api/server-time")
 def server_time() -> Dict[str, str]:
     return {"now_utc_iso": datetime.now(timezone.utc).isoformat()}

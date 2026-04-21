@@ -79,3 +79,5 @@ GeminiWatermarkTool
 user_web_backend/generated_cards/
 
 /scripts/cardgen/output*
+
+.mcp.json
