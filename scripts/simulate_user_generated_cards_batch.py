@@ -802,10 +802,18 @@ def run_admin_simulated_card_generations(
         except Exception:
             logger.warning("simulate progress callback failed", exc_info=True)
 
+    logger.info(
+        "simulate_card_batch: max_count=%s remaining_supply=%s maximum_diversity=%s",
+        max_count, remaining_i, maximum_diversity,
+    )
     emit("started", requested_run_count=n)
 
     if n <= 0:
         out["stopped_reason"] = "no_remaining_supply" if remaining_i <= 0 else "zero_planned"
+        logger.warning(
+            "simulate_card_batch: stopping early reason=%s remaining=%s",
+            out["stopped_reason"], remaining_i,
+        )
         emit("stopped", stopped_reason=out["stopped_reason"])
         return out
 
@@ -822,12 +830,23 @@ def run_admin_simulated_card_generations(
                 out["showcase_candidate_pool_size"] = len(candidates_raw)
                 out["showcase_pool_cap"] = SIMULATE_SHOWCASE_MAX_CANDIDATES
                 planned_ids = _select_diverse_winner_row_plan(candidates_raw, n)
+                logger.info(
+                    "simulate_card_batch: showcase_eligible_total=%s candidates_fetched=%s planned=%s",
+                    eligible_total, len(candidates_raw), len(planned_ids),
+                )
         finally:
             plan_conn.close()
 
         n_run = len(planned_ids)
         out["planned"] = n_run
         if n_run <= 0:
+            logger.warning(
+                "simulate_card_batch: no eligible showcase candidates "
+                "(eligible_total=%s). "
+                "Check that event_cards.manual_image_url is populated for events in "
+                "winner_wallets_nft_to_claim. Run the event_cards backfill if needed.",
+                out["showcase_eligible_total"],
+            )
             out["stopped_reason"] = "no_eligible_showcase_candidates"
             emit(
                 "stopped",

@@ -13,7 +13,12 @@
       "Bash(\"venv/Scripts/python.exe\" -m pytest tests/test_agent1_helpers.py tests/test_scheduler_helpers.py tests/test_payload_extras.py -v)",
       "Bash(python -m pytest tests/test_simulate_batch_helpers.py tests/test_scenarios_service.py -v)",
       "Bash(.\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/test_simulate_batch_helpers.py tests/test_scenarios_service.py -v)",
-      "Bash(python -m pytest --version)"
+      "Bash(python -m pytest --version)",
+      "Bash(python -m postgres_mcp --help)",
+      "Bash(C:\\\\Python314\\\\python.exe -m pip install postgres-mcp)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "postgres"
+  ]
 }

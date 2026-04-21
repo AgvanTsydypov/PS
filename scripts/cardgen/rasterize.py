@@ -120,7 +120,17 @@ def _worker_loop(worker_index: int) -> None:
             reply_q.put(("error", err))
 
     def _launch(p):
-        browser = p.chromium.launch(headless=True)
+        # Extra args (e.g. --no-sandbox on Linux prod servers that run
+        # Chromium without a user-namespace sandbox).
+        extra_args = [
+            a.strip()
+            for a in os.getenv("PLAYWRIGHT_CHROMIUM_ARGS", "").split(",")
+            if a.strip()
+        ]
+        if os.getenv("PLAYWRIGHT_NO_SANDBOX", "").strip().lower() in ("1", "true", "yes"):
+            if "--no-sandbox" not in extra_args:
+                extra_args.append("--no-sandbox")
+        browser = p.chromium.launch(headless=True, args=extra_args or None)
         context = browser.new_context(
             viewport={"width": 1024, "height": 1024},
             device_scale_factor=1.0,
@@ -300,7 +310,15 @@ def svg_to_png(
     for attempt in range(1, _MAX_RENDER_ATTEMPTS + 1):
         reply_q: "queue.Queue[Tuple[str, object]]" = queue.Queue(maxsize=1)
         _REQUEST_QUEUE.put((svg_body, int(width), int(height), reply_q))
-        status, payload = reply_q.get(timeout=timeout_seconds)
+        try:
+            status, payload = reply_q.get(timeout=timeout_seconds)
+        except queue.Empty:
+            raise RuntimeError(
+                f"SVG rasterization timed out after {timeout_seconds:.0f}s — "
+                "Playwright worker is dead or overloaded. "
+                "Check server logs for Chromium launch errors. "
+                "On Linux set PLAYWRIGHT_NO_SANDBOX=1 if running without user-namespace sandbox."
+            )
         if status == "ok":
             assert isinstance(payload, (bytes, bytearray))
             return bytes(payload)
