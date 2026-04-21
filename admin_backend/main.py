@@ -3315,7 +3315,7 @@ app.add_middleware(
 def _warm_rasterizer_pool_on_startup() -> None:
     """Pre-boot Playwright workers in the background so showcase batches
     (``/api/scenarios/simulate-generated-cards-batch``) and mint renders don't
-    pay the ~12s Chromium cold start on their first request. Non-blocking:
+    pay the Chromium cold start on their first request. Non-blocking:
     uvicorn reports startup complete immediately; warmup finishes whenever
     Chromium is ready, and if Playwright is unavailable we just log and
     fall back to lazy init.
@@ -3330,6 +3330,19 @@ def _warm_rasterizer_pool_on_startup() -> None:
             logger.warning("rasterizer pool warmup failed; continuing lazy", exc_info=True)
 
     threading.Thread(target=_warm, name="rasterizer-warmup", daemon=True).start()
+
+
+@app.on_event("shutdown")
+def _shutdown_rasterizer_pool() -> None:
+    """Close Chromium workers cleanly on uvicorn reload/stop so we don't
+    leak ``chrome-headless-shell`` zombie processes (which otherwise pile
+    up under ``--reload`` and wedge the dev machine)."""
+    try:
+        from scripts.cardgen.rasterize import shutdown
+
+        shutdown()
+    except Exception:
+        logger.warning("rasterizer shutdown failed", exc_info=True)
 
 
 @app.get("/api/health")
