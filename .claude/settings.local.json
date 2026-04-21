@@ -8,7 +8,12 @@
       "Bash(\"venv/Scripts/python.exe\" -m pytest tests/test_infer_archetype.py tests/test_card_payload.py tests/test_claude_client.py tests/test_double_mint_eligibility.py -v)",
       "Bash(\"venv/Scripts/python.exe\" -m pytest tests/)",
       "Bash(\"venv/Scripts/python.exe\" -m pytest tests/test_card_title_wrap.py --tb=short)",
-      "Bash(\"venv/Scripts/python.exe\" -m pytest tests/ -q)"
+      "Bash(\"venv/Scripts/python.exe\" -m pytest tests/ -q)",
+      "Bash(\"venv/Scripts/python.exe\" -c \"import google.genai; print\\('installed'\\)\")",
+      "Bash(\"venv/Scripts/python.exe\" -m pytest tests/test_agent1_helpers.py tests/test_scheduler_helpers.py tests/test_payload_extras.py -v)",
+      "Bash(python -m pytest tests/test_simulate_batch_helpers.py tests/test_scenarios_service.py -v)",
+      "Bash(.\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/test_simulate_batch_helpers.py tests/test_scenarios_service.py -v)",
+      "Bash(python -m pytest --version)"
     ]
   }
 }

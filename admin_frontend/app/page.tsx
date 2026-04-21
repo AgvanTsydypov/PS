@@ -1493,8 +1493,57 @@ export default function HomePage() {
 
   useEffect(() => {
     const wsUrl = API_BASE.replace(/^http/, "ws") + "/ws/events";
-    const ws = new WebSocket(wsUrl);
-    ws.onmessage = (event) => {
+    let ws: WebSocket | null = null;
+    let keepAlive: number | null = null;
+    let reconnectTimer: number | null = null;
+    let reconnectAttempt = 0;
+    let disposed = false;
+
+    const clearKeepAlive = () => {
+      if (keepAlive !== null) {
+        window.clearInterval(keepAlive);
+        keepAlive = null;
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (disposed || reconnectTimer !== null) return;
+      // Exponential backoff capped at 10s; first retry is ~0.5s so local
+      // uvicorn --reload cycles feel instant while still being gentle on a
+      // remote backend that's actually down.
+      const delay = Math.min(10000, 500 * Math.pow(2, reconnectAttempt));
+      reconnectAttempt += 1;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, delay);
+    };
+
+    const connect = () => {
+      if (disposed) return;
+      clearKeepAlive();
+      try {
+        ws = new WebSocket(wsUrl);
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      ws.onopen = () => {
+        reconnectAttempt = 0;
+        ws?.send("hello");
+        keepAlive = window.setInterval(() => {
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send("ping");
+        }, 15000);
+      };
+      ws.onclose = () => {
+        clearKeepAlive();
+        scheduleReconnect();
+      };
+      ws.onerror = () => {
+        // Let onclose drive reconnect to avoid racing two timers.
+        ws?.close();
+      };
+      ws.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data) as {
           event: string;
@@ -1574,14 +1623,29 @@ export default function HomePage() {
       } catch {
         // ignore parse errors
       }
+      };
     };
-    ws.onopen = () => ws.send("hello");
-    const keepAlive = window.setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) ws.send("ping");
-    }, 15000);
+
+    connect();
+
     return () => {
-      window.clearInterval(keepAlive);
-      ws.close();
+      disposed = true;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      clearKeepAlive();
+      if (ws) {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      }
     };
   }, []);
 
