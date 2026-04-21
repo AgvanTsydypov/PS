@@ -15,17 +15,21 @@ import secrets
 import urllib.parse
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 _CARDGEN_DIR = pathlib.Path(__file__).resolve().parent / "cardgen"
-import httpx
 import psycopg2.extras
 
-from scripts.cardgen.generate_card import generate_card_back_svg, generate_card_svg
-from scripts.cardgen.rasterize import svg_to_png
+from scripts.cardgen.assets import (
+    render_card_svgs,
+    rasterize_card_svgs,
+    unpin_pinata_urls,
+    upload_card_assets_to_pinata,
+)
 from scripts.data_loading_manager import DataLoadingManager
+
+__all__ = ["unpin_pinata_urls"]  # re-exported for admin_backend import path
 
 CARD_BASE_URL = (
     os.getenv("CARD_BASE_URL")
@@ -83,22 +87,6 @@ _PTIER_CSS_COLORS: Dict[str, str] = {
     "P50": "#38BE50",
     "BASE": "#B6BBC8",
 }
-PINATA_JWT_ENV_KEY = "PINATA_JWT"
-PINATA_FILE_API_URL = "https://api.pinata.cloud/pinning/pinFileToIPFS"
-PINATA_UNPIN_API_URL = "https://api.pinata.cloud/pinning/unpin"
-PINATA_GATEWAY_PREFIX = "https://gateway.pinata.cloud/ipfs/"
-
-# Rendered card PNG dimensions. Source SVG is 516x802 (viewBox); we rasterize
-# at 2x by default for crisp rendering on high-DPI marketplaces and wallet
-# previews. Supports fractional scale (e.g. CARD_PNG_SCALE=1.5) for a size /
-# quality tradeoff.
-try:
-    CARD_PNG_SCALE = float(os.getenv("CARD_PNG_SCALE", "1.5"))
-except ValueError:
-    CARD_PNG_SCALE = 2.0
-CARD_PNG_WIDTH = int(round(516 * CARD_PNG_SCALE))
-CARD_PNG_HEIGHT = int(round(802 * CARD_PNG_SCALE))
-
 _CARD_SOURCE_SQL = """
 SELECT
     w.id AS winner_row_id,
@@ -333,69 +321,6 @@ def _build_render_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return render_payload
 
 
-def _pinata_jwt() -> str:
-    jwt = str(os.getenv(PINATA_JWT_ENV_KEY, "")).strip()
-    if not jwt:
-        raise ValueError(f"{PINATA_JWT_ENV_KEY} is required")
-    return jwt
-
-
-def unpin_pinata_urls(urls: list[str]) -> None:
-    """Best-effort unpin a list of Pinata IPFS gateway URLs. Silently ignores all errors."""
-    jwt = os.environ.get(PINATA_JWT_ENV_KEY, "").strip()
-    if not jwt:
-        return
-    for url in urls:
-        if not url or not url.startswith(PINATA_GATEWAY_PREFIX):
-            continue
-        cid = url[len(PINATA_GATEWAY_PREFIX):]
-        if not cid:
-            continue
-        try:
-            httpx.delete(
-                f"{PINATA_UNPIN_API_URL}/{cid}",
-                headers={"Authorization": f"Bearer {jwt}"},
-                timeout=10.0,
-            )
-        except Exception:
-            pass
-
-
-def _pin_bytes_to_pinata(filename: str, body: bytes, content_type: str) -> str:
-    jwt = _pinata_jwt()
-    headers = {"Authorization": f"Bearer {jwt}"}
-    files = {
-        "file": (filename, body, content_type),
-    }
-    data = {
-        "pinataMetadata": json.dumps({"name": filename}),
-    }
-    response = httpx.post(
-        PINATA_FILE_API_URL,
-        headers=headers,
-        data=data,
-        files=files,
-        timeout=40.0,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    ipfs_hash = payload.get("IpfsHash")
-    if not ipfs_hash:
-        raise RuntimeError(f"Pinata file upload missing IpfsHash: {payload}")
-    return f"https://gateway.pinata.cloud/ipfs/{ipfs_hash}"
-
-
-def _upload_generated_card_assets_to_pinata(slug: str, front_png: bytes, back_png: bytes) -> Tuple[str, str]:
-    safe_slug = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(slug or "").strip()) or "card"
-    front_name = f"{safe_slug}-front.png"
-    back_name = f"{safe_slug}-back.png"
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        front_f = pool.submit(_pin_bytes_to_pinata, front_name, front_png, "image/png")
-        back_f = pool.submit(_pin_bytes_to_pinata, back_name, back_png, "image/png")
-        return front_f.result(), back_f.result()
-
-
 def _load_card_source_row(manager: DataLoadingManager, winner_row_id: int) -> Optional[Dict[str, Any]]:
     conn = manager.get_connection()
     try:
@@ -478,17 +403,15 @@ def _build_card_payload_from_source_row(
 
 def _attach_generated_card_images(payload: Dict[str, Any]) -> Dict[str, Any]:
     render_payload = _build_render_payload(payload)
-    front_svg = generate_card_svg(render_payload)
-    back_svg = generate_card_back_svg(render_payload)
+    # Canonical pipeline: SVG -> PNG -> Pinata. The raster step produces a plain
+    # PNG that every marketplace and wallet renders identically (no dependency
+    # on remote @font-face resolution). The shared rasterizer reuses one
+    # headless browser across calls, so sequential mints are cheap.
+    front_svg, back_svg = render_card_svgs(render_payload)
     (_CARDGEN_DIR / "output.svg").write_text(front_svg, encoding="utf-8")
     (_CARDGEN_DIR / "output_back.svg").write_text(back_svg, encoding="utf-8")
 
-    # Rasterize SVG -> PNG locally via headless Chromium so the on-chain/IPFS
-    # asset is a plain PNG that every marketplace and wallet renders identically
-    # (no dependency on remote @font-face resolution). The rasterizer reuses
-    # one browser/page across calls, so sequential calls are cheap.
-    front_png = svg_to_png(front_svg, width=CARD_PNG_WIDTH, height=CARD_PNG_HEIGHT)
-    back_png = svg_to_png(back_svg, width=CARD_PNG_WIDTH, height=CARD_PNG_HEIGHT)
+    front_png, back_png = rasterize_card_svgs(front_svg, back_svg)
     (_CARDGEN_DIR / "output.png").write_bytes(front_png)
     (_CARDGEN_DIR / "output_back.png").write_bytes(back_png)
 
@@ -496,7 +419,7 @@ def _attach_generated_card_images(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload.get("season_type"),
         payload.get("season_number"),
     )
-    front_image_url, back_image_url = _upload_generated_card_assets_to_pinata(slug, front_png, back_png)
+    front_image_url, back_image_url = upload_card_assets_to_pinata(slug, front_png, back_png)
     output = dict(payload)
     output["front_image_url"] = front_image_url
     output["back_image_url"] = back_image_url

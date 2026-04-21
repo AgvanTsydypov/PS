@@ -19,7 +19,6 @@ import threading
 import urllib.parse
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from dataclasses import dataclass
 from time import monotonic
@@ -31,20 +30,17 @@ import psycopg2.extras
 from dotenv import load_dotenv
 from web3 import Web3
 
-try:
-    import boto3
-    from botocore.config import Config
-except Exception:  # pragma: no cover
-    boto3 = None
-    Config = None
-
 _repo_root = Path(__file__).resolve().parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 load_dotenv(dotenv_path=_repo_root / os.getenv("ENV_FILE", ".env"), override=False)
 
-from scripts.cardgen.generate_card import generate_card_back_svg, generate_card_svg
+from scripts.cardgen.assets import (
+    delete_r2_object_by_key,
+    render_card_pngs,
+    upload_card_assets_to_r2,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +125,6 @@ _winner_catalog_join_total_lock = threading.Lock()
 _winner_catalog_join_total_cache: Tuple[float, int] = (0.0, 0)
 _embedded_image_cache_lock = threading.Lock()
 _embedded_image_cache: Dict[str, Tuple[float, str]] = {}
-_r2_client: Any = None
 
 
 def _db_params() -> Dict[str, object]:
@@ -753,96 +748,6 @@ def _remote_image_to_data_uri_cached(image_url: str, *, timeout_seconds: Optiona
     return data_uri
 
 
-def _r2_required_env() -> Dict[str, str]:
-    endpoint = str(os.getenv("R2_ENDPOINT", "")).strip()
-    bucket = str(os.getenv("R2_BUCKET", "")).strip()
-    access_key = str(os.getenv("R2_ACCESS_KEY_ID", "")).strip()
-    secret_key = str(os.getenv("R2_SECRET_ACCESS_KEY", "")).strip()
-    public_base_url = str(os.getenv("R2_PUBLIC_BASE_URL", "")).strip().rstrip("/")
-    if not endpoint:
-        raise ValueError("R2_ENDPOINT is required")
-    if not bucket:
-        raise ValueError("R2_BUCKET is required")
-    if not access_key:
-        raise ValueError("R2_ACCESS_KEY_ID is required")
-    if not secret_key:
-        raise ValueError("R2_SECRET_ACCESS_KEY is required")
-    if not public_base_url:
-        raise ValueError("R2_PUBLIC_BASE_URL is required")
-    return {
-        "endpoint": endpoint,
-        "bucket": bucket,
-        "access_key": access_key,
-        "secret_key": secret_key,
-        "public_base_url": public_base_url,
-    }
-
-
-def _get_r2_client() -> Any:
-    global _r2_client
-    if boto3 is None or Config is None:
-        raise ValueError("R2 upload dependencies are missing. Install boto3 and botocore.")
-    if _r2_client is not None:
-        return _r2_client
-    cfg = _r2_required_env()
-    _r2_client = boto3.client(
-        "s3",
-        endpoint_url=cfg["endpoint"],
-        aws_access_key_id=cfg["access_key"],
-        aws_secret_access_key=cfg["secret_key"],
-        region_name="auto",
-        config=Config(signature_version="s3v4"),
-    )
-    return _r2_client
-
-
-def _generated_card_r2_key(slug: str, side: str) -> str:
-    prefix = str(os.getenv("R2_PREFIX", "dev")).strip().strip("/")
-    safe_slug = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(slug or "").strip())
-    safe_side = "front" if side == "front" else "back"
-    if prefix:
-        return f"{prefix}/cards-images/{safe_slug}/{safe_side}.svg"
-    return f"cards-images/{safe_slug}/{safe_side}.svg"
-
-
-def _delete_r2_object_by_key(key: Optional[str]) -> None:
-    if not key:
-        return
-    try:
-        cfg = _r2_required_env()
-        _get_r2_client().delete_object(Bucket=cfg["bucket"], Key=key)
-    except Exception:
-        logger.warning("Could not delete generated card asset from R2 key=%s", key, exc_info=True)
-
-
-def _upload_generated_card_assets_to_r2(slug: str, front_svg: str, back_svg: str) -> Tuple[str, str, str, str]:
-    cfg = _r2_required_env()
-    front_key = _generated_card_r2_key(slug, "front")
-    back_key = _generated_card_r2_key(slug, "back")
-    client = _get_r2_client()
-    common_kwargs: Dict[str, Any] = {
-        "Bucket": cfg["bucket"],
-        "ContentType": "image/svg+xml",
-        "CacheControl": "public, max-age=31536000, immutable",
-    }
-
-    def _put(key: str, body: str) -> None:
-        client.put_object(Key=key, Body=body.encode("utf-8"), **common_kwargs)
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        f_front = pool.submit(_put, front_key, front_svg)
-        f_back = pool.submit(_put, back_key, back_svg)
-        f_front.result()
-        f_back.result()
-
-    return (
-        f"{cfg['public_base_url']}/{front_key}",
-        f"{cfg['public_base_url']}/{back_key}",
-        front_key,
-        back_key,
-    )
-
-
 def run_admin_simulated_card_generations(
     *,
     max_count: int = 50,
@@ -1071,10 +976,11 @@ def run_admin_simulated_card_generations(
 
                     payload["collection_mint_number"] = created_row["collection_mint_number"]
                     render_payload = _build_render_payload(payload)
-                    front_svg = generate_card_svg(render_payload)
-                    back_svg = generate_card_back_svg(render_payload)
+                    # Showcase cards use the same SVG -> PNG pipeline as NFT mints;
+                    # only the destination differs (R2 here, Pinata for real mints).
+                    front_png, back_png = render_card_pngs(render_payload)
                     front_image_path, back_image_path, uploaded_front_key, uploaded_back_key = (
-                        _upload_generated_card_assets_to_r2(slug, front_svg, back_svg)
+                        upload_card_assets_to_r2(slug, front_png, back_png)
                     )
 
                     cursor.execute(
@@ -1101,8 +1007,8 @@ def run_admin_simulated_card_generations(
                 )
             except Exception as exc:
                 conn.rollback()
-                _delete_r2_object_by_key(uploaded_front_key)
-                _delete_r2_object_by_key(uploaded_back_key)
+                delete_r2_object_by_key(uploaded_front_key)
+                delete_r2_object_by_key(uploaded_back_key)
                 errors.append(str(exc))
                 out["origin_slots_skipped_no_winner_proxy"] = skipped_no_winner_proxy
                 emit("error", iteration=i + 1, error=errors[-1])
