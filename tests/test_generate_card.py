@@ -174,6 +174,41 @@ class TestOwnership:
         label, _ = _ownership({})
         assert label == "LOOTER TAKEOVER"
 
+    def test_explicit_looter_label(self):
+        label, _ = _ownership({"claim_type": "looter"})
+        assert label == "LOOTER TAKEOVER"
+
+    def test_origin_color_is_magenta(self):
+        _, color = _ownership({"claim_type": "origin"})
+        assert color == "#FF007F"
+
+    def test_looter_color_is_green(self):
+        _, color = _ownership({"claim_type": "looter"})
+        assert color == "#40E288"
+
+    def test_default_color_is_green(self):
+        """No claim_type key → falls back to looter, so color must be green."""
+        _, color = _ownership({})
+        assert color == "#40E288"
+
+    def test_uppercase_origin_recognized(self):
+        """claim_type comparison is case-insensitive — uppercase must still give
+        the ORIGIN SECURED label and magenta color."""
+        label, color = _ownership({"claim_type": "ORIGIN"})
+        assert label == "ORIGIN SECURED"
+        assert color == "#FF007F"
+
+    def test_none_claim_type_treated_as_looter(self):
+        label, color = _ownership({"claim_type": None})
+        assert label == "LOOTER TAKEOVER"
+        assert color == "#40E288"
+
+    def test_origin_and_looter_colors_are_distinct(self):
+        """Sanity: the two ownership bands must not accidentally share a color."""
+        _, origin_color = _ownership({"claim_type": "origin"})
+        _, looter_color = _ownership({"claim_type": "looter"})
+        assert origin_color != looter_color
+
 
 class TestSeason:
     def test_genesis_label(self):

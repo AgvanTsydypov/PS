@@ -456,6 +456,116 @@ class TestBuildCardPayloadFromSourceRow:
 
 
 # ---------------------------------------------------------------------------
+# Origin vs Looter — end-to-end card values
+#
+# Wallet ownership determines claim_type ("origin" / "looter") and therefore
+# the SVG ownership band ("ORIGIN SECURED" magenta vs "LOOTER TAKEOVER"
+# green). Critically, every other card field is derived from the winner row
+# and MUST be identical regardless of which wallet is minting. These tests
+# capture both the branching behavior and the "only claim_type changes"
+# invariant so a future refactor can't accidentally couple card content to
+# wallet identity.
+# ---------------------------------------------------------------------------
+
+
+class TestOriginLooterCardValues:
+    """End-to-end: wallet comparison → card payload → SVG ownership values."""
+
+    def _origin_payload(self):
+        return _build_card_payload_from_source_row(
+            _source_row(), session_signin_proxy_wallet=_PROXY
+        )
+
+    def _looter_payload(self):
+        return _build_card_payload_from_source_row(
+            _source_row(), session_signin_proxy_wallet=_OTHER_PROXY
+        )
+
+    # --- claim_type branching -----------------------------------------------
+
+    def test_matching_wallet_produces_origin(self):
+        assert self._origin_payload()["claim_type"] == "origin"
+
+    def test_different_wallet_produces_looter(self):
+        assert self._looter_payload()["claim_type"] == "looter"
+
+    def test_no_session_wallet_always_looter(self):
+        payload = _build_card_payload_from_source_row(_source_row())
+        assert payload["claim_type"] == "looter"
+
+    def test_whitespace_session_wallet_treated_as_no_wallet(self):
+        """A blank string must not accidentally match the winner proxy wallet."""
+        payload = _build_card_payload_from_source_row(
+            _source_row(), session_signin_proxy_wallet="   "
+        )
+        assert payload["claim_type"] == "looter"
+
+    def test_case_insensitive_wallet_body_match_gives_origin(self):
+        """Uppercase hex body (prefix '0x' stays lowercase) must still match
+        the winner — wallet comparison is body-case-insensitive."""
+        upper_body_proxy = "0x" + _PROXY[2:].upper()
+        payload = _build_card_payload_from_source_row(
+            _source_row(), session_signin_proxy_wallet=upper_body_proxy
+        )
+        assert payload["claim_type"] == "origin"
+
+    # --- Only claim_type changes; all other fields stay the same ------------
+
+    def test_only_claim_type_differs_between_origin_and_looter(self):
+        """Every card field except claim_type must be identical for origin and
+        looter cards generated from the same winner row.  The card content is
+        derived exclusively from the winner allocation — not from who is
+        minting it."""
+        origin = self._origin_payload()
+        looter = self._looter_payload()
+        assert origin["claim_type"] != looter["claim_type"]
+        differing = {
+            k for k in (set(origin) & set(looter)) - {"claim_type"}
+            if origin[k] != looter[k]
+        }
+        assert not differing, (
+            f"Fields {differing!r} differ between origin and looter cards — "
+            "only claim_type should change"
+        )
+
+    # --- SVG ownership band -------------------------------------------------
+
+    def test_origin_card_svg_label_is_origin_secured(self):
+        from scripts.cardgen.generate_card import _ownership
+        label, _ = _ownership(self._origin_payload())
+        assert label == "ORIGIN SECURED"
+
+    def test_looter_card_svg_label_is_looter_takeover(self):
+        from scripts.cardgen.generate_card import _ownership
+        label, _ = _ownership(self._looter_payload())
+        assert label == "LOOTER TAKEOVER"
+
+    def test_origin_card_svg_color_is_magenta(self):
+        from scripts.cardgen.generate_card import _ownership
+        _, color = _ownership(self._origin_payload())
+        assert color == "#FF007F"
+
+    def test_looter_card_svg_color_is_green(self):
+        from scripts.cardgen.generate_card import _ownership
+        _, color = _ownership(self._looter_payload())
+        assert color == "#40E288"
+
+    def test_archetype_identical_for_origin_and_looter(self):
+        """Spot-check the most visible card field: archetype must not shift."""
+        assert self._origin_payload()["archetype"] == self._looter_payload()["archetype"]
+
+    def test_card_title_identical_for_origin_and_looter(self):
+        assert self._origin_payload()["card_title"] == self._looter_payload()["card_title"]
+
+    def test_entry_bracket_identical_for_origin_and_looter(self):
+        assert self._origin_payload()["entry_bracket"] == self._looter_payload()["entry_bracket"]
+
+    def test_border_color_identical_for_origin_and_looter(self):
+        """Rarity border comes from yield tier, not wallet identity."""
+        assert self._origin_payload()["border_color"] == self._looter_payload()["border_color"]
+
+
+# ---------------------------------------------------------------------------
 # _SHOWCASE_CANDIDATE_BODY SQL guard
 #
 # The admin mint flow deletes the ``preview_cards`` preview row on
