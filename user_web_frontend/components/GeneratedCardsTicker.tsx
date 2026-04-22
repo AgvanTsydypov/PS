@@ -299,7 +299,7 @@ export default function GeneratedCardsTicker({
       return (
         <Link
           key={cardId}
-          href={`/cards/${encodeURIComponent(item.slug)}`}
+          href={`/preview/${encodeURIComponent(item.slug)}`}
           className="card-ticker-item card-ticker-item-lite home-card-panel-item"
           aria-label={`Open card: ${label}`}
         >
@@ -315,7 +315,7 @@ export default function GeneratedCardsTicker({
         aria-hidden={isClone || undefined}
       >
         <Link
-          href={`/cards/${encodeURIComponent(item.slug)}`}
+          href={`/preview/${encodeURIComponent(item.slug)}`}
           className="card-center-hotspot"
           tabIndex={-1}
           aria-label={`Open card: ${label}`}
@@ -351,6 +351,7 @@ export default function GeneratedCardsTicker({
                 item.slug,
                 event.clientX,
                 event.clientY,
+                { basePath: "/preview" },
               )
             ) {
               return;
@@ -492,7 +493,7 @@ export default function GeneratedCardsTicker({
               return (
                 <Link
                   key={cardId}
-                  href={`/cards/${encodeURIComponent(item.slug)}`}
+                  href={`/preview/${encodeURIComponent(item.slug)}`}
                   className="card-ticker-item card-ticker-item-lite"
                   aria-label={`Open card: ${label}`}
                 >

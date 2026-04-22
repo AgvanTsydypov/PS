@@ -16,6 +16,7 @@ from scripts.simulate_user_generated_cards_batch import (
     _select_diverse_winner_row_plan,
     _build_card_payload_from_source_row,
     _ShowcasePick,
+    _SHOWCASE_CANDIDATE_BODY,
 )
 
 _VALID_ADDR = "0x" + "a" * 40
@@ -452,3 +453,30 @@ class TestBuildCardPayloadFromSourceRow:
             _source_row(manual_image_url="https://cdn.example.com/test.png")
         )
         assert payload["image_url"] == "https://cdn.example.com/test.png"
+
+
+# ---------------------------------------------------------------------------
+# _SHOWCASE_CANDIDATE_BODY SQL guard
+#
+# The admin mint flow deletes the ``preview_cards`` preview row on
+# successful mint. Without an ``is_minted = FALSE`` filter on the candidate
+# query, a minted winner row would become "eligible" again the moment its
+# preview is removed and could be re-picked for a fresh showcase card — which
+# would silently reintroduce the very overlap between showcase and minted
+# Stars we are trying to eliminate. These tests pin the SQL constant so that
+# a future refactor can't regress the invariant.
+# ---------------------------------------------------------------------------
+
+class TestShowcaseCandidateBodyExcludesMinted:
+    def test_filters_out_minted_winner_rows(self):
+        normalized = " ".join(_SHOWCASE_CANDIDATE_BODY.split()).lower()
+        assert "coalesce(w.is_minted, false) = false" in normalized
+
+    def test_still_filters_out_rows_with_existing_preview(self):
+        normalized = " ".join(_SHOWCASE_CANDIDATE_BODY.split()).lower()
+        assert "gc.id is null" in normalized
+
+    def test_still_requires_manual_image(self):
+        normalized = " ".join(_SHOWCASE_CANDIDATE_BODY.split()).lower()
+        assert "ec.manual_image_url is not null" in normalized
+        assert "btrim(ec.manual_image_url) <> ''" in normalized

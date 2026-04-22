@@ -260,13 +260,36 @@ WHERE ec.manual_image_url IS NOT NULL
 """
 
 # Subset: catalog rows not yet used for a generated card (pick target for /api/cards/get).
+#
+# ``is_minted = FALSE`` is defense-in-depth. ``promote_preview_to_claim`` deletes
+# the preview row from ``preview_cards`` on mint, which by itself would flip
+# ``gc.id IS NULL`` back to true and make an already-minted winner look eligible
+# for a fresh preview slot — hence the explicit minted-filter guard.
 _ELIGIBLE_WINNER_BASE = """
 FROM winner_wallets_nft_to_claim w
 JOIN event_cards ec ON ec.event_id = w.event_id
-LEFT JOIN user_generated_cards gc ON gc.winner_row_id = w.id
+LEFT JOIN preview_cards gc ON gc.winner_row_id = w.id
 WHERE ec.manual_image_url IS NOT NULL
   AND BTRIM(ec.manual_image_url) <> ''
   AND gc.id IS NULL
+  AND COALESCE(w.is_minted, FALSE) = FALSE
+"""
+
+# Home-page ticker feed: random sample of preview_cards rows.
+#
+# ``preview_cards`` is a preview-only buffer — ``promote_preview_to_claim``
+# deletes the row on mint — so the ticker does not need any extra filter to
+# exclude minted STARs: they simply aren't in this table anymore. The minted
+# card keeps its permalink at ``/api/cards/{slug}`` served out of ``claims``.
+_CARDS_TICKER_SAMPLE_SQL = """
+SELECT gc.slug,
+       gc.card_title,
+       gc.front_image_path,
+       gc.back_image_path,
+       gc.created_at
+FROM preview_cards gc
+ORDER BY RANDOM()
+LIMIT %s
 """
 POLYMARKET_GAMMA_API_BASE = os.getenv("POLYMARKET_GAMMA_API_BASE", "https://gamma-api.polymarket.com").rstrip("/")
 POLYMARKET_DATA_API_BASE = os.getenv("POLYMARKET_DATA_API_BASE", "https://data-api.polymarket.com").rstrip("/")
@@ -299,7 +322,7 @@ _pm_session_refresh_attempts: Dict[str, float] = {}
 _pm_session_refresh_lock = threading.Lock()
 # Solana / minted NFT lookup configuration. Used by /api/me/cards to render the
 # user's actual on-chain NFTs (claims rows that finalized on Solana) instead of
-# previewed/generated cards from user_generated_cards.
+# previewed/generated cards from preview_cards.
 SOLANA_RPC_URL_FOR_EXPLORER = os.getenv("SOLANA_RPC_URL", "").strip()
 SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS = float(
     os.getenv("USER_WEB_NFT_METADATA_FETCH_TIMEOUT_SECONDS", "6")
@@ -593,13 +616,32 @@ def _ensure_user_solana_wallet_column() -> None:
         conn.close()
 
 
-def _ensure_user_generated_cards_schema() -> None:
+def _ensure_preview_cards_schema() -> None:
+    """Safety-net schema bootstrap for the ``preview_cards`` buffer table.
+
+    Mirrors the canonical DDL in ``sql/schemas/create_seasons_system.sql``
+    (which is authoritative) so a backend starting against a fresh DB
+    without the migration having run still has a working preview buffer.
+    The idempotent rename at the top lets this also recover a DB that
+    still has the legacy ``user_generated_cards`` name.
+    """
     conn = _get_connection()
     try:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                CREATE TABLE IF NOT EXISTS user_generated_cards (
+                DO $$
+                BEGIN
+                    IF to_regclass('public.user_generated_cards') IS NOT NULL
+                       AND to_regclass('public.preview_cards') IS NULL THEN
+                        ALTER TABLE user_generated_cards RENAME TO preview_cards;
+                    END IF;
+                END $$;
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS preview_cards (
                     id BIGSERIAL PRIMARY KEY,
                     slug TEXT NOT NULL UNIQUE,
                     owner_wallet VARCHAR(42) NOT NULL,
@@ -616,31 +658,31 @@ def _ensure_user_generated_cards_schema() -> None:
                     back_image_path TEXT NOT NULL,
                     card_payload_json JSONB NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    CONSTRAINT fk_generated_card_winner_row
+                    CONSTRAINT fk_preview_card_winner_row
                         FOREIGN KEY (winner_row_id) REFERENCES winner_wallets_nft_to_claim(id) ON DELETE CASCADE,
-                    CONSTRAINT fk_generated_card_season
+                    CONSTRAINT fk_preview_card_season
                         FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
-                    CONSTRAINT generated_card_owner_wallet_format_check
+                    CONSTRAINT preview_card_owner_wallet_format_check
                         CHECK (owner_wallet ~* '^0x[a-f0-9]{40}$')
                 )
                 """
             )
             cursor.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_generated_cards_owner_wallet_lower
-                ON user_generated_cards(LOWER(owner_wallet), created_at DESC)
+                CREATE INDEX IF NOT EXISTS idx_preview_cards_owner_wallet_lower
+                ON preview_cards(LOWER(owner_wallet), created_at DESC)
                 """
             )
             cursor.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_generated_cards_created_at
-                ON user_generated_cards(created_at DESC)
+                CREATE INDEX IF NOT EXISTS idx_preview_cards_created_at
+                ON preview_cards(created_at DESC)
                 """
             )
         conn.commit()
     except Exception:
         conn.rollback()
-        logger.exception("Failed to ensure user_generated_cards schema")
+        logger.exception("Failed to ensure preview_cards schema")
         raise
     finally:
         conn.close()
@@ -652,7 +694,7 @@ def _update_generated_card_asset_urls(slug: str, front_url: str, back_url: str) 
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                UPDATE user_generated_cards
+                UPDATE preview_cards
                 SET front_image_path = %s,
                     back_image_path = %s
                 WHERE slug = %s
@@ -1247,7 +1289,7 @@ def _generated_cards_supply_counts(
         total_available = _winner_catalog_join_total_cached(cursor)
     else:
         total_available = _count_winner_catalog_join(cursor)
-    cursor.execute("SELECT COUNT(*) AS claimed_count FROM user_generated_cards")
+    cursor.execute("SELECT COUNT(*) AS claimed_count FROM preview_cards")
     claimed_row = cursor.fetchone()
     claimed_count = int(
         (claimed_row.get("claimed_count") if isinstance(claimed_row, dict) else claimed_row[0]) if claimed_row else 0
@@ -2424,7 +2466,7 @@ async def rate_limit_middleware(request: Request, call_next):
 def startup_checks() -> None:
     _configure_user_web_timing_logging()
     _warn_if_claims_uniqueness_index_missing()
-    _ensure_user_generated_cards_schema()
+    _ensure_preview_cards_schema()
     _ensure_user_solana_wallet_column()
     _warm_rasterizer_pool_in_background()
     if os.getenv("NODE_ENV", "development") != "development" and not _allowed_origins():
@@ -2941,15 +2983,7 @@ def generated_cards_ticker(request: Request, limit: Optional[int] = None) -> Dic
     conn = _get_connection()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-            cursor.execute(
-                """
-                SELECT slug, card_title, front_image_path, back_image_path, created_at
-                FROM user_generated_cards
-                ORDER BY RANDOM()
-                LIMIT %s
-                """,
-                (safe_limit,),
-            )
+            cursor.execute(_CARDS_TICKER_SAMPLE_SQL, (safe_limit,))
             rows = cursor.fetchall()
     except Exception:
         logger.exception("Failed to load generated cards ticker")
@@ -2989,71 +3023,114 @@ def generated_cards_ticker(request: Request, limit: Optional[int] = None) -> Dic
     return payload
 
 
-@app.get("/api/cards/{slug}")
-def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
-    """Public card detail for showcase links; not gated by wallet-actions lock (same as /api/cards/ticker)."""
-    normalized_slug = str(slug or "").strip()
-    if not normalized_slug:
-        raise HTTPException(status_code=400, detail="Card slug is required")
+# Preview card detail — reads the live preview buffer. Same shape as the
+# minted-detail endpoint so the frontend can share a single card component.
+#
+# ``collection_mint_number`` is deliberately NOT selected here: previews are
+# not part of the minted collection, so exposing a "Collection mint #N" on
+# the preview response would be a meaningless contract. The number still
+# exists on ``preview_cards`` (it's burned into the card-back SVG at
+# preview-creation time), just not surfaced through the public API.
+_PREVIEW_CARD_DETAIL_SQL = """
+SELECT
+    gc.id,
+    gc.slug,
+    gc.owner_wallet,
+    gc.owner_proxy_wallet,
+    gc.winner_row_id,
+    gc.season_id,
+    gc.event_id,
+    gc.event_slug,
+    gc.card_title,
+    gc.primary_tag,
+    gc.secondary_tag,
+    gc.pattern,
+    gc.front_image_path,
+    gc.back_image_path,
+    gc.card_payload_json,
+    gc.created_at,
+    e.title AS event_title,
+    e.description AS event_description,
+    e.slug AS event_slug_from_events,
+    e.volume AS event_volume,
+    e.volume24hr AS event_volume_24hr,
+    e.volume1wk AS event_volume_1wk,
+    e.volume1mo AS event_volume_1mo,
+    e.liquidity AS event_liquidity,
+    e.open_interest AS event_open_interest,
+    e.comment_count AS event_comment_count,
+    e.active AS event_active,
+    e.closed AS event_closed,
+    e.start_date AS event_start_date,
+    e.end_date AS event_end_date,
+    e.closed_time AS event_closed_time,
+    wwin.proxy_wallet AS winner_proxy_wallet,
+    NULL::text AS minted_asset_address
+FROM preview_cards gc
+LEFT JOIN events e ON e.id = gc.event_id
+LEFT JOIN winner_wallets_nft_to_claim wwin ON wwin.id = gc.winner_row_id
+WHERE gc.slug = %s
+LIMIT 1
+"""
 
-    conn = _get_connection()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-            cursor.execute(
-                """
-                SELECT
-                    gc.id,
-                    gc.collection_mint_number,
-                    gc.slug,
-                    gc.owner_wallet,
-                    gc.owner_proxy_wallet,
-                    gc.winner_row_id,
-                    gc.season_id,
-                    gc.event_id,
-                    gc.event_slug,
-                    gc.card_title,
-                    gc.primary_tag,
-                    gc.secondary_tag,
-                    gc.pattern,
-                    gc.front_image_path,
-                    gc.back_image_path,
-                    gc.card_payload_json,
-                    gc.created_at,
-                    e.title AS event_title,
-                    e.description AS event_description,
-                    e.slug AS event_slug_from_events,
-                    e.volume AS event_volume,
-                    e.volume24hr AS event_volume_24hr,
-                    e.volume1wk AS event_volume_1wk,
-                    e.volume1mo AS event_volume_1mo,
-                    e.liquidity AS event_liquidity,
-                    e.open_interest AS event_open_interest,
-                    e.comment_count AS event_comment_count,
-                    e.active AS event_active,
-                    e.closed AS event_closed,
-                    e.start_date AS event_start_date,
-                    e.end_date AS event_end_date,
-                    e.closed_time AS event_closed_time,
-                    wwin.proxy_wallet AS winner_proxy_wallet,
-                    wwin.minted_asset_address AS minted_asset_address
-                FROM user_generated_cards gc
-                LEFT JOIN events e ON e.id = gc.event_id
-                LEFT JOIN winner_wallets_nft_to_claim wwin ON wwin.id = gc.winner_row_id
-                WHERE gc.slug = %s
-                LIMIT 1
-                """,
-                (normalized_slug,),
-            )
-            row = cursor.fetchone()
-    except Exception:
-        logger.exception("Failed to load generated card slug=%s", normalized_slug)
-        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
-    finally:
-        conn.close()
+# Minted card detail — reads the denormalized card fields that
+# ``promote_preview_to_claim`` wrote onto ``claims``. Aliases ``card_slug``,
+# ``front_image_url`` and ``back_image_url`` to the preview-shaped column
+# names so a single formatter (``_format_generated_card_row``) can render
+# both preview and minted responses.
+_MINTED_CARD_DETAIL_SQL = """
+SELECT
+    c.id,
+    c.collection_mint_number,
+    c.card_slug AS slug,
+    c.user_wallet AS owner_wallet,
+    uws.proxy_wallet AS owner_proxy_wallet,
+    c.winner_row_id,
+    c.season_id,
+    w.event_id AS event_id,
+    w.event_slug AS event_slug,
+    c.card_title,
+    c.primary_tag,
+    c.secondary_tag,
+    c.pattern,
+    c.front_image_url AS front_image_path,
+    c.back_image_url  AS back_image_path,
+    c.card_payload_json,
+    c.timestamp AS created_at,
+    e.title AS event_title,
+    e.description AS event_description,
+    e.slug AS event_slug_from_events,
+    e.volume AS event_volume,
+    e.volume24hr AS event_volume_24hr,
+    e.volume1wk AS event_volume_1wk,
+    e.volume1mo AS event_volume_1mo,
+    e.liquidity AS event_liquidity,
+    e.open_interest AS event_open_interest,
+    e.comment_count AS event_comment_count,
+    e.active AS event_active,
+    e.closed AS event_closed,
+    e.start_date AS event_start_date,
+    e.end_date AS event_end_date,
+    e.closed_time AS event_closed_time,
+    w.proxy_wallet AS winner_proxy_wallet,
+    c.asset_address AS minted_asset_address
+FROM claims c
+LEFT JOIN winner_wallets_nft_to_claim w ON w.id = c.winner_row_id
+LEFT JOIN events e ON e.id = w.event_id
+LEFT JOIN user_wallet_signins uws ON LOWER(uws.wallet_address) = LOWER(c.user_wallet)
+WHERE c.card_slug = %s
+LIMIT 1
+"""
 
-    if not row:
-        raise HTTPException(status_code=404, detail="Card not found")
-    row_dict = dict(row)
+
+def _build_card_detail_response(row_dict: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    """Shared formatter for ``/api/preview/{slug}`` and ``/api/cards/{slug}``.
+
+    Both endpoints select the same aliased column shape (slug, card_title,
+    front_image_path, back_image_path, card_payload_json, event_*,
+    winner_proxy_wallet, minted_asset_address) so one formatter can serve
+    both preview and minted rows.
+    """
     card = _format_generated_card_row(row_dict, request=request, include_payload=True)
     event_snapshot = {
         "title": row_dict.get("event_title"),
@@ -3086,6 +3163,56 @@ def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
         _build_magiceden_item_url(minted_asset_address) if minted_asset_address else None
     )
     return {"card": card}
+
+
+def _fetch_card_detail_row(sql: str, slug: str, log_label: str) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(sql, (slug,))
+            row = cursor.fetchone()
+    except Exception:
+        logger.exception("Failed to load %s slug=%s", log_label, slug)
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+@app.get("/api/preview/{slug}")
+def preview_card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
+    """Public preview-card detail — reads the live preview buffer (``preview_cards``).
+
+    Serves the home-showcase ticker links. Preview rows are deleted on mint by
+    ``promote_preview_to_claim``, so a slug that was minted will 404 here and
+    must be requested from ``/api/cards/{slug}`` instead.
+    """
+    normalized_slug = str(slug or "").strip()
+    if not normalized_slug:
+        raise HTTPException(status_code=400, detail="Card slug is required")
+
+    row = _fetch_card_detail_row(_PREVIEW_CARD_DETAIL_SQL, normalized_slug, "preview card")
+    if not row:
+        raise HTTPException(status_code=404, detail="Card not found")
+    return _build_card_detail_response(row, request)
+
+
+@app.get("/api/cards/{slug}")
+def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
+    """Public minted-STAR detail — reads denormalized fields off ``claims``.
+
+    The card-detail row is written by ``promote_preview_to_claim`` at mint
+    time; preview cards (not yet minted) are served from
+    ``/api/preview/{slug}`` and will 404 here.
+    """
+    normalized_slug = str(slug or "").strip()
+    if not normalized_slug:
+        raise HTTPException(status_code=400, detail="Card slug is required")
+
+    row = _fetch_card_detail_row(_MINTED_CARD_DETAIL_SQL, normalized_slug, "minted card")
+    if not row:
+        raise HTTPException(status_code=404, detail="Card not found")
+    return _build_card_detail_response(row, request)
 
 
 @app.post("/api/cards/get")
@@ -3136,11 +3263,10 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
             if not image_url:
                 raise HTTPException(status_code=400, detail="Selected row is missing manual image URL")
 
-            # ── Step 1: INSERT first (placeholder paths) so the DB trigger assigns
-            #   collection_mint_number before we render the SVG. ──────────────────
+            # ── Step 1: INSERT first (placeholder paths). ─────────────────────────
             cursor.execute(
                 """
-                INSERT INTO user_generated_cards (
+                INSERT INTO preview_cards (
                     slug,
                     owner_wallet,
                     owner_proxy_wallet,
@@ -3160,7 +3286,6 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
                 )
                 RETURNING
                     id,
-                    collection_mint_number,
                     slug,
                     owner_wallet,
                     owner_proxy_wallet,
@@ -3197,10 +3322,14 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
             created_row = cursor.fetchone()
             phase_t = _log_card_get_phase("insert_generated_card", phase_t)
 
-            # ── Step 2: Inject the assigned mint number into the render payload ──
-            payload["collection_mint_number"] = created_row["collection_mint_number"]
+            # ── Step 2: Stamp a preview placeholder on the mint-number slot. ───────
+            # Preview cards are NOT part of the minted collection yet, so the
+            # "Collection mint #N" line on the card-back SVG is rendered as a
+            # plain dash for previews. The real number is assigned to the
+            # matching ``claims`` row at mint time (see promote_preview_to_claim).
+            payload["collection_mint_number"] = "-"
 
-            # ── Step 3: Render SVGs + rasterize to PNG now that mint number is known ──
+            # ── Step 3: Render SVGs + rasterize to PNG. ────────────────────────────
             # Showcase cards share the NFT pipeline: SVG -> PNG via the shared
             # headless-browser pool, then uploaded to R2 as image/png. The only
             # difference from a real mint is the destination (R2 vs Pinata).
@@ -3220,7 +3349,7 @@ def get_card(request: Request) -> UserGeneratedCardResponse:
             # ── Step 5: Update record with real paths and final payload ───────────
             cursor.execute(
                 """
-                UPDATE user_generated_cards
+                UPDATE preview_cards
                 SET front_image_path = %s,
                     back_image_path  = %s,
                     card_payload_json = %s::jsonb

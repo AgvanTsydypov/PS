@@ -169,7 +169,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_active_season_user_wallet_lower
     ON claims(season_id, LOWER(user_wallet))
     WHERE status IN ('PENDING', 'PROCESSING', 'COMPLETED');
 
--- Per-season collection mint # on claims (1..N within each season_id), mirroring user_generated_cards.
+-- Per-season collection mint # on claims (1..N within each season_id), mirroring preview_cards.
 DO $$
 BEGIN
     IF to_regclass('public.claims') IS NULL THEN
@@ -209,7 +209,7 @@ BEGIN
     IF NEW.collection_mint_number IS NOT NULL THEN
         RETURN NEW;
     END IF;
-    -- Distinct namespace from user_generated_cards (9283741) to avoid cross-lock contention.
+    -- Distinct namespace from preview_cards (9283741) to avoid cross-lock contention.
     PERFORM pg_advisory_xact_lock(9283742, NEW.season_id);
     SELECT COALESCE(MAX(collection_mint_number), 0) + 1
     INTO NEW.collection_mint_number
@@ -445,7 +445,47 @@ COMMENT ON COLUMN winner_wallets_nft_to_claim.rarity_bracket IS 'Occurrence band
 
 DO $$ BEGIN RAISE NOTICE '✅ winner_wallets_nft_to_claim table created'; END $$;
 
-CREATE TABLE IF NOT EXISTS user_generated_cards (
+-- ─────────────────────────────────────────────────────────────────────────────
+-- ``preview_cards`` — home-showcase/preview buffer for unminted cards.
+--
+-- Historically this was ``user_generated_cards`` and quietly dual-roled as the
+-- canonical store for minted STAR pages. Stage 2 of the refactor moved minted
+-- card data onto ``claims`` (denormalized card fields), turned this table into
+-- a strict preview-only buffer, and ``promote_preview_to_claim`` now DELETEs a
+-- row from here on mint. The rename to ``preview_cards`` aligns the table
+-- name with its actual responsibility (and with the ``/api/preview/{slug}``
+-- endpoint that reads it).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Idempotent rename from the legacy name. Safe to re-run: it only renames
+-- when the legacy table is still around and the new name is still free.
+DO $$
+BEGIN
+    IF to_regclass('public.user_generated_cards') IS NOT NULL
+       AND to_regclass('public.preview_cards') IS NULL THEN
+        ALTER TABLE user_generated_cards RENAME TO preview_cards;
+    END IF;
+END $$;
+
+-- Rename any legacy indexes that carried over from the old table name.
+ALTER INDEX IF EXISTS idx_generated_cards_owner_wallet_lower
+    RENAME TO idx_preview_cards_owner_wallet_lower;
+ALTER INDEX IF EXISTS idx_generated_cards_created_at
+    RENAME TO idx_preview_cards_created_at;
+ALTER INDEX IF EXISTS ux_user_generated_cards_season_collection_mint
+    RENAME TO ux_preview_cards_season_collection_mint;
+
+-- Drop the legacy trigger+function so the definitions below can reintroduce
+-- them under the new names without leaving stale duplicates behind.
+DO $$
+BEGIN
+    IF to_regclass('public.preview_cards') IS NOT NULL THEN
+        EXECUTE 'DROP TRIGGER IF EXISTS tr_user_generated_cards_assign_season_mint ON preview_cards';
+    END IF;
+END $$;
+DROP FUNCTION IF EXISTS user_generated_cards_assign_season_mint_number();
+
+CREATE TABLE IF NOT EXISTS preview_cards (
     id BIGSERIAL PRIMARY KEY,
     collection_mint_number BIGINT,
     slug TEXT NOT NULL UNIQUE,
@@ -463,30 +503,30 @@ CREATE TABLE IF NOT EXISTS user_generated_cards (
     back_image_path TEXT NOT NULL,
     card_payload_json JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT fk_generated_card_winner_row
+    CONSTRAINT fk_preview_card_winner_row
         FOREIGN KEY (winner_row_id) REFERENCES winner_wallets_nft_to_claim(id) ON DELETE CASCADE,
-    CONSTRAINT fk_generated_card_season
+    CONSTRAINT fk_preview_card_season
         FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
-    CONSTRAINT generated_card_owner_wallet_format_check
+    CONSTRAINT preview_card_owner_wallet_format_check
         CHECK (owner_wallet ~* '^0x[a-f0-9]{40}$')
 );
 
-CREATE INDEX IF NOT EXISTS idx_generated_cards_owner_wallet_lower
-    ON user_generated_cards(LOWER(owner_wallet), created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_generated_cards_created_at
-    ON user_generated_cards(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_preview_cards_owner_wallet_lower
+    ON preview_cards(LOWER(owner_wallet), created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_preview_cards_created_at
+    ON preview_cards(created_at DESC);
 
 -- Per-season collection mint # (1..N within each season_id), not a global sequence.
 DO $$
 BEGIN
-    IF to_regclass('public.user_generated_cards') IS NULL THEN
+    IF to_regclass('public.preview_cards') IS NULL THEN
         RETURN;
     END IF;
 
-    ALTER TABLE user_generated_cards
+    ALTER TABLE preview_cards
         ADD COLUMN IF NOT EXISTS collection_mint_number BIGINT;
 
-    ALTER TABLE user_generated_cards
+    ALTER TABLE preview_cards
         ALTER COLUMN collection_mint_number DROP DEFAULT;
 
     DROP SEQUENCE IF EXISTS user_generated_cards_collection_mint_seq CASCADE;
@@ -500,18 +540,18 @@ BEGIN
                 PARTITION BY season_id
                 ORDER BY created_at ASC, id ASC
             ) AS rn
-        FROM user_generated_cards
+        FROM preview_cards
     )
-    UPDATE user_generated_cards u
+    UPDATE preview_cards u
     SET collection_mint_number = n.rn
     FROM numbered n
     WHERE u.id = n.id;
 
-    CREATE UNIQUE INDEX IF NOT EXISTS ux_user_generated_cards_season_collection_mint
-        ON user_generated_cards(season_id, collection_mint_number);
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_preview_cards_season_collection_mint
+        ON preview_cards(season_id, collection_mint_number);
 END $$;
 
-CREATE OR REPLACE FUNCTION user_generated_cards_assign_season_mint_number()
+CREATE OR REPLACE FUNCTION preview_cards_assign_season_mint_number()
 RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.collection_mint_number IS NOT NULL THEN
@@ -520,17 +560,17 @@ BEGIN
     PERFORM pg_advisory_xact_lock(9283741, NEW.season_id);
     SELECT COALESCE(MAX(collection_mint_number), 0) + 1
     INTO NEW.collection_mint_number
-    FROM user_generated_cards
+    FROM preview_cards
     WHERE season_id = NEW.season_id;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS tr_user_generated_cards_assign_season_mint ON user_generated_cards;
-CREATE TRIGGER tr_user_generated_cards_assign_season_mint
-    BEFORE INSERT ON user_generated_cards
+DROP TRIGGER IF EXISTS tr_preview_cards_assign_season_mint ON preview_cards;
+CREATE TRIGGER tr_preview_cards_assign_season_mint
+    BEFORE INSERT ON preview_cards
     FOR EACH ROW
-    EXECUTE PROCEDURE user_generated_cards_assign_season_mint_number();
+    EXECUTE PROCEDURE preview_cards_assign_season_mint_number();
 
 -- Performance indexes for wallet lookup paths used by /api/wallets.
 CREATE INDEX IF NOT EXISTS idx_claims_season_user_wallet_lower
@@ -781,6 +821,117 @@ ORDER BY sow.rank NULLS LAST, sow.proxy_wallet;
 COMMENT ON VIEW v_origin_wallets IS 'Compatibility view returning Origins wallets snapshot for currently active standard season.';
 
 DO $$ BEGIN RAISE NOTICE '✅ v_origin_wallets compatibility view created'; END $$;
+
+-- ============================================================================
+-- 6b. CLAIMS DENORMALIZATION FOR PUBLIC /cards/{slug} PAGE
+-- ============================================================================
+-- Adds denormalized card-detail columns to ``claims`` so the public permalink
+-- for a minted STAR can be served from ``claims`` directly, without reading
+-- ``preview_cards``. This decouples the preview buffer (``preview_cards``)
+-- from the canonical store for minted cards (``claims``). The mint flow
+-- (``promote_preview_to_claim``) populates these columns AND deletes the
+-- matching ``preview_cards`` row so minted STARs disappear from the
+-- showcase ticker. Backfill below recovers values for claims minted BEFORE
+-- this refactor by copying them out of the (pre-rename) preview twin.
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '🎯 Adding claims denormalization columns for /cards/{slug}...'; END $$;
+
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS card_slug          TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS card_title         TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS front_image_url    TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS back_image_url     TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS primary_tag        TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS secondary_tag      TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS pattern            TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS winner_row_id      BIGINT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS card_payload_json  JSONB;
+
+-- FK to winner_wallets_nft_to_claim is ON DELETE SET NULL: a deleted winner
+-- row must never cascade into the historical claim (claims are an
+-- append-only audit log of on-chain mints and cannot be retroactively
+-- removed just because the snapshot they came from was purged).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'fk_claims_winner_row'
+    ) THEN
+        ALTER TABLE claims
+            ADD CONSTRAINT fk_claims_winner_row
+            FOREIGN KEY (winner_row_id)
+            REFERENCES winner_wallets_nft_to_claim(id)
+            ON DELETE SET NULL;
+    END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_card_slug
+    ON claims(card_slug)
+    WHERE card_slug IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_claims_winner_row_id
+    ON claims(winner_row_id)
+    WHERE winner_row_id IS NOT NULL;
+
+-- Backfill from preview_cards (formerly ``user_generated_cards``) via
+-- winner_wallets_nft_to_claim.minted_claim_id. Idempotent: only touches rows
+-- where card_slug IS NULL. For claims minted before this refactor, the
+-- pre-mint dual-write left the mint-time slug and on-chain Pinata URLs on
+-- the preview twin, so copying from there is a loss-less migration. After
+-- this script the Stage 2 ``promote_preview_to_claim`` DELETEs the preview
+-- row on mint, so subsequent claims are populated directly at mint time.
+DO $$
+DECLARE
+    backfilled_count INTEGER := 0;
+BEGIN
+    IF to_regclass('public.preview_cards') IS NULL THEN
+        RAISE NOTICE '⚠️  preview_cards not found, skipping claims denormalization backfill';
+        RETURN;
+    END IF;
+
+    WITH src AS (
+        SELECT
+            c.id AS claim_id,
+            gc.slug AS card_slug,
+            gc.card_title AS card_title,
+            gc.front_image_path AS front_image_url,
+            gc.back_image_path AS back_image_url,
+            gc.primary_tag AS primary_tag,
+            gc.secondary_tag AS secondary_tag,
+            gc.pattern AS pattern,
+            gc.winner_row_id AS winner_row_id,
+            gc.card_payload_json AS card_payload_json
+        FROM claims c
+        JOIN winner_wallets_nft_to_claim w ON w.minted_claim_id = c.id
+        JOIN preview_cards gc ON gc.winner_row_id = w.id
+        WHERE c.card_slug IS NULL
+    ),
+    updated AS (
+        UPDATE claims c
+        SET card_slug          = src.card_slug,
+            card_title         = src.card_title,
+            front_image_url    = src.front_image_url,
+            back_image_url     = src.back_image_url,
+            primary_tag        = src.primary_tag,
+            secondary_tag      = src.secondary_tag,
+            pattern            = src.pattern,
+            winner_row_id      = src.winner_row_id,
+            card_payload_json  = src.card_payload_json
+        FROM src
+        WHERE c.id = src.claim_id
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO backfilled_count FROM updated;
+    RAISE NOTICE '✅ Claims denormalization backfilled rows: %', backfilled_count;
+END $$;
+
+COMMENT ON COLUMN claims.card_slug IS 'Public permalink slug for /cards/{slug}; mirrors qr_payload baked into the on-chain NFT';
+COMMENT ON COLUMN claims.card_title IS 'Denormalized card title for rendering /cards/{slug} without reading preview_cards';
+COMMENT ON COLUMN claims.front_image_url IS 'Pinata/IPFS URL for the front card image baked into the on-chain NFT';
+COMMENT ON COLUMN claims.back_image_url IS 'Pinata/IPFS URL for the back card image baked into the on-chain NFT';
+COMMENT ON COLUMN claims.winner_row_id IS 'FK to winner_wallets_nft_to_claim row that was minted; allows JOINs for event snapshot';
+COMMENT ON COLUMN claims.card_payload_json IS 'Full polystars_card payload snapshot at mint time, mirroring preview_cards.card_payload_json';
+
+DO $$ BEGIN RAISE NOTICE '✅ Claims denormalization columns ready'; END $$;
 
 -- ============================================================================
 -- 7. HELPER VIEWS FOR ANALYTICS

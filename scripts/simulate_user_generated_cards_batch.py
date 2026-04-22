@@ -90,15 +90,21 @@ WHERE ec.manual_image_url IS NOT NULL
   AND BTRIM(ec.manual_image_url) <> ''
 """
 
-# Eligible catalog rows: winner snapshot + event_cards (image) + not yet in user_generated_cards.
+# Eligible catalog rows: winner snapshot + event_cards (image) + not yet in preview_cards.
 # Archetype/metrics for planning come from w only — no participants join.
+#
+# Mirrors ``user_web_backend._ELIGIBLE_WINNER_BASE``: minted winner rows must be
+# excluded here as well, otherwise the admin simulation tool could regenerate a
+# preview for a row whose STAR has already been minted (the preview row is
+# deleted on mint, so ``gc.id IS NULL`` alone is not sufficient).
 _SHOWCASE_CANDIDATE_BODY = """
 FROM winner_wallets_nft_to_claim w
 JOIN event_cards ec ON ec.event_id = w.event_id
-LEFT JOIN user_generated_cards gc ON gc.winner_row_id = w.id
+LEFT JOIN preview_cards gc ON gc.winner_row_id = w.id
 WHERE ec.manual_image_url IS NOT NULL
   AND BTRIM(ec.manual_image_url) <> ''
   AND gc.id IS NULL
+  AND COALESCE(w.is_minted, FALSE) = FALSE
 """
 
 _ELIGIBLE_WINNER_BASE = _SHOWCASE_CANDIDATE_BODY
@@ -412,7 +418,7 @@ def _generated_cards_supply_counts(
         total_available = _winner_catalog_join_total_cached(cursor)
     else:
         total_available = _count_winner_catalog_join(cursor)
-    cursor.execute("SELECT COUNT(*) AS claimed_count FROM user_generated_cards")
+    cursor.execute("SELECT COUNT(*) AS claimed_count FROM preview_cards")
     claimed_row = cursor.fetchone()
     claimed_count = int(
         (claimed_row.get("claimed_count") if isinstance(claimed_row, dict) else claimed_row[0]) if claimed_row else 0
@@ -935,7 +941,7 @@ def run_admin_simulated_card_generations(
 
                     cursor.execute(
                         """
-                        INSERT INTO user_generated_cards (
+                        INSERT INTO preview_cards (
                             slug,
                             owner_wallet,
                             owner_proxy_wallet,
@@ -955,7 +961,6 @@ def run_admin_simulated_card_generations(
                         )
                         RETURNING
                             id,
-                            collection_mint_number,
                             slug,
                             owner_wallet,
                             owner_proxy_wallet,
@@ -993,7 +998,11 @@ def run_admin_simulated_card_generations(
                     if not created_row:
                         raise RuntimeError("INSERT returned no row")
 
-                    payload["collection_mint_number"] = created_row["collection_mint_number"]
+                    # Preview cards aren't part of the minted collection yet —
+                    # render the card-back "Collection mint #N" slot as a plain
+                    # dash. The real number is assigned at mint time onto the
+                    # corresponding ``claims`` row.
+                    payload["collection_mint_number"] = "-"
                     render_payload = _build_render_payload(payload)
                     # Showcase cards use the same SVG -> PNG pipeline as NFT mints;
                     # only the destination differs (R2 here, Pinata for real mints).
@@ -1014,7 +1023,7 @@ def run_admin_simulated_card_generations(
 
                     cursor.execute(
                         """
-                        UPDATE user_generated_cards
+                        UPDATE preview_cards
                         SET front_image_path = %s,
                             back_image_path  = %s,
                             card_payload_json = %s::jsonb

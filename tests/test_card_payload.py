@@ -438,6 +438,174 @@ class TestBuildCardPayload:
 
 
 # ---------------------------------------------------------------------------
+# Preview slug re-use through the preview → mint transition
+#
+# Pins the contract that a slug, once minted from a preview row, lives through
+# the preview → mint transition: the on-chain QR code baked into the NFT
+# (``polystars_card.qr_payload``) must use the existing preview slug instead
+# of a freshly-generated random string. Losing this would reintroduce the
+# bug where ``/preview/{preview_slug}`` and ``/cards/{mint_slug}`` pointed at
+# two unrelated random strings for the same physical card.
+# ---------------------------------------------------------------------------
+
+class TestBuildCardPayloadPreviewSlugReuse:
+    def test_preview_slug_is_used_verbatim_in_qr_payload(self):
+        preview_slug = "card-standard-s1-from-preview-42"
+        payload = _build_card_payload_from_source_row(
+            _base_row(),
+            claim_id=7,
+            claim_type="looter",
+            preview_slug=preview_slug,
+        )
+        assert payload["qr_payload"].endswith(f"/cards/{preview_slug}"), (
+            "qr_payload must bake the preview slug so the on-chain QR code "
+            "points at the same ``/cards/{slug}`` the preview already occupies"
+        )
+
+    def test_missing_preview_slug_falls_back_to_generation(self):
+        payload = _build_card_payload_from_source_row(
+            _base_row(season_type="genesis", season_number=4),
+            claim_id=1,
+            claim_type="looter",
+            preview_slug=None,
+        )
+        # Without a preview to reuse we must still produce a slug (admin mints
+        # without a preview round-trip must not crash). Generated slugs carry
+        # the season type/number prefix.
+        assert "/cards/card-genesis-s4-" in payload["qr_payload"]
+
+    def test_empty_preview_slug_falls_back_to_generation(self):
+        payload = _build_card_payload_from_source_row(
+            _base_row(),
+            claim_id=1,
+            claim_type="looter",
+            preview_slug="   ",
+        )
+        slug_tail = payload["qr_payload"].rstrip("/").rsplit("/", 1)[-1]
+        assert slug_tail.startswith("card-standard-s1-"), (
+            "A blank preview_slug is equivalent to None — the builder must "
+            "fall back to slug generation rather than emit an empty path"
+        )
+
+
+# ---------------------------------------------------------------------------
+# promote_preview_to_claim — canonical mint-time writer
+#
+# The admin mint flow must call ``promote_preview_to_claim`` to denormalize
+# card-detail fields onto the claim row. The helper must be importable from
+# the module's public surface and must still be callable after the rename
+# from ``persist_user_generated_card_for_mint``.
+# ---------------------------------------------------------------------------
+
+class TestPromotePreviewToClaimSurface:
+    def test_promote_helper_is_importable(self):
+        from scripts.polystars_card_payload import promote_preview_to_claim
+
+        assert callable(promote_preview_to_claim)
+
+    def test_legacy_persist_helper_is_removed(self):
+        import scripts.polystars_card_payload as mod
+
+        assert not hasattr(mod, "persist_user_generated_card_for_mint"), (
+            "The legacy persist_user_generated_card_for_mint helper has been "
+            "replaced by promote_preview_to_claim and must not linger as an "
+            "alias — keeping it would invite silent regressions back to the "
+            "preview-only-table-as-canonical-store shape we removed"
+        )
+
+
+# ---------------------------------------------------------------------------
+# promote_preview_to_claim — DB interaction shape
+#
+# Stage 2 behaviour: the helper must UPDATE the matching ``claims`` row with
+# the denormalized card fields AND DELETE the corresponding preview row from
+# ``preview_cards``. The old dual-write UPSERT is gone — if it ever comes
+# back, the preview ticker will start surfacing minted STARs again.
+# ---------------------------------------------------------------------------
+
+
+class TestPromotePreviewToClaimDbWrites:
+    def _build_polystars_card(self, *, slug: str = "polystar-s1-0001") -> dict:
+        return {
+            "card_title": "Test STAR",
+            "primary_tag": "Whale",
+            "secondary_tag": "Legend",
+            "pattern": "mosaic",
+            "front_image_url": "https://ipfs.pinata.cloud/ipfs/front.png",
+            "back_image_url": "https://ipfs.pinata.cloud/ipfs/back.png",
+            "qr_payload": f"https://polystars.app/cards/{slug}",
+        }
+
+    def _run_promote(self, polystars_card: dict):
+        from scripts.polystars_card_payload import promote_preview_to_claim
+
+        cursor = MagicMock()
+        cursor.__enter__ = lambda self: self
+        cursor.__exit__ = MagicMock(return_value=False)
+
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        manager = MagicMock()
+        manager.get_connection.return_value = conn
+
+        promote_preview_to_claim(
+            manager,
+            claim_id=42,
+            winner_row_id=7,
+            owner_wallet="0xOWNER",
+            polystars_card=polystars_card,
+        )
+        return cursor, conn
+
+    def _statements(self, cursor: MagicMock) -> list[str]:
+        return [
+            " ".join(str(call.args[0]).split()).lower()
+            for call in cursor.execute.call_args_list
+        ]
+
+    def test_updates_claims_with_card_denormalized_fields(self):
+        card = self._build_polystars_card()
+        cursor, _conn = self._run_promote(card)
+        stmts = self._statements(cursor)
+        assert any("update claims" in s for s in stmts), (
+            "promote_preview_to_claim must UPDATE claims with card_slug, "
+            "card_title, front_image_url, back_image_url, etc."
+        )
+
+    def test_deletes_preview_row_for_winner(self):
+        card = self._build_polystars_card()
+        cursor, _conn = self._run_promote(card)
+        stmts = self._statements(cursor)
+        assert any("delete from preview_cards" in s for s in stmts), (
+            "Stage 2: the preview row must be DELETED on mint — leaving it "
+            "behind would let it keep showing up in the home ticker"
+        )
+
+    def test_does_not_upsert_preview_row_anymore(self):
+        """The Stage 1 dual-write UPSERT into preview_cards is gone."""
+        card = self._build_polystars_card()
+        cursor, _conn = self._run_promote(card)
+        stmts = self._statements(cursor)
+        assert not any(
+            "insert into preview_cards" in s for s in stmts
+        ), "Stage 2: the Stage 1 UPSERT into preview_cards must be gone"
+
+    def test_commits_on_success(self):
+        card = self._build_polystars_card()
+        _cursor, conn = self._run_promote(card)
+        assert conn.commit.called
+        assert not conn.rollback.called
+
+    def test_noop_when_slug_cannot_be_extracted(self):
+        card = self._build_polystars_card()
+        card["qr_payload"] = ""
+        cursor, conn = self._run_promote(card)
+        assert not cursor.execute.called
+        assert not conn.commit.called
+
+
+# ---------------------------------------------------------------------------
 # _remote_image_to_data_uri
 # ---------------------------------------------------------------------------
 

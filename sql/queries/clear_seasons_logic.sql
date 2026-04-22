@@ -68,12 +68,25 @@ WHERE type IN ('genesis', 'standard');
 -- 5) (Опционально) почистить тех-логи сезонов
 DELETE FROM season_events_log;
 
--- 6) Универсальная очистка (работает и до/после миграции winners table rename)
+-- 6) Универсальная очистка (работает и до/после миграций):
+--    * winners table rename (`winner_wallets_nft_to_claim`)
+--    * preview-buffer rename (`user_generated_cards` → `preview_cards`)
 DO $$
+DECLARE
+  preview_table TEXT := NULL;
 BEGIN
+  IF to_regclass('public.preview_cards') IS NOT NULL THEN
+    preview_table := 'preview_cards';
+  ELSIF to_regclass('public.user_generated_cards') IS NOT NULL THEN
+    preview_table := 'user_generated_cards';
+  END IF;
+
   IF to_regclass('public.winner_wallets_nft_to_claim') IS NOT NULL THEN
-    IF to_regclass('public.user_generated_cards') IS NOT NULL THEN
-      TRUNCATE TABLE claims, seasons, season_events_log, user_generated_cards, winner_wallets_nft_to_claim RESTART IDENTITY;
+    IF preview_table IS NOT NULL THEN
+      EXECUTE format(
+        'TRUNCATE TABLE claims, seasons, season_events_log, %I, winner_wallets_nft_to_claim RESTART IDENTITY',
+        preview_table
+      );
     ELSE
       TRUNCATE TABLE claims, seasons, season_events_log, winner_wallets_nft_to_claim RESTART IDENTITY;
     END IF;

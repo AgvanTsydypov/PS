@@ -15,7 +15,9 @@
       "Bash(.\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/test_simulate_batch_helpers.py tests/test_scenarios_service.py -v)",
       "Bash(python -m pytest --version)",
       "Bash(python -m postgres_mcp --help)",
-      "Bash(C:\\\\Python314\\\\python.exe -m pip install postgres-mcp)"
+      "Bash(C:\\\\Python314\\\\python.exe -m pip install postgres-mcp)",
+      "Bash(psql *)",
+      "Bash(echo \"EXIT:$?\")"
     ]
   },
   "enabledMcpjsonServers": [
