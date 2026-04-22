@@ -606,6 +606,199 @@ class TestPromotePreviewToClaimDbWrites:
 
 
 # ---------------------------------------------------------------------------
+# promote_preview_to_claim — contract details
+#
+# Early-return guards, rollback semantics, and parameter-binding checks that
+# go beyond the SQL-shape tests above.  The shape tests only verify WHICH
+# statements are issued; these tests verify the PARAMETERS bound to them and
+# the error path.
+# ---------------------------------------------------------------------------
+
+
+class TestPromotePreviewToClaimContractDetails:
+    def _build_card(
+        self,
+        *,
+        slug: str = "polystar-s1-0001",
+        front_url: str | None = None,
+        back_url: str | None = None,
+    ) -> dict:
+        return {
+            "card_title": "Contract STAR",
+            "primary_tag": "Oracle",
+            "secondary_tag": "Degen",
+            "pattern": "grid",
+            "front_image_url": front_url if front_url is not None else f"https://r2.example.com/{slug}/front.png",
+            "back_image_url": back_url if back_url is not None else f"https://r2.example.com/{slug}/back.png",
+            "qr_payload": f"https://polystars.app/cards/{slug}",
+        }
+
+    def _run(
+        self,
+        card: dict,
+        *,
+        claim_id: int = 42,
+        winner_row_id: int = 7,
+        execute_side_effect=None,
+    ):
+        from scripts.polystars_card_payload import promote_preview_to_claim
+
+        cursor = MagicMock()
+        cursor.__enter__ = lambda self: self
+        cursor.__exit__ = MagicMock(return_value=False)
+        if execute_side_effect is not None:
+            cursor.execute.side_effect = execute_side_effect
+
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        manager = MagicMock()
+        manager.get_connection.return_value = conn
+
+        promote_preview_to_claim(
+            manager,
+            claim_id=claim_id,
+            winner_row_id=winner_row_id,
+            owner_wallet="0xOWNER",
+            polystars_card=card,
+        )
+        return cursor, conn
+
+    # --- Early-return guards ------------------------------------------------
+
+    def test_noop_when_front_image_url_is_empty(self):
+        """Missing front image must abort before touching the DB."""
+        card = self._build_card(front_url="")
+        cursor, conn = self._run(card)
+        assert not cursor.execute.called
+        assert not conn.commit.called
+
+    def test_noop_when_back_image_url_is_empty(self):
+        """Missing back image must abort before touching the DB."""
+        card = self._build_card(back_url="")
+        cursor, conn = self._run(card)
+        assert not cursor.execute.called
+        assert not conn.commit.called
+
+    # --- Rollback semantics -------------------------------------------------
+
+    def test_rollback_on_db_exception_and_exception_reraised(self):
+        """If cursor.execute raises, conn.rollback must be called and the
+        exception must propagate so the caller can surface the failure."""
+        from scripts.polystars_card_payload import promote_preview_to_claim
+
+        cursor = MagicMock()
+        cursor.__enter__ = lambda self: self
+        cursor.__exit__ = MagicMock(return_value=False)
+        cursor.execute.side_effect = RuntimeError("simulated DB failure")
+
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        manager = MagicMock()
+        manager.get_connection.return_value = conn
+
+        with pytest.raises(RuntimeError, match="simulated DB failure"):
+            promote_preview_to_claim(
+                manager,
+                claim_id=1,
+                winner_row_id=2,
+                owner_wallet="0xOWNER",
+                polystars_card=self._build_card(),
+            )
+
+        conn.rollback.assert_called_once()
+        assert not conn.commit.called
+
+    # --- UPDATE column coverage ---------------------------------------------
+
+    def test_update_sets_all_required_columns(self):
+        """Every denormalized card field must appear in the UPDATE statement."""
+        card = self._build_card()
+        cursor, _ = self._run(card)
+        update_stmt = next(
+            " ".join(str(c.args[0]).split()).lower()
+            for c in cursor.execute.call_args_list
+            if "update claims" in " ".join(str(c.args[0]).split()).lower()
+        )
+        for col in (
+            "card_slug",
+            "card_title",
+            "front_image_url",
+            "back_image_url",
+            "primary_tag",
+            "secondary_tag",
+            "pattern",
+            "winner_row_id",
+            "card_payload_json",
+        ):
+            assert col in update_stmt, (
+                f"UPDATE claims is missing column {col!r} — the /api/cards/{{slug}} "
+                "endpoint reads directly from claims, so every field must be written"
+            )
+
+    # --- Parameter binding --------------------------------------------------
+
+    def test_update_where_param_is_claim_id(self):
+        """claim_id must be the final (WHERE) parameter of the UPDATE so the
+        right claim row is overwritten."""
+        card = self._build_card()
+        cursor, _ = self._run(card, claim_id=99)
+        update_call = next(
+            c for c in cursor.execute.call_args_list
+            if "update claims" in " ".join(str(c.args[0]).split()).lower()
+        )
+        params = update_call.args[1]
+        assert params[-1] == 99, (
+            "claim_id must be the last UPDATE parameter (bound to the WHERE id = %%s clause)"
+        )
+
+    def test_update_params_include_winner_row_id(self):
+        """winner_row_id must be among the UPDATE SET params so the claims row
+        is linked back to the winner that triggered the mint."""
+        card = self._build_card()
+        cursor, _ = self._run(card, winner_row_id=77)
+        update_call = next(
+            c for c in cursor.execute.call_args_list
+            if "update claims" in " ".join(str(c.args[0]).split()).lower()
+        )
+        params = update_call.args[1]
+        assert 77 in params, "winner_row_id must appear in UPDATE params"
+
+    def test_delete_parameter_is_winner_row_id(self):
+        """The preview row must be deleted by winner_row_id — using any other
+        column would leave the wrong rows in the ticker buffer."""
+        card = self._build_card()
+        cursor, _ = self._run(card, winner_row_id=55)
+        delete_call = next(
+            c for c in cursor.execute.call_args_list
+            if "delete from preview_cards" in " ".join(str(c.args[0]).split()).lower()
+        )
+        params = delete_call.args[1]
+        assert params[0] == 55, (
+            "winner_row_id must be the DELETE filter parameter — using claim_id "
+            "instead would leave orphaned preview rows in the home ticker"
+        )
+
+    def test_card_payload_json_serialized_as_json_string(self):
+        """polystars_card must be serialized to a JSON string before binding;
+        passing the raw dict would cause a psycopg2 type error at runtime."""
+        import json
+
+        card = self._build_card()
+        cursor, _ = self._run(card)
+        update_call = next(
+            c for c in cursor.execute.call_args_list
+            if "update claims" in " ".join(str(c.args[0]).split()).lower()
+        )
+        params = update_call.args[1]
+        json_params = [p for p in params if isinstance(p, str) and p.startswith("{")]
+        assert json_params, "card_payload_json must be a JSON-serialized string in params"
+        parsed = json.loads(json_params[0])
+        assert parsed["card_title"] == card["card_title"]
+        assert parsed["primary_tag"] == card["primary_tag"]
+
+
+# ---------------------------------------------------------------------------
 # _remote_image_to_data_uri
 # ---------------------------------------------------------------------------
 

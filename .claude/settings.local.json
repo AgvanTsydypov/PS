@@ -2,22 +2,20 @@
   "permissions": {
     "allow": [
       "Bash(venv/Scripts/python.exe *)",
-      "Bash(cmd *)",
-      "Bash(python -m pytest tests/test_infer_archetype.py tests/test_card_payload.py tests/test_claude_client.py tests/test_double_mint_eligibility.py -v)",
-      "Bash(.\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/test_infer_archetype.py tests/test_card_payload.py tests/test_claude_client.py tests/test_double_mint_eligibility.py -v)",
-      "Bash(\"venv/Scripts/python.exe\" -m pytest tests/test_infer_archetype.py tests/test_card_payload.py tests/test_claude_client.py tests/test_double_mint_eligibility.py -v)",
-      "Bash(\"venv/Scripts/python.exe\" -m pytest tests/)",
-      "Bash(\"venv/Scripts/python.exe\" -m pytest tests/test_card_title_wrap.py --tb=short)",
-      "Bash(\"venv/Scripts/python.exe\" -m pytest tests/ -q)",
-      "Bash(\"venv/Scripts/python.exe\" -c \"import google.genai; print\\('installed'\\)\")",
-      "Bash(\"venv/Scripts/python.exe\" -m pytest tests/test_agent1_helpers.py tests/test_scheduler_helpers.py tests/test_payload_extras.py -v)",
-      "Bash(python -m pytest tests/test_simulate_batch_helpers.py tests/test_scenarios_service.py -v)",
-      "Bash(.\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/test_simulate_batch_helpers.py tests/test_scenarios_service.py -v)",
-      "Bash(python -m pytest --version)",
-      "Bash(python -m postgres_mcp --help)",
-      "Bash(C:\\\\Python314\\\\python.exe -m pip install postgres-mcp)",
+      "Bash(\"venv/Scripts/python.exe\" *)",
       "Bash(psql *)",
-      "Bash(echo \"EXIT:$?\")"
+      "Bash(git *)",
+      "Read(//c/Users/AgvanD/**)",
+      "Read(//c/Users/AgvanD/AppData/Roaming/Claude/**)",
+      "mcp__postgres__list_schemas",
+      "mcp__postgres__list_objects",
+      "mcp__postgres__get_object_details",
+      "mcp__postgres__execute_sql",
+      "mcp__postgres__analyze_db_health",
+      "mcp__postgres__analyze_query_indexes",
+      "mcp__postgres__explain_query",
+      "mcp__postgres__get_top_queries",
+      "Bash(grep -E \"\\\\.py$\")"
     ]
   },
   "enabledMcpjsonServers": [
