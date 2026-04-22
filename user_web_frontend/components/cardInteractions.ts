@@ -172,6 +172,7 @@ export function navigateToCardIfCenterClick(
   slug: string,
   clientX?: number,
   clientY?: number,
+  options?: { basePath?: string },
 ): boolean {
   if (!slug || target.dataset.centerNavigate !== "1") return false;
   if (!isHoverActiveForClick(target)) return false;
@@ -182,7 +183,11 @@ export function navigateToCardIfCenterClick(
     typeof clientY === "number" &&
     isCenterZoneByWrapperCoordinates(target, clientX, clientY);
   if (!pointerInCenterByPress && !pointerInCenterByMove && !pointerInCenterByClick) return false;
-  window.location.href = `/cards/${encodeURIComponent(slug)}`;
+  // Two permalinks: ``/cards/{slug}`` for minted STARs (claims-backed) and
+  // ``/preview/{slug}`` for live showcase previews (preview_cards).
+  // Callers whose card is a preview must pass ``basePath: "/preview"``.
+  const base = (options?.basePath ?? "/cards").replace(/\/+$/, "");
+  window.location.href = `${base}/${encodeURIComponent(slug)}`;
   return true;
 }
 

@@ -338,6 +338,7 @@ def _build_card_payload_from_source_row(
     claim_id: int,
     claim_type: str,
     collection_mint_number: Optional[int] = None,
+    preview_slug: Optional[str] = None,
 ) -> Dict[str, Any]:
     normalized_entry_bracket = _normalize_entry_bracket(row.get("entry_bracket"))
     normalized_edge = _normalize_choice(row.get("edge"), CARD_TIER_OPTIONS, "BASE")
@@ -362,7 +363,15 @@ def _build_card_payload_from_source_row(
         raise ValueError("Card payload requires manual_image_url in the DB row")
 
     season_type = _normalize_choice(row.get("season_type"), CARD_SEASON_TYPE_OPTIONS, "standard").lower()
-    slug = _generated_card_slug(season_type, row.get("season_number"))
+    # Reuse the preview slug if one was minted from a pre-generated preview row.
+    # Generating a fresh slug at mint time used to create a visible mismatch:
+    # showcase links (``/preview/{preview_slug}``) and the on-chain QR code
+    # (``/cards/{mint_slug}``) pointed at two different random strings for the
+    # same card. Now the slug is an attribute of the winner slot and lives
+    # through the preview → mint transition, so the QR code baked on the
+    # physical card and the ticker that first surfaced it agree.
+    normalized_preview_slug = str(preview_slug or "").strip()
+    slug = normalized_preview_slug or _generated_card_slug(season_type, row.get("season_number"))
 
     payload = {
         "season_type": season_type,
@@ -440,6 +449,33 @@ def _attach_fixed_card_images(
     return output
 
 
+def _load_preview_slug_for_winner_row(
+    manager: DataLoadingManager, winner_row_id: int
+) -> Optional[str]:
+    """Return the existing ``preview_cards.slug`` for this winner slot.
+
+    ``winner_row_id`` has a UNIQUE constraint on ``preview_cards``, so
+    at most one preview row can exist per slot. Returns ``None`` if the slot
+    was never previewed (admin-initiated mint without a preview round-trip),
+    which signals ``build_polystars_card_for_mint`` to fall back to a fresh
+    random slug rather than fail — admin mints must not require a preview.
+    """
+    conn = manager.get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT slug FROM preview_cards WHERE winner_row_id = %s LIMIT 1",
+                (winner_row_id,),
+            )
+            row = cursor.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    slug = str((row[0] if not isinstance(row, dict) else row.get("slug")) or "").strip()
+    return slug or None
+
+
 def build_polystars_card_for_mint(
     manager: DataLoadingManager,
     *,
@@ -453,11 +489,13 @@ def build_polystars_card_for_mint(
     row = _load_card_source_row(manager, winner_row_id)
     if not row:
         raise ValueError(f"winner_wallets_nft_to_claim id={winner_row_id} not found")
+    preview_slug = _load_preview_slug_for_winner_row(manager, winner_row_id)
     payload = _build_card_payload_from_source_row(
         row,
         claim_id=claim_id,
         claim_type=claim_type,
         collection_mint_number=collection_mint_number,
+        preview_slug=preview_slug,
     )
     if fixed_front_image_url and fixed_back_image_url:
         return _attach_fixed_card_images(
@@ -480,46 +518,33 @@ def _slug_from_qr_payload(qr_payload: Any) -> Optional[str]:
     return tail or None
 
 
-def _lookup_owner_proxy_wallet(manager: DataLoadingManager, owner_wallet: str) -> Optional[str]:
-    wallet = str(owner_wallet or "").strip()
-    if not wallet:
-        return None
-    conn = manager.get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT proxy_wallet
-                FROM user_wallet_signins
-                WHERE LOWER(wallet_address) = LOWER(%s)
-                LIMIT 1
-                """,
-                (wallet,),
-            )
-            row = cursor.fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return None
-    proxy = str((row[0] if not isinstance(row, dict) else row.get("proxy_wallet")) or "").strip()
-    return proxy or None
-
-
-def persist_user_generated_card_for_mint(
+def promote_preview_to_claim(
     manager: DataLoadingManager,
     *,
+    claim_id: int,
     winner_row_id: int,
-    owner_wallet: str,
+    owner_wallet: str,  # noqa: ARG001 — kept for call-site parity; owner EOA is already on claims.user_wallet
     polystars_card: Dict[str, Any],
 ) -> None:
-    """Mirror the freshly minted card into ``user_generated_cards``.
+    """Promote a preview row into a minted ``claims`` row.
 
-    Uses the same persistence pattern as ``user_web_backend`` ``/api/cards/get``
-    so the public ``/cards/{slug}`` page renders minted STARs without any
-    fallback logic. Slug is the value embedded in ``polystars_card.qr_payload``;
-    images are the on-chain Pinata URLs already in the payload. ``ON CONFLICT
-    (winner_row_id)`` makes the call idempotent and safely overwrites a
-    pre-existing preview row with the on-chain truth.
+    ``preview_cards`` is a preview-only buffer and ``claims`` is the
+    canonical store for minted STARs. This helper is the one place where a
+    row transitions between the two tables:
+
+    1. ``UPDATE claims`` — denormalize ``card_slug``, ``card_title``,
+       ``front_image_url``, ``back_image_url``, ``primary_tag``,
+       ``secondary_tag``, ``pattern``, ``winner_row_id`` and
+       ``card_payload_json`` onto the existing minted-claim row so the public
+       ``/api/cards/{slug}`` endpoint can resolve it from ``claims`` alone.
+    2. ``DELETE FROM preview_cards WHERE winner_row_id = %s`` — drop
+       the preview row so it disappears from the home ticker feed and cannot
+       be served by ``/api/preview/{slug}`` after mint. The minted card keeps
+       its permalink at ``/api/cards/{slug}`` (slug is reused across the
+       preview → mint transition by ``build_polystars_card_for_mint``).
+
+    Both writes run in the same transaction: either the preview is promoted
+    atomically or nothing changes and the mint can be retried safely.
     """
     slug = _slug_from_qr_payload(polystars_card.get("qr_payload"))
     if not slug:
@@ -529,76 +554,46 @@ def persist_user_generated_card_for_mint(
     if not front_image_url or not back_image_url:
         return
 
-    source_row = _load_card_source_row(manager, winner_row_id)
-    if not source_row:
-        return
-
-    season_id_raw = source_row.get("season_id")
-    try:
-        season_id = int(season_id_raw)
-    except (TypeError, ValueError):
-        return
-    event_id = source_row.get("event_id")
-    event_slug = source_row.get("event_slug")
     card_title = str(polystars_card.get("card_title") or "").strip() or None
     primary_tag = str(polystars_card.get("primary_tag") or "").strip() or None
     secondary_tag = str(polystars_card.get("secondary_tag") or "").strip() or None
     pattern = str(polystars_card.get("pattern") or "").strip() or None
-    owner_proxy_wallet = _lookup_owner_proxy_wallet(manager, owner_wallet)
+    card_payload_json = json.dumps(polystars_card)
 
     conn = manager.get_connection()
     try:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO user_generated_cards (
-                    slug,
-                    owner_wallet,
-                    owner_proxy_wallet,
-                    winner_row_id,
-                    season_id,
-                    event_id,
-                    event_slug,
-                    card_title,
-                    primary_tag,
-                    secondary_tag,
-                    pattern,
-                    front_image_path,
-                    back_image_path,
-                    card_payload_json
-                ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
-                )
-                ON CONFLICT (winner_row_id) DO UPDATE SET
-                    slug = EXCLUDED.slug,
-                    owner_wallet = EXCLUDED.owner_wallet,
-                    owner_proxy_wallet = EXCLUDED.owner_proxy_wallet,
-                    event_id = EXCLUDED.event_id,
-                    event_slug = EXCLUDED.event_slug,
-                    card_title = EXCLUDED.card_title,
-                    primary_tag = EXCLUDED.primary_tag,
-                    secondary_tag = EXCLUDED.secondary_tag,
-                    pattern = EXCLUDED.pattern,
-                    front_image_path = EXCLUDED.front_image_path,
-                    back_image_path = EXCLUDED.back_image_path,
-                    card_payload_json = EXCLUDED.card_payload_json
+                UPDATE claims
+                SET card_slug         = %s,
+                    card_title        = %s,
+                    front_image_url   = %s,
+                    back_image_url    = %s,
+                    primary_tag       = %s,
+                    secondary_tag    = %s,
+                    pattern           = %s,
+                    winner_row_id     = %s,
+                    card_payload_json = %s::jsonb,
+                    updated_at        = NOW()
+                WHERE id = %s
                 """,
                 (
                     slug,
-                    owner_wallet,
-                    owner_proxy_wallet,
-                    winner_row_id,
-                    season_id,
-                    event_id,
-                    event_slug,
                     card_title,
+                    front_image_url,
+                    back_image_url,
                     primary_tag,
                     secondary_tag,
                     pattern,
-                    front_image_url,
-                    back_image_url,
-                    json.dumps(polystars_card),
+                    winner_row_id,
+                    card_payload_json,
+                    claim_id,
                 ),
+            )
+            cursor.execute(
+                "DELETE FROM preview_cards WHERE winner_row_id = %s",
+                (winner_row_id,),
             )
         conn.commit()
     except Exception:

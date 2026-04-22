@@ -47,7 +47,7 @@ from scripts.daily_scheduler_simple import SimplifiedScheduler
 from scripts.cardgen.generate_card import generate_card_back_svg, generate_card_svg
 from scripts.polystars_card_payload import (
     build_polystars_card_for_mint,
-    persist_user_generated_card_for_mint,
+    promote_preview_to_claim,
     unpin_pinata_urls,
 )
 from scripts.simulate_user_generated_cards_batch import run_admin_simulated_card_generations
@@ -1984,23 +1984,30 @@ class SeasonWorkbenchService:
             recipient_solana_wallet=recipient_address,
             mint_result=mint_result,
         )
-        # Mirror the minted card into ``user_generated_cards`` using the same
-        # persistence pattern as ``/api/cards/get`` (preview flow), so the
-        # public ``/cards/{slug}`` page renders it without any fallback logic.
-        # Run after ``mark_winner_row_as_minted`` so ``minted_asset_address`` is
-        # already available for the explorer/MagicEden links on first page load.
+        # Promote the preview row into a minted ``claims`` row. This path is
+        # the SAME for both the admin-workbench mint button and the public
+        # ``POST /api/me/mint`` user mint — both routes end up in this
+        # ``run_mint_claim`` method on ``SeasonWorkbenchService``. The helper
+        # atomically (a) denormalizes card fields onto ``claims`` so the
+        # public permalink ``/api/cards/{slug}`` can be served straight from
+        # ``claims``, and (b) DELETEs the matching row from
+        # ``preview_cards`` so the preview vanishes from the home
+        # showcase ticker and from ``/api/preview/{slug}``. Run AFTER
+        # ``mark_winner_row_as_minted`` so ``minted_asset_address`` is
+        # available for the explorer/MagicEden links on first page load.
         # Persistence failures must not roll back a successful mint — the
         # on-chain NFT is already final and authoritative.
         try:
-            persist_user_generated_card_for_mint(
+            promote_preview_to_claim(
                 self.manager,
+                claim_id=claim_id,
                 winner_row_id=allocation.row_id,
                 owner_wallet=wallet,
                 polystars_card=polystars_card,
             )
         except Exception:
             logger.exception(
-                "Failed to persist user_generated_cards row for claim_id=%s; "
+                "Failed to promote preview into claims for claim_id=%s; "
                 "mint succeeded so skipping rollback",
                 claim_id,
             )
