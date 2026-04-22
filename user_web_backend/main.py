@@ -636,6 +636,23 @@ def _ensure_preview_cards_schema() -> None:
                        AND to_regclass('public.preview_cards') IS NULL THEN
                         ALTER TABLE user_generated_cards RENAME TO preview_cards;
                     END IF;
+
+                    -- Same safety pattern as the canonical schema: rename
+                    -- the legacy-named indexes, or drop them outright when
+                    -- the new-named index was already created alongside.
+                    IF to_regclass('public.idx_preview_cards_owner_wallet_lower') IS NOT NULL THEN
+                        DROP INDEX IF EXISTS idx_generated_cards_owner_wallet_lower;
+                    ELSIF to_regclass('public.idx_generated_cards_owner_wallet_lower') IS NOT NULL THEN
+                        ALTER INDEX idx_generated_cards_owner_wallet_lower
+                            RENAME TO idx_preview_cards_owner_wallet_lower;
+                    END IF;
+
+                    IF to_regclass('public.idx_preview_cards_created_at') IS NOT NULL THEN
+                        DROP INDEX IF EXISTS idx_generated_cards_created_at;
+                    ELSIF to_regclass('public.idx_generated_cards_created_at') IS NOT NULL THEN
+                        ALTER INDEX idx_generated_cards_created_at
+                            RENAME TO idx_preview_cards_created_at;
+                    END IF;
                 END $$;
                 """
             )

@@ -468,12 +468,37 @@ BEGIN
 END $$;
 
 -- Rename any legacy indexes that carried over from the old table name.
-ALTER INDEX IF EXISTS idx_generated_cards_owner_wallet_lower
-    RENAME TO idx_preview_cards_owner_wallet_lower;
-ALTER INDEX IF EXISTS idx_generated_cards_created_at
-    RENAME TO idx_preview_cards_created_at;
-ALTER INDEX IF EXISTS ux_user_generated_cards_season_collection_mint
-    RENAME TO ux_preview_cards_season_collection_mint;
+--
+-- ``ALTER INDEX ... RENAME TO`` has no ``IF NOT EXISTS`` on the target, so
+-- a naive rename blows up when the new-name index has already been created
+-- by a prior partial run (e.g. the backend's ``_ensure_preview_cards_schema``
+-- bootstrap ran ``CREATE INDEX IF NOT EXISTS idx_preview_cards_...`` next
+-- to the still-present legacy index). The DO-block below handles both
+-- orderings: if the target is free we rename, otherwise we just drop the
+-- legacy duplicate so only the canonical name survives.
+DO $$
+BEGIN
+    IF to_regclass('public.idx_preview_cards_owner_wallet_lower') IS NOT NULL THEN
+        DROP INDEX IF EXISTS idx_generated_cards_owner_wallet_lower;
+    ELSIF to_regclass('public.idx_generated_cards_owner_wallet_lower') IS NOT NULL THEN
+        ALTER INDEX idx_generated_cards_owner_wallet_lower
+            RENAME TO idx_preview_cards_owner_wallet_lower;
+    END IF;
+
+    IF to_regclass('public.idx_preview_cards_created_at') IS NOT NULL THEN
+        DROP INDEX IF EXISTS idx_generated_cards_created_at;
+    ELSIF to_regclass('public.idx_generated_cards_created_at') IS NOT NULL THEN
+        ALTER INDEX idx_generated_cards_created_at
+            RENAME TO idx_preview_cards_created_at;
+    END IF;
+
+    IF to_regclass('public.ux_preview_cards_season_collection_mint') IS NOT NULL THEN
+        DROP INDEX IF EXISTS ux_user_generated_cards_season_collection_mint;
+    ELSIF to_regclass('public.ux_user_generated_cards_season_collection_mint') IS NOT NULL THEN
+        ALTER INDEX ux_user_generated_cards_season_collection_mint
+            RENAME TO ux_preview_cards_season_collection_mint;
+    END IF;
+END $$;
 
 -- Drop the legacy trigger+function so the definitions below can reintroduce
 -- them under the new names without leaving stale duplicates behind.
