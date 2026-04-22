@@ -110,6 +110,32 @@ def _patch_scheduler_psycopg2():
         yield _sched
 
 
+@contextlib.contextmanager
+def _patch_data_loading_manager_psycopg2():
+    """Replace psycopg2 baked into scripts.data_loading_manager (DataLoadingManager)."""
+    import scripts.data_loading_manager as _dlm
+    with unittest.mock.patch.object(_dlm, "psycopg2", _real_psycopg2):
+        yield _dlm
+
+
+@contextlib.contextmanager
+def integration_full_workbench_service():
+    """Fully initialized SeasonWorkbenchService against real PostgreSQL.
+
+    Patches module-level psycopg2 in all layers touched by ``SeasonWorkbenchService.__init__``
+    (DataLoadingManager, SeasonManager, SimplifiedScheduler, admin_backend).
+    """
+    import admin_backend.main as _ab
+    import scripts.data_loading_manager as _dlm
+    import scripts.daily_scheduler_simple as _sched
+    import scripts.season_manager as _sm
+    with unittest.mock.patch.object(_dlm, "psycopg2", _real_psycopg2):
+        with unittest.mock.patch.object(_sm, "psycopg2", _real_psycopg2):
+            with unittest.mock.patch.object(_sched, "psycopg2", _real_psycopg2):
+                with unittest.mock.patch.object(_ab, "psycopg2", _real_psycopg2):
+                    yield _ab.SeasonWorkbenchService()
+
+
 @pytest.fixture()
 def workbench():
     """SeasonWorkbenchService wired to real PostgreSQL, bypassing DataLoadingManager init.
@@ -134,3 +160,19 @@ def real_scheduler():
     with _patch_scheduler_psycopg2() as sched_mod:
         scheduler = object.__new__(sched_mod.SimplifiedScheduler)
         yield scheduler
+
+
+@pytest.fixture()
+def admin_api_client():
+    """FastAPI TestClient for ``admin_backend.main:app`` with real DB service."""
+    from fastapi.testclient import TestClient
+
+    import admin_backend.main as ab
+
+    with integration_full_workbench_service() as svc:
+        prev = ab.service
+        ab.service = svc
+        try:
+            yield TestClient(ab.app)
+        finally:
+            ab.service = prev
