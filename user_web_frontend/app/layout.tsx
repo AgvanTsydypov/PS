@@ -2,6 +2,7 @@ import "./globals.css";
 import type { Metadata } from "next";
 import { ReactNode } from "react";
 
+import CookieBanner from "../components/CookieBanner";
 import FoucGuard from "../components/FoucGuard";
 import SiteMaintenanceStrip from "../components/SiteMaintenanceStrip";
 import SiteSocialFooter from "../components/SiteSocialFooter";
@@ -58,6 +59,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <SiteMaintenanceStrip />
         {children}
         <SiteSocialFooter />
+        <CookieBanner />
       </body>
     </html>
   );

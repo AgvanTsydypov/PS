@@ -4,6 +4,7 @@ import Link from "next/link";
 import React, { useEffect, useState } from "react";
 
 import SiteLogoLink from "../../../components/SiteLogoLink";
+import { isSafeExternalUrl } from "../../../components/cardInteractions";
 import { fetchPublicUserApiJsonResult } from "../../../lib/userApiBase";
 
 type GeneratedCardPayload = {
@@ -174,9 +175,9 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                     <dd>{event.slug ?? card.event_slug ?? "N/A"}</dd>
                     <dt>Solana Explorer</dt>
                     <dd>
-                      {card.explorer_asset_url ? (
+                      {isSafeExternalUrl(card.explorer_asset_url) ? (
                         <a
-                          href={card.explorer_asset_url}
+                          href={card.explorer_asset_url!}
                           target="_blank"
                           rel="noopener noreferrer"
                         >
@@ -188,9 +189,9 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                     </dd>
                     <dt>Magic Eden</dt>
                     <dd>
-                      {card.magiceden_url ? (
+                      {isSafeExternalUrl(card.magiceden_url) ? (
                         <a
-                          href={card.magiceden_url}
+                          href={card.magiceden_url!}
                           target="_blank"
                           rel="noopener noreferrer"
                         >

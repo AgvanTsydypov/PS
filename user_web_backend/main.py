@@ -2913,7 +2913,7 @@ def wallet_verify(payload: VerifyRequest):
         max_age=JWT_TTL_SECONDS,
         httponly=True,
         secure=_cookie_secure_flag(),
-        samesite="lax",
+        samesite="strict",
         path="/",
         domain=_cookie_domain_value(),
     )
@@ -2962,7 +2962,7 @@ def wallet_logout() -> JSONResponse:
         domain=_cookie_domain_value(),
         httponly=True,
         secure=_cookie_secure_flag(),
-        samesite="lax",
+        samesite="strict",
     )
     return response
 

@@ -2541,3 +2541,46 @@ button:disabled {
     height: 14px;
   }
 }
+
+/* ── Cookie banner ─────────────────────────────────────────────────────────── */
+.cookie-banner {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 2147482000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 12px 20px;
+  background: rgba(10, 10, 10, 0.97);
+  border-top: 1px solid var(--bd-line-strong);
+  font-family: var(--bd-font-ui);
+  font-size: 0.8125rem;
+  flex-wrap: wrap;
+}
+
+.cookie-banner-text {
+  margin: 0;
+  color: var(--bd-ink-dim);
+  line-height: 1.5;
+}
+
+.cookie-banner-btn {
+  flex-shrink: 0;
+  padding: 6px 18px;
+  background: var(--bd-brand);
+  color: var(--bd-brand-ink);
+  border: none;
+  font-family: var(--bd-font-ui);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.cookie-banner-btn:hover {
+  opacity: 0.85;
+}

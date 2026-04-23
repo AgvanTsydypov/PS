@@ -5,6 +5,15 @@ import type {
   SetStateAction,
 } from "react";
 
+export function isSafeExternalUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+  try {
+    return new URL(url).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 const MAX_TILT = 20;
 const PROXIMITY_PX = 10;
 const FLIP_DURATION_MS = 720;
@@ -187,7 +196,10 @@ export function navigateToCardIfCenterClick(
   // ``/preview/{slug}`` for live showcase previews (preview_cards).
   // Callers whose card is a preview must pass ``basePath: "/preview"``.
   const base = (options?.basePath ?? "/cards").replace(/\/+$/, "");
-  window.location.href = `${base}/${encodeURIComponent(slug)}`;
+  const targetPath = `${base}/${encodeURIComponent(slug)}`;
+  const resolved = new URL(targetPath, window.location.origin);
+  if (resolved.origin !== window.location.origin) return false;
+  window.location.href = resolved.pathname;
   return true;
 }
 
