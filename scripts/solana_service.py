@@ -392,33 +392,28 @@ class SolanaClient:
 
     @staticmethod
     def _build_card_attributes(card_payload: dict[str, Any]) -> list[dict[str, Any]]:
-        trait_keys = [
-            "season_type",
-            "season_number",
-            "recurrence",
-            "claim_type",
-            "card_title",
-            "primary_tag",
-            "secondary_tag",
-            "entry_bracket",
-            "archetype",
-            "rarity_bracket",
-            "edge",
-            "yield",
-            "gravity",
-            "leaderboard_rank",
-            "proxy_wallet",
+        trait_specs: list[tuple[str, str]] = [
+            ("season_type", "SEASON TYPE"),
+            ("season_number", "SEASON NUMBER"),
+            ("recurrence", "EVENT INSTANCE"),
+            ("claim_type", "PARTICIPANT CLASS"),
+            ("primary_tag", "SECTOR"),
+            ("archetype", "ARCHETYPE"),
+            ("entry_bracket", "P(E)"),
+            ("edge", "EDGE"),
+            ("yield", "YIELD"),
+            ("gravity", "GRAVITY"),
         ]
         attributes: list[dict[str, Any]] = []
-        for key in trait_keys:
-            value = card_payload.get(key)
+        for payload_key, trait_type in trait_specs:
+            value = card_payload.get(payload_key)
             if value is None:
                 continue
             if isinstance(value, str):
                 value = value.strip()
                 if not value:
                     continue
-            attributes.append({"trait_type": key, "value": value})
+            attributes.append({"trait_type": trait_type, "value": value})
         return attributes
 
     @staticmethod

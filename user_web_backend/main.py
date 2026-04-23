@@ -1858,7 +1858,10 @@ def _extract_attribute_map(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]
 
     Mirrors the attribute layout produced by ``SolanaClient._build_card_attributes``
     so the dashboard can hydrate ``season_type`` / ``season_number`` / ``phase``
-    purely from on-chain metadata. Unknown trait types are preserved as-is.
+    purely from on-chain metadata. New mints expose human-readable trait types
+    (e.g. ``SEASON TYPE``); those are copied onto legacy snake_case keys when
+    present so existing callers keep working. Unknown trait types are preserved
+    as-is.
     """
     if not isinstance(metadata, dict):
         return {}
@@ -1873,6 +1876,22 @@ def _extract_attribute_map(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]
         if not trait:
             continue
         out[trait] = entry.get("value")
+
+    display_trait_to_internal = {
+        "SEASON TYPE": "season_type",
+        "SEASON NUMBER": "season_number",
+        "EVENT INSTANCE": "recurrence",
+        "PARTICIPANT CLASS": "claim_type",
+        "SECTOR": "primary_tag",
+        "ARCHETYPE": "archetype",
+        "P(E)": "entry_bracket",
+        "EDGE": "edge",
+        "YIELD": "yield",
+        "GRAVITY": "gravity",
+    }
+    for display, internal in display_trait_to_internal.items():
+        if display in out and internal not in out:
+            out[internal] = out[display]
     return out
 
 
