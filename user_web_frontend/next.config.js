@@ -1,4 +1,5 @@
 const STATIC_IMAGE_ORIGINS = [
+  "https://*.r2.dev",
   "https://gateway.pinata.cloud",
   "https://cloudflare-ipfs.com",
   "https://ipfs.io",
@@ -7,9 +8,14 @@ const STATIC_IMAGE_ORIGINS = [
 
 function buildCspImgSrc() {
   const parts = new Set(["'self'", "data:", "blob:", ...STATIC_IMAGE_ORIGINS]);
-  const r2Base = String(process.env.R2_PUBLIC_BASE_URL || "").trim().replace(/\/+$/, "");
-  if (r2Base.startsWith("https://")) {
-    try { parts.add(new URL(r2Base).origin); } catch (_) { /* ignore */ }
+  // Allow backend origin for locally-served asset paths (e.g. http://localhost:8011)
+  const apiBase = String(process.env.NEXT_PUBLIC_USER_API_BASE_URL || "").trim();
+  if (apiBase.startsWith("http")) {
+    try { parts.add(new URL(apiBase).origin); } catch (_) { /* ignore */ }
+  }
+  if (process.env.NODE_ENV === "development") {
+    parts.add("http://localhost:8011");
+    parts.add("http://127.0.0.1:8011");
   }
   return Array.from(parts).join(" ");
 }
@@ -51,25 +57,20 @@ const contentSecurityPolicy = [
   "frame-ancestors 'none'",
   "object-src 'none'",
   `img-src ${buildCspImgSrc()}`,
-  "font-src 'self' https://fonts.gstatic.com",
+  "font-src 'self' data: https://fonts.gstatic.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   `script-src ${scriptSrc}`,
   `connect-src ${buildCspConnectSrc()}`,
 ].join("; ");
 
 function buildRemotePatterns() {
-  const patterns = STATIC_IMAGE_ORIGINS.map((origin) => {
-    const { protocol, hostname } = new URL(origin);
-    return { protocol: protocol.replace(":", ""), hostname };
-  });
-  const r2Base = String(process.env.R2_PUBLIC_BASE_URL || "").trim().replace(/\/+$/, "");
-  if (r2Base.startsWith("https://")) {
-    try {
-      const { hostname } = new URL(r2Base);
-      patterns.push({ protocol: "https", hostname });
-    } catch (_) { /* ignore */ }
-  }
-  return patterns;
+  return [
+    { protocol: "https", hostname: "**.r2.dev" },
+    { protocol: "https", hostname: "gateway.pinata.cloud" },
+    { protocol: "https", hostname: "cloudflare-ipfs.com" },
+    { protocol: "https", hostname: "ipfs.io" },
+    { protocol: "https", hostname: "dweb.link" },
+  ];
 }
 
 /** @type {import('next').NextConfig} */

@@ -15,10 +15,24 @@
       "mcp__postgres__analyze_query_indexes",
       "mcp__postgres__explain_query",
       "mcp__postgres__get_top_queries",
-      "Bash(grep -E \"\\\\.py$\")"
+      "Bash(grep -E \"\\\\.py$\")",
+      "Bash(rtk ls *)",
+      "Bash(mkdir -p \"C:/Users/AgvanD/.claude/agents\")",
+      "Bash(cp -r \"C:/Users/AgvanD/Desktop/University/QM/agency-agents/engineering/.\" \"C:/Users/AgvanD/.claude/agents/\")",
+      "Bash(cp -r \"C:/Users/AgvanD/Desktop/University/QM/agency-agents/design/.\" \"C:/Users/AgvanD/.claude/agents/\")",
+      "Bash(cp -r \"C:/Users/AgvanD/Desktop/University/QM/agency-agents/testing/.\" \"C:/Users/AgvanD/.claude/agents/\")",
+      "Bash(cp -r \"C:/Users/AgvanD/Desktop/University/QM/agency-agents/product/.\" \"C:/Users/AgvanD/.claude/agents/\")",
+      "Bash(rtk find *)",
+      "Bash(rtk wc *)",
+      "Bash(rtk git *)",
+      "Bash(rtk grep *)"
     ]
   },
   "enabledMcpjsonServers": [
     "postgres"
-  ]
+  ],
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "playwright@claude-plugins-official": true
+  }
 }
