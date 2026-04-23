@@ -867,6 +867,25 @@ CREATE INDEX IF NOT EXISTS idx_user_wallet_signins_last_signed_in_at
 DO $$ BEGIN RAISE NOTICE '✅ user_wallet_signins table created'; END $$;
 
 -- ============================================================================
+-- 9b. SIWE CHALLENGE STORE (shared across uvicorn workers)
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '🔐 Creating wallet_siwe_challenges table...'; END $$;
+
+CREATE TABLE IF NOT EXISTS wallet_siwe_challenges (
+    id TEXT PRIMARY KEY,
+    wallet_address TEXT NOT NULL,
+    message TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT wallet_siwe_challenges_wallet_check CHECK (wallet_address ~* '^0x[a-f0-9]{40}$')
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_siwe_challenges_expires_at
+    ON wallet_siwe_challenges(expires_at);
+
+DO $$ BEGIN RAISE NOTICE '✅ wallet_siwe_challenges table created'; END $$;
+
+-- ============================================================================
 -- 11. PARTICIPANTS SNAPSHOT MATERIALIZED VIEW
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE '👥 Creating participants materialized view...'; END $$;
@@ -1205,6 +1224,7 @@ DO $$ BEGIN RAISE NOTICE '   - downstream_runs'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - event_resolution_queue'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - event_cards'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - user_wallet_signins'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - wallet_siwe_challenges'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - participants (materialized view)'; END $$;
 DO $$ BEGIN RAISE NOTICE ''; END $$;
 DO $$ BEGIN RAISE NOTICE '📈 Created views:'; END $$;

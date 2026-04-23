@@ -41,6 +41,7 @@ from scripts.cardgen.assets import (
     render_card_pngs,
     upload_card_assets_to_r2,
 )
+from scripts.http_fetch_ssrf import urlopen_after_ssrf_check
 
 logger = logging.getLogger(__name__)
 
@@ -708,7 +709,7 @@ def _remote_image_to_data_uri(image_url: str, *, timeout_seconds: Optional[float
         },
     )
     effective_timeout = POLYMARKET_REQUEST_TIMEOUT_SECONDS if timeout_seconds is None else float(timeout_seconds)
-    with urllib.request.urlopen(req, timeout=effective_timeout) as response:
+    with urlopen_after_ssrf_check(req, timeout=float(effective_timeout)) as response:
         raw = response.read()
         if not raw:
             raise ValueError("Downloaded image is empty")

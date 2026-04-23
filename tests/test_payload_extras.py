@@ -156,13 +156,19 @@ class TestBuildRenderPayload:
 
     def test_http_url_converted_to_data_uri(self):
         payload = {"image_url": "http://example.com/img.jpg"}
-        with patch("urllib.request.urlopen", return_value=_mock_urlopen(b"bytes", "image/jpeg")):
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=_mock_urlopen(b"bytes", "image/jpeg"),
+        ):
             result = _build_render_payload(payload)
         assert result["image_url"].startswith("data:image/jpeg;base64,")
 
     def test_https_url_converted_to_data_uri(self):
         payload = {"image_url": "https://cdn.example.com/img.png"}
-        with patch("urllib.request.urlopen", return_value=_mock_urlopen(b"pngbytes", "image/png")):
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=_mock_urlopen(b"pngbytes", "image/png"),
+        ):
             result = _build_render_payload(payload)
         assert result["image_url"].startswith("data:image/png;base64,")
 
