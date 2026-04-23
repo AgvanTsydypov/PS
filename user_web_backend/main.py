@@ -58,6 +58,7 @@ from scripts.cardgen.assets import (
     render_card_pngs,
     upload_card_assets_to_r2,
 )
+from scripts.http_fetch_ssrf import urlopen_after_ssrf_check
 
 try:
     from solders.pubkey import Pubkey  # type: ignore
@@ -152,12 +153,18 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Content-Type",
+        "Origin",
+        "Referer",
+        "User-Agent",
+        "X-Requested-With",
+    ],
 )
 
-_challenge_store: Dict[str, ChallengeRecord] = {}
-_challenge_lock = threading.Lock()
 CHALLENGE_TTL_SECONDS = int(os.getenv("USER_WEB_CHALLENGE_TTL_SECONDS", "300"))
 season_manager = SeasonManager(use_local_db=True)
 mint_service = SeasonWorkbenchService()
@@ -426,17 +433,23 @@ LEGACY_ARCHETYPE_MAP: Dict[str, str] = {
 }
 
 
-def _cleanup_expired_challenges() -> None:
+def _cleanup_expired_siwe_challenges_loop() -> None:
+    """Best-effort periodic purge so abandoned SIWE rows do not accumulate."""
     while True:
         threading.Event().wait(60)
-        now = datetime.now(timezone.utc)
-        with _challenge_lock:
-            expired = [cid for cid, rec in _challenge_store.items() if rec.expires_at < now]
-            for cid in expired:
-                del _challenge_store[cid]
+        conn = _get_connection()
+        try:
+            with conn.cursor() as cursor:
+                _purge_stale_siwe_challenges(cursor)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.debug("SIWE challenge purge tick failed", exc_info=True)
+        finally:
+            conn.close()
 
 
-threading.Thread(target=_cleanup_expired_challenges, daemon=True).start()
+threading.Thread(target=_cleanup_expired_siwe_challenges_loop, daemon=True).start()
 
 
 def _normalize_evm_address(value: str) -> str:
@@ -613,6 +626,113 @@ def _ensure_user_solana_wallet_column() -> None:
     except Exception:
         conn.rollback()
         logger.exception("Failed to ensure user_wallet_signins.solana_wallet column")
+    finally:
+        conn.close()
+
+
+def _ensure_wallet_siwe_challenges_table() -> None:
+    """Creates the SIWE challenge table when missing (multi-worker safe store)."""
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS wallet_siwe_challenges (
+                    id TEXT PRIMARY KEY,
+                    wallet_address TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT wallet_siwe_challenges_wallet_check
+                        CHECK (wallet_address ~* '^0x[a-f0-9]{40}$')
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_wallet_siwe_challenges_expires_at
+                    ON wallet_siwe_challenges(expires_at)
+                """
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("Failed to ensure wallet_siwe_challenges table")
+    finally:
+        conn.close()
+
+
+def _purge_stale_siwe_challenges(cursor: Any) -> None:
+    cursor.execute("DELETE FROM wallet_siwe_challenges WHERE expires_at < NOW()")
+
+
+def _insert_siwe_challenge_record(
+    challenge_id: str,
+    wallet_address: str,
+    message: str,
+    expires_at: datetime,
+) -> None:
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            _purge_stale_siwe_challenges(cursor)
+            cursor.execute(
+                """
+                INSERT INTO wallet_siwe_challenges (id, wallet_address, message, expires_at)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (challenge_id, wallet_address.lower(), message, expires_at),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _peek_siwe_challenge(challenge_id: str) -> Tuple[Optional[ChallengeRecord], str]:
+    """Return ``(record, status)`` where status is ``ok``, ``missing``, or ``expired``."""
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT wallet_address, message, expires_at
+                FROM wallet_siwe_challenges
+                WHERE id = %s
+                """,
+                (challenge_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None, "missing"
+            wallet, msg, exp = row[0], row[1], row[2]
+            if getattr(exp, "tzinfo", None) is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp < datetime.now(timezone.utc):
+                return None, "expired"
+            return (
+                ChallengeRecord(
+                    wallet_address=str(wallet),
+                    message=str(msg),
+                    expires_at=exp,
+                ),
+                "ok",
+            )
+    finally:
+        conn.close()
+
+
+def _delete_siwe_challenge_by_id(challenge_id: str) -> None:
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM wallet_siwe_challenges WHERE id = %s", (challenge_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("Failed to delete SIWE challenge id=%s", challenge_id)
     finally:
         conn.close()
 
@@ -1169,7 +1289,7 @@ def _remote_image_to_data_uri(image_url: str, *, timeout_seconds: Optional[float
     effective_timeout = (
         POLYMARKET_REQUEST_TIMEOUT_SECONDS if timeout_seconds is None else float(timeout_seconds)
     )
-    with urllib.request.urlopen(req, timeout=effective_timeout) as response:
+    with urlopen_after_ssrf_check(req, timeout=effective_timeout) as response:
         raw = response.read()
         if not raw:
             raise ValueError("Downloaded image is empty")
@@ -1554,7 +1674,9 @@ def _resolve_nft_visuals_for_metadata_uri(metadata_uri: str) -> Dict[str, Option
                     "User-Agent": "Mozilla/5.0 (PolyStars user-web)",
                 },
             )
-            with urllib.request.urlopen(req, timeout=SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS) as response:
+            with urlopen_after_ssrf_check(
+                req, timeout=float(SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS)
+            ) as response:
                 status_code = int(getattr(response, "status", 200))
                 if 200 <= status_code < 300:
                     body = response.read().decode("utf-8", errors="replace")
@@ -1643,8 +1765,8 @@ def _try_fetch_metadata_json(uri: str) -> Optional[Dict[str, Any]]:
                 "User-Agent": "Mozilla/5.0 (PolyStars user-web)",
             },
         )
-        with urllib.request.urlopen(
-            req, timeout=SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS
+        with urlopen_after_ssrf_check(
+            req, timeout=float(SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS)
         ) as response:
             status_code = int(getattr(response, "status", 200))
             if not (200 <= status_code < 300):
@@ -2508,11 +2630,37 @@ def _fetch_polymarket_trader_rank(proxy_wallet: str) -> Tuple[Optional[str], boo
         return None, False
 
 
+def _trust_x_forwarded_for_rate_limit() -> bool:
+    """When true, use the first ``X-Forwarded-For`` hop as the client IP for rate limits.
+
+    Enable only when this app is deployed behind a trusted reverse proxy that sets
+    ``X-Forwarded-For`` correctly; otherwise clients can spoof arbitrary IPs.
+    """
+    return os.getenv("USER_WEB_TRUST_X_FORWARDED_FOR", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _rate_limit_client_ip(request: Request) -> str:
+    if _trust_x_forwarded_for_rate_limit():
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+            if parts:
+                return parts[0][:200]
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     cfg = RATE_LIMITS.get(request.url.path)
     if cfg is not None:
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = _rate_limit_client_ip(request)
         wallet_scope = ""
         bucket_key = f"{request.url.path}:{client_ip}:{wallet_scope}"
         now = monotonic()
@@ -2535,6 +2683,7 @@ def startup_checks() -> None:
     _warn_if_claims_uniqueness_index_missing()
     _ensure_preview_cards_schema()
     _ensure_user_solana_wallet_column()
+    _ensure_wallet_siwe_challenges_table()
     _warm_rasterizer_pool_in_background()
     if os.getenv("NODE_ENV", "development") != "development" and not _allowed_origins():
         logger.warning(
@@ -2761,6 +2910,18 @@ def season_opened_archetype_counts(season_id: int) -> Dict[str, Any]:
     }
 
 
+def _mask_hex_address_for_public_ticker(addr: str) -> str:
+    """Reduces wallet-address scraping value while keeping a short visual hint."""
+    raw = (addr or "").strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith("0x") and len(raw) >= 12:
+        return f"{raw[:6]}…{raw[-4:]}"
+    if len(raw) >= 10:
+        return f"{raw[:4]}…{raw[-4:]}"
+    return "…"
+
+
 @app.get("/api/wallet-ticker")
 def wallet_ticker(limit: int = 100) -> Dict[str, Any]:
     safe_limit = max(1, min(int(limit), 200))
@@ -2787,7 +2948,11 @@ def wallet_ticker(limit: int = 100) -> Dict[str, Any]:
     finally:
         conn.close()
 
-    wallets = [str(row[0]) for row in rows if row and row[0]]
+    wallets = [
+        _mask_hex_address_for_public_ticker(str(row[0]))
+        for row in rows
+        if row and row[0]
+    ]
     return {
         "wallets": wallets,
         "total": len(wallets),
@@ -2804,12 +2969,12 @@ def wallet_challenge(payload: ChallengeRequest):
     message = _build_challenge_message(wallet_address, nonce)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=CHALLENGE_TTL_SECONDS)
 
-    with _challenge_lock:
-        _challenge_store[challenge_id] = ChallengeRecord(
-            wallet_address=wallet_address,
-            message=message,
-            expires_at=expires_at,
-        )
+    _insert_siwe_challenge_record(
+        challenge_id,
+        wallet_address,
+        message,
+        expires_at,
+    )
 
     return {
         "challenge_id": challenge_id,
@@ -2822,15 +2987,15 @@ def wallet_challenge(payload: ChallengeRequest):
 def wallet_verify(payload: VerifyRequest):
     _require_wallet_actions_enabled()
     wallet_address = _normalize_evm_address(payload.wallet_address)
-    with _challenge_lock:
-        challenge = _challenge_store.get(payload.challenge_id)
-        if challenge is None:
-            raise HTTPException(status_code=400, detail="Unknown challenge")
-        if challenge.expires_at < datetime.now(timezone.utc):
-            _challenge_store.pop(payload.challenge_id, None)
-            raise HTTPException(status_code=400, detail="Challenge expired")
-        if challenge.wallet_address.lower() != wallet_address.lower():
-            raise HTTPException(status_code=400, detail="Challenge wallet mismatch")
+    challenge, peek_status = _peek_siwe_challenge(payload.challenge_id)
+    if peek_status == "missing":
+        raise HTTPException(status_code=400, detail="Unknown challenge")
+    if peek_status == "expired":
+        _delete_siwe_challenge_by_id(payload.challenge_id)
+        raise HTTPException(status_code=400, detail="Challenge expired")
+    assert challenge is not None
+    if challenge.wallet_address.lower() != wallet_address.lower():
+        raise HTTPException(status_code=400, detail="Challenge wallet mismatch")
 
     encoded = encode_defunct(text=challenge.message)
     try:
@@ -2884,16 +3049,20 @@ def wallet_verify(payload: VerifyRequest):
                 (wallet_address, proxy_wallet, trader_rank),
             )
             row = cursor.fetchone()
+            cursor.execute(
+                "DELETE FROM wallet_siwe_challenges WHERE id = %s",
+                (payload.challenge_id,),
+            )
         conn.commit()
     except Exception:
         conn.rollback()
         logger.exception("Failed to persist wallet sign-in")
-        raise
+        raise HTTPException(
+            status_code=503,
+            detail="Sign-in could not be completed. Please try again.",
+        ) from None
     finally:
         conn.close()
-
-    with _challenge_lock:
-        _challenge_store.pop(payload.challenge_id, None)
 
     access_token = _issue_access_token(wallet_address)
     body: Dict[str, Any] = {
@@ -3606,9 +3775,12 @@ def me_eligibility(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
     try:
         return season_manager.check_user_eligibility(wallet)
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to compute eligibility for wallet=%s", wallet)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=503,
+            detail="Eligibility could not be determined. Please try again later.",
+        ) from None
 
 
 @app.post("/api/me/mint")
@@ -3695,13 +3867,16 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
         return mint_service.run_mint_claim(mint_request)
     except HTTPException:
         raise
-    except Exception as exc:
+    except Exception:
         logger.exception(
             "Mint failed for wallet=%s season_id=%s recipient=%s",
             wallet,
             season_id,
             recipient,
         )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=503,
+            detail="Mint could not be completed. Please try again later.",
+        ) from None
 
 

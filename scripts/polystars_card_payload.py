@@ -28,6 +28,7 @@ from scripts.cardgen.assets import (
     upload_card_assets_to_pinata,
 )
 from scripts.data_loading_manager import DataLoadingManager
+from scripts.http_fetch_ssrf import urlopen_after_ssrf_check
 
 __all__ = ["unpin_pinata_urls"]  # re-exported for admin_backend import path
 
@@ -301,7 +302,7 @@ def _remote_image_to_data_uri(image_url: str, *, timeout_seconds: float) -> str:
             ),
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
+    with urlopen_after_ssrf_check(req, timeout=float(timeout_seconds)) as response:
         raw = response.read()
         if not raw:
             raise ValueError("Downloaded image is empty")

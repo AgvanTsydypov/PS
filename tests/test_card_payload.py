@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from scripts.http_fetch_ssrf import SsrfUnsafeUrlError
 from scripts.polystars_card_payload import (
     CARD_ARCHETYPE_OPTIONS,
     CARD_ENTRY_BRACKET_OPTIONS,
@@ -831,27 +832,50 @@ class TestRemoteImageToDataUri:
     def test_http_url_fetched_and_encoded(self):
         raw = b"imagebytes"
         expected_b64 = base64.b64encode(raw).decode("ascii")
-        with patch("urllib.request.urlopen", return_value=_mock_urlopen(raw, "image/jpeg")):
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=_mock_urlopen(raw, "image/jpeg"),
+        ):
             result = _remote_image_to_data_uri("http://example.com/img.jpg", timeout_seconds=5)
         assert result == f"data:image/jpeg;base64,{expected_b64}"
 
     def test_https_url_fetched_and_encoded(self):
         raw = b"pngdata"
-        with patch("urllib.request.urlopen", return_value=_mock_urlopen(raw, "image/png")):
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=_mock_urlopen(raw, "image/png"),
+        ):
             result = _remote_image_to_data_uri("https://cdn.example.com/img.png", timeout_seconds=5)
         assert result.startswith("data:image/png;base64,")
 
     def test_empty_response_raises(self):
         with (
-            patch("urllib.request.urlopen", return_value=_mock_urlopen(b"", "image/png")),
+            patch(
+                "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+                return_value=_mock_urlopen(b"", "image/png"),
+            ),
             pytest.raises(ValueError, match="empty"),
         ):
             _remote_image_to_data_uri("https://example.com/img.png", timeout_seconds=5)
 
     def test_content_type_included_in_data_uri(self):
-        with patch("urllib.request.urlopen", return_value=_mock_urlopen(b"gif", "image/gif")):
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=_mock_urlopen(b"gif", "image/gif"),
+        ):
             result = _remote_image_to_data_uri("https://example.com/img.gif", timeout_seconds=5)
         assert "image/gif" in result
+
+    def test_loopback_literal_rejected_before_fetch(self):
+        with pytest.raises(SsrfUnsafeUrlError):
+            _remote_image_to_data_uri("http://127.0.0.1/img.png", timeout_seconds=5)
+
+    def test_metadata_ip_rejected_before_fetch(self):
+        with pytest.raises(SsrfUnsafeUrlError):
+            _remote_image_to_data_uri(
+                "http://169.254.169.254/latest/meta-data/",
+                timeout_seconds=5,
+            )
 
 
 # ---------------------------------------------------------------------------
