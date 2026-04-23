@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { ActiveSeasonsBoard } from "../components/ActiveSeasonsBoard";
 import GeneratedCardsTicker from "../components/GeneratedCardsTicker";
+import { SeasonArchetypeOpensBoard } from "../components/SeasonArchetypeOpensBoard";
 
 export default function HomePage() {
   return (
@@ -20,6 +21,7 @@ export default function HomePage() {
               </p>
             }
           />
+          <SeasonArchetypeOpensBoard />
         </div>
       }
     />

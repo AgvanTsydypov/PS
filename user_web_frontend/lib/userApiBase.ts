@@ -31,6 +31,41 @@ export type SeasonResponse = {
   phase_reason: string;
 };
 
+export type SeasonCatalogEntry = {
+  id: number;
+  type: string;
+  season_number: number;
+  title: string;
+  is_active: boolean;
+};
+
+export type SeasonsCatalogResponse = {
+  seasons: SeasonCatalogEntry[];
+};
+
+export type SeasonArchetypeOpensResponse = {
+  season_id: number;
+  total_opened: number;
+  by_archetype: Record<string, number>;
+  unknown: number;
+};
+
+/** Canonical archetype order (matches user_web_backend CARD_ARCHETYPE_OPTIONS). */
+export const ARCHETYPE_DISPLAY_ORDER = [
+  "ANOMALY",
+  "ICARUS",
+  "BOT",
+  "BURNER",
+  "SIGNAL",
+  "VECTOR",
+  "EQUILIBRIUM",
+  "AMASSER",
+  "EXTRACTOR",
+  "PASSENGER",
+  "SUBSTRATE",
+  "OPERATOR",
+] as const;
+
 export type CardTickerItem = {
   slug: string;
   card_title: string;
@@ -225,6 +260,20 @@ export async function fetchActiveSeasons(
   options?: PublicFetchOptions,
 ): Promise<SeasonResponse[] | null> {
   return fetchPublicUserApiJson<SeasonResponse[]>("/api/seasons/active", options);
+}
+
+export async function fetchSeasonsCatalog(
+  options?: PublicFetchOptions,
+): Promise<SeasonsCatalogResponse | null> {
+  return fetchPublicUserApiJson<SeasonsCatalogResponse>("/api/seasons/catalog", options);
+}
+
+export async function fetchSeasonArchetypeOpens(
+  seasonId: number,
+  options?: PublicFetchOptions,
+): Promise<SeasonArchetypeOpensResponse | null> {
+  const path = `/api/seasons/${seasonId}/opened-archetypes`;
+  return fetchPublicUserApiJson<SeasonArchetypeOpensResponse>(path, options);
 }
 
 export async function fetchCardTicker(
