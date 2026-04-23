@@ -337,8 +337,9 @@ _nft_metadata_cache_lock = threading.Lock()
 _nft_metadata_cache: "Dict[str, Dict[str, Optional[str]]]" = {}
 # Full off-chain JSON metadata cache, keyed by URI. Mirrors
 # ``_nft_metadata_cache`` but stores the entire parsed JSON object so the
-# DAS-backed /api/me/cards endpoint can read ``polystars_card`` and any
-# custom top-level fields without re-fetching from IPFS. Each entry is a
+# DAS-backed /api/me/cards endpoint can read ``card_display_data`` (or legacy
+# ``polystars_card``) and any custom top-level fields without re-fetching from
+# IPFS. Each entry is a
 # (cached_at_monotonic, payload) tuple — payload is the parsed JSON for
 # successful fetches and an empty dict for negative results. Negative
 # entries are kept only for ``USER_WEB_NFT_METADATA_NEGATIVE_TTL_SECONDS``
@@ -1387,12 +1388,22 @@ def _decode_data_uri_json(metadata_uri: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _extract_card_slug_from_polystars_card(polystars_card: Any) -> Optional[str]:
-    """Extract the in-app card slug from the embedded ``polystars_card.qr_payload``.
+def _metadata_embedded_card(metadata: Any) -> Optional[Dict[str, Any]]:
+    """Return ``card_display_data`` (new) or legacy ``polystars_card`` from metadata JSON."""
+    if not isinstance(metadata, dict):
+        return None
+    block = metadata.get("card_display_data")
+    if isinstance(block, dict):
+        return block
+    legacy = metadata.get("polystars_card")
+    return legacy if isinstance(legacy, dict) else None
 
-    Mint-time payload shape (see ``scripts/polystars_card_payload.py``):
-    ``qr_payload = "{CARD_BASE_URL}/cards/{slug}"`` — the slug is the last
-    non-empty path segment. Returns ``None`` for any malformed input.
+
+def _extract_card_slug_from_polystars_card(polystars_card: Any) -> Optional[str]:
+    """Extract the in-app card slug from ``qr_payload`` on an embedded card dict.
+
+    Mint metadata uses ``card_display_data`` (or legacy ``polystars_card``); see
+    ``scripts/polystars_card_payload.py`` for ``qr_payload`` shape.
     """
     if not isinstance(polystars_card, dict):
         return None
@@ -1462,8 +1473,8 @@ def _extract_nft_visuals_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Op
     Mirrors the layout produced by ``SolanaClient._build_metadata_uri``: the
     primary front image is in ``image``, and ``properties.files`` lists ``[front, back]``
     so the back image is the first ``files[].uri`` that differs from ``image``.
-    The in-app card slug is recovered from the embedded ``polystars_card.qr_payload``
-    so minted STARs can deep-link to the same ``/cards/{slug}`` page used by previews.
+    The in-app card slug is recovered from ``card_display_data`` (or legacy
+    ``polystars_card``) ``qr_payload`` so minted STARs deep-link to ``/cards/{slug}``.
 
     All image URLs are normalized through ``_normalize_ipfs_gateway_url`` so
     that metadata written against a private dedicated Pinata gateway still
@@ -1486,7 +1497,7 @@ def _extract_nft_visuals_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Op
                     continue
                 back = uri_value
                 break
-    card_slug = _extract_card_slug_from_polystars_card(metadata.get("polystars_card"))
+    card_slug = _extract_card_slug_from_polystars_card(_metadata_embedded_card(metadata))
     return {
         "name": name,
         "front_image_url": front,
@@ -1644,7 +1655,7 @@ def _fetch_full_nft_metadata_for_uri(metadata_uri: str) -> Optional[Dict[str, An
 
     Unlike ``_resolve_nft_visuals_for_metadata_uri`` (which returns a small
     projection), this returns the full JSON object so callers can read the
-    embedded ``polystars_card`` block, attributes, and any other custom
+    embedded ``card_display_data`` / ``polystars_card`` block, attributes, and any other custom
     top-level fields.
 
     Successful results are cached forever (IPFS content is immutable).
@@ -1858,10 +1869,9 @@ def _extract_attribute_map(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]
 
     Mirrors the attribute layout produced by ``SolanaClient._build_card_attributes``
     so the dashboard can hydrate ``season_type`` / ``season_number`` / ``phase``
-    purely from on-chain metadata. New mints expose human-readable trait types
-    (e.g. ``SEASON TYPE``); those are copied onto legacy snake_case keys when
-    present so existing callers keep working. Unknown trait types are preserved
-    as-is.
+    purely from on-chain metadata. Title-case trait labels (e.g. ``Season Type``)
+    are copied onto legacy snake_case keys when present so existing callers keep
+    working. Unknown trait types are preserved as-is.
     """
     if not isinstance(metadata, dict):
         return {}
@@ -1878,13 +1888,23 @@ def _extract_attribute_map(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]
         out[trait] = entry.get("value")
 
     display_trait_to_internal = {
+        "Season Type": "season_type",
+        "Season Number": "season_number",
+        "Instance": "event_instance",
+        "Participant Class": "claim_type",
+        "Sector": "primary_tag",
+        "Archetype": "archetype",
+        "P(E)": "entry_bracket",
+        "Edge": "edge",
+        "Yield": "yield",
+        "Gravity": "gravity",
+        # Legacy on-chain labels
         "SEASON TYPE": "season_type",
         "SEASON NUMBER": "season_number",
-        "EVENT INSTANCE": "recurrence",
+        "EVENT INSTANCE": "event_instance",
         "PARTICIPANT CLASS": "claim_type",
         "SECTOR": "primary_tag",
         "ARCHETYPE": "archetype",
-        "P(E)": "entry_bracket",
         "EDGE": "edge",
         "YIELD": "yield",
         "GRAVITY": "gravity",
@@ -1936,7 +1956,7 @@ def _build_me_card_item_from_das_asset(
         json_uri = str(content.get("json_uri") or "").strip()
 
     # Prefer the freshly-fetched off-chain JSON because it contains the full
-    # ``polystars_card`` block and any custom top-level fields. Fall back to
+    # ``card_display_data`` / ``polystars_card`` block and any custom top-level fields. Fall back to
     # the metadata inline-projected by the DAS provider if the URI fetch
     # failed or returned nothing.
     metadata_source: Dict[str, Any] = {}
@@ -1987,13 +2007,13 @@ def _build_me_card_item_from_das_asset(
     )
     season_number = _coerce_int(attributes.get("season_number"))
     phase = (
-        str(attributes.get("claim_type") or "").strip() or None
+        str(attributes.get("claim_type") or "").strip().lower() or None
     )
 
     collection_mint_number: Optional[int] = None
-    polystars_card = metadata_source.get("polystars_card") if metadata_source else None
-    if isinstance(polystars_card, dict):
-        collection_mint_number = _coerce_int(polystars_card.get("collection_mint_number"))
+    embedded_card = _metadata_embedded_card(metadata_source) if metadata_source else None
+    if isinstance(embedded_card, dict):
+        collection_mint_number = _coerce_int(embedded_card.get("collection_mint_number"))
 
     ownership = asset.get("ownership") if isinstance(asset.get("ownership"), dict) else {}
     owner_address = (

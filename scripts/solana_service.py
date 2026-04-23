@@ -293,7 +293,7 @@ class SolanaClient:
         polystars_card: dict[str, Any] | None = None,
     ) -> str:
         card_payload = dict(polystars_card or {})
-        metadata_card_payload = self._build_metadata_card_payload(card_payload)
+        metadata_card_payload = self._build_card_display_data_payload(card_payload)
         front_image_url = str(card_payload.get("front_image_url") or "").strip()
         back_image_url = str(card_payload.get("back_image_url") or "").strip()
         front_image_mime = str(card_payload.get("front_image_mime") or "").strip()
@@ -308,30 +308,19 @@ class SolanaClient:
             "attributes": attributes,
         }
         if primary_image_url:
-            files = [
-                {
-                    "uri": primary_image_url,
-                    "type": front_image_mime or self._guess_media_type(primary_image_url),
-                }
-            ]
-            if back_image_url:
-                files.append(
-                    {
-                        "uri": back_image_url,
-                        "type": back_image_mime or self._guess_media_type(back_image_url),
-                    }
-                )
             metadata["image"] = primary_image_url
-            metadata["properties"] = {
-                "category": "image",
-                "files": files,
-            }
+            metadata["properties"] = self._metadata_image_properties(
+                front_url=primary_image_url,
+                back_url=back_image_url,
+                front_mime=front_image_mime,
+                back_mime=back_image_mime,
+            )
         if winner_context:
-            metadata["winner_context"] = self._build_metadata_winner_context(
+            metadata["winner_source_data"] = self._build_winner_source_data(
                 winner_context=winner_context,
             )
         if metadata_card_payload:
-            metadata["polystars_card"] = metadata_card_payload
+            metadata["card_display_data"] = metadata_card_payload
 
         uploaded_uri = self._upload_metadata_to_pinata(metadata)
         if uploaded_uri:
@@ -351,7 +340,8 @@ class SolanaClient:
             )
 
         # Fallback when Pinata is unavailable: keep URI minimal to stay below
-        # transaction size limits. Full winner snapshot remains in DB records.
+        # transaction size limits. Full winner snapshot remains in DB records;
+        # inline JSON uses ``winner_source_data`` / ``card_display_data`` keys.
         compact_metadata = {
             "name": nft_name,
             "symbol": "SLOP",
@@ -360,20 +350,46 @@ class SolanaClient:
         }
         if primary_image_url:
             compact_metadata["image"] = primary_image_url
+            compact_metadata["properties"] = self._metadata_image_properties(
+                front_url=primary_image_url,
+                back_url=back_image_url,
+                front_mime=front_image_mime,
+                back_mime=back_image_mime,
+            )
         if winner_context:
-            compact_metadata["winner_ref"] = {
-                "assignment_type": winner_context.get("assignment_type"),
-                "winner_wallet_address": winner_context.get("winner_wallet_address"),
-                "season_id": winner_context.get("season_id"),
-                "winner_row_id": (winner_context.get("snapshot") or {}).get("winner_row_id"),
-            }
+            compact_metadata["winner_source_data"] = self._build_winner_source_data_compact(
+                winner_context=winner_context,
+            )
         if metadata_card_payload:
-            compact_metadata["polystars_card"] = metadata_card_payload
+            compact_metadata["card_display_data"] = metadata_card_payload
 
         compact_metadata = self._make_json_safe(compact_metadata)
         raw_json = json.dumps(compact_metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         encoded = base64.b64encode(raw_json).decode("ascii")
         return f"data:application/json;base64,{encoded}"
+
+    @staticmethod
+    def _metadata_image_properties(
+        *,
+        front_url: str,
+        back_url: str,
+        front_mime: str,
+        back_mime: str,
+    ) -> dict[str, Any]:
+        files: list[dict[str, str]] = [
+            {
+                "uri": front_url,
+                "type": front_mime or SolanaClient._guess_media_type(front_url),
+            }
+        ]
+        if back_url:
+            files.append(
+                {
+                    "uri": back_url,
+                    "type": back_mime or SolanaClient._guess_media_type(back_url),
+                }
+            )
+        return {"category": "image", "files": files}
 
     @staticmethod
     def _guess_media_type(url: str) -> str:
@@ -391,49 +407,159 @@ class SolanaClient:
         return "image/*"
 
     @staticmethod
+    def _recurrence_implies_fractal(recurrence_value: Any) -> bool:
+        """Same rule as ``cardgen.generate_card._event_recurrence_is_fractal``."""
+        s = str(recurrence_value or "").strip().lower()
+        if not s or s in ("null", "none", "-"):
+            return False
+        if s == "unique":
+            return False
+        return True
+
+    @staticmethod
+    def _format_trait_season_type(raw: Any) -> str | None:
+        s = str(raw or "").strip().lower()
+        if not s:
+            return None
+        if s == "genesis":
+            return "Genesis"
+        if s == "standard":
+            return "Standard"
+        return s[:1].upper() + s[1:] if s else None
+
+    @staticmethod
+    def _format_trait_string_title(raw: Any) -> str | None:
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        return s or None
+
+    @staticmethod
+    def _format_trait_participant_class(raw: Any) -> str | None:
+        s = str(raw or "").strip()
+        return s.title() if s else None
+
+    @staticmethod
+    def _format_trait_archetype(raw: Any) -> str | None:
+        s = str(raw or "").strip()
+        return s.upper() if s else None
+
+    @staticmethod
     def _build_card_attributes(card_payload: dict[str, Any]) -> list[dict[str, Any]]:
-        trait_specs: list[tuple[str, str]] = [
-            ("season_type", "SEASON TYPE"),
-            ("season_number", "SEASON NUMBER"),
-            ("recurrence", "EVENT INSTANCE"),
-            ("claim_type", "PARTICIPANT CLASS"),
-            ("primary_tag", "SECTOR"),
-            ("archetype", "ARCHETYPE"),
-            ("entry_bracket", "P(E)"),
-            ("edge", "EDGE"),
-            ("yield", "YIELD"),
-            ("gravity", "GRAVITY"),
+        season_type = SolanaClient._format_trait_season_type(card_payload.get("season_type"))
+        season_num = card_payload.get("season_number")
+        season_number_str: str | None
+        if season_num is None:
+            season_number_str = None
+        else:
+            season_number_str = str(season_num).strip() or None
+
+        instance_val = (
+            "Fractal"
+            if SolanaClient._recurrence_implies_fractal(card_payload.get("recurrence"))
+            else "Singular"
+        )
+
+        participant = SolanaClient._format_trait_participant_class(card_payload.get("claim_type"))
+        sector = SolanaClient._format_trait_string_title(card_payload.get("primary_tag"))
+        archetype = SolanaClient._format_trait_archetype(card_payload.get("archetype"))
+
+        trait_specs: list[tuple[str | None, str]] = [
+            (season_type, "Season Type"),
+            (season_number_str, "Season Number"),
+            (instance_val, "Instance"),
+            (participant, "Participant Class"),
+            (sector, "Sector"),
+            (archetype, "Archetype"),
+            (SolanaClient._format_trait_string_title(card_payload.get("entry_bracket")), "P(E)"),
+            (SolanaClient._format_trait_string_title(card_payload.get("edge")), "Edge"),
+            (SolanaClient._format_trait_string_title(card_payload.get("yield")), "Yield"),
+            (SolanaClient._format_trait_string_title(card_payload.get("gravity")), "Gravity"),
         ]
         attributes: list[dict[str, Any]] = []
-        for payload_key, trait_type in trait_specs:
-            value = card_payload.get(payload_key)
+        for value, trait_type in trait_specs:
             if value is None:
                 continue
             if isinstance(value, str):
-                value = value.strip()
-                if not value:
+                v = value.strip()
+                if not v:
                     continue
-            attributes.append({"trait_type": trait_type, "value": value})
+                attributes.append({"trait_type": trait_type, "value": v})
+            else:
+                attributes.append({"trait_type": trait_type, "value": value})
         return attributes
 
     @staticmethod
-    def _build_metadata_winner_context(
-        winner_context: dict[str, Any],
-    ) -> dict[str, Any]:
-        context = dict(winner_context)
-        snapshot = context.get("snapshot")
-        if isinstance(snapshot, dict):
-            snapshot_copy = dict(snapshot)
-            snapshot_copy.pop("event_image_url", None)
-            snapshot_copy.pop("event_image_source_url", None)
-            context["snapshot"] = snapshot_copy
-        return context
+    def _sanitize_snapshot_for_metadata(snapshot: Any) -> Any:
+        if not isinstance(snapshot, dict):
+            return snapshot
+        snapshot_copy = dict(snapshot)
+        snapshot_copy.pop("event_image_url", None)
+        snapshot_copy.pop("event_image_source_url", None)
+        return snapshot_copy
 
     @staticmethod
-    def _build_metadata_card_payload(card_payload: dict[str, Any]) -> dict[str, Any]:
-        metadata_card_payload = dict(card_payload)
-        metadata_card_payload.pop("image_url", None)
-        return metadata_card_payload
+    def _build_winner_source_data(winner_context: dict[str, Any]) -> dict[str, Any]:
+        snapshot = SolanaClient._sanitize_snapshot_for_metadata(winner_context.get("snapshot"))
+        chain = str(winner_context.get("blockchain") or "solana").strip().lower() or "solana"
+        return {
+            "winner_wallet_address": winner_context.get("winner_wallet_address"),
+            "claimer_wallet_address": winner_context.get("claimer_wallet_address"),
+            "season_id": winner_context.get("season_id"),
+            "snapshot": snapshot,
+            "blockchain": chain,
+        }
+
+    @staticmethod
+    def _build_winner_source_data_compact(winner_context: dict[str, Any]) -> dict[str, Any]:
+        chain = str(winner_context.get("blockchain") or "solana").strip().lower() or "solana"
+        snap = winner_context.get("snapshot")
+        winner_row_id = snap.get("winner_row_id") if isinstance(snap, dict) else None
+        out: dict[str, Any] = {
+            "winner_wallet_address": winner_context.get("winner_wallet_address"),
+            "claimer_wallet_address": winner_context.get("claimer_wallet_address"),
+            "season_id": winner_context.get("season_id"),
+            "blockchain": chain,
+        }
+        if winner_row_id is not None:
+            out["winner_row_id"] = winner_row_id
+        return out
+
+    @staticmethod
+    def _build_card_display_data_payload(card_payload: dict[str, Any]) -> dict[str, Any]:
+        allowed = (
+            "season_type",
+            "season_number",
+            "recurrence",
+            "claim_type",
+            "card_title",
+            "card_lore",
+            "primary_tag",
+            "secondary_tag",
+            "entry_bracket",
+            "archetype",
+            "archetype_description",
+            "archetype_math",
+            "rarity_bracket",
+            "proxy_wallet",
+            "edge",
+            "yield",
+            "gravity",
+            "leaderboard_rank",
+            "season_start_date",
+            "season_end_date",
+            "season_size",
+            "collection_mint_number",
+            "front_image_url",
+            "back_image_url",
+            "qr_payload",
+        )
+        out: dict[str, Any] = {}
+        for key in allowed:
+            if key not in card_payload:
+                continue
+            out[key] = card_payload[key]
+        return out
 
     def _validate_core_collection_account(self, collection_pubkey: Pubkey) -> None:
         response = self._rpc_call_with_retry(
