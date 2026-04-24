@@ -168,7 +168,7 @@ BACK_LORE_Y = float(FIGMA_BACK_LORE_Y) - 3.0   # 82
 BACK_LORE_BOTTOM_LIMIT = BACK_SEP_LINE_Y - 4.0
 BACK_ARCH_HEADER_Y = 217.0          # 220 - 3
 BACK_ARCH_Y = 254.0                 # 257 - 3
-# Order: ARCHETYPE → body desc → [ OCCURRENCE ] (same font size as body).
+# Order: ARCHETYPE → body desc → PROBABILITY COHORT (same font size as body).
 BACK_DESC_Y = float(BACK_ARCH_Y) + 25.0   # desc starts 25px below archetype (+3 gap)
 # Line-height for font-size=10 meta footer rows (SEASON CARD / DATES).
 BACK_META_LH = 14
@@ -475,15 +475,17 @@ _DZ_ARCHETYPE_STYLES: Dict[str, Tuple[str, str, bool]] = {
     "BOT":         ("url(#bot-gradient)",          "#000000", False),
     "BURNER":      ("url(#burner-gradient)",       "#000000", False),
     "EQUILIBRIUM": ("url(#equilibrium-gradient)",  "#000000", True),
-    "AMASSER":     ("url(#amasser-gradient)",      "#000000", False),
+    "GRAVITON":    ("url(#amasser-gradient)",      "#000000", False),
     "VECTOR":      ("url(#vector-gradient)",       "#000000", False),
     "SIGNAL":      ("url(#signal-gradient)",       "#000000", False),
-    "EXTRACTOR":   ("#1C1B1B",                     "#000000", False),
+    "EXTRACTOR":   ("url(#extractor-gradient)",    "#000000", False),
+    "INSIDER":     ("#1C1B1B",                     "#000000", False),
     "PASSENGER":   ("#B8BFCE",                     "#000000", False),
     "OPERATOR":    ("#625F5F",                     "#000000", False),
     "SUBSTRATE":   ("#474332",                     "#000000", False),
     # Legacy aliases kept so older payloads do not silently degrade to OPERATOR.
     "HARVESTER":   ("#1C1B1B",                     "#000000", False),
+    "AMASSER":     ("url(#amasser-gradient)",      "#000000", False),
     "MARTYR":      ("url(#icarus-gradient)",       "#000000", False),
 }
 
@@ -843,6 +845,13 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     <stop offset="90%" stop-color="#C5CC84"/>
   </linearGradient>
   <linearGradient id="icarus-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="16%" stop-color="#871919"/>
+    <stop offset="32%" stop-color="#FFA20C"/>
+    <stop offset="50%" stop-color="#FDDFA9"/>
+    <stop offset="68%" stop-color="#FFA20C"/>
+    <stop offset="84%" stop-color="#871919"/>
+  </linearGradient>
+  <linearGradient id="extractor-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
     <stop offset="15%" stop-color="#7F8E3D"/>
     <stop offset="30%" stop-color="#7A5CBE"/>
     <stop offset="45%" stop-color="#9D653E"/>
@@ -1142,8 +1151,8 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 
 <text x="{X_POLYSTARS}" y="{Y_POLYSTARS}"
       text-anchor="start" dominant-baseline="hanging"
-      font-size="6" fill="#5289BC">
-  POLYSTARS
+      font-size="6">
+  <tspan fill="#2E5CFF">P</tspan><tspan fill="#D5744C">O</tspan><tspan fill="#B8BFCE">L</tspan><tspan fill="#925AB9">Y</tspan><tspan fill="#328ADD">S</tspan><tspan fill="#3E9292">T</tspan><tspan fill="#C08838">A</tspan><tspan fill="#736D51">R</tspan><tspan fill="#BA4040">S</tspan>
 </text>''')
 
     # ---- Layer 17: Structural outer border (always #333333) ----
@@ -1487,6 +1496,28 @@ def _fmt_back_date(raw: Any) -> str:
     return s
 
 
+def _normalize_probability_cohort_label(raw: Any) -> str:
+    """Normalize legacy occurrence labels to the new Probability Cohort copy."""
+    value = " ".join(str(raw or "").replace("\n", " ").split())
+    if not value:
+        return "PROBABILITY COHORT: --"
+    value = value.replace("[", "").replace("]", "").strip()
+    upper = value.upper()
+    if "OCCURENCE" in upper:
+        value = value.replace("Occurence", "Probability Cohort")
+        value = value.replace("OCCURENCE", "PROBABILITY COHORT")
+        upper = value.upper()
+    if "OCCURRENCE" in upper:
+        value = value.replace("Occurrence", "Probability Cohort")
+        value = value.replace("OCCURRENCE", "PROBABILITY COHORT")
+        upper = value.upper()
+    if upper.startswith("PROBABILITY COHORT:"):
+        payload = value.split(":", 1)[1].strip() if ":" in value else value
+    else:
+        payload = value
+    return f"PROBABILITY COHORT: {payload}"
+
+
 def _qr_modules_svg(payload: str, ox: float, oy: float, draw_size: float) -> str:
     """Black QR modules inside a square; outer stroke/fill drawn by caller."""
     try:
@@ -1567,9 +1598,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
         archetype_math = "No statistical pattern."
 
     rarity_raw = str(data.get("rarity_bracket", "") or "").strip()
-    if not rarity_raw:
-        rarity_raw = "[ OCCURRENCE: — ]"
-    rarity_esc = _esc(rarity_raw)
+    rarity_esc = _esc(_normalize_probability_cohort_label(rarity_raw))
 
     mint = data.get("collection_mint_number")
     mint_str = str(mint).strip() if mint is not None and str(mint).strip() != "" else "—"
@@ -1748,6 +1777,13 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     <stop offset="90%" stop-color="#C5CC84"/>
   </linearGradient>
   <linearGradient id="icarus-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+    <stop offset="16%" stop-color="#871919"/>
+    <stop offset="32%" stop-color="#FFA20C"/>
+    <stop offset="50%" stop-color="#FDDFA9"/>
+    <stop offset="68%" stop-color="#FFA20C"/>
+    <stop offset="84%" stop-color="#871919"/>
+  </linearGradient>
+  <linearGradient id="extractor-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
     <stop offset="15%" stop-color="#7F8E3D"/>
     <stop offset="30%" stop-color="#7A5CBE"/>
     <stop offset="45%" stop-color="#9D653E"/>
@@ -1850,11 +1886,11 @@ SAMPLE_DATA: Dict[str, Any] = {
     "edge":              "BASE",
     "yield":             "P50",
     "gravity":           "BASE",
-    "archetype":         "SUBSTRATE",
+    "archetype":         "ICARUS",
     "card_lore":         "Standard edition pricing breach at triple digits signals industry inflection. Historical AAA launch data suggests $69.99 baseline holds. Resolution hinges on store listings by Feb 2026 deadline.",
     "archetype_description": "Mechanical routing protocol detected. This entity operates with massive kinetic force but generates zero directional trajectory, executing purely on structural arbitrage and fractional spreads. Devoid of human psychology or predictive bias, they exist solely to bridge conditional markets, merge underlying tokens, and enforce absolute liquidity ceilings. They do not predict the future; they mathematically process the emotions of the swarm.",
     "archetype_math":    "(P(E) ≥ 0.97 & Vol < 50) ∪ Mid-Trend Lag",
-    "rarity_bracket":    "[ OCCURRENCE: 1.0% - 2.0% ]",
+    "rarity_bracket":    "PROBABILITY COHORT: 1.0% - 2.0%",
     "leaderboard_rank":  63564,
     "collection_mint_number": 7,
     "season_size":       333,

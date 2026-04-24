@@ -914,40 +914,40 @@ END $$;
 CREATE MATERIALIZED VIEW IF NOT EXISTS participants AS
 WITH event_aggregates AS (
     SELECT
-        proxy_wallet,
-        MAX(event_id) AS event_id,
-        event_slug,
-        SUM(avg_price * total_bought) AS event_volume_usdc,
-        SUM(realized_pnl) AS event_pnl,
-        SUM(avg_price * (avg_price * total_bought)) / NULLIF(SUM(avg_price * total_bought), 0) AS capital_weighted_vwap,
-        SUM(realized_pnl) / NULLIF(SUM(avg_price * total_bought), 0) AS event_roi
+        user_closed_positions.proxy_wallet,
+        MAX(user_closed_positions.event_id) AS event_id,
+        user_closed_positions.event_slug,
+        SUM(user_closed_positions.avg_price * user_closed_positions.total_bought) AS event_volume_usdc,
+        SUM(user_closed_positions.realized_pnl) AS event_pnl,
+        SUM(user_closed_positions.avg_price * (user_closed_positions.avg_price * user_closed_positions.total_bought)) / NULLIF(SUM(user_closed_positions.avg_price * user_closed_positions.total_bought), 0::numeric) AS capital_weighted_vwap,
+        SUM(user_closed_positions.realized_pnl) / NULLIF(SUM(user_closed_positions.avg_price * user_closed_positions.total_bought), 0::numeric) AS event_roi
     FROM user_closed_positions
-    GROUP BY proxy_wallet, event_slug
+    GROUP BY user_closed_positions.proxy_wallet, user_closed_positions.event_slug
 ),
 filtered_traders AS (
     SELECT
-        proxy_wallet,
-        event_id,
-        event_slug,
-        event_volume_usdc,
-        event_pnl,
-        capital_weighted_vwap,
-        event_roi
+        event_aggregates.proxy_wallet,
+        event_aggregates.event_id,
+        event_aggregates.event_slug,
+        event_aggregates.event_volume_usdc,
+        event_aggregates.event_pnl,
+        event_aggregates.capital_weighted_vwap,
+        event_aggregates.event_roi
     FROM event_aggregates
-    WHERE capital_weighted_vwap >= 0.001
+    WHERE event_aggregates.capital_weighted_vwap >= 0.001
 ),
 ranked_traders AS (
     SELECT
-        proxy_wallet,
-        event_id,
-        event_slug,
-        event_volume_usdc,
-        event_pnl,
-        capital_weighted_vwap,
-        event_roi,
-        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_roi) AS roi_percentile,
-        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY event_volume_usdc) AS volume_percentile,
-        PERCENT_RANK() OVER (PARTITION BY event_slug ORDER BY capital_weighted_vwap) AS vwap_percentile
+        filtered_traders.proxy_wallet,
+        filtered_traders.event_id,
+        filtered_traders.event_slug,
+        filtered_traders.event_volume_usdc,
+        filtered_traders.event_pnl,
+        filtered_traders.capital_weighted_vwap,
+        filtered_traders.event_roi,
+        PERCENT_RANK() OVER (PARTITION BY filtered_traders.event_slug ORDER BY filtered_traders.event_roi) AS roi_percentile,
+        PERCENT_RANK() OVER (PARTITION BY filtered_traders.event_slug ORDER BY filtered_traders.event_volume_usdc) AS volume_percentile,
+        PERCENT_RANK() OVER (PARTITION BY filtered_traders.event_slug ORDER BY filtered_traders.capital_weighted_vwap) AS vwap_percentile
     FROM filtered_traders
 ),
 mapped_traders AS (
@@ -955,38 +955,38 @@ mapped_traders AS (
         rt.proxy_wallet,
         rt.event_id,
         rt.event_slug,
-        ROUND(rt.capital_weighted_vwap::numeric, 4) AS entry_cwap,
-        ROUND(rt.event_volume_usdc::numeric, 2) AS total_volume,
-        ROUND(rt.event_pnl::numeric, 2) AS total_pnl,
-        ROUND((rt.event_roi * 100)::numeric, 2) AS roi_percentage,
+        ROUND(rt.capital_weighted_vwap, 4) AS entry_cwap,
+        ROUND(rt.event_volume_usdc, 2) AS total_volume,
+        ROUND(rt.event_pnl, 2) AS total_pnl,
+        ROUND(rt.event_roi * 100::numeric, 2) AS roi_percentage,
         CASE
-            WHEN rt.capital_weighted_vwap <= 0.20 THEN '[0.00 - 0.20]'
-            WHEN rt.capital_weighted_vwap <= 0.40 THEN '[0.20 - 0.40]'
-            WHEN rt.capital_weighted_vwap <= 0.60 THEN '[0.40 - 0.60]'
-            WHEN rt.capital_weighted_vwap <= 0.80 THEN '[0.60 - 0.80]'
-            WHEN rt.capital_weighted_vwap <= 0.97 THEN '[0.80 - 0.97]'
-            ELSE '[0.97 - 1.00]'
+            WHEN rt.capital_weighted_vwap <= 0.20 THEN '[0.00 - 0.20]'::text
+            WHEN rt.capital_weighted_vwap <= 0.40 THEN '[0.20 - 0.40]'::text
+            WHEN rt.capital_weighted_vwap <= 0.60 THEN '[0.40 - 0.60]'::text
+            WHEN rt.capital_weighted_vwap <= 0.80 THEN '[0.60 - 0.80]'::text
+            WHEN rt.capital_weighted_vwap <= 0.97 THEN '[0.80 - 0.97]'::text
+            ELSE '[0.97 - 1.00]'::text
         END AS entry_bracket,
         CASE
-            WHEN rt.vwap_percentile <= 0.010 THEN 'P99'
-            WHEN rt.vwap_percentile <= 0.100 THEN 'P90'
-            WHEN rt.vwap_percentile <= 0.300 THEN 'P70'
-            WHEN rt.vwap_percentile <= 0.500 THEN 'P50'
-            ELSE 'BASE'
+            WHEN rt.vwap_percentile <= 0.010::double precision THEN 'P99'::text
+            WHEN rt.vwap_percentile <= 0.100::double precision THEN 'P90'::text
+            WHEN rt.vwap_percentile <= 0.300::double precision THEN 'P70'::text
+            WHEN rt.vwap_percentile <= 0.500::double precision THEN 'P50'::text
+            ELSE 'BASE'::text
         END AS edge,
         CASE
-            WHEN rt.roi_percentile >= 0.99 THEN 'P99'
-            WHEN rt.roi_percentile >= 0.90 THEN 'P90'
-            WHEN rt.roi_percentile >= 0.70 THEN 'P70'
-            WHEN rt.roi_percentile >= 0.50 THEN 'P50'
-            ELSE 'BASE'
+            WHEN rt.roi_percentile >= 0.99::double precision THEN 'P99'::text
+            WHEN rt.roi_percentile >= 0.90::double precision THEN 'P90'::text
+            WHEN rt.roi_percentile >= 0.70::double precision THEN 'P70'::text
+            WHEN rt.roi_percentile >= 0.50::double precision THEN 'P50'::text
+            ELSE 'BASE'::text
         END AS yield,
         CASE
-            WHEN rt.volume_percentile >= 0.99 THEN 'P99'
-            WHEN rt.volume_percentile >= 0.90 THEN 'P90'
-            WHEN rt.volume_percentile >= 0.70 THEN 'P70'
-            WHEN rt.volume_percentile >= 0.50 THEN 'P50'
-            ELSE 'BASE'
+            WHEN rt.volume_percentile >= 0.99::double precision THEN 'P99'::text
+            WHEN rt.volume_percentile >= 0.90::double precision THEN 'P90'::text
+            WHEN rt.volume_percentile >= 0.70::double precision THEN 'P70'::text
+            WHEN rt.volume_percentile >= 0.50::double precision THEN 'P50'::text
+            ELSE 'BASE'::text
         END AS gravity
     FROM ranked_traders rt
 ),
@@ -1004,46 +1004,47 @@ archetyped_traders AS (
         mt.yield,
         mt.gravity,
         CASE
-            WHEN mt.total_pnl < 0 AND mt.entry_cwap < 0.60 THEN 'ICARUS'
-            WHEN mt.total_pnl < 0 AND mt.entry_cwap >= 0.60 THEN 'BURNER'
-            WHEN mt.total_pnl = 0 THEN 'BOT'
-            WHEN mt.entry_bracket = '[0.97 - 1.00]' AND mt.total_volume >= 5000 THEN 'EXTRACTOR'
-            WHEN mt.entry_bracket = '[0.97 - 1.00]' AND mt.total_volume >= 50 THEN 'PASSENGER'
-            WHEN mt.entry_bracket = '[0.97 - 1.00]' THEN 'SUBSTRATE'
-            WHEN mt.entry_bracket <> '[0.80 - 0.97]'
+            WHEN mt.total_pnl < 0::numeric AND mt.entry_cwap < 0.60 THEN 'ICARUS'::text
+            WHEN mt.total_pnl < 0::numeric AND mt.entry_cwap >= 0.60 THEN 'BURNER'::text
+            WHEN mt.total_pnl = 0::numeric THEN 'BOT'::text
+            WHEN mt.entry_bracket = '[0.97 - 1.00]'::text AND mt.total_volume >= 5000::numeric THEN 'EXTRACTOR'::text
+            WHEN mt.entry_bracket = '[0.97 - 1.00]'::text AND mt.total_volume >= 50::numeric THEN 'PASSENGER'::text
+            WHEN mt.entry_bracket = '[0.97 - 1.00]'::text THEN 'SUBSTRATE'::text
+            WHEN mt.entry_bracket <> '[0.80 - 0.97]'::text
                  AND (
-                     (mt.entry_bracket = '[0.00 - 0.20]' AND mt.edge = 'P99' AND mt.yield = 'P99' AND mt.gravity = 'P99') OR
-                     (mt.entry_bracket = '[0.20 - 0.40]' AND mt.edge = 'P90' AND mt.yield = 'P90' AND mt.gravity = 'P90') OR
-                     (mt.entry_bracket = '[0.40 - 0.60]' AND mt.edge = 'P70' AND mt.yield = 'P70' AND mt.gravity = 'P70') OR
-                     (mt.entry_bracket = '[0.60 - 0.80]' AND mt.edge = 'P50' AND mt.yield = 'P50' AND mt.gravity = 'P50')
-                 ) THEN 'ANOMALY'
-            WHEN mt.entry_bracket IN ('[0.00 - 0.20]', '[0.20 - 0.40]')
-                 AND mt.edge IN ('P99', 'P90')
-                 AND mt.yield IN ('P99', 'P90') THEN 'SIGNAL'
-            WHEN mt.entry_bracket = '[0.40 - 0.60]'
-                 AND mt.edge IN ('P99', 'P90')
-                 AND mt.yield IN ('P99', 'P90') THEN 'VECTOR'
-            WHEN mt.edge IN ('P99', 'P90', 'P70')
-                 AND mt.yield IN ('P99', 'P90', 'P70')
-                 AND mt.gravity IN ('P99', 'P90', 'P70') THEN 'EQUILIBRIUM'
-            WHEN mt.gravity IN ('P99', 'P90') THEN 'AMASSER'
-            WHEN mt.entry_bracket IN ('[0.60 - 0.80]', '[0.80 - 0.97]')
-                 AND mt.edge IN ('BASE', 'P50')
-                 AND mt.yield IN ('BASE', 'P50')
-                 AND mt.gravity IN ('BASE', 'P50', 'P70') THEN 'SUBSTRATE'
-            ELSE 'OPERATOR'
+                     mt.entry_bracket = '[0.00 - 0.20]'::text AND mt.edge = 'P99'::text AND mt.yield = 'P99'::text AND mt.gravity = 'P99'::text
+                     OR mt.entry_bracket = '[0.20 - 0.40]'::text AND mt.edge = 'P90'::text AND mt.yield = 'P90'::text AND mt.gravity = 'P90'::text
+                     OR mt.entry_bracket = '[0.40 - 0.60]'::text AND mt.edge = 'P70'::text AND mt.yield = 'P70'::text AND mt.gravity = 'P70'::text
+                     OR mt.entry_bracket = '[0.60 - 0.80]'::text AND mt.edge = 'P50'::text AND mt.yield = 'P50'::text AND mt.gravity = 'P50'::text
+                 ) THEN 'ANOMALY'::text
+            WHEN mt.entry_cwap <= 0.10 AND mt.yield = 'P99'::text THEN 'INSIDER'::text
+            WHEN mt.entry_bracket = ANY (ARRAY['[0.00 - 0.20]'::text, '[0.20 - 0.40]'::text])
+                 AND mt.edge = ANY (ARRAY['P99'::text, 'P90'::text])
+                 AND mt.yield = ANY (ARRAY['P99'::text, 'P90'::text]) THEN 'SIGNAL'::text
+            WHEN mt.entry_bracket = '[0.40 - 0.60]'::text
+                 AND mt.edge = ANY (ARRAY['P99'::text, 'P90'::text])
+                 AND mt.yield = ANY (ARRAY['P99'::text, 'P90'::text]) THEN 'VECTOR'::text
+            WHEN mt.edge = ANY (ARRAY['P99'::text, 'P90'::text, 'P70'::text])
+                 AND mt.yield = ANY (ARRAY['P99'::text, 'P90'::text, 'P70'::text])
+                 AND mt.gravity = ANY (ARRAY['P99'::text, 'P90'::text, 'P70'::text]) THEN 'EQUILIBRIUM'::text
+            WHEN mt.gravity = ANY (ARRAY['P99'::text, 'P90'::text]) THEN 'GRAVITON'::text
+            WHEN mt.entry_bracket = ANY (ARRAY['[0.60 - 0.80]'::text, '[0.80 - 0.97]'::text])
+                 AND mt.edge = ANY (ARRAY['BASE'::text, 'P50'::text])
+                 AND mt.yield = ANY (ARRAY['BASE'::text, 'P50'::text])
+                 AND mt.gravity = ANY (ARRAY['BASE'::text, 'P50'::text, 'P70'::text]) THEN 'SUBSTRATE'::text
+            ELSE 'OPERATOR'::text
         END AS archetype
     FROM mapped_traders mt
 ),
 leaderboard_latest AS (
-    SELECT DISTINCT ON (proxy_wallet)
-        proxy_wallet,
-        rank
+    SELECT DISTINCT ON (trader_leaderboard.proxy_wallet)
+        trader_leaderboard.proxy_wallet,
+        trader_leaderboard.rank
     FROM trader_leaderboard
-    WHERE category = 'OVERALL'
-      AND time_period = 'ALL'
-      AND order_by = 'PNL'
-    ORDER BY proxy_wallet, fetched_date DESC, fetched_at DESC
+    WHERE trader_leaderboard.category::text = 'OVERALL'::text
+      AND trader_leaderboard.time_period::text = 'ALL'::text
+      AND trader_leaderboard.order_by::text = 'PNL'::text
+    ORDER BY trader_leaderboard.proxy_wallet, trader_leaderboard.fetched_date DESC, trader_leaderboard.fetched_at DESC
 )
 SELECT
     at.proxy_wallet,
@@ -1059,54 +1060,56 @@ SELECT
     at.gravity,
     at.archetype,
     CASE at.archetype
-        WHEN 'ICARUS' THEN 'Lethal overextension protocol. This entity deployed capital into the void with extreme early conviction, attempting to forge reality before the timeline achieved consensus. Driven by pure analytical hubris, they absorbed maximum absolute risk but failed to align with the final ledger. They do not adapt to shifting probabilities; they demand the market bends to their thesis. A tragic, mathematically shattered visionary.'
-        WHEN 'BURNER' THEN 'Late-stage exit liquidity. This entity executes under the psychological duress of momentum, buying into a heavily mature consensus just before a catastrophic timeline flip. Captivated by the illusion of certainty, they absorb minimal upside potential while blindly accepting maximum downside exposure. They do not drive the market; they unknowingly finance the precision of the apex tiers. The ultimate sacrificial capital.'
-        WHEN 'BOT' THEN 'Mechanical routing protocol detected. This entity operates with massive kinetic force but generates zero directional trajectory, executing purely on structural arbitrage and fractional spreads. Devoid of human psychology or predictive bias, they exist solely to bridge conditional markets, merge underlying tokens, and enforce absolute liquidity ceilings. They do not predict the future; they mathematically process the emotions of the swarm.'
-        WHEN 'EXTRACTOR' THEN 'Apex-tier consensus exploitation. This entity exhibits extreme risk aversion, refusing to deploy their overwhelming financial mass until absolute mathematical certainty has crystallized. By parking heavy capital into fully resolved timelines, they brutally extract risk-free, low-variance yield from the ecosystems final moments. They possess no predictive foresight, relying entirely on financial gravity to crush the remaining fractional value out of the ledger.'
-        WHEN 'PASSENGER' THEN 'Terminal consensus achieved prior to entry. This entity absorbs zero predictive risk, boarding the probability matrix only after the timeline has fundamentally crystallized. Driven by the psychological need to participate rather than predict, they trade all capital efficiency for the absolute safety of hindsight. They do not chart the course or bend the narrative; they are simply the trailing biological weight of the ledger.'
-        WHEN 'SUBSTRATE' THEN 'Structural baseline matter. This entity operates at the absolute kinetic floor of the ecosystem, executing entirely on lagging indicators or sweeping micro-dust at terminal certainty. Lacking both the financial mass to influence the matrix and the velocity to predict it, they form the dense, low-tier static of the network. They are the organic, foundational plankton that sustains the broader probabilistic food chain.'
-        WHEN 'ANOMALY' THEN 'Consensus exploitation protocol active. This entity exhibits zero predictive foresight and absorbs minimal absolute risk. They execute only when a prevailing consensus has crystallized (0.60+) or the event is mathematically solved (0.80+). By deploying overwhelming financial mass at the terminal stage of the market lifecycle, they extract a low-variance tax from the ecosystem''s resolution. Pure capital preservation.'
-        WHEN 'SIGNAL' THEN 'Pure information asymmetry. This operator deploys capital into the void before narrative formation. Lacking the gravitational mass to forcibly bend the market, they rely strictly on execution velocity and extreme absolute risk. They are the initial spark of the probability curve, capturing maximum capital efficiency through sheer predictive foresight. Lethal, early, and precise.'
-        WHEN 'VECTOR' THEN 'The calculated divergence. This entity intercepts the market at the point of maximum entropy-the statistical coin-flip. Rather than adopting the herd''s velocity, they execute early and take the mathematically hostile side of a forming consensus. By absorbing peak volatility and being proven violently correct, they achieve immense capital efficiency. A structural disruptor.'
-        WHEN 'EQUILIBRIUM' THEN 'Heavyweight alpha baseline established. This entity possesses the predictive velocity of a Signal, reinforced by the financial density to unilaterally rewrite the probability matrix. They do not wait for the market to mature; their capital deployment instantly forces a global repricing event. High efficiency. High mass. They are the gravitational anchors of the ecosystem.'
-        WHEN 'AMASSER' THEN 'Heavy kinetic grinder. This entity lacks elite execution speed and generates standard capital efficiency, yet they operate with massive financial density. They deploy heavy volume into the mid-trend, serving as the raw mechanical engine of the market. They do not predict the future, nor do they wait for absolute certainty. They provide the deep liquidity floors that allow the broader ecosystem to function.'
-        WHEN 'OPERATOR' THEN 'Standard kinetic node. This entity forms the prevailing wind of the probability matrix. They execute mid-trend, absorb average systemic risk, and generate standard baseline returns. They are not the whales anchoring the market, nor the snipers predicting it. They are the active, decentralized processing power of the ledger-the everyday volume that keeps the terminal alive.'
-        ELSE NULL
+        WHEN 'ICARUS'::text THEN 'Lethal overextension protocol. This entity deployed capital into the void with extreme early conviction, attempting to forge reality before the timeline achieved consensus. Driven by pure analytical hubris, they absorbed maximum absolute risk but failed to align with the final ledger. They do not adapt to shifting probabilities; they demand the market bends to their thesis. A tragic, mathematically shattered visionary.'::text
+        WHEN 'BURNER'::text THEN 'Late-stage exit liquidity. This entity executes under the psychological duress of momentum, buying into a heavily mature consensus just before a catastrophic timeline flip. Captivated by the illusion of certainty, they absorb minimal upside potential while blindly accepting maximum downside exposure. They do not drive the market; they unknowingly finance the precision of the apex tiers. The ultimate sacrificial capital.'::text
+        WHEN 'BOT'::text THEN 'Mechanical routing protocol detected. This entity operates with massive kinetic force but generates zero directional trajectory, executing purely on structural arbitrage and fractional spreads. Devoid of human psychology or predictive bias, they exist solely to bridge conditional markets, merge underlying tokens, and enforce absolute liquidity ceilings. They do not predict the future; they mathematically process the emotions of the swarm.'::text
+        WHEN 'EXTRACTOR'::text THEN 'Apex-tier consensus exploitation. This entity exhibits extreme risk aversion, refusing to deploy their overwhelming financial mass until absolute mathematical certainty has crystallized. By parking heavy capital into fully resolved timelines, they brutally extract risk-free, low-variance yield from the ecosystems final moments. They possess no predictive foresight, relying entirely on financial gravity to crush the remaining fractional value out of the ledger.'::text
+        WHEN 'PASSENGER'::text THEN 'Terminal consensus achieved prior to entry. This entity absorbs zero predictive risk, boarding the probability matrix only after the timeline has fundamentally crystallized. Driven by the psychological need to participate rather than predict, they trade all capital efficiency for the absolute safety of hindsight. They do not chart the course or bend the narrative; they are simply the trailing biological weight of the ledger.'::text
+        WHEN 'SUBSTRATE'::text THEN 'Structural baseline matter. This entity operates at the absolute kinetic floor of the ecosystem, executing entirely on lagging indicators or sweeping micro-dust at terminal certainty. Lacking both the financial mass to influence the matrix and the velocity to predict it, they form the dense, low-tier static of the network. They are the organic, foundational plankton that sustains the broader probabilistic food chain.'::text
+        WHEN 'ANOMALY'::text THEN 'Systemic resonance detected. This entity represents a mathematical impossibility on the ledger. Their capital mass, execution velocity, and predictive accuracy have scaled in absolute algorithmic unison with their implied probability bracket. They do not merely trade the market; they mirror its optimal mathematical structure. Perfect calibration. Zero systemic drag.'::text
+        WHEN 'INSIDER'::text THEN 'Pure information asymmetry. This entity does not predict; they know. They deploy capital into the void before public narrative formation, entering the matrix when the implied probability is exceptionally low. By extracting maximum absolute yield on sub-10% probability, they exhibit the exact mathematical signature of non-public foresight. Lethal, early, and precise.'::text
+        WHEN 'SIGNAL'::text THEN 'Early probability forecaster. This operator deploys capital into the void before narrative formation. Lacking the gravitational mass to forcibly bend the market, they rely strictly on execution velocity and extreme absolute risk. They are the initial spark of the probability curve, capturing massive capital efficiency through sheer predictive vision.'::text
+        WHEN 'VECTOR'::text THEN 'The calculated divergence. This entity intercepts the market at the point of maximum entropy-the statistical coin-flip. Rather than adopting the herd''s velocity, they execute early and take the mathematically hostile side of a forming consensus. By absorbing peak volatility and being proven violently correct, they achieve immense capital efficiency. A structural disruptor.'::text
+        WHEN 'EQUILIBRIUM'::text THEN 'Heavyweight alpha baseline established. This entity possesses the predictive velocity of a Signal, reinforced by the financial density to unilaterally rewrite the probability matrix. They do not wait for the market to mature; their capital deployment instantly forces a global repricing event. High efficiency. High mass. They are the gravitational anchors of the ecosystem.'::text
+        WHEN 'GRAVITON'::text THEN 'Heavy kinetic grinder. This entity lacks elite execution speed and generates standard capital efficiency, yet they operate with massive financial density. They deploy heavy volume into the mid-trend, serving as the raw mechanical engine of the market. They do not predict the future, nor do they wait for absolute certainty. They provide the deep liquidity floors that allow the broader ecosystem to function.'::text
+        WHEN 'OPERATOR'::text THEN 'Standard kinetic node. This entity forms the prevailing wind of the probability matrix. They execute mid-trend, absorb average systemic risk, and generate standard baseline returns. They are not the whales anchoring the market, nor the snipers predicting it. They are the active, decentralized processing power of the ledger-the everyday volume that keeps the terminal alive.'::text
+        ELSE NULL::text
     END AS archetype_description,
     CASE at.archetype
-        WHEN 'ICARUS' THEN 'P(E) < 0.60 | PnL < $0.00'
-        WHEN 'BURNER' THEN 'P(E) ≥ 0.60 | PnL < $0.00'
-        WHEN 'BOT' THEN 'PnL ≡ $0.00'
-        WHEN 'EXTRACTOR' THEN 'P(E) ≥ 0.97 | Vol ≥ $5,000.00'
-        WHEN 'PASSENGER' THEN 'P(E) ≥ 0.97 | $50.00 ≤ Vol < $5,000.00'
-        WHEN 'ANOMALY' THEN 'P(E) < 0.80 | Edge ≡ Yield ≡ Gravity ∝ 1/P(E)'
-        WHEN 'SIGNAL' THEN 'P(E) ∈ [0.00 - 0.40] | Edge ≥ P90 | Yield ≥ P90'
-        WHEN 'VECTOR' THEN 'P(E) ∈ [0.40 - 0.60] | Edge ≥ P90 | Yield ≥ P90'
-        WHEN 'EQUILIBRIUM' THEN 'Edge ≥ P70 | Yield ≥ P70 | Gravity ≥ P70'
-        WHEN 'AMASSER' THEN 'Gravity ≥ P90'
-        WHEN 'SUBSTRATE' THEN '(P(E) ≥ 0.97 & Vol < $50.00) ∪ Mid-Trend Lag'
-        WHEN 'OPERATOR' THEN 'Gravity ≤ P70 | Edge ⇌ Yield'
-        ELSE NULL
+        WHEN 'ICARUS'::text THEN 'P(E) < 0.60 | PnL < $0.00'::text
+        WHEN 'BURNER'::text THEN 'P(E) ≥ 0.60 | PnL < $0.00'::text
+        WHEN 'BOT'::text THEN 'PnL ≡ $0.00'::text
+        WHEN 'EXTRACTOR'::text THEN 'P(E) ≥ 0.97 | Vol ≥ $5,000.00'::text
+        WHEN 'PASSENGER'::text THEN 'P(E) ≥ 0.97 | $50.00 ≤ Vol < $5,000.00'::text
+        WHEN 'ANOMALY'::text THEN 'P(E) < 0.80 | Edge ≡ Yield ≡ Gravity ∝ 1/P(E)'::text
+        WHEN 'INSIDER'::text THEN 'P(E) ≤ 0.10 | Yield ≥ P99'::text
+        WHEN 'SIGNAL'::text THEN 'P(E) ∈ [0.00 - 0.40] | Edge ≥ P90 | Yield ≥ P90'::text
+        WHEN 'VECTOR'::text THEN 'P(E) ∈ [0.40 - 0.60] | Edge ≥ P90 | Yield ≥ P90'::text
+        WHEN 'EQUILIBRIUM'::text THEN 'Edge ≥ P70 | Yield ≥ P70 | Gravity ≥ P70'::text
+        WHEN 'GRAVITON'::text THEN 'Gravity ≥ P90'::text
+        WHEN 'SUBSTRATE'::text THEN '(P(E) ≥ 0.97 & Vol < $50.00) ∪ Mid-Trend Lag'::text
+        WHEN 'OPERATOR'::text THEN 'Gravity ≤ P70 | Edge ⇌ Yield'::text
+        ELSE NULL::text
     END AS archetype_math,
     CASE at.archetype
-        WHEN 'ANOMALY' THEN '[ OCCURRENCE: < 1.0% ]'
-        WHEN 'EXTRACTOR' THEN '[ OCCURRENCE: < 1.0% ]'
-        WHEN 'ICARUS' THEN '[ OCCURRENCE: < 1.0% ]'
-        WHEN 'SIGNAL' THEN '[ OCCURRENCE: 1.0% - 3.0% ]'
-        WHEN 'AMASSER' THEN '[ OCCURRENCE: 1.0% - 3.0% ]'
-        WHEN 'VECTOR' THEN '[ OCCURRENCE: 1.0% - 3.0% ]'
-        WHEN 'BURNER' THEN '[ OCCURRENCE: 3.0% - 5.0% ]'
-        WHEN 'EQUILIBRIUM' THEN '[ OCCURRENCE: 3.0% - 5.0% ]'
-        WHEN 'BOT' THEN '[ OCCURRENCE: 5.0% - 10.0% ]'
-        WHEN 'PASSENGER' THEN '[ OCCURRENCE: 10.0% - 15.0% ]'
-        WHEN 'OPERATOR' THEN '[ OCCURRENCE: 20.0% - 30.0% ]'
-        WHEN 'SUBSTRATE' THEN '[ OCCURRENCE: 30.0% - 40.0% ]'
-        ELSE NULL
+        WHEN 'INSIDER'::text THEN 'PROBABILITY COHORT: < 0.3%'::text
+        WHEN 'ANOMALY'::text THEN 'PROBABILITY COHORT: < 1.0%'::text
+        WHEN 'EXTRACTOR'::text THEN 'PROBABILITY COHORT: < 1.0%'::text
+        WHEN 'ICARUS'::text THEN 'PROBABILITY COHORT: < 1.0%'::text
+        WHEN 'SIGNAL'::text THEN 'PROBABILITY COHORT: 1.0% - 3.0%'::text
+        WHEN 'GRAVITON'::text THEN 'PROBABILITY COHORT: 1.0% - 3.0%'::text
+        WHEN 'VECTOR'::text THEN 'PROBABILITY COHORT: 1.0% - 3.0%'::text
+        WHEN 'BURNER'::text THEN 'PROBABILITY COHORT: 3.0% - 5.0%'::text
+        WHEN 'EQUILIBRIUM'::text THEN 'PROBABILITY COHORT: 3.0% - 5.0%'::text
+        WHEN 'BOT'::text THEN 'PROBABILITY COHORT: 5.0% - 10.0%'::text
+        WHEN 'PASSENGER'::text THEN 'PROBABILITY COHORT: 10.0% - 15.0%'::text
+        WHEN 'OPERATOR'::text THEN 'PROBABILITY COHORT: 20.0% - 30.0%'::text
+        WHEN 'SUBSTRATE'::text THEN 'PROBABILITY COHORT: 30.0% - 40.0%'::text
+        ELSE NULL::text
     END AS rarity_bracket,
     ll.rank
 FROM archetyped_traders at
-LEFT JOIN leaderboard_latest ll
-    ON ll.proxy_wallet = at.proxy_wallet;
+LEFT JOIN leaderboard_latest ll ON ll.proxy_wallet::text = at.proxy_wallet;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_participants_proxy_wallet_event_slug
     ON participants(proxy_wallet, event_slug);
