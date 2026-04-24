@@ -362,16 +362,21 @@ const cardEntryBracketOptions = [
   "[0.40 - 0.60]",
   "[0.60 - 0.80]",
   "[0.80 - 0.97]",
+  "[0.97 - 1.00]",
 ] as const;
 const cardTierOptions = ["P99", "P90", "P70", "P50", "BASE"] as const;
 const cardArchetypeOptions = [
+  "ICARUS",
+  "BURNER",
+  "BOT",
+  "EXTRACTOR",
+  "PASSENGER",
   "ANOMALY",
+  "INSIDER",
   "SIGNAL",
   "VECTOR",
   "EQUILIBRIUM",
-  "HARVESTER",
-  "MARTYR",
-  "AMASSER",
+  "GRAVITON",
   "SUBSTRATE",
   "OPERATOR",
 ] as const;
@@ -382,6 +387,13 @@ const legacyEntryBracketMap: Record<string, typeof cardEntryBracketOptions[numbe
   OUTLIER: "[0.40 - 0.60]",
   VECTOR: "[0.60 - 0.80]",
   HARVESTER: "[0.80 - 0.97]",
+  EXTRACTOR: "[0.97 - 1.00]",
+  PASSENGER: "[0.97 - 1.00]",
+};
+const legacyArchetypeAliasMap: Record<string, typeof cardArchetypeOptions[number]> = {
+  AMASSER: "GRAVITON",
+  HARVESTER: "SUBSTRATE",
+  MARTYR: "ICARUS",
 };
 const simulateGeneratedCardsChunkSize = 10;
 
@@ -407,6 +419,7 @@ function normalizeArchetype(
 ): typeof cardArchetypeOptions[number] {
   let value = String(raw ?? "").trim().toUpperCase();
   if (value.startsWith("THE ")) value = value.slice(4).trim();
+  if (legacyArchetypeAliasMap[value]) value = legacyArchetypeAliasMap[value];
   return normalizeChoice(value, cardArchetypeOptions, fallback);
 }
 
@@ -429,6 +442,7 @@ function inferArchetypeFromMetrics(
       (entryBracket === "[0.60 - 0.80]" && edge === "P50" && yld === "P50" && grav === "P50")
     )
   ) return "ANOMALY";
+  if (entryBracket === "[0.00 - 0.20]" && yld === "P99") return "INSIDER";
   if (
     (entryBracket === "[0.00 - 0.20]" || entryBracket === "[0.20 - 0.40]") &&
     (edge === "P99" || edge === "P90") &&
@@ -440,18 +454,7 @@ function inferArchetypeFromMetrics(
     (yld === "P99" || yld === "P90" || yld === "P70") &&
     (grav === "P99" || grav === "P90" || grav === "P70")
   ) return "EQUILIBRIUM";
-  if (
-    (entryBracket === "[0.60 - 0.80]" || entryBracket === "[0.80 - 0.97]") &&
-    (grav === "P99" || grav === "P90") &&
-    (edge === "BASE" || edge === "P50") &&
-    (yld === "BASE" || yld === "P50")
-  ) return "HARVESTER";
-  if (
-    (entryBracket === "[0.00 - 0.20]" || entryBracket === "[0.20 - 0.40]") &&
-    (edge === "P99" || edge === "P90" || edge === "P70") &&
-    (yld === "BASE" || yld === "P50")
-  ) return "MARTYR";
-  if (grav === "P99" || grav === "P90") return "AMASSER";
+  if (grav === "P99" || grav === "P90") return "GRAVITON";
   if (
     (entryBracket === "[0.60 - 0.80]" || entryBracket === "[0.80 - 0.97]") &&
     (edge === "BASE" || edge === "P50") &&
