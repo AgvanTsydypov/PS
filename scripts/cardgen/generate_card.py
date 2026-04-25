@@ -351,7 +351,6 @@ _LEGACY_TO_INTERVAL: Dict[str, str] = {
     "ORACLE": "[0.20 - 0.40]",
     "OUTLIER": "[0.40 - 0.60]",
     "VECTOR": "[0.60 - 0.80]",
-    "HARVESTER": "[0.80 - 0.97]",
     "EXTRACTOR": "[0.97 - 1.00]",
     "PASSENGER": "[0.97 - 1.00]",
 }
@@ -475,7 +474,7 @@ _DZ_ARCHETYPE_STYLES: Dict[str, Tuple[str, str, bool]] = {
     "BOT":         ("url(#bot-gradient)",          "#000000", False),
     "BURNER":      ("url(#burner-gradient)",       "#000000", False),
     "EQUILIBRIUM": ("url(#equilibrium-gradient)",  "#000000", True),
-    "GRAVITON":    ("url(#amasser-gradient)",      "#000000", False),
+    "GRAVITON":    ("url(#graviton-gradient)",     "#000000", False),
     "VECTOR":      ("url(#vector-gradient)",       "#000000", False),
     "SIGNAL":      ("url(#signal-gradient)",       "#000000", False),
     "EXTRACTOR":   ("url(#extractor-gradient)",    "#000000", False),
@@ -483,10 +482,6 @@ _DZ_ARCHETYPE_STYLES: Dict[str, Tuple[str, str, bool]] = {
     "PASSENGER":   ("#B8BFCE",                     "#000000", False),
     "OPERATOR":    ("#625F5F",                     "#000000", False),
     "SUBSTRATE":   ("#474332",                     "#000000", False),
-    # Legacy aliases kept so older payloads do not silently degrade to OPERATOR.
-    "HARVESTER":   ("#1C1B1B",                     "#000000", False),
-    "AMASSER":     ("url(#amasser-gradient)",      "#000000", False),
-    "MARTYR":      ("url(#icarus-gradient)",       "#000000", False),
 }
 
 
@@ -879,7 +874,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     <stop offset="50%" stop-color="#0A2A2A"/>
     <stop offset="100%" stop-color="#134E4E"/>
   </linearGradient>
-  <linearGradient id="amasser-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+  <linearGradient id="graviton-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
     <stop offset="0%"  stop-color="#996C2C"/>
     <stop offset="50%" stop-color="#996C2C"/>
     <stop offset="100%" stop-color="#33240F"/>
@@ -1811,7 +1806,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     <stop offset="50%" stop-color="#0A2A2A"/>
     <stop offset="100%" stop-color="#134E4E"/>
   </linearGradient>
-  <linearGradient id="amasser-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+  <linearGradient id="graviton-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
     <stop offset="0%" stop-color="#996C2C"/>
     <stop offset="50%" stop-color="#996C2C"/>
     <stop offset="100%" stop-color="#33240F"/>

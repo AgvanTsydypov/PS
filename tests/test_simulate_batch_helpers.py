@@ -302,7 +302,7 @@ class TestSelectDiverseWinnerRowPlan:
         candidates = [
             _make_candidate(1, same_img, archetype="OPERATOR"),
             _make_candidate(2, same_img, archetype="SIGNAL"),
-            _make_candidate(3, "https://a.com/unique.png", archetype="AMASSER"),
+            _make_candidate(3, "https://a.com/unique.png", archetype="GRAVITON"),
         ]
         for _ in range(10):
             plan = _select_diverse_winner_row_plan(candidates, k=2)
@@ -390,9 +390,9 @@ class TestBuildCardPayloadFromSourceRow:
         payload = _build_card_payload_from_source_row(_source_row())
         assert payload["claim_type"] == "looter"
 
-    def test_harvester_normalized_to_extractor(self):
+    def test_unknown_archetype_falls_back_to_inferred_extractor(self):
         row = _source_row(
-            archetype="HARVESTER",
+            archetype="UNKNOWN_ARCHE",
             entry_bracket="[0.97 - 1.00]",
             total_volume=10000.0,
             total_pnl=100.0,
@@ -400,9 +400,9 @@ class TestBuildCardPayloadFromSourceRow:
         payload = _build_card_payload_from_source_row(row)
         assert payload["archetype"] == "EXTRACTOR"
 
-    def test_martyr_normalized_to_icarus(self):
+    def test_unknown_archetype_falls_back_to_inferred_icarus(self):
         row = _source_row(
-            archetype="MARTYR",
+            archetype="UNKNOWN_ARCHE",
             total_pnl=-100.0,
             entry_cwap=0.3,
         )

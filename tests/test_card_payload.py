@@ -150,14 +150,11 @@ class TestNormalizeArchetype:
     def test_the_prefix_case_insensitive(self):
         assert _normalize_archetype("the anomaly", "OPERATOR") == "ANOMALY"
 
-    def test_legacy_harvester_maps_to_extractor(self):
-        assert _normalize_archetype("HARVESTER", "OPERATOR") == "EXTRACTOR"
+    def test_unknown_archetype_uses_inferred_value(self):
+        assert _normalize_archetype("UNKNOWN_ARCHE", "OPERATOR") == "OPERATOR"
 
-    def test_legacy_martyr_maps_to_icarus(self):
-        assert _normalize_archetype("MARTYR", "OPERATOR") == "ICARUS"
-
-    def test_legacy_lowercase_harvester(self):
-        assert _normalize_archetype("harvester", "OPERATOR") == "EXTRACTOR"
+    def test_unknown_lowercase_archetype_uses_inferred_value(self):
+        assert _normalize_archetype("unknown_arche", "ICARUS") == "ICARUS"
 
     def test_unknown_raw_returns_inferred(self):
         assert _normalize_archetype("NONEXISTENT", "EQUILIBRIUM") == "EQUILIBRIUM"
@@ -206,8 +203,8 @@ class TestNormalizeEntryBracket:
     def test_legacy_vector_maps_to_bracket(self):
         assert _normalize_entry_bracket("VECTOR") == "[0.60 - 0.80]"
 
-    def test_legacy_harvester_maps_to_bracket(self):
-        assert _normalize_entry_bracket("HARVESTER") == "[0.80 - 0.97]"
+    def test_unknown_text_bracket_falls_back_to_default(self):
+        assert _normalize_entry_bracket("SOME_TEXT_VALUE") == "[0.80 - 0.97]"
 
     def test_legacy_extractor_maps_to_bracket(self):
         assert _normalize_entry_bracket("EXTRACTOR") == "[0.97 - 1.00]"
@@ -388,21 +385,25 @@ class TestBuildCardPayload:
         )
         assert payload["recurrence"] is None
 
-    def test_legacy_archetype_harvester_remapped(self):
+    def test_unknown_archetype_falls_back_to_inferred_extractor(self):
         payload = _build_card_payload_from_source_row(
-            _base_row(archetype="HARVESTER"), claim_id=1, claim_type="looter"
+            _base_row(archetype="UNKNOWN_ARCHE", entry_bracket="[0.97 - 1.00]", total_volume=10000.0),
+            claim_id=1,
+            claim_type="looter",
         )
         assert payload["archetype"] == "EXTRACTOR"
 
-    def test_legacy_archetype_martyr_remapped(self):
+    def test_unknown_archetype_falls_back_to_inferred_icarus(self):
         payload = _build_card_payload_from_source_row(
-            _base_row(archetype="MARTYR"), claim_id=1, claim_type="looter"
+            _base_row(archetype="UNKNOWN_ARCHE", total_pnl=-100.0, entry_cwap=0.3),
+            claim_id=1,
+            claim_type="looter",
         )
         assert payload["archetype"] == "ICARUS"
 
-    def test_legacy_entry_bracket_remapped(self):
+    def test_unknown_entry_bracket_defaults(self):
         payload = _build_card_payload_from_source_row(
-            _base_row(entry_bracket="HARVESTER"), claim_id=1, claim_type="looter"
+            _base_row(entry_bracket="UNKNOWN_BRACKET"), claim_id=1, claim_type="looter"
         )
         assert payload["entry_bracket"] == "[0.80 - 0.97]"
 

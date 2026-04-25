@@ -52,16 +52,17 @@ export type SeasonArchetypeOpensResponse = {
 
 /** Canonical archetype order (matches user_web_backend CARD_ARCHETYPE_OPTIONS). */
 export const ARCHETYPE_DISPLAY_ORDER = [
-  "ANOMALY",
   "ICARUS",
-  "BOT",
   "BURNER",
+  "BOT",
+  "EXTRACTOR",
+  "PASSENGER",
+  "ANOMALY",
+  "INSIDER",
   "SIGNAL",
   "VECTOR",
   "EQUILIBRIUM",
-  "AMASSER",
-  "EXTRACTOR",
-  "PASSENGER",
+  "GRAVITON",
   "SUBSTRATE",
   "OPERATOR",
 ] as const;

@@ -96,7 +96,7 @@ The angle must be identical across all gradient-bearing elements.
 | 0.20 – 0.40 | ORACLE | `#FFBF00` |
 | 0.40 – 0.60 | OUTLIER | `#0051FF` |
 | 0.60 – 0.80 | VECTOR | `#00FF2F` |
-| 0.80 – 0.97 | HARVESTER | `#FFFFFF` |
+| 0.80 – 0.97 | SUBSTRATE | `#FFFFFF` |
 
 Entries ≥ 0.97 CWAP are purged entirely (bot filter).
 
@@ -118,7 +118,7 @@ Entries ≥ 0.97 CWAP are purged entirely (bot filter).
 | #FFBF00 | ORACLE | P90 | 2nd |
 | #0051FF | OUTLIER | P70 | 3rd |
 | #00FF2F | VECTOR | P50 | 4th |
-| #FFFFFF | HARVESTER | Base | 5th |
+| #FFFFFF | SUBSTRATE | Base | 5th |
 
 ## 5. Dynamic Fields — Metadata Badge (Top-Right)
 
@@ -311,7 +311,7 @@ Value:       [edge name]       color: Tier Color Map    font-size: 20px    track
 | 0.30 – 0.50 | OUTLIER |
 | 0.50 – 0.70 | VECTOR |
 | 0.70 – 0.90 | VALIDATOR |
-| 0.90 – 1.00 | HARVESTER |
+| 0.90 – 1.00 | SUBSTRATE |
 
 ### 7.6 YIELD (Skill / Capital Efficiency)
 
