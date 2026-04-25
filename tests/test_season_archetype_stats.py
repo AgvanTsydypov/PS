@@ -39,8 +39,8 @@ class TestNormalizeArchetypeForStats:
     def test_the_prefix_stripped(self, uw):
         assert uw._normalize_archetype_for_stats("THE ANOMALY") == "ANOMALY"
 
-    def test_legacy_map(self, uw):
-        assert uw._normalize_archetype_for_stats("HARVESTER") == "EXTRACTOR"
+    def test_unknown_maps_to_unknown_bucket(self, uw):
+        assert uw._normalize_archetype_for_stats("UNKNOWN_LEGACY_LABEL") == "UNKNOWN"
 
     def test_gibberish_buckets_unknown(self, uw):
         assert uw._normalize_archetype_for_stats("not-a-real-archetype-xyz") == "UNKNOWN"
@@ -87,12 +87,12 @@ class FakeConn:
 
 
 class TestSeasonOpenedArchetypeCounts:
-    def test_merges_raw_rows_and_legacy(self, uw):
+    def test_merges_raw_rows_and_unknowns(self, uw):
         agg_rows = [
             ("", 2),
             ("ANOMALY", 1),
             ("the icarus", 3),
-            ("HARVESTER", 1),
+            ("GRAVITON", 1),
             ("nonsense", 5),
         ]
         fake = FakeConn(season_exists=True, agg_rows=agg_rows)
@@ -104,7 +104,7 @@ class TestSeasonOpenedArchetypeCounts:
         assert out["unknown"] == 2 + 5
         assert out["by_archetype"]["ANOMALY"] == 1
         assert out["by_archetype"]["ICARUS"] == 3
-        assert out["by_archetype"]["EXTRACTOR"] == 1
+        assert out["by_archetype"]["GRAVITON"] == 1
         assert out["total_opened"] == sum(out["by_archetype"].values()) + out["unknown"]
         assert fake._cursor.last_params == (42,)
 

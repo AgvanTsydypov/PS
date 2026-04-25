@@ -214,24 +214,24 @@ class TestEquilibrium:
 
 
 # ---------------------------------------------------------------------------
-# AMASSER
+# GRAVITON
 # ---------------------------------------------------------------------------
 
-class TestAmasser:
-    def test_high_grav_base_edge_is_amasser(self):
-        assert infer(B00, edge="BASE", yld="BASE", grav="P90") == "AMASSER"
+class TestGraviton:
+    def test_high_grav_base_edge_is_graviton(self):
+        assert infer(B00, edge="BASE", yld="BASE", grav="P90") == "GRAVITON"
 
-    def test_p99_grav_base_edge_is_amasser(self):
-        assert infer(B20, edge="P50", yld="BASE", grav="P99") == "AMASSER"
+    def test_p99_grav_base_edge_is_graviton(self):
+        assert infer(B20, edge="P50", yld="BASE", grav="P99") == "GRAVITON"
 
-    def test_p90_grav_with_low_edge_is_amasser(self):
-        assert infer(B40, edge="BASE", yld="P50", grav="P90") == "AMASSER"
+    def test_p90_grav_with_low_edge_is_graviton(self):
+        assert infer(B40, edge="BASE", yld="P50", grav="P90") == "GRAVITON"
 
-    def test_p70_grav_not_amasser(self):
+    def test_p70_grav_not_graviton(self):
         result = infer(B00, edge="BASE", yld="BASE", grav="P70")
-        assert result != "AMASSER"
+        assert result != "GRAVITON"
 
-    def test_amasser_requires_edge_not_meeting_equilibrium(self):
+    def test_graviton_requires_edge_not_meeting_equilibrium(self):
         # If edge/yld also P70+, EQUILIBRIUM fires first
         result = infer(B80, edge="P70", yld="P70", grav="P99")
         assert result == "EQUILIBRIUM"
@@ -270,9 +270,9 @@ class TestSubstrate:
         assert result != "SUBSTRATE"
 
     def test_b80_p99_grav_breaks_substrate(self):
-        # P99 grav → AMASSER fires before SUBSTRATE
+        # P99 grav → GRAVITON fires before SUBSTRATE
         result = infer(B80, edge="BASE", yld="BASE", grav="P99")
-        assert result == "AMASSER"
+        assert result == "GRAVITON"
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +290,7 @@ class TestOperator:
         assert infer(B40, edge="BASE", yld="BASE", grav="BASE") == "OPERATOR"
 
     def test_b60_p70_edge_base_yld_grav_is_operator(self):
-        # P70 edge but BASE yld → not EQUILIBRIUM, not AMASSER, not SUBSTRATE → OPERATOR
+        # P70 edge but BASE yld → not EQUILIBRIUM, not GRAVITON, not SUBSTRATE → OPERATOR
         assert infer(B60, edge="P70", yld="BASE", grav="BASE") == "OPERATOR"
 
     def test_b20_p50_tiers_is_operator(self):

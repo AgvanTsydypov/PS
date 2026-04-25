@@ -57,16 +57,17 @@ CARD_ENTRY_BRACKET_OPTIONS = (
 CARD_TIER_OPTIONS = ("P99", "P90", "P70", "P50", "BASE")
 _ANOMALY_SUBTIER_OPTIONS = frozenset({"P99", "P90", "P70", "P50"})
 CARD_ARCHETYPE_OPTIONS = (
-    "ANOMALY",
     "ICARUS",
-    "BOT",
     "BURNER",
+    "BOT",
+    "EXTRACTOR",
+    "PASSENGER",
+    "ANOMALY",
+    "INSIDER",
     "SIGNAL",
     "VECTOR",
     "EQUILIBRIUM",
-    "AMASSER",
-    "EXTRACTOR",
-    "PASSENGER",
+    "GRAVITON",
     "SUBSTRATE",
     "OPERATOR",
 )
@@ -75,13 +76,8 @@ LEGACY_ENTRY_BRACKET_MAP: Dict[str, str] = {
     "ORACLE": "[0.20 - 0.40]",
     "OUTLIER": "[0.40 - 0.60]",
     "VECTOR": "[0.60 - 0.80]",
-    "HARVESTER": "[0.80 - 0.97]",
     "EXTRACTOR": "[0.97 - 1.00]",
     "PASSENGER": "[0.97 - 1.00]",
-}
-LEGACY_ARCHETYPE_MAP: Dict[str, str] = {
-    "HARVESTER": "EXTRACTOR",
-    "MARTYR": "ICARUS",
 }
 
 _WINNER_CATALOG_JOIN = """
@@ -172,7 +168,6 @@ def _normalize_archetype(raw: Optional[str], inferred: str) -> str:
     cleaned = str(raw or "").strip().upper()
     if cleaned.startswith("THE "):
         cleaned = cleaned[4:].strip()
-    cleaned = LEGACY_ARCHETYPE_MAP.get(cleaned, cleaned)
     return _normalize_choice(cleaned, CARD_ARCHETYPE_OPTIONS, inferred)
 
 
@@ -230,6 +225,8 @@ def _infer_archetype_from_metrics(
         )
     ):
         return "ANOMALY"
+    if entry_cwap is not None and entry_cwap <= 0.10 and yld == "P99":
+        return "INSIDER"
     if (
         (entry_bracket == "[0.00 - 0.20]" or entry_bracket == "[0.20 - 0.40]")
         and (edge == "P99" or edge == "P90")
@@ -245,7 +242,7 @@ def _infer_archetype_from_metrics(
     ):
         return "EQUILIBRIUM"
     if grav == "P99" or grav == "P90":
-        return "AMASSER"
+        return "GRAVITON"
     if (
         (entry_bracket == "[0.60 - 0.80]" or entry_bracket == "[0.80 - 0.97]")
         and (edge == "BASE" or edge == "P50")
