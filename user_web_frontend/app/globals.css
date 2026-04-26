@@ -57,7 +57,6 @@ body {
   background: transparent;
   color: var(--bd-ink);
   font-family: var(--bd-font-ui);
-  overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -2589,10 +2588,9 @@ button:disabled {
 
 .sm-layout {
   display: flex;
-  justify-content: center;
   align-items: flex-start;
   min-height: 100vh;
-  padding-top: var(--site-maintenance-strip-height, 0px);
+  padding-left: max(0px, calc(50% - 905px));
 }
 
 .sm-sidebar {
@@ -2633,10 +2631,14 @@ button:disabled {
 
 .sm-content {
   flex: 0 0 860px;
-  margin-left: calc(860px * 0.25);
+  margin: 0 0 0 calc(860px * 0.25);
   padding: 48px 32px;
   background: transparent;
   min-height: 100vh;
+  max-width: none;
+  border: none;
+  border-radius: 0;
+  animation: none;
 }
 
 .sm-content-inner {
