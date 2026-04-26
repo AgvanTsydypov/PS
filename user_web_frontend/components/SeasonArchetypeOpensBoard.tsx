@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ARCHETYPE_DISPLAY_ORDER,
@@ -158,11 +157,6 @@ export function SeasonArchetypeOpensBoard() {
         </>
       ) : null}
 
-      <div className="season-board-actions">
-        <Link href="/system-manual" className="season-mint-button">
-          System Manual
-        </Link>
-      </div>
     </section>
   );
 }

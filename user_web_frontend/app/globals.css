@@ -434,6 +434,15 @@ body::after {
   height: 100%;
 }
 
+.home-sm-action {
+  align-self: stretch;
+}
+
+.home-sm-action .season-mint-button {
+  background: transparent;
+  border: 2px solid var(--bd-line-strong);
+}
+
 .season-archetype-opens-board .season-archetype-opens-lede {
   margin: 0 0 14px;
   font-size: 13px;
@@ -2591,6 +2600,11 @@ button:disabled {
   align-items: flex-start;
   min-height: 100vh;
   padding-left: max(0px, calc(50% - 905px));
+}
+
+.sm-sidebar-logo {
+  display: block;
+  margin-bottom: 32px;
 }
 
 .sm-sidebar {
