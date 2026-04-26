@@ -25,11 +25,13 @@
       "Bash(rtk find *)",
       "Bash(rtk wc *)",
       "Bash(rtk git *)",
-      "Bash(rtk grep *)"
+      "Bash(rtk grep *)",
+      "Skill(update-config)"
     ]
   },
   "enabledMcpjsonServers": [
-    "postgres"
+    "postgres",
+    "designlang"
   ],
   "enabledPlugins": {
     "superpowers@claude-plugins-official": true,
