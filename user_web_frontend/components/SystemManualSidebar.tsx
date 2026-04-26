@@ -73,7 +73,6 @@ export default function SystemManualSidebar() {
     <nav className="sm-sidebar" aria-label="System Manual navigation">
       {NAV.map((item) => {
         const hasChildren = item.children.length > 0;
-        const isExpanded = hasChildren && pathname.startsWith(item.href);
         const isActive = pathname === item.href;
 
         const itemClasses = [
@@ -87,17 +86,10 @@ export default function SystemManualSidebar() {
         return (
           <div key={item.href}>
             <Link href={item.href} className={itemClasses}>
-              <span>{item.label}</span>
-              {hasChildren && (
-                <span className="sm-nav-chevron" aria-hidden="true">
-                  {isExpanded ? "▾" : "▸"}
-                </span>
-              )}
+              {item.label}
             </Link>
             {hasChildren && (
-              <div
-                className={`sm-nav-children${isExpanded ? " sm-nav-open" : ""}`}
-              >
+              <div className="sm-nav-children sm-nav-open">
                 {item.children.map((child) => {
                   const childClasses = [
                     "sm-nav-item",
