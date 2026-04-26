@@ -2589,33 +2589,35 @@ button:disabled {
 
 .sm-layout {
   display: flex;
+  justify-content: center;
+  align-items: flex-start;
   min-height: 100vh;
+  padding-top: var(--site-maintenance-strip-height, 0px);
 }
 
 .sm-sidebar {
-  position: fixed;
+  position: sticky;
   top: var(--site-maintenance-strip-height, 0px);
-  left: 0;
-  width: 260px;
+  flex: 0 0 260px;
+  align-self: flex-start;
   height: calc(100vh - var(--site-maintenance-strip-height, 0px));
   overflow-y: auto;
   overflow-x: hidden;
-  background: var(--bd-bg-elev);
-  border-right: 1px solid var(--bd-line);
+  background: transparent;
   padding: 24px 0 48px;
   z-index: 10;
 }
 
 .sm-content {
-  margin-left: 260px;
-  padding: 48px 64px;
-  flex: 1;
+  flex: 0 0 860px;
+  margin-left: calc(860px * 0.25);
+  padding: 48px 32px;
   background: transparent;
   min-height: 100vh;
 }
 
 .sm-content-inner {
-  max-width: 860px;
+  width: 100%;
 }
 
 .sm-nav-item {
@@ -2704,6 +2706,16 @@ button:disabled {
 
 .sm-placeholder {
   min-height: 200px;
+}
+
+.sm-section-title {
+  font-family: var(--bd-font-display);
+  font-size: 20px;
+  letter-spacing: 0.06em;
+  color: var(--bd-ink);
+  margin: 64px 0 20px;
+  padding-top: 32px;
+  border-top: 1px solid var(--bd-line-strong);
 }
 
 /* season-mint-button used as <Link> needs inline-block */
