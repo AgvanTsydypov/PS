@@ -55,7 +55,9 @@ Server component. Renders a two-column shell:
 
 CSS:
 - `.sm-layout` — `display: flex; min-height: 100vh;`
-- `.sm-content` — `margin-left: 260px; padding: 48px 64px; flex: 1;`
+- `.sm-content` — `margin-left: 260px; padding: 48px 64px; flex: 1; background: transparent;`
+- The global `<body>` CRT background (static grain, scanlines, vignette) shows through the content area — no card/panel wrappers ever appear around page content. Text floats directly on the page background.
+- `max-width: 860px` on content prose to match docs.alphakek.ai reading width.
 - Responsive (≤768px): sidebar hidden or slide-in (out of scope for skeleton, sidebar collapses to top nav strip).
 
 ---
@@ -144,14 +146,19 @@ All new classes added to `globals.css` under a `/* ── System Manual ──` 
 | P2 indent | `padding-left: 28px; padding-right: 16px; padding-top/bottom: 8px` |
 | Chevron | inline unicode `▾` / `▸`, `var(--bd-ink-faint)` |
 | Content padding | `48px 64px` |
+| Content max-width | `860px` (prose reads like docs.alphakek.ai) |
+| Content background | `transparent` — global CRT body bg shows through |
+| Page `<h1>` | `var(--bd-font-display)`, `font-size: 28px`, `var(--bd-ink)`, `margin: 0 0 40px` |
 
 ---
 
 ## 6. Page Content Policy (No Content)
 
 Every page file contains only:
-1. An `<h1>` with the section title (display font)
-2. A single `<div className="sm-placeholder">` — empty box, `min-height: 120px`, `border: 1px dashed var(--bd-line-strong)` — visual marker for future content
+1. An `<h1>` with the section title in `var(--bd-font-display)`
+2. A single `<div className="sm-placeholder">` — invisible spacer, `min-height: 200px`, **no border, no background, no box** — just vertical space for future content
+
+**Critical:** No card wrappers, no `<section>` with borders, no panel backgrounds around any content element. Everything renders directly on the transparent page background so the global CRT effect shows through. This matches docs.alphakek.ai's "text floating on background" appearance.
 
 No paragraphs, no descriptions, no real content.
 
