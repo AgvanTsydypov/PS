@@ -2601,11 +2601,34 @@ button:disabled {
   flex: 0 0 260px;
   align-self: flex-start;
   height: calc(100vh - var(--site-maintenance-strip-height, 0px));
-  overflow-y: auto;
+  overflow-y: scroll;
   overflow-x: hidden;
+  scrollbar-width: none;
   background: transparent;
   padding: 24px 0 48px;
   z-index: 10;
+}
+
+.sm-sidebar::-webkit-scrollbar {
+  width: 0;
+}
+
+.sm-sidebar:hover {
+  scrollbar-width: thin;
+  scrollbar-color: var(--bd-line-strong) transparent;
+}
+
+.sm-sidebar:hover::-webkit-scrollbar {
+  width: 3px;
+}
+
+.sm-sidebar:hover::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sm-sidebar:hover::-webkit-scrollbar-thumb {
+  background: var(--bd-line-strong);
+  border-radius: 2px;
 }
 
 .sm-content {
