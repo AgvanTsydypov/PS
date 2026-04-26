@@ -2711,3 +2711,126 @@ a.season-mint-button {
   display: inline-block;
   text-decoration: none;
 }
+
+/* ── System Manual — Markdown content ───────────────────────────────────── */
+
+.sm-md {
+  color: var(--bd-ink-dim);
+  font-family: var(--bd-font-ui);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.sm-md p {
+  margin: 0 0 16px;
+}
+
+.sm-md h2 {
+  font-family: var(--bd-font-display);
+  font-size: 18px;
+  letter-spacing: 0.05em;
+  color: var(--bd-ink);
+  margin: 40px 0 16px;
+}
+
+.sm-md h3 {
+  font-family: var(--bd-font-display);
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  color: var(--bd-ink-dim);
+  margin: 28px 0 12px;
+}
+
+.sm-md a {
+  color: var(--bd-brand);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.15s ease;
+}
+
+.sm-md a:hover {
+  border-bottom-color: var(--bd-brand);
+}
+
+.sm-md ul,
+.sm-md ol {
+  padding-left: 20px;
+  margin: 0 0 16px;
+}
+
+.sm-md li {
+  margin-bottom: 6px;
+}
+
+.sm-md code {
+  font-family: var(--bd-font-mono);
+  font-size: 13px;
+  background: var(--bd-bg-elev);
+  border: 1px solid var(--bd-line-strong);
+  padding: 1px 5px;
+  color: var(--bd-ink);
+}
+
+.sm-md pre {
+  background: var(--bd-bg-elev);
+  border: 1px solid var(--bd-line-strong);
+  padding: 16px;
+  overflow-x: auto;
+  margin: 0 0 16px;
+}
+
+.sm-md pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+}
+
+.sm-md blockquote {
+  border-left: 2px solid var(--bd-brand);
+  margin: 0 0 16px;
+  padding: 4px 0 4px 16px;
+  color: var(--bd-ink-mute);
+}
+
+.sm-md img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 24px 0;
+}
+
+.sm-md table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 24px;
+  font-size: 14px;
+}
+
+.sm-md th {
+  font-family: var(--bd-font-display);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--bd-ink-mute);
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--bd-line-strong);
+}
+
+.sm-md td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--bd-line);
+  color: var(--bd-ink-dim);
+  vertical-align: top;
+}
+
+.sm-md tr:last-child td {
+  border-bottom: none;
+}
+
+.sm-md hr {
+  border: none;
+  border-top: 1px solid var(--bd-line-strong);
+  margin: 32px 0;
+}
