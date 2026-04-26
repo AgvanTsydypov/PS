@@ -2844,8 +2844,12 @@ a.season-mint-button {
   color: var(--bd-ink-mute);
 }
 
+.sm-md p:has(> img) {
+  overflow-x: auto;
+}
+
 .sm-md img {
-  max-width: 100%;
+  width: 1000px;
   height: auto;
   display: block;
   margin: 24px 0;
