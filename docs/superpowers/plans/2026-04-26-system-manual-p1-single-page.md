@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Render all P2 content for a P1 topic on one scrollable page; sidebar P2 links become in-page anchor links; old P2 routes redirect.
+**Goal:** All P2 content renders on its parent P1 page; adding a new section = drop a folder with `.md` files, no code changes needed.
 
-**Architecture:** Extract the nav config to a shared lib so server-side P1 pages can iterate their children. Each P1 page aggregates index.md + all child markdown files in order. Sidebar P2 hrefs change to `parent-route#anchor` format. Old P2 `page.tsx` files become `redirect()` one-liners.
+**Architecture:** Filesystem-driven. `lib/systemManualContent.ts` gains three helpers that scan `content/system-manual/` at runtime. The layout builds the nav server-side and passes it to the client sidebar as props. A single dynamic route `[section]/page.tsx` replaces all static P1 page files. All static P1 and P2 `page.tsx` files are deleted.
 
-**Tech Stack:** Next.js 14 (App Router), TypeScript, React server components, `next/navigation` redirect
+**Tech Stack:** Next.js 14 (App Router), TypeScript, Node.js `fs`, React server + client components
 
 ---
 
@@ -14,113 +14,193 @@
 
 | Action | File |
 |--------|------|
-| Create | `user_web_frontend/lib/systemManualNav.ts` |
-| Modify | `user_web_frontend/components/SystemManualSidebar.tsx` |
-| Modify | `user_web_frontend/app/system-manual/telemetry-pipeline/page.tsx` |
-| Modify | `user_web_frontend/app/system-manual/seasonal-architecture/page.tsx` |
+| Modify | `user_web_frontend/lib/systemManualContent.ts` |
 | Modify | `user_web_frontend/app/globals.css` |
-| Replace | `user_web_frontend/app/system-manual/telemetry-pipeline/phase-1-volumetric-ingestion/page.tsx` |
-| Replace | `user_web_frontend/app/system-manual/telemetry-pipeline/phase-2-resolution-queues/page.tsx` |
-| Replace | `user_web_frontend/app/system-manual/telemetry-pipeline/phase-3-condition-parsing/page.tsx` |
-| Replace | `user_web_frontend/app/system-manual/telemetry-pipeline/phase-4-redemption-extraction/page.tsx` |
-| Replace | `user_web_frontend/app/system-manual/telemetry-pipeline/phase-5-behavioral-profiling/page.tsx` |
-| Replace | `user_web_frontend/app/system-manual/telemetry-pipeline/phase-6-stellar-initialization/page.tsx` |
-| Replace | `user_web_frontend/app/system-manual/seasonal-architecture/chronological-grid/page.tsx` |
-| Replace | `user_web_frontend/app/system-manual/seasonal-architecture/phase-matrix/page.tsx` |
-| Replace | `user_web_frontend/app/system-manual/seasonal-architecture/modular-initialization/page.tsx` |
+| Modify | `user_web_frontend/app/system-manual/layout.tsx` |
+| Modify | `user_web_frontend/components/SystemManualSidebar.tsx` |
+| Create | `user_web_frontend/app/system-manual/[section]/page.tsx` |
+| Delete | `user_web_frontend/app/system-manual/telemetry-pipeline/page.tsx` |
+| Delete | `user_web_frontend/app/system-manual/seasonal-architecture/page.tsx` |
+| Delete | `user_web_frontend/app/system-manual/telemetry-pipeline/phase-1-volumetric-ingestion/page.tsx` |
+| Delete | `user_web_frontend/app/system-manual/telemetry-pipeline/phase-2-resolution-queues/page.tsx` |
+| Delete | `user_web_frontend/app/system-manual/telemetry-pipeline/phase-3-condition-parsing/page.tsx` |
+| Delete | `user_web_frontend/app/system-manual/telemetry-pipeline/phase-4-redemption-extraction/page.tsx` |
+| Delete | `user_web_frontend/app/system-manual/telemetry-pipeline/phase-5-behavioral-profiling/page.tsx` |
+| Delete | `user_web_frontend/app/system-manual/telemetry-pipeline/phase-6-stellar-initialization/page.tsx` |
+| Delete | `user_web_frontend/app/system-manual/seasonal-architecture/chronological-grid/page.tsx` |
+| Delete | `user_web_frontend/app/system-manual/seasonal-architecture/phase-matrix/page.tsx` |
+| Delete | `user_web_frontend/app/system-manual/seasonal-architecture/modular-initialization/page.tsx` |
 
 ---
 
-### Task 1: Extract NAV config to shared lib
+### Task 1: Add filesystem helpers to `systemManualContent.ts`
 
 **Files:**
-- Create: `user_web_frontend/lib/systemManualNav.ts`
+- Modify: `user_web_frontend/lib/systemManualContent.ts`
 
-The NAV array currently lives inside `SystemManualSidebar.tsx` (a client component). Server-side P1 pages need to iterate their children, so we move NAV to a plain TS module both can import. P2 hrefs are updated here to use anchor format (`parent#anchor`).
+Three new exports:
+- `slugToLabel(slug)` — strips optional `\d+-` prefix, replaces hyphens with spaces, uppercases: `phase-1-volumetric-ingestion` → `PHASE 1 VOLUMETRIC INGESTION`
+- `getSections()` — returns sorted directory names under `content/system-manual/`
+- `getSectionChildren(section)` — returns sorted `.md` filenames (minus extension, excluding `index.md`) under `content/system-manual/[section]/`
 
-- [ ] **Step 1: Create `user_web_frontend/lib/systemManualNav.ts`**
+- [ ] **Step 1: Replace the full contents of `user_web_frontend/lib/systemManualContent.ts`**
 
 ```ts
-export type NavChild = {
-  label: string;
-  href: string;
-};
+import fs from "fs";
+import path from "path";
 
-export type NavItem = {
-  label: string;
-  href: string;
-  children: NavChild[];
-};
+export function getManualContent(slug: string): string | null {
+  const filePath = path.join(process.cwd(), "content", "system-manual", `${slug}.md`);
+  try {
+    return fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+}
 
-export const NAV: NavItem[] = [
-  { label: "Overview", href: "/system-manual", children: [] },
-  {
-    label: "TELEMETRY PIPELINE",
-    href: "/system-manual/telemetry-pipeline",
-    children: [
-      {
-        label: "PHASE 1: VOLUMETRIC INGESTION",
-        href: "/system-manual/telemetry-pipeline#phase-1-volumetric-ingestion",
-      },
-      {
-        label: "PHASE 2: THE RESOLUTION QUEUES",
-        href: "/system-manual/telemetry-pipeline#phase-2-resolution-queues",
-      },
-      {
-        label: "PHASE 3: CONDITION PARSING",
-        href: "/system-manual/telemetry-pipeline#phase-3-condition-parsing",
-      },
-      {
-        label: "PHASE 4: REDEMPTION EXTRACTION & NOISE FILTRATION",
-        href: "/system-manual/telemetry-pipeline#phase-4-redemption-extraction",
-      },
-      {
-        label: "PHASE 5: BEHAVIORAL PROFILING",
-        href: "/system-manual/telemetry-pipeline#phase-5-behavioral-profiling",
-      },
-      {
-        label: "PHASE 6: STELLAR INITIALIZATION",
-        href: "/system-manual/telemetry-pipeline#phase-6-stellar-initialization",
-      },
-    ],
-  },
-  {
-    label: "SEASONAL ARCHITECTURE",
-    href: "/system-manual/seasonal-architecture",
-    children: [
-      {
-        label: "1. THE CHRONOLOGICAL GRID",
-        href: "/system-manual/seasonal-architecture#chronological-grid",
-      },
-      {
-        label: "2. THE PHASE MATRIX",
-        href: "/system-manual/seasonal-architecture#phase-matrix",
-      },
-      {
-        label: "3. THE MODULAR INITIALIZATION PROTOCOL",
-        href: "/system-manual/seasonal-architecture#modular-initialization",
-      },
-    ],
-  },
-];
+export function slugToLabel(slug: string): string {
+  const withoutPrefix = slug.replace(/^\d+-/, "");
+  return withoutPrefix.replace(/-/g, " ").toUpperCase();
+}
+
+export function getSections(): string[] {
+  const contentDir = path.join(process.cwd(), "content", "system-manual");
+  try {
+    return fs
+      .readdirSync(contentDir)
+      .filter((name) => fs.statSync(path.join(contentDir, name)).isDirectory())
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+export function getSectionChildren(section: string): string[] {
+  const sectionDir = path.join(process.cwd(), "content", "system-manual", section);
+  try {
+    return fs
+      .readdirSync(sectionDir)
+      .filter((name) => name.endsWith(".md") && name !== "index.md")
+      .map((name) => name.replace(/\.md$/, ""))
+      .sort();
+  } catch {
+    return [];
+  }
+}
 ```
 
 - [ ] **Step 2: Commit**
 
 ```bash
 cd user_web_frontend
-git add lib/systemManualNav.ts
-git commit -m "feat: extract systemManualNav to shared lib"
+git add lib/systemManualContent.ts
+git commit -m "feat: add slugToLabel, getSections, getSectionChildren helpers"
 ```
 
 ---
 
-### Task 2: Update SystemManualSidebar to use shared lib
+### Task 2: Add `sm-section-title` CSS class
+
+**Files:**
+- Modify: `user_web_frontend/app/globals.css`
+
+The dynamic P1 page renders a heading (`<h2 className="sm-section-title">`) between sections. It needs its own class — visually between the page `h1` (28 px) and inline markdown `h2` (18 px), with a top border to divide sections.
+
+- [ ] **Step 1: Find this block in `globals.css` (around line 2707)**
+
+```css
+.sm-placeholder {
+  min-height: 200px;
+}
+```
+
+Insert immediately after it:
+
+```css
+.sm-section-title {
+  font-family: var(--bd-font-display);
+  font-size: 20px;
+  letter-spacing: 0.06em;
+  color: var(--bd-ink);
+  margin: 64px 0 20px;
+  padding-top: 32px;
+  border-top: 1px solid var(--bd-line-strong);
+}
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add app/globals.css
+git commit -m "feat: add sm-section-title CSS for P1 section dividers"
+```
+
+---
+
+### Task 3: Build nav server-side in layout
+
+**Files:**
+- Modify: `user_web_frontend/app/system-manual/layout.tsx`
+
+The layout is a server component — it can call `getSections()` and `getSectionChildren()` directly. It builds the full nav array and passes it as a prop to `SystemManualSidebar`. The sidebar no longer needs to know about the filesystem.
+
+- [ ] **Step 1: Replace the full contents of `user_web_frontend/app/system-manual/layout.tsx`**
+
+```tsx
+import { type ReactNode } from "react";
+
+import SystemManualSidebar from "../../components/SystemManualSidebar";
+import {
+  getSectionChildren,
+  getSections,
+  slugToLabel,
+} from "../../lib/systemManualContent";
+
+type NavChild = { label: string; href: string };
+type NavItem = { label: string; href: string; children: NavChild[] };
+
+function buildNav(): NavItem[] {
+  return [
+    { label: "Overview", href: "/system-manual", children: [] },
+    ...getSections().map((section) => ({
+      label: slugToLabel(section),
+      href: `/system-manual/${section}`,
+      children: getSectionChildren(section).map((childSlug) => ({
+        label: slugToLabel(childSlug),
+        href: `/system-manual/${section}#${childSlug}`,
+      })),
+    })),
+  ];
+}
+
+export default function SystemManualLayout({ children }: { children: ReactNode }) {
+  const nav = buildNav();
+  return (
+    <div className="sm-layout">
+      <SystemManualSidebar nav={nav} />
+      <main className="sm-content">
+        <div className="sm-content-inner">{children}</div>
+      </main>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add app/system-manual/layout.tsx
+git commit -m "feat: build system manual nav server-side in layout"
+```
+
+---
+
+### Task 4: Update sidebar to accept nav as prop
 
 **Files:**
 - Modify: `user_web_frontend/components/SystemManualSidebar.tsx`
 
-Replace the inline type definitions and NAV array with an import from the new lib. Remove the per-child active-state check — P2 items never highlight individually (per design).
+The sidebar receives the nav array as a prop instead of importing a hardcoded config. The `usePathname()` usage stays — active state logic is unchanged (P1 item highlights when `pathname === item.href`; P2 items never highlight individually).
 
 - [ ] **Step 1: Replace the full contents of `user_web_frontend/components/SystemManualSidebar.tsx`**
 
@@ -130,14 +210,15 @@ Replace the inline type definitions and NAV array with an import from the new li
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { NAV } from "../lib/systemManualNav";
+type NavChild = { label: string; href: string };
+type NavItem = { label: string; href: string; children: NavChild[] };
 
-export default function SystemManualSidebar() {
+export default function SystemManualSidebar({ nav }: { nav: NavItem[] }) {
   const pathname = usePathname();
 
   return (
     <nav className="sm-sidebar" aria-label="System Manual navigation">
-      {NAV.map((item) => {
+      {nav.map((item) => {
         const hasChildren = item.children.length > 0;
         const isActive = pathname === item.href;
 
@@ -187,83 +268,53 @@ Expected: no errors.
 
 ```bash
 git add components/SystemManualSidebar.tsx
-git commit -m "feat: sidebar imports NAV from lib; P2 hrefs become anchors"
+git commit -m "feat: sidebar accepts nav as prop, removes hardcoded config"
 ```
 
 ---
 
-### Task 3: Add `sm-section-title` CSS class
+### Task 5: Create dynamic `[section]/page.tsx`
 
 **Files:**
-- Modify: `user_web_frontend/app/globals.css`
+- Create: `user_web_frontend/app/system-manual/[section]/page.tsx`
 
-The P1 pages will render a phase/section heading between the intro and each child's content. This heading needs its own class — it sits visually between the page `h1` (28 px) and the inline markdown `h2` (18 px).
+This single file handles every P1 route. It renders:
+1. `<h1>` — section title derived from slug
+2. `index.md` content — the intro
+3. For each child `.md` file (sorted alphabetically): `<h2 id={childSlug}>` + child markdown content
 
-- [ ] **Step 1: Add the class after the `.sm-placeholder` block in `globals.css`**
+`generateStaticParams` tells Next.js which section slugs exist at build time.
 
-Find the line:
-```css
-.sm-placeholder {
-  min-height: 200px;
-}
-```
-
-Insert immediately after it (before the `/* season-mint-button */` comment):
-
-```css
-.sm-section-title {
-  font-family: var(--bd-font-display);
-  font-size: 20px;
-  letter-spacing: 0.06em;
-  color: var(--bd-ink);
-  margin: 64px 0 20px;
-  padding-top: 32px;
-  border-top: 1px solid var(--bd-line-strong);
-}
-```
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add app/globals.css
-git commit -m "feat: add sm-section-title CSS class for P1 section dividers"
-```
-
----
-
-### Task 4: Aggregate content on the TELEMETRY PIPELINE P1 page
-
-**Files:**
-- Modify: `user_web_frontend/app/system-manual/telemetry-pipeline/page.tsx`
-
-The page reads `index.md` (intro), then iterates its children from NAV, reads each child's markdown file, and renders heading + content for each.
-
-Anchor id derivation: `child.href.split("#")[1]` — e.g. `/system-manual/telemetry-pipeline#phase-1-volumetric-ingestion` → `"phase-1-volumetric-ingestion"`.
-
-Content slug derivation: `"telemetry-pipeline/" + anchor` — matches the file at `content/system-manual/telemetry-pipeline/phase-1-volumetric-ingestion.md`.
-
-- [ ] **Step 1: Replace the full contents of `user_web_frontend/app/system-manual/telemetry-pipeline/page.tsx`**
+- [ ] **Step 1: Create `user_web_frontend/app/system-manual/[section]/page.tsx`**
 
 ```tsx
 import MarkdownContent from "../../../components/MarkdownContent";
-import { getManualContent } from "../../../lib/systemManualContent";
-import { NAV } from "../../../lib/systemManualNav";
+import {
+  getManualContent,
+  getSectionChildren,
+  getSections,
+  slugToLabel,
+} from "../../../lib/systemManualContent";
 
-export default function TelemetryPipelinePage() {
-  const intro = getManualContent("telemetry-pipeline/index");
-  const parent = NAV.find((item) => item.href === "/system-manual/telemetry-pipeline")!;
+export function generateStaticParams() {
+  return getSections().map((section) => ({ section }));
+}
+
+export default function SectionPage({ params }: { params: { section: string } }) {
+  const { section } = params;
+  const intro = getManualContent(`${section}/index`);
+  const children = getSectionChildren(section);
 
   return (
     <>
-      <h1 className="sm-page-title">TELEMETRY PIPELINE</h1>
+      <h1 className="sm-page-title">{slugToLabel(section)}</h1>
       {intro && <MarkdownContent content={intro} />}
-      {parent.children.map((child) => {
-        const anchor = child.href.split("#")[1];
-        const content = getManualContent(`telemetry-pipeline/${anchor}`);
+      {children.map((childSlug) => {
+        const content = getManualContent(`${section}/${childSlug}`);
         return (
-          <section key={anchor}>
-            <h2 id={anchor} className="sm-section-title">
-              {child.label}
+          <section key={childSlug}>
+            <h2 id={childSlug} className="sm-section-title">
+              {slugToLabel(childSlug)}
             </h2>
             {content && <MarkdownContent content={content} />}
           </section>
@@ -285,55 +336,40 @@ Expected: no errors.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add app/system-manual/telemetry-pipeline/page.tsx
-git commit -m "feat: telemetry-pipeline P1 page aggregates all phase content"
+git add app/system-manual/\[section\]/page.tsx
+git commit -m "feat: dynamic [section]/page.tsx aggregates all P2 content"
 ```
 
 ---
 
-### Task 5: Aggregate content on the SEASONAL ARCHITECTURE P1 page
+### Task 6: Delete static P1 and P2 page files
 
 **Files:**
-- Modify: `user_web_frontend/app/system-manual/seasonal-architecture/page.tsx`
+- Delete: 2 static P1 pages + 9 static P2 pages
 
-Same pattern as Task 4 — intro + iterated children from NAV. Content files are in `content/system-manual/seasonal-architecture/`.
+Static P1 files conflict with the new dynamic route (Next.js prefers static over dynamic, so they'd shadow `[section]/page.tsx`). P2 files are no longer reachable from the sidebar — delete them so those URLs cleanly 404.
 
-- [ ] **Step 1: Replace the full contents of `user_web_frontend/app/system-manual/seasonal-architecture/page.tsx`**
+- [ ] **Step 1: Delete all static P1 and P2 page files**
 
-```tsx
-import MarkdownContent from "../../../components/MarkdownContent";
-import { getManualContent } from "../../../lib/systemManualContent";
-import { NAV } from "../../../lib/systemManualNav";
-
-export default function SeasonalArchitecturePage() {
-  const intro = getManualContent("seasonal-architecture/index");
-  const parent = NAV.find((item) => item.href === "/system-manual/seasonal-architecture")!;
-
-  return (
-    <>
-      <h1 className="sm-page-title">SEASONAL ARCHITECTURE</h1>
-      {intro && <MarkdownContent content={intro} />}
-      {parent.children.map((child) => {
-        const anchor = child.href.split("#")[1];
-        const content = getManualContent(`seasonal-architecture/${anchor}`);
-        return (
-          <section key={anchor}>
-            <h2 id={anchor} className="sm-section-title">
-              {child.label}
-            </h2>
-            {content && <MarkdownContent content={content} />}
-          </section>
-        );
-      })}
-    </>
-  );
-}
+```bash
+cd user_web_frontend
+rm app/system-manual/telemetry-pipeline/page.tsx
+rm app/system-manual/seasonal-architecture/page.tsx
+rm app/system-manual/telemetry-pipeline/phase-1-volumetric-ingestion/page.tsx
+rm app/system-manual/telemetry-pipeline/phase-2-resolution-queues/page.tsx
+rm app/system-manual/telemetry-pipeline/phase-3-condition-parsing/page.tsx
+rm app/system-manual/telemetry-pipeline/phase-4-redemption-extraction/page.tsx
+rm app/system-manual/telemetry-pipeline/phase-5-behavioral-profiling/page.tsx
+rm app/system-manual/telemetry-pipeline/phase-6-stellar-initialization/page.tsx
+rm app/system-manual/seasonal-architecture/chronological-grid/page.tsx
+rm app/system-manual/seasonal-architecture/phase-matrix/page.tsx
+rm app/system-manual/seasonal-architecture/modular-initialization/page.tsx
 ```
 
 - [ ] **Step 2: Verify lint passes**
 
 ```bash
-cd user_web_frontend && npm run lint
+npm run lint
 ```
 
 Expected: no errors.
@@ -341,140 +377,13 @@ Expected: no errors.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add app/system-manual/seasonal-architecture/page.tsx
-git commit -m "feat: seasonal-architecture P1 page aggregates all section content"
+git add -A
+git commit -m "chore: remove static P1 and P2 page files (replaced by dynamic route)"
 ```
 
 ---
 
-### Task 6: Replace TELEMETRY PIPELINE P2 pages with redirects
-
-**Files:**
-- Replace: all 6 `phase-*/page.tsx` files under `app/system-manual/telemetry-pipeline/`
-
-Each file becomes a one-liner redirect to the anchor on the parent P1 page.
-
-- [ ] **Step 1: Replace `phase-1-volumetric-ingestion/page.tsx`**
-
-```tsx
-import { redirect } from "next/navigation";
-export default function Phase1Page() {
-  redirect("/system-manual/telemetry-pipeline#phase-1-volumetric-ingestion");
-}
-```
-
-- [ ] **Step 2: Replace `phase-2-resolution-queues/page.tsx`**
-
-```tsx
-import { redirect } from "next/navigation";
-export default function Phase2Page() {
-  redirect("/system-manual/telemetry-pipeline#phase-2-resolution-queues");
-}
-```
-
-- [ ] **Step 3: Replace `phase-3-condition-parsing/page.tsx`**
-
-```tsx
-import { redirect } from "next/navigation";
-export default function Phase3Page() {
-  redirect("/system-manual/telemetry-pipeline#phase-3-condition-parsing");
-}
-```
-
-- [ ] **Step 4: Replace `phase-4-redemption-extraction/page.tsx`**
-
-```tsx
-import { redirect } from "next/navigation";
-export default function Phase4Page() {
-  redirect("/system-manual/telemetry-pipeline#phase-4-redemption-extraction");
-}
-```
-
-- [ ] **Step 5: Replace `phase-5-behavioral-profiling/page.tsx`**
-
-```tsx
-import { redirect } from "next/navigation";
-export default function Phase5Page() {
-  redirect("/system-manual/telemetry-pipeline#phase-5-behavioral-profiling");
-}
-```
-
-- [ ] **Step 6: Replace `phase-6-stellar-initialization/page.tsx`**
-
-```tsx
-import { redirect } from "next/navigation";
-export default function Phase6Page() {
-  redirect("/system-manual/telemetry-pipeline#phase-6-stellar-initialization");
-}
-```
-
-- [ ] **Step 7: Verify lint passes**
-
-```bash
-cd user_web_frontend && npm run lint
-```
-
-Expected: no errors.
-
-- [ ] **Step 8: Commit**
-
-```bash
-git add app/system-manual/telemetry-pipeline/phase-*/page.tsx
-git commit -m "feat: redirect telemetry-pipeline P2 routes to parent anchor"
-```
-
----
-
-### Task 7: Replace SEASONAL ARCHITECTURE P2 pages with redirects
-
-**Files:**
-- Replace: 3 P2 pages under `app/system-manual/seasonal-architecture/`
-
-- [ ] **Step 1: Replace `chronological-grid/page.tsx`**
-
-```tsx
-import { redirect } from "next/navigation";
-export default function ChronologicalGridPage() {
-  redirect("/system-manual/seasonal-architecture#chronological-grid");
-}
-```
-
-- [ ] **Step 2: Replace `phase-matrix/page.tsx`**
-
-```tsx
-import { redirect } from "next/navigation";
-export default function PhaseMatrixPage() {
-  redirect("/system-manual/seasonal-architecture#phase-matrix");
-}
-```
-
-- [ ] **Step 3: Replace `modular-initialization/page.tsx`**
-
-```tsx
-import { redirect } from "next/navigation";
-export default function ModularInitializationPage() {
-  redirect("/system-manual/seasonal-architecture#modular-initialization");
-}
-```
-
-- [ ] **Step 4: Verify lint passes**
-
-```bash
-cd user_web_frontend && npm run lint
-```
-
-Expected: no errors.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add app/system-manual/seasonal-architecture/*/page.tsx
-git commit -m "feat: redirect seasonal-architecture P2 routes to parent anchor"
-```
-
----
-
-### Task 8: Build verification + manual browser test
+### Task 7: Build verification + manual browser test
 
 **Files:** none
 
@@ -484,36 +393,58 @@ git commit -m "feat: redirect seasonal-architecture P2 routes to parent anchor"
 cd user_web_frontend && npm run build
 ```
 
-Expected: exits 0, no TypeScript errors, no missing module errors.
+Expected: exits 0, no TypeScript errors.
 
 - [ ] **Step 2: Start dev server**
 
 ```bash
-cd user_web_frontend && npm run dev -- -p 3001
+npm run dev -- -p 3001
 ```
 
-- [ ] **Step 3: Manual checks — navigate to `/system-manual/telemetry-pipeline`**
+- [ ] **Step 3: Check sidebar auto-populates**
 
-Verify:
-- Page title "TELEMETRY PIPELINE" is visible
+Open `http://localhost:3001/system-manual`. Verify:
+- "TELEMETRY PIPELINE" and "SEASONAL ARCHITECTURE" appear in sidebar with their P2 entries listed
+- No hardcoded labels in source — all derived from filesystem
+
+- [ ] **Step 4: Check TELEMETRY PIPELINE page**
+
+Navigate to `/system-manual/telemetry-pipeline`. Verify:
+- `TELEMETRY PIPELINE` h1 appears
 - Intro text and pipeline image appear
-- All 6 phase headings (PHASE 1 … PHASE 6) appear as section titles with a top border
+- All 6 phase headings appear with a top border between them
 - Each phase's content renders below its heading
-- Sidebar "TELEMETRY PIPELINE" item is highlighted (active state)
-- P2 sidebar links are visible and not highlighted
+- Sidebar TELEMETRY PIPELINE item is highlighted
 
-- [ ] **Step 4: Test anchor links**
+- [ ] **Step 5: Test anchor links**
 
-Click each P2 sidebar link (e.g. "PHASE 1: VOLUMETRIC INGESTION"). Verify the page scrolls to the correct section (browser URL bar shows `#phase-1-volumetric-ingestion`).
+Click each P2 sidebar link (e.g. "PHASE 1 VOLUMETRIC INGESTION"). Verify the page scrolls to the correct heading.
 
-- [ ] **Step 5: Test old P2 routes redirect**
+- [ ] **Step 6: Check SEASONAL ARCHITECTURE page**
 
-Navigate directly to `/system-manual/telemetry-pipeline/phase-1-volumetric-ingestion`. Verify it redirects to `/system-manual/telemetry-pipeline#phase-1-volumetric-ingestion`.
+Navigate to `/system-manual/seasonal-architecture`. Verify all 3 sections render in alphabetical order.
 
-- [ ] **Step 6: Repeat checks for `/system-manual/seasonal-architecture`**
+- [ ] **Step 7: Verify overview is unaffected**
 
-Verify all 3 sections (Chronological Grid, Phase Matrix, Modular Initialization Protocol) appear in sequence with section headings and content.
+Navigate to `/system-manual`. Verify it still shows only the overview content.
 
-- [ ] **Step 7: Verify Overview page is unaffected**
+- [ ] **Step 8: Verify adding a new section works**
 
-Navigate to `/system-manual`. Verify it still shows only the overview content with no regressions.
+Create a test directory and file:
+
+```bash
+mkdir -p user_web_frontend/content/system-manual/test-section
+echo "Test intro." > user_web_frontend/content/system-manual/test-section/index.md
+echo "Test child content." > user_web_frontend/content/system-manual/test-section/01-test-child.md
+```
+
+Restart dev server, navigate to `/system-manual/test-section`. Verify:
+- Page renders with title "TEST SECTION"
+- "01 TEST CHILD" section heading and content appear
+- Sidebar automatically shows "TEST SECTION" with "01 TEST CHILD" child link
+
+Delete test files after verifying:
+
+```bash
+rm -rf user_web_frontend/content/system-manual/test-section
+```
