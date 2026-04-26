@@ -2594,10 +2594,10 @@ button:disabled {
 
 .sm-sidebar {
   position: fixed;
-  top: 0;
+  top: var(--site-maintenance-strip-height, 0px);
   left: 0;
   width: 260px;
-  height: 100vh;
+  height: calc(100vh - var(--site-maintenance-strip-height, 0px));
   overflow-y: auto;
   overflow-x: hidden;
   background: var(--bd-bg-elev);
