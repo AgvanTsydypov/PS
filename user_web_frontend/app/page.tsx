@@ -22,6 +22,11 @@ export default function HomePage() {
             }
           />
           <SeasonArchetypeOpensBoard />
+          <div className="home-sm-action">
+            <Link href="/system-manual" className="season-mint-button">
+              System Manual
+            </Link>
+          </div>
         </div>
       }
     />

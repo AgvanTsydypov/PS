@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import SiteLogoLink from "./SiteLogoLink";
+
 type NavChild = { label: string; href: string };
 type NavItem = { label: string; href: string; children: NavChild[] };
 
@@ -11,6 +13,7 @@ export default function SystemManualSidebar({ nav }: { nav: NavItem[] }) {
 
   return (
     <nav className="sm-sidebar" aria-label="System Manual navigation">
+      <SiteLogoLink className="sm-sidebar-logo" />
       {nav.map((item) => {
         const hasChildren = item.children.length > 0;
         const isActive = pathname === item.href;
