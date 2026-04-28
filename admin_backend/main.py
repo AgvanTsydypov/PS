@@ -53,6 +53,7 @@ from admin_backend.claims_mint import (
     BLOCKCHAIN_ETHEREUM,
 )
 from scripts.evm_service import EVM_CONTRACT_ADDRESS_ENV_KEY
+from scripts.polystars_card_payload import promote_preview_to_claim
 
 logger = logging.getLogger(__name__)
 

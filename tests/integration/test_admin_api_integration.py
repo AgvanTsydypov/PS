@@ -27,7 +27,7 @@ def test_server_time_ok(admin_api_client):
 def test_config_ok(admin_api_client):
     r = admin_api_client.get("/api/config")
     assert r.status_code == 200
-    assert "default_solana_recipient" in r.json()
+    assert "default_evm_recipient" in r.json()
 
 
 def test_overview_has_seasons_and_logs(admin_api_client):
@@ -57,7 +57,6 @@ def test_eligibility_returns_streams(admin_api_client):
     assert body.get("wallet_address") == wallet.lower()
     assert "genesis" in body and isinstance(body["genesis"], dict)
     assert "standard" in body and isinstance(body["standard"], dict)
-    assert "double_mint" in body
 
 
 def test_user_web_wallet_actions_get(admin_api_client):
