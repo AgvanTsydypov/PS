@@ -17,7 +17,7 @@ from tests.integration.conftest import make_real_connection
 _WALLET_A = "0x" + "d" * 40
 _WALLET_B = "0x" + "e" * 40
 _WALLET_C = "0x" + "f" * 40
-_SOLANA_ADDR = "H1wsggroxpW3LwCCv8dVeiJW73oYPkcDGgSqhiT5Zbz3"
+_RECIPIENT_ADDR = "0x" + "c" * 40
 _SEASON_NUM = 77100
 
 
@@ -110,10 +110,10 @@ class TestReservePendingClaim:
     def test_inserts_pending_row(self, workbench, claim_season):
         result = workbench.reserve_pending_claim(
             wallet=_WALLET_A,
-            recipient_wallet=_SOLANA_ADDR,
+            recipient_wallet=_RECIPIENT_ADDR,
             season_id=claim_season,
             phase="breach",
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         claim = _fetch_claim(result["claim_id"])
         assert claim is not None
@@ -122,10 +122,10 @@ class TestReservePendingClaim:
     def test_trigger_assigns_collection_mint_number(self, workbench, claim_season):
         result = workbench.reserve_pending_claim(
             wallet=_WALLET_A,
-            recipient_wallet=_SOLANA_ADDR,
+            recipient_wallet=_RECIPIENT_ADDR,
             season_id=claim_season,
             phase="breach",
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         assert result["collection_mint_number"] is not None
         assert result["collection_mint_number"] >= 1
@@ -133,17 +133,17 @@ class TestReservePendingClaim:
     def test_sequential_mint_numbers_within_season(self, workbench, claim_season):
         r1 = workbench.reserve_pending_claim(
             wallet=_WALLET_A,
-            recipient_wallet=_SOLANA_ADDR,
+            recipient_wallet=_RECIPIENT_ADDR,
             season_id=claim_season,
             phase="breach",
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         r2 = workbench.reserve_pending_claim(
             wallet=_WALLET_B,
-            recipient_wallet=_SOLANA_ADDR,
+            recipient_wallet=_RECIPIENT_ADDR,
             season_id=claim_season,
             phase="breach",
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         n1 = r1["collection_mint_number"]
         n2 = r2["collection_mint_number"]
@@ -153,29 +153,29 @@ class TestReservePendingClaim:
 class TestFinalizeCompletedClaim:
 
     def _make_result(self, claim_id: int):
-        from scripts.solana_service import MintedNftResult
+        from scripts.evm_service import MintedNftResult
         return MintedNftResult(
             claim_id=claim_id,
-            asset_address="FAKE_ASSET_ADDRESS",
-            tx_hash="FAKE_TX_HASH_" + "a" * 40,
+            asset_address="0x4aAd310B69B37B006Edb8D4573a4CEf7c34A5e8F/0",
+            tx_hash="0x" + "a" * 64,
             nft_name="Test NFT",
             metadata_uri="https://example.com/meta.json",
-            explorer_tx_url="https://explorer.solana.com/tx/fake",
-            explorer_asset_url="https://explorer.solana.com/address/fake",
+            explorer_tx_url="https://sepolia.etherscan.io/tx/0x" + "a" * 64,
+            explorer_asset_url="https://testnets.opensea.io/assets/sepolia/0x4aAd310B69B37B006Edb8D4573a4CEf7c34A5e8F/0",
         )
 
     def test_status_becomes_completed(self, workbench, claim_season):
         r = workbench.reserve_pending_claim(
             wallet=_WALLET_A,
-            recipient_wallet=_SOLANA_ADDR,
+            recipient_wallet=_RECIPIENT_ADDR,
             season_id=claim_season,
             phase="breach",
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         workbench.finalize_completed_claim(
             claim_id=r["claim_id"],
             mint_result=self._make_result(r["claim_id"]),
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         claim = _fetch_claim(r["claim_id"])
         assert claim["status"] == "COMPLETED"
@@ -183,16 +183,16 @@ class TestFinalizeCompletedClaim:
     def test_tx_hash_and_asset_address_written(self, workbench, claim_season):
         r = workbench.reserve_pending_claim(
             wallet=_WALLET_A,
-            recipient_wallet=_SOLANA_ADDR,
+            recipient_wallet=_RECIPIENT_ADDR,
             season_id=claim_season,
             phase="breach",
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         mint = self._make_result(r["claim_id"])
         workbench.finalize_completed_claim(
             claim_id=r["claim_id"],
             mint_result=mint,
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         claim = _fetch_claim(r["claim_id"])
         assert claim["tx_hash"] == mint.tx_hash
@@ -202,15 +202,15 @@ class TestFinalizeCompletedClaim:
         before = _fetch_season(claim_season)["remaining_supply"]
         r = workbench.reserve_pending_claim(
             wallet=_WALLET_A,
-            recipient_wallet=_SOLANA_ADDR,
+            recipient_wallet=_RECIPIENT_ADDR,
             season_id=claim_season,
             phase="breach",
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         workbench.finalize_completed_claim(
             claim_id=r["claim_id"],
             mint_result=self._make_result(r["claim_id"]),
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         after = _fetch_season(claim_season)["remaining_supply"]
         assert after == before - 1
@@ -222,15 +222,15 @@ class TestFinalizeCompletedClaim:
         for w in wallets:
             r = workbench.reserve_pending_claim(
                 wallet=w,
-                recipient_wallet=_SOLANA_ADDR,
+                recipient_wallet=_RECIPIENT_ADDR,
                 season_id=claim_season,
                 phase="breach",
-                mint_chain="solana",
+                mint_chain="ethereum",
             )
             workbench.finalize_completed_claim(
                 claim_id=r["claim_id"],
                 mint_result=self._make_result(r["claim_id"]),
-                mint_chain="solana",
+                mint_chain="ethereum",
             )
         season = _fetch_season(claim_season)
         assert season["remaining_supply"] == 0
@@ -243,36 +243,36 @@ class TestReleaseReservedClaim:
     def test_release_pending_deletes_row_and_returns_true(self, workbench, claim_season):
         r = workbench.reserve_pending_claim(
             wallet=_WALLET_A,
-            recipient_wallet=_SOLANA_ADDR,
+            recipient_wallet=_RECIPIENT_ADDR,
             season_id=claim_season,
             phase="breach",
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         released = workbench.release_reserved_claim(r["claim_id"])
         assert released is True
         assert _fetch_claim(r["claim_id"]) is None
 
     def test_release_completed_claim_does_not_delete(self, workbench, claim_season):
-        from scripts.solana_service import MintedNftResult
+        from scripts.evm_service import MintedNftResult
         r = workbench.reserve_pending_claim(
             wallet=_WALLET_A,
-            recipient_wallet=_SOLANA_ADDR,
+            recipient_wallet=_RECIPIENT_ADDR,
             season_id=claim_season,
             phase="breach",
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         workbench.finalize_completed_claim(
             claim_id=r["claim_id"],
             mint_result=MintedNftResult(
                 claim_id=r["claim_id"],
-                asset_address="ASSET",
-                tx_hash="TXHASH",
+                asset_address="0x4aAd310B/0",
+                tx_hash="0x" + "f" * 64,
                 nft_name="N",
                 metadata_uri="https://x",
                 explorer_tx_url="https://x",
                 explorer_asset_url="https://x",
             ),
-            mint_chain="solana",
+            mint_chain="ethereum",
         )
         released = workbench.release_reserved_claim(r["claim_id"])
         assert released is False

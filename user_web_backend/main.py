@@ -14,7 +14,6 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -59,11 +58,6 @@ from scripts.cardgen.assets import (
     upload_card_assets_to_r2,
 )
 from scripts.http_fetch_ssrf import urlopen_after_ssrf_check
-
-try:
-    from solders.pubkey import Pubkey  # type: ignore
-except Exception:  # pragma: no cover - solders should be installed alongside admin
-    Pubkey = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -124,14 +118,8 @@ class RateLimitConfig(BaseModel):
     max_requests: int
 
 
-class SolanaWalletUpdateRequest(BaseModel):
-    """Body for PUT /api/me/solana-wallet — empty/null clears the saved wallet."""
-
-    solana_wallet: Optional[str] = None
-
-
 class MintMyNftRequest(BaseModel):
-    """Body for POST /api/me/mint — recipient comes from the saved Solana wallet on the session."""
+    """Body for POST /api/me/mint."""
 
     season_id: int
 
@@ -223,10 +211,6 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
     "/api/cards/get": RateLimitConfig(
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
         max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_GET_CARD_MAX", "20")),
-    ),
-    "/api/me/solana-wallet": RateLimitConfig(
-        window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
-        max_requests=int(os.getenv("USER_WEB_RATE_LIMIT_SOLANA_WALLET_MAX", "30")),
     ),
     "/api/me/eligibility": RateLimitConfig(
         window_seconds=int(os.getenv("USER_WEB_RATE_LIMIT_WINDOW_SECONDS", "60")),
@@ -327,36 +311,6 @@ PM_SESSION_REFRESH_TTL_SECONDS = float(
 )
 _pm_session_refresh_attempts: Dict[str, float] = {}
 _pm_session_refresh_lock = threading.Lock()
-# Solana / minted NFT lookup configuration. Used by /api/me/cards to render the
-# user's actual on-chain NFTs (claims rows that finalized on Solana) instead of
-# previewed/generated cards from preview_cards.
-SOLANA_RPC_URL_FOR_EXPLORER = os.getenv("SOLANA_RPC_URL", "").strip()
-SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS = float(
-    os.getenv("USER_WEB_NFT_METADATA_FETCH_TIMEOUT_SECONDS", "6")
-)
-SOLANA_NFT_METADATA_CACHE_MAX_ENTRIES = int(
-    os.getenv("USER_WEB_NFT_METADATA_CACHE_MAX_ENTRIES", "2000")
-)
-SOLANA_NFT_METADATA_PARALLEL_FETCHES = max(
-    1, int(os.getenv("USER_WEB_NFT_METADATA_PARALLEL_FETCHES", "8"))
-)
-_nft_metadata_cache_lock = threading.Lock()
-_nft_metadata_cache: "Dict[str, Dict[str, Optional[str]]]" = {}
-# Full off-chain JSON metadata cache, keyed by URI. Mirrors
-# ``_nft_metadata_cache`` but stores the entire parsed JSON object so the
-# DAS-backed /api/me/cards endpoint can read ``card_display_data`` (or legacy
-# ``polystars_card``) and any custom top-level fields without re-fetching from
-# IPFS. Each entry is a
-# (cached_at_monotonic, payload) tuple — payload is the parsed JSON for
-# successful fetches and an empty dict for negative results. Negative
-# entries are kept only for ``USER_WEB_NFT_METADATA_NEGATIVE_TTL_SECONDS``
-# so a transient gateway 429/timeout does not permanently hide a card's
-# image and slug until the container restarts.
-_nft_metadata_full_cache_lock = threading.Lock()
-_nft_metadata_full_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
-NFT_METADATA_NEGATIVE_TTL_SECONDS = float(
-    os.getenv("USER_WEB_NFT_METADATA_NEGATIVE_TTL_SECONDS", "60")
-)
 # Public IPFS gateways used as automatic fallbacks when the primary URL is
 # rate-limited / down. Order matters — cheapest/fastest first. Pinata's
 # public gateway is intentionally NOT in this list because it's the most
@@ -367,31 +321,6 @@ _IPFS_FALLBACK_GATEWAYS: Tuple[str, ...] = (
     "https://dweb.link/ipfs/",
     "https://nftstorage.link/ipfs/",
 )
-# Solana DAS (Digital Asset Standard) configuration. Used by /api/me/cards to
-# enumerate the user's currently-owned NFTs from MASTER_COLLECTION_ADDRESS
-# directly from on-chain state, so transferred/sold NFTs disappear from the
-# dashboard automatically. SOLANA_DAS_RPC_URL must point to a DAS-compatible
-# provider (Helius, Triton, Quicknode, Shyft, …); plain mainnet-beta does not
-# implement searchAssets / getAssetsByOwner.
-SOLANA_DAS_RPC_URL = (
-    os.getenv("SOLANA_DAS_RPC_URL", "").strip()
-    or os.getenv("SOLANA_RPC_URL", "").strip()
-)
-SOLANA_DAS_REQUEST_TIMEOUT_SECONDS = float(
-    os.getenv("USER_WEB_SOLANA_DAS_REQUEST_TIMEOUT_SECONDS", "8")
-)
-SOLANA_DAS_PAGE_LIMIT = max(
-    1, min(int(os.getenv("USER_WEB_SOLANA_DAS_PAGE_LIMIT", "200")), 1000)
-)
-SOLANA_DAS_MAX_PAGES = max(
-    1, int(os.getenv("USER_WEB_SOLANA_DAS_MAX_PAGES", "10"))
-)
-ME_CARDS_ONCHAIN_CACHE_TTL_SECONDS = float(
-    os.getenv("USER_WEB_ME_CARDS_ONCHAIN_CACHE_TTL_SECONDS", "20")
-)
-_me_cards_onchain_cache_lock = threading.Lock()
-# (owner_solana_wallet_lower, collection_lower) -> (expires_at_monotonic, payload)
-_me_cards_onchain_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
 CLAIMS_UNIQUENESS_INDEX_NAME = "ux_claims_active_season_user_wallet_lower"
 
 CARD_SEASON_TYPE_OPTIONS = ("standard", "genesis")
@@ -603,25 +532,6 @@ def _warn_if_claims_uniqueness_index_missing() -> None:
             )
     except Exception:
         logger.exception("Could not verify presence of index %s", CLAIMS_UNIQUENESS_INDEX_NAME)
-    finally:
-        conn.close()
-
-
-def _ensure_user_solana_wallet_column() -> None:
-    """Adds the optional solana_wallet column to user_wallet_signins for existing DBs."""
-    conn = _get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                ALTER TABLE user_wallet_signins
-                    ADD COLUMN IF NOT EXISTS solana_wallet TEXT
-                """
-            )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        logger.exception("Failed to ensure user_wallet_signins.solana_wallet column")
     finally:
         conn.close()
 
@@ -1460,43 +1370,6 @@ def _format_generated_card_row(row: Dict[str, Any], request: Request, include_pa
     return payload
 
 
-def _solana_explorer_cluster_suffix() -> str:
-    """Returns the ?cluster=... suffix matching SOLANA_RPC_URL for explorer links."""
-    rpc = SOLANA_RPC_URL_FOR_EXPLORER.lower()
-    if "devnet" in rpc:
-        return "?cluster=devnet"
-    if "testnet" in rpc:
-        return "?cluster=testnet"
-    return ""
-
-
-def _build_solana_explorer_asset_url(asset_address: str) -> Optional[str]:
-    addr = (asset_address or "").strip()
-    if not addr:
-        return None
-    return f"https://explorer.solana.com/address/{addr}{_solana_explorer_cluster_suffix()}"
-
-
-def _build_solana_explorer_tx_url(tx_hash: str) -> Optional[str]:
-    tx = (tx_hash or "").strip()
-    if not tx:
-        return None
-    return f"https://explorer.solana.com/tx/{tx}{_solana_explorer_cluster_suffix()}"
-
-
-def _build_magiceden_item_url(asset_address: str) -> Optional[str]:
-    """Public Magic Eden item page for a Solana NFT mint/asset address.
-
-    Magic Eden only indexes mainnet assets, so on devnet/testnet the link will
-    404 — we still emit it for parity with the Explorer link; the frontend can
-    decide whether to surface it based on the cluster.
-    """
-    addr = (asset_address or "").strip()
-    if not addr:
-        return None
-    return f"https://magiceden.io/item-details/{addr}"
-
-
 def _decode_data_uri_json(metadata_uri: str) -> Optional[Dict[str, Any]]:
     """Decode a data:application/json[;base64],... metadata URI used as Pinata fallback."""
     if not metadata_uri.startswith("data:"):
@@ -1597,9 +1470,9 @@ def _normalize_ipfs_gateway_url(value: Any) -> Optional[str]:
 def _extract_nft_visuals_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Optional[str]]:
     """Pull (name, front, back, card_slug) details out of a Metaplex-style NFT metadata JSON.
 
-    Mirrors the layout produced by ``SolanaClient._build_metadata_uri``: the
-    primary front image is in ``image``, and ``properties.files`` lists ``[front, back]``
-    so the back image is the first ``files[].uri`` that differs from ``image``.
+    Mirrors the Metaplex NFT metadata layout: the primary front image is in
+    ``image``, and ``properties.files`` lists ``[front, back]`` so the back
+    image is the first ``files[].uri`` that differs from ``image``.
     The in-app card slug is recovered from ``card_display_data`` (or legacy
     ``polystars_card``) ``qr_payload`` so minted STARs deep-link to ``/cards/{slug}``.
 
@@ -1631,72 +1504,6 @@ def _extract_nft_visuals_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Op
         "back_image_url": back,
         "card_slug": card_slug,
     }
-
-
-def _resolve_nft_visuals_for_metadata_uri(metadata_uri: str) -> Dict[str, Optional[str]]:
-    """Fetch (with caching) NFT image URLs + card slug by metadata URI.
-
-    The cache is keyed by the URI itself; IPFS content is immutable so a single
-    successful fetch can be reused across requests. Returns a dict with
-    ``name``, ``front_image_url``, ``back_image_url``, ``card_slug`` (any of
-    which may be ``None``). A negative result (failed fetch) is also cached as
-    empty values to avoid hammering a slow gateway on every page load.
-    """
-    uri = (metadata_uri or "").strip()
-    empty: Dict[str, Optional[str]] = {
-        "name": None,
-        "front_image_url": None,
-        "back_image_url": None,
-        "card_slug": None,
-    }
-    if not uri:
-        return empty
-
-    with _nft_metadata_cache_lock:
-        cached = _nft_metadata_cache.get(uri)
-        if cached is not None:
-            return dict(cached)
-
-    metadata: Optional[Dict[str, Any]] = None
-    if uri.startswith("data:"):
-        metadata = _decode_data_uri_json(uri)
-    else:
-        try:
-            req = urllib.request.Request(
-                uri,
-                method="GET",
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": "Mozilla/5.0 (PolyStars user-web)",
-                },
-            )
-            with urlopen_after_ssrf_check(
-                req, timeout=float(SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS)
-            ) as response:
-                status_code = int(getattr(response, "status", 200))
-                if 200 <= status_code < 300:
-                    body = response.read().decode("utf-8", errors="replace")
-                    if body:
-                        try:
-                            metadata = json.loads(body)
-                        except json.JSONDecodeError:
-                            metadata = None
-        except Exception:
-            metadata = None
-
-    visuals = _extract_nft_visuals_from_metadata(metadata) if isinstance(metadata, dict) else dict(empty)
-
-    with _nft_metadata_cache_lock:
-        if len(_nft_metadata_cache) >= SOLANA_NFT_METADATA_CACHE_MAX_ENTRIES:
-            # Drop one arbitrary entry; not LRU but bounded — enough for a
-            # process-local cache backed by immutable IPFS content.
-            try:
-                _nft_metadata_cache.pop(next(iter(_nft_metadata_cache)))
-            except StopIteration:
-                pass
-        _nft_metadata_cache[uri] = dict(visuals)
-
-    return visuals
 
 
 def _extract_ipfs_cid_path(uri: str) -> Optional[str]:
@@ -1740,497 +1547,6 @@ def _candidate_metadata_uris(uri: str) -> List[str]:
             if alt not in candidates:
                 candidates.append(alt)
     return candidates
-
-
-def _try_fetch_metadata_json(uri: str) -> Optional[Dict[str, Any]]:
-    """Single-shot HTTP GET that returns parsed JSON or ``None`` on any failure.
-
-    Treats any non-2xx, network error, or non-JSON body as a soft failure so
-    the caller can move on to the next fallback gateway.
-    """
-    if not uri:
-        return None
-    if uri.startswith("data:"):
-        return _decode_data_uri_json(uri)
-    try:
-        req = urllib.request.Request(
-            uri,
-            method="GET",
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (PolyStars user-web)",
-            },
-        )
-        with urlopen_after_ssrf_check(
-            req, timeout=float(SOLANA_NFT_METADATA_FETCH_TIMEOUT_SECONDS)
-        ) as response:
-            status_code = int(getattr(response, "status", 200))
-            if not (200 <= status_code < 300):
-                return None
-            body = response.read().decode("utf-8", errors="replace")
-            if not body:
-                return None
-            try:
-                parsed = json.loads(body)
-            except json.JSONDecodeError:
-                return None
-            return parsed if isinstance(parsed, dict) else None
-    except Exception:
-        return None
-
-
-def _fetch_full_nft_metadata_for_uri(metadata_uri: str) -> Optional[Dict[str, Any]]:
-    """Returns the parsed off-chain NFT metadata JSON, or ``None`` on failure.
-
-    Unlike ``_resolve_nft_visuals_for_metadata_uri`` (which returns a small
-    projection), this returns the full JSON object so callers can read the
-    embedded ``card_display_data`` / ``polystars_card`` block, attributes, and any other custom
-    top-level fields.
-
-    Successful results are cached forever (IPFS content is immutable).
-    Negative results are kept only for ``NFT_METADATA_NEGATIVE_TTL_SECONDS``
-    so a single transient gateway 429/timeout does not permanently hide a
-    card's image and slug. On a cold or expired entry we also try a small
-    set of public IPFS fallback gateways before giving up.
-    """
-    uri = (metadata_uri or "").strip()
-    if not uri:
-        return None
-
-    now = monotonic()
-    with _nft_metadata_full_cache_lock:
-        cached = _nft_metadata_full_cache.get(uri)
-        if cached is not None:
-            cached_at, payload = cached
-            if payload:
-                return payload
-            if now - cached_at < NFT_METADATA_NEGATIVE_TTL_SECONDS:
-                return None
-            # Negative entry expired — fall through and refetch.
-
-    metadata: Optional[Dict[str, Any]] = None
-    for candidate in _candidate_metadata_uris(uri):
-        result = _try_fetch_metadata_json(candidate)
-        if isinstance(result, dict) and result:
-            metadata = result
-            break
-
-    with _nft_metadata_full_cache_lock:
-        if len(_nft_metadata_full_cache) >= SOLANA_NFT_METADATA_CACHE_MAX_ENTRIES:
-            try:
-                _nft_metadata_full_cache.pop(next(iter(_nft_metadata_full_cache)))
-            except StopIteration:
-                pass
-        _nft_metadata_full_cache[uri] = (
-            now,
-            metadata if isinstance(metadata, dict) else {},
-        )
-    return metadata if isinstance(metadata, dict) else None
-
-
-def _iso_to_epoch_seconds(value: Optional[str]) -> int:
-    """Best-effort ISO-8601 → epoch seconds converter for stable sort ordering.
-
-    Returns ``0`` for any unparseable / empty input so callers can use the
-    result in a sort key without branching on ``None``.
-    """
-    text = str(value or "").strip()
-    if not text:
-        return 0
-    try:
-        if text.endswith("Z"):
-            text = text[:-1] + "+00:00"
-        dt = datetime.fromisoformat(text)
-    except ValueError:
-        return 0
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    try:
-        return int(dt.timestamp())
-    except (OverflowError, OSError, ValueError):
-        return 0
-
-
-def _das_search_assets_by_owner_and_collection(
-    owner_solana_wallet: str,
-    collection_address: str,
-) -> List[Dict[str, Any]]:
-    """Returns all DAS Asset records owned by ``owner`` that belong to ``collection``.
-
-    Uses the Metaplex DAS ``searchAssets`` RPC method. Iterates pages until
-    the provider returns fewer items than the page size or until we hit the
-    safety cap ``SOLANA_DAS_MAX_PAGES``. Raises ``HTTPException(503)`` if the
-    RPC is misconfigured / unreachable / returns a JSON-RPC error so the
-    caller can surface a clean "service unavailable" to the dashboard
-    instead of silently rendering an empty list.
-
-    The DAS endpoint must be a provider that implements DAS (Helius, Triton,
-    Quicknode, Shyft, …); plain ``api.mainnet-beta.solana.com`` does NOT.
-    """
-    rpc_url = SOLANA_DAS_RPC_URL.strip()
-    if not rpc_url:
-        logger.error(
-            "SOLANA_DAS_RPC_URL (or SOLANA_RPC_URL) is not configured; cannot list on-chain STARs"
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="On-chain NFT lookup is not configured on the server",
-        )
-    owner = (owner_solana_wallet or "").strip()
-    collection = (collection_address or "").strip()
-    if not owner or not collection:
-        return []
-
-    aggregated: List[Dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    page = 1
-    while page <= SOLANA_DAS_MAX_PAGES:
-        body = json.dumps({
-            "jsonrpc": "2.0",
-            "id": f"polystars-me-cards-p{page}",
-            "method": "searchAssets",
-            "params": {
-                "ownerAddress": owner,
-                "grouping": ["collection", collection],
-                "burnt": False,
-                "page": page,
-                "limit": SOLANA_DAS_PAGE_LIMIT,
-            },
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            rpc_url,
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "PolyStars user-web/1.0 (+DAS me-cards)",
-            },
-        )
-        try:
-            with urllib.request.urlopen(
-                req, timeout=SOLANA_DAS_REQUEST_TIMEOUT_SECONDS
-            ) as response:
-                status_code = int(getattr(response, "status", 200))
-                raw = response.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            err_body = ""
-            try:
-                err_body = exc.read().decode("utf-8", errors="replace")[:300]
-            except Exception:
-                pass
-            logger.warning(
-                "DAS searchAssets HTTP error code=%s owner=%s collection=%s body=%s",
-                exc.code,
-                owner,
-                collection,
-                err_body,
-            )
-            raise HTTPException(
-                status_code=503, detail="On-chain NFT lookup failed"
-            ) from exc
-        except (urllib.error.URLError, TimeoutError):
-            logger.exception(
-                "DAS searchAssets transport failure owner=%s collection=%s",
-                owner,
-                collection,
-            )
-            raise HTTPException(
-                status_code=503, detail="On-chain NFT lookup failed"
-            )
-
-        if status_code < 200 or status_code >= 300:
-            logger.warning(
-                "DAS searchAssets non-2xx status=%s body=%s",
-                status_code,
-                raw[:300],
-            )
-            raise HTTPException(
-                status_code=503, detail="On-chain NFT lookup failed"
-            )
-
-        try:
-            envelope = json.loads(raw or "{}")
-        except json.JSONDecodeError:
-            logger.warning("DAS searchAssets returned invalid JSON: %s", raw[:300])
-            raise HTTPException(
-                status_code=503, detail="On-chain NFT lookup failed"
-            )
-
-        if not isinstance(envelope, dict):
-            raise HTTPException(
-                status_code=503, detail="On-chain NFT lookup failed"
-            )
-        if envelope.get("error"):
-            logger.warning(
-                "DAS searchAssets returned RPC error owner=%s collection=%s error=%s",
-                owner,
-                collection,
-                envelope.get("error"),
-            )
-            raise HTTPException(
-                status_code=503, detail="On-chain NFT lookup failed"
-            )
-        result = envelope.get("result") or {}
-        items = result.get("items") if isinstance(result, dict) else None
-        if not isinstance(items, list):
-            items = []
-
-        # Defensive de-dup: some providers return overlapping pages.
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            asset_id = str(item.get("id") or "").strip()
-            if not asset_id or asset_id in seen_ids:
-                continue
-            seen_ids.add(asset_id)
-            aggregated.append(item)
-
-        if len(items) < SOLANA_DAS_PAGE_LIMIT:
-            break
-        page += 1
-
-    return aggregated
-
-
-def _extract_attribute_map(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Returns a flat ``{trait_type: value}`` mapping from a metadata JSON.
-
-    Mirrors the attribute layout produced by ``SolanaClient._build_card_attributes``
-    so the dashboard can hydrate ``season_type`` / ``season_number`` / ``phase``
-    purely from on-chain metadata. Title-case trait labels (e.g. ``Season Type``)
-    are copied onto legacy snake_case keys when present so existing callers keep
-    working. Unknown trait types are preserved as-is.
-    """
-    if not isinstance(metadata, dict):
-        return {}
-    raw_attrs = metadata.get("attributes")
-    if not isinstance(raw_attrs, list):
-        return {}
-    out: Dict[str, Any] = {}
-    for entry in raw_attrs:
-        if not isinstance(entry, dict):
-            continue
-        trait = str(entry.get("trait_type") or "").strip()
-        if not trait:
-            continue
-        out[trait] = entry.get("value")
-
-    display_trait_to_internal = {
-        "Season Type": "season_type",
-        "Season Number": "season_number",
-        "Instance": "event_instance",
-        "Participant Class": "claim_type",
-        "Sector": "primary_tag",
-        "Archetype": "archetype",
-        "P(E)": "entry_bracket",
-        "Edge": "edge",
-        "Yield": "yield",
-        "Gravity": "gravity",
-        # Legacy on-chain labels
-        "SEASON TYPE": "season_type",
-        "SEASON NUMBER": "season_number",
-        "EVENT INSTANCE": "event_instance",
-        "PARTICIPANT CLASS": "claim_type",
-        "SECTOR": "primary_tag",
-        "ARCHETYPE": "archetype",
-        "EDGE": "edge",
-        "YIELD": "yield",
-        "GRAVITY": "gravity",
-    }
-    for display, internal in display_trait_to_internal.items():
-        if display in out and internal not in out:
-            out[internal] = out[display]
-    return out
-
-
-def _coerce_int(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        if isinstance(value, bool):
-            return int(value)
-        return int(value)
-    except (TypeError, ValueError):
-        try:
-            return int(str(value).strip())
-        except (TypeError, ValueError):
-            return None
-
-
-def _build_me_card_item_from_das_asset(
-    asset: Dict[str, Any],
-    metadata_json: Optional[Dict[str, Any]],
-    claims_enrichment: Dict[str, Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    """Maps a DAS Asset (+ off-chain JSON + DB row) to /api/me/cards item shape.
-
-    On-chain data is the source of truth for the *list* and for the visible
-    card content (name, images, slug, season type/number, phase,
-    collection_mint_number). The optional ``claims_enrichment`` lookup is
-    used solely to add ``claim_id``, ``season_id``, ``tx_hash``, ``minted_at``
-    when the same asset_address still has a matching DB row — these are not
-    available from DAS and are nice-to-have for explorer/timestamp links.
-    """
-    asset_address = str(asset.get("id") or "").strip()
-    if not asset_address:
-        return None
-
-    content = asset.get("content") if isinstance(asset.get("content"), dict) else {}
-    metadata_inline = (
-        content.get("metadata") if isinstance(content.get("metadata"), dict) else {}
-    )
-    json_uri = ""
-    if isinstance(content, dict):
-        json_uri = str(content.get("json_uri") or "").strip()
-
-    # Prefer the freshly-fetched off-chain JSON because it contains the full
-    # ``card_display_data`` / ``polystars_card`` block and any custom top-level fields. Fall back to
-    # the metadata inline-projected by the DAS provider if the URI fetch
-    # failed or returned nothing.
-    metadata_source: Dict[str, Any] = {}
-    if isinstance(metadata_json, dict) and metadata_json:
-        metadata_source = metadata_json
-    elif isinstance(metadata_inline, dict) and metadata_inline:
-        metadata_source = metadata_inline
-
-    visuals = _extract_nft_visuals_from_metadata(metadata_source) if metadata_source else {
-        "name": None,
-        "front_image_url": None,
-        "back_image_url": None,
-        "card_slug": None,
-    }
-
-    # If the off-chain JSON didn't yield images, fall back to DAS-supplied
-    # links/files (provider may host its own image proxy). Normalize Pinata
-    # gateway URLs here too so private gateway URLs emitted by the DAS
-    # provider are rewritten to the canonical public gateway.
-    if not visuals.get("front_image_url"):
-        links = content.get("links") if isinstance(content.get("links"), dict) else {}
-        if isinstance(links, dict):
-            link_image = _normalize_ipfs_gateway_url(links.get("image"))
-            if link_image:
-                visuals["front_image_url"] = link_image
-    if not visuals.get("front_image_url") or not visuals.get("back_image_url"):
-        files = content.get("files") if isinstance(content.get("files"), list) else []
-        for entry in files:
-            if not isinstance(entry, dict):
-                continue
-            uri_value = _normalize_ipfs_gateway_url(entry.get("uri"))
-            if not uri_value:
-                continue
-            if not visuals.get("front_image_url"):
-                visuals["front_image_url"] = uri_value
-                continue
-            if uri_value != visuals.get("front_image_url") and not visuals.get("back_image_url"):
-                visuals["back_image_url"] = uri_value
-
-    if not visuals.get("name"):
-        inline_name = str(metadata_inline.get("name") or "").strip() if isinstance(metadata_inline, dict) else ""
-        if inline_name:
-            visuals["name"] = inline_name
-
-    attributes = _extract_attribute_map(metadata_source)
-    season_type = (
-        str(attributes.get("season_type") or "").strip().lower() or None
-    )
-    season_number = _coerce_int(attributes.get("season_number"))
-    phase = (
-        str(attributes.get("claim_type") or "").strip().lower() or None
-    )
-
-    collection_mint_number: Optional[int] = None
-    embedded_card = _metadata_embedded_card(metadata_source) if metadata_source else None
-    if isinstance(embedded_card, dict):
-        collection_mint_number = _coerce_int(embedded_card.get("collection_mint_number"))
-
-    ownership = asset.get("ownership") if isinstance(asset.get("ownership"), dict) else {}
-    owner_address = (
-        str(ownership.get("owner") or "").strip() or None if isinstance(ownership, dict) else None
-    )
-
-    enrichment = claims_enrichment.get(asset_address) or {}
-    claim_id = enrichment.get("claim_id")
-    season_id = enrichment.get("season_id")
-    tx_hash = enrichment.get("tx_hash")
-    minted_at_iso = enrichment.get("minted_at_iso")
-
-    return {
-        "claim_id": claim_id,
-        "asset_address": asset_address,
-        "tx_hash": tx_hash,
-        "metadata_uri": json_uri or None,
-        "recipient_solana_wallet": owner_address,
-        "season_id": season_id,
-        "season_type": season_type,
-        "season_number": season_number,
-        "phase": phase,
-        "collection_mint_number": collection_mint_number,
-        "name": visuals.get("name"),
-        "front_image_url": visuals.get("front_image_url"),
-        "back_image_url": visuals.get("back_image_url"),
-        "card_slug": visuals.get("card_slug"),
-        "explorer_asset_url": _build_solana_explorer_asset_url(asset_address),
-        "explorer_tx_url": _build_solana_explorer_tx_url(tx_hash) if tx_hash else None,
-        "minted_at": minted_at_iso,
-    }
-
-
-def _load_claims_enrichment_for_assets(
-    asset_addresses: List[str],
-) -> Dict[str, Dict[str, Any]]:
-    """Best-effort lookup of DB-only fields (claim_id, season_id, tx_hash, minted_at).
-
-    We intentionally don't filter by ``user_wallet`` here: the source of truth
-    for ownership is on-chain. The DB enrichment is keyed purely on
-    ``asset_address`` so even an NFT that was transferred to the current owner
-    from another PolyStars user gets a tx_hash/minted_at if those exist in our
-    claims table.
-    """
-    cleaned = [str(addr or "").strip() for addr in asset_addresses if str(addr or "").strip()]
-    if not cleaned:
-        return {}
-    out: Dict[str, Dict[str, Any]] = {}
-    conn = _get_connection()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-            cursor.execute(
-                """
-                SELECT
-                    c.id AS claim_id,
-                    c.asset_address,
-                    c.season_id,
-                    c.tx_hash,
-                    c.timestamp AS minted_at
-                FROM claims c
-                WHERE c.asset_address = ANY(%s)
-                  AND c.status = 'COMPLETED'
-                """,
-                (cleaned,),
-            )
-            for row in cursor.fetchall():
-                addr = str(row.get("asset_address") or "").strip()
-                if not addr:
-                    continue
-                minted_at = row.get("minted_at")
-                minted_at_iso: Optional[str] = None
-                if isinstance(minted_at, datetime):
-                    minted_at_iso = minted_at.astimezone(timezone.utc).isoformat()
-                out[addr] = {
-                    "claim_id": _coerce_int(row.get("claim_id")),
-                    "season_id": _coerce_int(row.get("season_id")),
-                    "tx_hash": (str(row.get("tx_hash") or "").strip() or None),
-                    "minted_at_iso": minted_at_iso,
-                }
-    except Exception:
-        # Enrichment is best-effort. A DB hiccup must not break the on-chain
-        # listing — the caller will simply render those auxiliary fields as
-        # null.
-        logger.exception("Failed to enrich on-chain STARs from claims table")
-        return {}
-    finally:
-        conn.close()
-    return out
 
 
 def _fetch_polymarket_public_profile(wallet_address: str) -> Dict[str, Any]:
@@ -2455,79 +1771,13 @@ def _load_wallet_signin_snapshot(user_wallet_address: str) -> Tuple[str, str]:
         conn.close()
 
 
-def _validate_solana_address(raw: str) -> str:
-    """Validates a Solana base58 pubkey and returns its canonical form."""
-    candidate = (raw or "").strip()
-    if not candidate:
-        raise HTTPException(status_code=400, detail="Solana wallet is required")
-    if Pubkey is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Solana support is unavailable on this server (solders not installed)",
-        )
-    try:
-        pubkey = Pubkey.from_string(candidate)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid Solana wallet address")
-    return str(pubkey)
-
-
-def _load_user_solana_wallet(user_wallet_address: str) -> Optional[str]:
-    conn = _get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT solana_wallet
-                FROM user_wallet_signins
-                WHERE wallet_address = %s
-                """,
-                (user_wallet_address.lower(),),
-            )
-            row = cursor.fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return None
-    value = row[0]
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _save_user_solana_wallet(user_wallet_address: str, solana_wallet: Optional[str]) -> None:
-    """Persist (or clear) the Solana recipient for the given EVM session wallet."""
-    normalized_evm = user_wallet_address.lower()
-    conn = _get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO user_wallet_signins (
-                    wallet_address, first_seen_at, last_signed_in_at, sign_in_count, solana_wallet
-                ) VALUES (%s, NOW(), NOW(), 1, %s)
-                ON CONFLICT (wallet_address)
-                DO UPDATE SET solana_wallet = EXCLUDED.solana_wallet
-                """,
-                (normalized_evm, solana_wallet),
-            )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        logger.exception("Failed to save user solana wallet for %s", normalized_evm)
-        raise HTTPException(status_code=500, detail="Failed to save Solana wallet")
-    finally:
-        conn.close()
-
-
 def _load_wallet_session_row(user_wallet_address: str) -> Optional[Dict[str, Any]]:
     conn = _get_connection()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT sign_in_count, proxy_wallet, trader_rank, solana_wallet
+                SELECT sign_in_count, proxy_wallet, trader_rank
                 FROM user_wallet_signins
                 WHERE LOWER(wallet_address) = LOWER(%s)
                 LIMIT 1
@@ -2678,7 +1928,6 @@ def startup_checks() -> None:
     _configure_user_web_timing_logging()
     _warn_if_claims_uniqueness_index_missing()
     _ensure_preview_cards_schema()
-    _ensure_user_solana_wallet_column()
     _ensure_wallet_siwe_challenges_table()
     _warm_rasterizer_pool_in_background()
     if os.getenv("NODE_ENV", "development") != "development" and not _allowed_origins():
@@ -3099,7 +2348,6 @@ def wallet_session(request: Request) -> Dict[str, Any]:
             "sign_in_count": 0,
             "proxy_wallet": None,
             "trader_rank": None,
-            "solana_wallet": None,
         }
     cached_proxy = str(db_row.get("proxy_wallet") or "").strip() or None
     cached_rank = str(db_row.get("trader_rank") or "").strip() or None
@@ -3112,9 +2360,6 @@ def wallet_session(request: Request) -> Dict[str, Any]:
         "sign_in_count": int(db_row.get("sign_in_count") or 0),
         "proxy_wallet": refreshed_proxy,
         "trader_rank": refreshed_rank,
-        "solana_wallet": (str(db_row.get("solana_wallet") or "").strip() or None)
-        if db_row.get("solana_wallet") is not None
-        else None,
     }
 
 
@@ -3142,159 +2387,6 @@ def polymarket_public_profile(request: Request) -> Dict[str, Any]:
         "wallet_address": wallet,
         "proxy_wallet": proxy_wallet,
         "profile": profile,
-    }
-
-
-@app.get("/api/me/cards")
-def me_cards(request: Request) -> Dict[str, Any]:
-    """Returns the NFTs the user's linked Solana wallet currently holds on-chain.
-
-    Source of truth is **on-chain ownership** of assets in
-    ``MASTER_COLLECTION_ADDRESS`` for the user's saved Solana wallet (set via
-    ``PUT /api/me/solana-wallet``). The list is queried through the Metaplex
-    DAS ``searchAssets`` RPC method on ``SOLANA_DAS_RPC_URL``. As a result:
-
-    * Selling/transferring an NFT immediately removes it from the dashboard.
-    * Receiving someone else's PolyStars NFT immediately shows it.
-    * Minting on-chain failures (no asset_address) never appear here even
-      if a row exists in the local ``claims`` table.
-
-    Card content (name, images, slug, season type/number, phase,
-    collection_mint_number) is hydrated from the asset's off-chain JSON
-    metadata (referenced by ``content.json_uri``), which is cached in
-    ``_nft_metadata_cache``. Auxiliary DB-only fields (``claim_id``,
-    ``season_id``, ``tx_hash``, ``minted_at``) are best-effort joined from
-    our ``claims`` table by ``asset_address`` to keep explorer-tx links
-    working; they are ``None`` for NFTs that were not minted via PolyStars
-    (e.g. transferred in from another wallet).
-    """
-    _require_wallet_actions_enabled()
-    connected_wallet = _extract_wallet_from_request(request).lower()
-    if not Web3.is_address(connected_wallet):
-        raise HTTPException(status_code=400, detail="Invalid connected wallet")
-
-    linked_solana_wallet = _load_user_solana_wallet(connected_wallet)
-    collection_address = ""
-    try:
-        collection_address = (mint_service.get_master_collection_address() or "").strip()
-    except Exception:
-        logger.exception("Failed to resolve MASTER_COLLECTION_ADDRESS for /api/me/cards")
-        collection_address = ""
-
-    response_envelope_base: Dict[str, Any] = {
-        "wallet_address": connected_wallet,
-        "linked_solana_wallet": linked_solana_wallet,
-        "collection_address": collection_address or None,
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    # No linked Solana wallet → nothing to query on-chain. Return an empty
-    # listing rather than an error so the dashboard can prompt the user to
-    # link a Solana wallet via the existing UX.
-    if not linked_solana_wallet:
-        return {
-            **response_envelope_base,
-            "items": [],
-            "total": 0,
-            "source": "onchain",
-            "reason": "no_linked_solana_wallet",
-        }
-
-    if not collection_address:
-        logger.error(
-            "MASTER_COLLECTION_ADDRESS is not configured; /api/me/cards cannot list on-chain NFTs"
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="Collection address is not configured on the server",
-        )
-
-    cache_key = (linked_solana_wallet.lower(), collection_address.lower())
-    now_monotonic = monotonic()
-    if ME_CARDS_ONCHAIN_CACHE_TTL_SECONDS > 0:
-        with _me_cards_onchain_cache_lock:
-            cached = _me_cards_onchain_cache.get(cache_key)
-            if cached and cached[0] > now_monotonic:
-                return {
-                    **response_envelope_base,
-                    **cached[1],
-                    "source": "onchain",
-                    "cached": True,
-                }
-
-    assets = _das_search_assets_by_owner_and_collection(
-        owner_solana_wallet=linked_solana_wallet,
-        collection_address=collection_address,
-    )
-
-    # Defensive double-check: filter out anything DAS may have leaked through
-    # without an owner match (provider bugs / cached responses). Compare
-    # case-sensitively because Solana addresses are base58 — case matters.
-    owned_assets: List[Dict[str, Any]] = []
-    for asset in assets:
-        ownership = asset.get("ownership") if isinstance(asset.get("ownership"), dict) else {}
-        owner_addr = str(ownership.get("owner") or "").strip() if isinstance(ownership, dict) else ""
-        burnt = bool(asset.get("burnt"))
-        if burnt:
-            continue
-        if owner_addr and owner_addr != linked_solana_wallet:
-            continue
-        owned_assets.append(asset)
-
-    # Hydrate off-chain metadata in parallel (cached → near-instant on warm hits).
-    json_uris = [
-        str((a.get("content") or {}).get("json_uri") or "").strip() for a in owned_assets
-    ]
-    metadata_by_uri: Dict[str, Dict[str, Any]] = {}
-    unique_uris = [uri for uri in dict.fromkeys(json_uris) if uri]
-    if unique_uris:
-        max_workers = min(SOLANA_NFT_METADATA_PARALLEL_FETCHES, len(unique_uris))
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            for uri, raw_metadata in zip(
-                unique_uris,
-                pool.map(_fetch_full_nft_metadata_for_uri, unique_uris),
-            ):
-                if isinstance(raw_metadata, dict):
-                    metadata_by_uri[uri] = raw_metadata
-
-    asset_addresses = [str(a.get("id") or "").strip() for a in owned_assets]
-    enrichment = _load_claims_enrichment_for_assets(asset_addresses)
-
-    items: List[Dict[str, Any]] = []
-    for asset, json_uri in zip(owned_assets, json_uris):
-        item = _build_me_card_item_from_das_asset(
-            asset=asset,
-            metadata_json=metadata_by_uri.get(json_uri),
-            claims_enrichment=enrichment,
-        )
-        if item is None:
-            continue
-        items.append(item)
-
-    # Sort newest-first using the best timestamp we have. Items without a
-    # known minted_at (no matching DB row) are kept at the end so they remain
-    # visible but don't pollute the "recently minted" head of the list.
-    items.sort(
-        key=lambda entry: (
-            0 if entry.get("minted_at") else 1,
-            -(_iso_to_epoch_seconds(entry.get("minted_at"))),
-            str(entry.get("asset_address") or ""),
-        )
-    )
-
-    payload_body = {"items": items, "total": len(items)}
-    if ME_CARDS_ONCHAIN_CACHE_TTL_SECONDS > 0:
-        with _me_cards_onchain_cache_lock:
-            _me_cards_onchain_cache[cache_key] = (
-                now_monotonic + ME_CARDS_ONCHAIN_CACHE_TTL_SECONDS,
-                payload_body,
-            )
-
-    return {
-        **response_envelope_base,
-        **payload_body,
-        "source": "onchain",
-        "cached": False,
     }
 
 
@@ -3491,12 +2583,6 @@ def _build_card_detail_response(row_dict: Dict[str, Any], request: Request) -> D
     card["event_snapshot"] = event_snapshot
     minted_asset_address = str(row_dict.get("minted_asset_address") or "").strip() or None
     card["asset_address"] = minted_asset_address
-    card["explorer_asset_url"] = (
-        _build_solana_explorer_asset_url(minted_asset_address) if minted_asset_address else None
-    )
-    card["magiceden_url"] = (
-        _build_magiceden_item_url(minted_asset_address) if minted_asset_address else None
-    )
     return {"card": card}
 
 
@@ -3739,29 +2825,6 @@ def me_master_collection() -> Dict[str, str]:
     return {"address": address}
 
 
-@app.get("/api/me/solana-wallet")
-def me_get_solana_wallet(request: Request) -> Dict[str, Optional[str]]:
-    """Returns the saved Solana recipient for the signed-in EVM wallet."""
-    _require_wallet_actions_enabled()
-    wallet = _extract_wallet_from_request(request).lower()
-    saved = _load_user_solana_wallet(wallet)
-    return {"wallet_address": wallet, "solana_wallet": saved}
-
-
-@app.put("/api/me/solana-wallet")
-def me_put_solana_wallet(payload: SolanaWalletUpdateRequest, request: Request) -> Dict[str, Optional[str]]:
-    """Saves (or clears with empty/null) the Solana recipient for the signed-in EVM wallet."""
-    _require_wallet_actions_enabled()
-    wallet = _extract_wallet_from_request(request).lower()
-    raw = (payload.solana_wallet or "").strip()
-    if not raw:
-        _save_user_solana_wallet(wallet, None)
-        return {"wallet_address": wallet, "solana_wallet": None}
-    canonical = _validate_solana_address(raw)
-    _save_user_solana_wallet(wallet, canonical)
-    return {"wallet_address": wallet, "solana_wallet": canonical}
-
-
 @app.get("/api/me/eligibility")
 def me_eligibility(request: Request) -> Dict[str, Any]:
     """Mint eligibility for the signed-in wallet across the current Genesis and Standard streams."""
@@ -3781,7 +2844,7 @@ def me_eligibility(request: Request) -> Dict[str, Any]:
 
 @app.post("/api/me/mint")
 def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
-    """Mints the next eligible NFT to the user's saved Solana wallet for the given season."""
+    """Mints the next eligible NFT for the signed-in wallet and given season."""
     _require_wallet_actions_enabled()
     wallet = _extract_wallet_from_request(request).lower()
     if not Web3.is_address(wallet):
@@ -3835,14 +2898,6 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
             detail="Wallet is not registered on Polymarket — minting is not allowed.",
         )
 
-    saved_solana = _load_user_solana_wallet(wallet)
-    if not saved_solana:
-        raise HTTPException(
-            status_code=400,
-            detail="Set your Solana recipient wallet before minting",
-        )
-    recipient = _validate_solana_address(saved_solana)
-
     try:
         season_id = int(payload.season_id)
     except Exception:
@@ -3852,7 +2907,7 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
 
     mint_request = MintClaimRequest(
         wallet=wallet,
-        recipient_address=recipient,
+        recipient_address=wallet,
         season_id=season_id,
         phase="breach",
         auto_phase=True,
@@ -3864,10 +2919,9 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
         raise
     except Exception:
         logger.exception(
-            "Mint failed for wallet=%s season_id=%s recipient=%s",
+            "Mint failed for wallet=%s season_id=%s",
             wallet,
             season_id,
-            recipient,
         )
         raise HTTPException(
             status_code=503,

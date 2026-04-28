@@ -33,7 +33,6 @@ type Season = {
 type ClaimRow = {
   id: number;
   user_wallet: string;
-  recipient_solana_wallet: string;
   phase_type: string;
   status: string;
   tx_hash?: string;
@@ -61,7 +60,6 @@ type WinnerWalletRow = {
   is_minted: boolean;
   minted_at?: string | null;
   minted_to_wallet?: string | null;
-  minted_to_solana_wallet?: string | null;
   minted_claim_id?: number | null;
   minted_tx_hash?: string | null;
   minted_asset_address?: string | null;
@@ -88,7 +86,6 @@ type WinnerWalletForm = {
   is_minted: boolean;
   minted_at_iso: string;
   minted_to_wallet: string;
-  minted_to_solana_wallet: string;
   minted_claim_id: string;
   minted_tx_hash: string;
   minted_asset_address: string;
@@ -564,7 +561,6 @@ export default function HomePage() {
     is_minted: false,
     minted_at_iso: "",
     minted_to_wallet: "",
-    minted_to_solana_wallet: "",
     minted_claim_id: "",
     minted_tx_hash: "",
     minted_asset_address: "",
@@ -685,7 +681,6 @@ export default function HomePage() {
     is_minted: false,
     minted_at_iso: "",
     minted_to_wallet: "",
-    minted_to_solana_wallet: "",
     minted_claim_id: "",
     minted_tx_hash: "",
     minted_asset_address: "",
@@ -708,7 +703,6 @@ export default function HomePage() {
     is_minted: Boolean(row.is_minted),
     minted_at_iso: row.minted_at ?? "",
     minted_to_wallet: row.minted_to_wallet ?? "",
-    minted_to_solana_wallet: row.minted_to_solana_wallet ?? "",
     minted_claim_id: row.minted_claim_id == null ? "" : String(row.minted_claim_id),
     minted_tx_hash: row.minted_tx_hash ?? "",
     minted_asset_address: row.minted_asset_address ?? "",
@@ -1669,7 +1663,7 @@ export default function HomePage() {
             <tbody>
               {seasonClaimsRows.map((r) => (
                 <tr key={r.id}>
-                  <td>{r.id}</td><td>{r.user_wallet}</td><td>{r.recipient_solana_wallet}</td><td>{r.phase_type}</td>
+                  <td>{r.id}</td><td>{r.user_wallet}</td><td>{r.phase_type}</td>
                   <td>{r.status}</td><td>{r.tx_hash}</td><td>{r.asset_address}</td><td>{r.timestamp}</td><td>{r.created_at}</td>
                 </tr>
               ))}
@@ -1749,8 +1743,6 @@ export default function HomePage() {
               <input value={winnerForm.minted_at_iso} onChange={(e) => setWinnerForm((prev) => ({ ...prev, minted_at_iso: e.target.value }))} style={{ minWidth: 280 }} />
               <label>minted_to_wallet</label>
               <input value={winnerForm.minted_to_wallet} onChange={(e) => setWinnerForm((prev) => ({ ...prev, minted_to_wallet: e.target.value }))} style={{ minWidth: 220 }} />
-              <label>minted_to_solana_wallet</label>
-              <input value={winnerForm.minted_to_solana_wallet} onChange={(e) => setWinnerForm((prev) => ({ ...prev, minted_to_solana_wallet: e.target.value }))} style={{ minWidth: 260 }} />
               <label>minted_claim_id</label>
               <input value={winnerForm.minted_claim_id} onChange={(e) => setWinnerForm((prev) => ({ ...prev, minted_claim_id: e.target.value }))} />
               <label>minted_tx_hash</label>
@@ -1779,7 +1771,6 @@ export default function HomePage() {
                       is_minted: winnerForm.is_minted,
                       minted_at_iso: winnerForm.minted_at_iso.trim() || null,
                       minted_to_wallet: winnerForm.minted_to_wallet.trim() || null,
-                      minted_to_solana_wallet: winnerForm.minted_to_solana_wallet.trim() || null,
                       minted_claim_id: winnerForm.minted_claim_id.trim() ? Number(winnerForm.minted_claim_id) : null,
                       minted_tx_hash: winnerForm.minted_tx_hash.trim() || null,
                       minted_asset_address: winnerForm.minted_asset_address.trim() || null,

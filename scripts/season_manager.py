@@ -177,7 +177,6 @@ class SeasonManager:
                         proxy_wallet AS wallet_address,
                         COALESCE(is_minted, FALSE) AS is_minted,
                         minted_to_wallet,
-                        minted_to_solana_wallet,
                         minted_claim_id,
                         minted_tx_hash,
                         minted_asset_address,

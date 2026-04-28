@@ -74,7 +74,6 @@ class ClaimsMintMixin:
         conn = self.manager.get_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute("ALTER TABLE claims ADD COLUMN IF NOT EXISTS recipient_solana_wallet TEXT")
                 cursor.execute("ALTER TABLE claims ADD COLUMN IF NOT EXISTS asset_address TEXT")
                 cursor.execute("ALTER TABLE claims ADD COLUMN IF NOT EXISTS mint_chain TEXT")
                 cursor.execute("ALTER TABLE claims ADD COLUMN IF NOT EXISTS collection_mint_number BIGINT")
@@ -82,16 +81,6 @@ class ClaimsMintMixin:
                 cursor.execute("ALTER TABLE claims ALTER COLUMN metadata_uri TYPE TEXT")
                 cursor.execute("ALTER TABLE claims ALTER COLUMN asset_address TYPE TEXT")
                 cursor.execute("ALTER TABLE claims DROP CONSTRAINT IF EXISTS claims_wallet_check")
-                cursor.execute(
-                    """
-                    ALTER TABLE claims
-                    ADD CONSTRAINT claims_wallet_check
-                    CHECK (
-                        user_wallet ~* '^0x[a-f0-9]{40}$'
-                        OR user_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'
-                    )
-                    """
-                )
                 # Backfill collection_mint_number for any pre-existing rows, numbering
                 # chronologically per season so legacy data keeps deterministic ordering.
                 cursor.execute(
@@ -331,7 +320,7 @@ class ClaimsMintMixin:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 cursor.execute(
                     """
-                    SELECT id, user_wallet, recipient_solana_wallet, phase_type, status, tx_hash, asset_address, timestamp, created_at
+                    SELECT id, user_wallet, phase_type, status, tx_hash, asset_address, timestamp, created_at
                     FROM claims
                     WHERE season_id = %s
                     ORDER BY created_at DESC, id DESC
@@ -537,7 +526,6 @@ class ClaimsMintMixin:
         insert_sql = """
             INSERT INTO claims (
                 user_wallet,
-                recipient_solana_wallet,
                 season_id,
                 phase_type,
                 timestamp,
@@ -547,7 +535,7 @@ class ClaimsMintMixin:
                 created_at,
                 updated_at
             )
-            VALUES (%s, %s, %s, %s, NOW(), %s, %s, %s, NOW(), NOW())
+            VALUES (%s, %s, %s, NOW(), %s, %s, %s, NOW(), NOW())
             RETURNING id, collection_mint_number
         """
         for attempt in range(2):
@@ -558,7 +546,6 @@ class ClaimsMintMixin:
                         insert_sql,
                         (
                             wallet,
-                            recipient_wallet,
                             season_id,
                             phase,
                             "PENDING",
@@ -686,7 +673,6 @@ class ClaimsMintMixin:
         allocation: WinnerClaimAllocation,
         claim_id: int,
         claimer_wallet: str,
-        recipient_solana_wallet: str,
         mint_result: MintedNftResult,
     ) -> None:
         conn = self.manager.get_connection()
@@ -699,7 +685,6 @@ class ClaimsMintMixin:
                         is_minted = TRUE,
                         minted_at = NOW(),
                         minted_to_wallet = %s,
-                        minted_to_solana_wallet = %s,
                         minted_claim_id = %s,
                         minted_tx_hash = %s,
                         minted_asset_address = %s
@@ -708,7 +693,6 @@ class ClaimsMintMixin:
                     """,
                     (
                         claimer_wallet,
-                        recipient_solana_wallet,
                         claim_id,
                         mint_result.tx_hash,
                         mint_result.asset_address,
@@ -831,7 +815,7 @@ class ClaimsMintMixin:
         card_claim_type = "origin" if allocation.assignment_type == "winner_self" else "looter"
 
         # Everything between reservation and finalize can fail (Pinata upload,
-        # Solana RPC, transaction confirmation). On any failure we:
+        # EVM RPC, transaction confirmation). On any failure we:
         #   1. Release the PENDING claim row so collection_mint_number stays gapless.
         #   2. Unpin any card images already uploaded to Pinata so they don't
         #      accumulate as orphaned pins. Metadata JSON unpin is handled inside
@@ -884,7 +868,6 @@ class ClaimsMintMixin:
             allocation=allocation,
             claim_id=claim_id,
             claimer_wallet=wallet,
-            recipient_solana_wallet=recipient_address,
             mint_result=mint_result,
         )
         # Promote the preview row into a minted ``claims`` row. This path is

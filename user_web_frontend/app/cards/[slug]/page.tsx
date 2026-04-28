@@ -173,7 +173,7 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                     <dd>{card.event_id ?? "N/A"}</dd>
                     <dt>Event slug</dt>
                     <dd>{event.slug ?? card.event_slug ?? "N/A"}</dd>
-                    <dt>Solana Explorer</dt>
+                    <dt>Explorer</dt>
                     <dd>
                       {isSafeExternalUrl(card.explorer_asset_url) ? (
                         <a
