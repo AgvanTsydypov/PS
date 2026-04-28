@@ -93,11 +93,6 @@ type EligibilityResponse = {
   is_origin_wallet: boolean;
   genesis: EligibilityStream;
   standard: EligibilityStream;
-  double_mint?: {
-    can_claim_genesis: boolean;
-    can_claim_standard: boolean;
-    can_claim_both_now: boolean;
-  };
 };
 
 type SolanaWalletResponse = {

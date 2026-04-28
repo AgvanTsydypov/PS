@@ -55,7 +55,6 @@ Key fields in the JSON response:
   "is_origin_wallet": true,
   "genesis":  { "eligible_now": true, "phase": "scavenge", "already_claimed": false },
   "standard": { "eligible_now": false, "phase": "vault", "ineligible_reason": "..." },
-  "double_mint": { "can_claim_both_now": false }
 }
 ```
 

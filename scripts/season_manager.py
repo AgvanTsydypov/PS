@@ -417,19 +417,11 @@ class SeasonManager:
         genesis_status = build_stream_status(genesis_season)
         standard_status = build_stream_status(standard_season)
 
-        can_claim_genesis = genesis_status["eligible_now"]
-        can_claim_standard = standard_status["eligible_now"]
-
         return {
             "wallet_address": normalized_wallet,
             "is_origin_wallet": is_origin,
             "genesis": genesis_status,
             "standard": standard_status,
-            "double_mint": {
-                "can_claim_genesis": can_claim_genesis,
-                "can_claim_standard": can_claim_standard,
-                "can_claim_both_now": can_claim_genesis and can_claim_standard,
-            },
         }
 
     def check_user_eligibility_for_season(
