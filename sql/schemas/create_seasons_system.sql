@@ -119,8 +119,7 @@ CREATE TABLE IF NOT EXISTS claims (
     
     -- User identification
     user_wallet VARCHAR(42) NOT NULL,
-    recipient_solana_wallet TEXT,
-    
+
     -- Claim details
     season_id INTEGER NOT NULL,
     phase_type phase_type NOT NULL,
@@ -157,7 +156,6 @@ CREATE TABLE IF NOT EXISTS claims (
 
 -- Claims indexes
 CREATE INDEX IF NOT EXISTS idx_claims_user_wallet ON claims(user_wallet);
-CREATE INDEX IF NOT EXISTS idx_claims_recipient_solana_wallet ON claims(recipient_solana_wallet) WHERE recipient_solana_wallet IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_claims_season_id ON claims(season_id);
 CREATE INDEX IF NOT EXISTS idx_claims_phase_type ON claims(phase_type);
 CREATE INDEX IF NOT EXISTS idx_claims_timestamp ON claims(timestamp DESC);
@@ -229,12 +227,11 @@ CREATE TRIGGER tr_claims_assign_season_mint
 COMMENT ON TABLE claims IS 'NFT claims for each season - tracks all mint requests';
 COMMENT ON COLUMN claims.collection_mint_number IS 'Per-season sequential mint number (1..N within each season_id); assigned by trigger';
 COMMENT ON COLUMN claims.user_wallet IS 'Ethereum wallet address of the claimant';
-COMMENT ON COLUMN claims.recipient_solana_wallet IS 'Solana wallet where minted NFT should be delivered';
 COMMENT ON COLUMN claims.season_id IS 'Reference to the season being claimed';
 COMMENT ON COLUMN claims.phase_type IS 'Claim phase: breach, vault (Origins only), or scavenge';
 COMMENT ON COLUMN claims.tx_hash IS 'Blockchain transaction hash for the mint';
 COMMENT ON COLUMN claims.token_id IS 'Minted NFT token ID';
-COMMENT ON COLUMN claims.asset_address IS 'Minted Solana NFT asset address';
+COMMENT ON COLUMN claims.asset_address IS 'Minted NFT asset address (contract/tokenId)';
 
 DO $$ BEGIN RAISE NOTICE '✅ Claims table created'; END $$;
 
@@ -358,7 +355,6 @@ CREATE TABLE IF NOT EXISTS winner_wallets_nft_to_claim (
     is_minted BOOLEAN NOT NULL DEFAULT FALSE,
     minted_at TIMESTAMPTZ,
     minted_to_wallet TEXT,
-    minted_to_solana_wallet TEXT,
     minted_claim_id BIGINT,
     minted_tx_hash TEXT,
     minted_asset_address TEXT,
@@ -386,7 +382,6 @@ ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS rank INTEGER;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS is_minted BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_at TIMESTAMPTZ;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_to_wallet TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_to_solana_wallet TEXT;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_claim_id BIGINT;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_tx_hash TEXT;
 ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_asset_address TEXT;

@@ -17,7 +17,6 @@ from tests.integration.conftest import make_real_connection
 _SEASON_NUM   = 77600
 _PROXY_WALLET = "0x" + "7" * 40
 _EOA_WALLET   = "0x" + "8" * 40
-_SOLANA_ADDR  = "H1wsggroxpW3LwCCv8dVeiJW73oYPkcDGgSqhiT5Zbz3"
 
 
 # ------------------------------------------------------------------
@@ -31,7 +30,7 @@ def _fetch_winner_row(winner_id: int) -> dict | None:
             cur.execute(
                 """
                 SELECT is_minted, minted_at, minted_to_wallet,
-                       minted_to_solana_wallet, minted_claim_id,
+                       minted_claim_id,
                        minted_tx_hash, minted_asset_address
                 FROM winner_wallets_nft_to_claim WHERE id = %s
                 """,
@@ -44,22 +43,22 @@ def _fetch_winner_row(winner_id: int) -> dict | None:
         return None
     return dict(zip(
         ("is_minted", "minted_at", "minted_to_wallet",
-         "minted_to_solana_wallet", "minted_claim_id",
+         "minted_claim_id",
          "minted_tx_hash", "minted_asset_address"),
         row,
     ))
 
 
 def _make_mint_result(claim_id: int):
-    from scripts.solana_service import MintedNftResult
+    from scripts.evm_service import MintedNftResult
     return MintedNftResult(
         claim_id=claim_id,
-        asset_address="INTEG_ASSET_ADDRESS",
-        tx_hash="INTEG_TX_HASH_" + "b" * 40,
+        asset_address="0x4aAd310B69B37B006Edb8D4573a4CEf7c34A5e8F/0",
+        tx_hash="0x" + "b" * 64,
         nft_name="Integ NFT",
         metadata_uri="https://example.com/integ-meta.json",
-        explorer_tx_url="https://explorer.solana.com/tx/integ",
-        explorer_asset_url="https://explorer.solana.com/address/integ",
+        explorer_tx_url="https://sepolia.etherscan.io/tx/0x" + "b" * 64,
+        explorer_asset_url="https://testnets.opensea.io/assets/sepolia/0x4aAd310B69B37B006Edb8D4573a4CEf7c34A5e8F/0",
     )
 
 
@@ -166,7 +165,6 @@ class TestMarkWinnerRowAsMinted:
             allocation,
             minted_setup["claim_id"],
             _EOA_WALLET,
-            _SOLANA_ADDR,
             _make_mint_result(minted_setup["claim_id"]),
         )
         row = _fetch_winner_row(minted_setup["winner_id"])
@@ -178,7 +176,6 @@ class TestMarkWinnerRowAsMinted:
             allocation,
             minted_setup["claim_id"],
             _EOA_WALLET,
-            _SOLANA_ADDR,
             _make_mint_result(minted_setup["claim_id"]),
         )
         row = _fetch_winner_row(minted_setup["winner_id"])
@@ -190,7 +187,6 @@ class TestMarkWinnerRowAsMinted:
             allocation,
             minted_setup["claim_id"],
             _EOA_WALLET,
-            _SOLANA_ADDR,
             _make_mint_result(minted_setup["claim_id"]),
         )
         row = _fetch_winner_row(minted_setup["winner_id"])
@@ -202,7 +198,6 @@ class TestMarkWinnerRowAsMinted:
             allocation,
             minted_setup["claim_id"],
             _EOA_WALLET,
-            _SOLANA_ADDR,
             _make_mint_result(minted_setup["claim_id"]),
         )
         row = _fetch_winner_row(minted_setup["winner_id"])
@@ -215,7 +210,6 @@ class TestMarkWinnerRowAsMinted:
             allocation,
             minted_setup["claim_id"],
             _EOA_WALLET,
-            _SOLANA_ADDR,
             mint,
         )
         row = _fetch_winner_row(minted_setup["winner_id"])
@@ -228,7 +222,6 @@ class TestMarkWinnerRowAsMinted:
             allocation,
             minted_setup["claim_id"],
             _EOA_WALLET,
-            _SOLANA_ADDR,
             mint,
         )
         row = _fetch_winner_row(minted_setup["winner_id"])
@@ -242,7 +235,6 @@ class TestMarkWinnerRowAsMinted:
             allocation,
             minted_setup["claim_id"],
             _EOA_WALLET,
-            _SOLANA_ADDR,
             mint,
         )
         with pytest.raises(RuntimeError, match="already marked as minted"):
@@ -250,6 +242,5 @@ class TestMarkWinnerRowAsMinted:
                 allocation,
                 minted_setup["claim_id"],
                 _EOA_WALLET,
-                _SOLANA_ADDR,
                 mint,
             )

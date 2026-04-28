@@ -72,7 +72,6 @@ type WalletSessionResponse = {
   sign_in_count?: number;
   proxy_wallet?: string | null;
   trader_rank?: string | null;
-  solana_wallet?: string | null;
 };
 
 type EligibilityStream = {
@@ -95,11 +94,6 @@ type EligibilityResponse = {
   standard: EligibilityStream;
 };
 
-type SolanaWalletResponse = {
-  wallet_address?: string;
-  solana_wallet: string | null;
-};
-
 type MintApiResult = {
   status?: string;
   claim_id?: number;
@@ -111,7 +105,6 @@ type MintApiResult = {
     asset_address?: string;
     tx_hash?: string;
   };
-  collection_address?: string;
   warnings?: string[];
   [key: string]: unknown;
 };
@@ -130,7 +123,6 @@ type MyMintedNftItem = {
   asset_address: string;
   tx_hash: string | null;
   metadata_uri: string | null;
-  recipient_solana_wallet: string | null;
   season_id: number | null;
   season_type: string | null;
   season_number: number | null;
@@ -288,11 +280,6 @@ type WalletOption =
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Text shown in the Solana hint paragraph. Extracted so it can be fed
-// through ScrambleText without a JSX fragment / whitespace ambiguity.
-const SOLANA_NOTE_TEXT =
-  "Your minted PolyStars STARs are issued on Solana. Provide the Solana address that should receive them. Minting is disabled until a Solana wallet is saved.";
-
 // Charset used to cycle characters during the byld.dev-style decode.
 // Mix of letters + common punctuation glyphs gives a "terminal decrypt"
 // feel similar to the hero copy on byld.dev.
@@ -398,12 +385,6 @@ export default function UserDashboard() {
   const [myCardsError, setMyCardsError] = useState("");
   const [myCardsFetchedAt, setMyCardsFetchedAt] = useState<string | null>(null);
   const [flippedCardSlugs, setFlippedCardSlugs] = useState<Record<string, boolean>>({});
-  const [solanaWallet, setSolanaWallet] = useState<string | null>(null);
-  const [solanaWalletInput, setSolanaWalletInput] = useState("");
-  const [solanaWalletLoading, setSolanaWalletLoading] = useState(false);
-  const [solanaWalletSaving, setSolanaWalletSaving] = useState(false);
-  const [solanaWalletError, setSolanaWalletError] = useState("");
-  const [solanaWalletNotice, setSolanaWalletNotice] = useState("");
   const [eligibility, setEligibility] = useState<EligibilityResponse | null>(null);
   const [eligibilityLoading, setEligibilityLoading] = useState(false);
   const [eligibilityError, setEligibilityError] = useState("");
@@ -418,13 +399,6 @@ export default function UserDashboard() {
   const [isWalletPanelHovered, setIsWalletPanelHovered] = useState(false);
   const [isWalletPanelCollapsed, setIsWalletPanelCollapsed] = useState(false);
   const walletPanelCollapseTimerRef = useRef<number | null>(null);
-
-  // Incremented each time the user hits "Refresh eligibility" without a
-  // saved Solana wallet. Used as a React `key` on the two Solana hint
-  // elements so they remount and restart the CSS ignition/fade animation.
-  // 0 means the flash has never fired yet → hint renders without the
-  // `.warn-flash` class.
-  const [warnFlashKey, setWarnFlashKey] = useState(0);
 
   // Wallet that was selected by the user in the picker — used for sign-in
   const selectedProviderRef = useRef<EthProvider | null>(null);
@@ -487,9 +461,6 @@ export default function UserDashboard() {
         }
         setProxyWallet(data.proxy_wallet ?? null);
         setTraderRank(data.trader_rank ?? null);
-        const initialSolana = (data.solana_wallet ?? "").trim() || null;
-        setSolanaWallet(initialSolana);
-        setSolanaWalletInput(initialSolana ?? "");
 
         const meta = loadStoredSessionMeta();
         if (typeof meta?.selectedWalletName === "string" && meta.selectedWalletName.trim()) {
@@ -515,10 +486,6 @@ export default function UserDashboard() {
       setMyCardsError("");
       setMyCardsFetchedAt(null);
       setFlippedCardSlugs({});
-      setSolanaWallet(null);
-      setSolanaWalletInput("");
-      setSolanaWalletError("");
-      setSolanaWalletNotice("");
       setEligibility(null);
       setEligibilityError("");
       setMintResultText("");
@@ -526,7 +493,6 @@ export default function UserDashboard() {
       return;
     }
     void refreshMyCards();
-    void refreshSolanaWallet();
     void refreshEligibility();
   }, [isSignedIn, walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -711,10 +677,6 @@ export default function UserDashboard() {
     setMyCardsError("");
     setMyCardsFetchedAt(null);
     setFlippedCardSlugs({});
-    setSolanaWallet(null);
-    setSolanaWalletInput("");
-    setSolanaWalletError("");
-    setSolanaWalletNotice("");
     setEligibility(null);
     setEligibilityError("");
     setMintResultText("");
@@ -885,81 +847,6 @@ export default function UserDashboard() {
     }
   }
 
-  async function refreshSolanaWallet() {
-    setSolanaWalletLoading(true);
-    setSolanaWalletError("");
-    try {
-      const res = await fetch(buildApiUrl("/api/me/solana-wallet"), {
-        method: "GET",
-        credentials: userApiCredentials,
-      });
-      if (!res.ok) {
-        if (res.status === 401) {
-          setIsSignedIn(false);
-          clearStoredSessionMeta();
-        }
-        const text = await res.text();
-        throw new Error(text || "Failed to load Solana wallet");
-      }
-      const payload = (await res.json()) as SolanaWalletResponse;
-      const value = (payload.solana_wallet ?? "").trim() || null;
-      setSolanaWallet(value);
-      setSolanaWalletInput(value ?? "");
-    } catch (error) {
-      setSolanaWalletError(extractErrorMessage(error));
-    } finally {
-      setSolanaWalletLoading(false);
-    }
-  }
-
-  async function saveSolanaWallet(overrideValue?: string | null) {
-    // The Clear button passes "" explicitly because React state updates are
-    // async — reading solanaWalletInput from the closure right after a
-    // setState would still see the stale (non-empty) value and re-save it.
-    const rawValue =
-      overrideValue !== undefined ? overrideValue ?? "" : solanaWalletInput;
-    const trimmed = String(rawValue).trim();
-    setSolanaWalletSaving(true);
-    setSolanaWalletError("");
-    setSolanaWalletNotice("");
-    try {
-      const res = await fetch(buildApiUrl("/api/me/solana-wallet"), {
-        method: "PUT",
-        credentials: userApiCredentials,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ solana_wallet: trimmed || null }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        let detail = text;
-        try {
-          const parsed = JSON.parse(text) as { detail?: string };
-          if (parsed?.detail) detail = parsed.detail;
-        } catch {
-          /* keep raw text */
-        }
-        throw new Error(detail || "Failed to save Solana wallet");
-      }
-      const payload = (await res.json()) as SolanaWalletResponse;
-      const value = (payload.solana_wallet ?? "").trim() || null;
-      setSolanaWallet(value);
-      setSolanaWalletInput(value ?? "");
-      setSolanaWalletNotice(value ? "Solana wallet saved." : "Solana wallet cleared.");
-      // Once a recipient wallet is saved successfully, mirror what the
-      // user would do manually: trigger the "Reload my STARs" action and
-      // refresh mint eligibility, so the dashboard reflects the new
-      // recipient without an extra click.
-      if (value) {
-        void refreshMyCards();
-        void refreshEligibility();
-      }
-    } catch (error) {
-      setSolanaWalletError(extractErrorMessage(error));
-    } finally {
-      setSolanaWalletSaving(false);
-    }
-  }
-
   async function refreshEligibility() {
     setEligibilityLoading(true);
     setEligibilityError("");
@@ -993,10 +880,6 @@ export default function UserDashboard() {
     }
     if (!isRegisteredOnPolymarket(proxyWallet)) {
       setMintError("Wallet is not registered on Polymarket — minting is not allowed.");
-      return;
-    }
-    if (!solanaWallet) {
-      setMintError("Set your Solana recipient wallet first.");
       return;
     }
     setMintingSeasonId(seasonId);
@@ -1054,13 +937,6 @@ export default function UserDashboard() {
   }
 
   function handleRefreshEligibilityClick() {
-    // When the user clicks "Refresh eligibility" without a saved Solana
-    // recipient wallet, briefly ignite the two blocking hints in red so
-    // the reason minting is locked is visually unmissable (0.5s of glow
-    // + 2s fade handled entirely in CSS via the .warn-flash keyframe).
-    if (!solanaWallet) {
-      setWarnFlashKey((k) => k + 1);
-    }
     void refreshEligibility();
   }
 
@@ -1075,15 +951,12 @@ export default function UserDashboard() {
     const stream = streamForSeason(season.id);
     const isThisMinting = mintingSeasonId === season.id;
     const isAnyMinting = mintingSeasonId !== null;
-    const hasSolanaWallet = Boolean(solanaWallet);
     const supplyEmpty = season.remaining <= 0;
     const isPmRegistered = isRegisteredOnPolymarket(proxyWallet);
 
     let blockedReason = "";
     if (!isPmRegistered) {
       blockedReason = "Wallet is not registered on Polymarket — minting is not allowed.";
-    } else if (!hasSolanaWallet) {
-      blockedReason = "Set your Solana recipient wallet to enable minting.";
     } else if (supplyEmpty) {
       blockedReason = "No supply remaining for this season.";
     } else if (eligibilityLoading && !stream) {
@@ -1097,12 +970,6 @@ export default function UserDashboard() {
     }
 
     const canMint = !blockedReason && !isAnyMinting;
-    // Only the "Solana wallet not set" reason participates in the
-    // ignition/fade flash. Other blockers (PM not registered, supply,
-    // eligibility loading/errors) are unrelated to the Solana button.
-    const isSolanaMissingReason =
-      blockedReason === "Set your Solana recipient wallet to enable minting.";
-    const shouldFlashReason = isSolanaMissingReason && warnFlashKey > 0;
 
     return (
       <div className="season-mint-action">
@@ -1115,16 +982,7 @@ export default function UserDashboard() {
           {isThisMinting ? "Minting..." : "Mint STAR"}
         </button>
         {blockedReason ? (
-          shouldFlashReason ? (
-            <span
-              key={`flash-${warnFlashKey}`}
-              className="season-mint-reason warn-flash"
-            >
-              <ScrambleText text={blockedReason} triggerKey={warnFlashKey} />
-            </span>
-          ) : (
-            <span className="season-mint-reason">{blockedReason}</span>
-          )
+          <span className="season-mint-reason">{blockedReason}</span>
         ) : (
           <span className="season-mint-reason ok">Eligible to mint now</span>
         )}
@@ -1284,14 +1142,6 @@ export default function UserDashboard() {
               <span>Trader rank</span>
               <strong>{traderRank ?? "No trades yet"}</strong>
             </div>
-            <div className="auth-info-row">
-              <span>Solana wallet</span>
-              <strong>
-                {solanaWallet
-                  ? `${solanaWallet.slice(0, 4)}...${solanaWallet.slice(-4)}`
-                  : "Not set"}
-              </strong>
-            </div>
           </>
         ) : null}
       </aside>
@@ -1336,79 +1186,6 @@ export default function UserDashboard() {
           )
         }
       />
-
-      <section className="season-board season-board-standalone solana-wallet-board">
-        <div className="season-board-title">Solana recipient wallet</div>
-        {!isSignedIn ? (
-          <div className="season-board-muted">
-            Sign in with your EVM wallet to set the Solana address that will receive your minted STARs.
-          </div>
-        ) : (
-          <>
-            {!solanaWallet ? (
-              warnFlashKey > 0 ? (
-                <p
-                  key={`flash-${warnFlashKey}`}
-                  className="season-board-note warn-flash"
-                >
-                  <ScrambleText text={SOLANA_NOTE_TEXT} triggerKey={warnFlashKey} />
-                </p>
-              ) : (
-                <p className="season-board-note">{SOLANA_NOTE_TEXT}</p>
-              )
-            ) : null}
-            <div className="solana-wallet-row">
-              <input
-                type="text"
-                className="solana-wallet-input"
-                placeholder="Your Solana wallet address (base58)"
-                value={solanaWalletInput}
-                onChange={(e) => {
-                  setSolanaWalletInput(e.target.value);
-                  setSolanaWalletNotice("");
-                  setSolanaWalletError("");
-                }}
-                spellCheck={false}
-                autoComplete="off"
-                disabled={solanaWalletSaving || solanaWalletLoading}
-              />
-              <button
-                onClick={() => void saveSolanaWallet()}
-                disabled={
-                  solanaWalletSaving ||
-                  solanaWalletLoading ||
-                  solanaWalletInput.trim() === (solanaWallet ?? "")
-                }
-              >
-                {solanaWalletSaving ? "Saving..." : "Save"}
-              </button>
-              {solanaWallet ? (
-                <button
-                  onClick={() => {
-                    setSolanaWalletInput("");
-                    void saveSolanaWallet("");
-                  }}
-                  disabled={solanaWalletSaving || solanaWalletLoading}
-                >
-                  Clear
-                </button>
-              ) : null}
-            </div>
-            <div className="solana-wallet-status">
-              <span>Saved address</span>
-              <strong className="solana-wallet-saved">
-                {solanaWalletLoading ? "Loading..." : solanaWallet ?? "Not set"}
-              </strong>
-            </div>
-            {solanaWalletError ? (
-              <pre className="eligibility-output">{solanaWalletError}</pre>
-            ) : null}
-            {solanaWalletNotice ? (
-              <p className="season-board-note">{solanaWalletNotice}</p>
-            ) : null}
-          </>
-        )}
-      </section>
 
       <section className="season-board season-board-standalone nft-board-horizontal">
         <div className="season-board-title">My STARs</div>

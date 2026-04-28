@@ -137,7 +137,6 @@ class WinnerWalletsUpsertRequest(BaseModel):
     is_minted: bool = False
     minted_at_iso: Optional[str] = None
     minted_to_wallet: Optional[str] = None
-    minted_to_solana_wallet: Optional[str] = None
     minted_claim_id: Optional[int] = None
     minted_tx_hash: Optional[str] = None
     minted_asset_address: Optional[str] = None
@@ -297,12 +296,6 @@ class SeasonWorkbenchService(ClaimsMintMixin):
                     """
                     ALTER TABLE winner_wallets_nft_to_claim
                     ADD COLUMN IF NOT EXISTS minted_to_wallet TEXT
-                    """
-                )
-                cursor.execute(
-                    """
-                    ALTER TABLE winner_wallets_nft_to_claim
-                    ADD COLUMN IF NOT EXISTS minted_to_solana_wallet TEXT
                     """
                 )
                 cursor.execute(
@@ -1550,7 +1543,7 @@ class SeasonWorkbenchService(ClaimsMintMixin):
                             roi_percentage, entry_bracket, edge, yield, gravity, rank,
                             archetype, archetype_description, archetype_math, rarity_bracket,
                             is_minted, minted_at,
-                            minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
+                            minted_to_wallet, minted_claim_id,
                             minted_tx_hash, minted_asset_address
                         FROM winner_wallets_nft_to_claim
                         ORDER BY season_id DESC, rank ASC NULLS LAST, id DESC
@@ -1568,7 +1561,7 @@ class SeasonWorkbenchService(ClaimsMintMixin):
                             roi_percentage, entry_bracket, edge, yield, gravity, rank,
                             archetype, archetype_description, archetype_math, rarity_bracket,
                             is_minted, minted_at,
-                            minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
+                            minted_to_wallet, minted_claim_id,
                             minted_tx_hash, minted_asset_address
                         FROM winner_wallets_nft_to_claim
                         WHERE season_id = %s
@@ -1779,12 +1772,12 @@ class SeasonWorkbenchService(ClaimsMintMixin):
                         window_start, window_end, snapshot_at,
                         event_id, event_slug,
                         is_minted, minted_at, minted_to_wallet,
-                        minted_to_solana_wallet, minted_claim_id, minted_tx_hash, minted_asset_address
+                        minted_claim_id, minted_tx_hash, minted_asset_address
                     ) VALUES (
                         %s, %s, %s,
                         %s, %s, %s, %s, %s,
                         %s, %s, %s,
-                        %s, %s, %s, %s
+                        %s, %s, %s
                     )
                     RETURNING
                         id, season_id, proxy_wallet AS wallet_address, source,
@@ -1793,7 +1786,7 @@ class SeasonWorkbenchService(ClaimsMintMixin):
                         roi_percentage, entry_bracket, edge, yield, gravity, rank,
                         archetype, archetype_description, archetype_math, rarity_bracket,
                         is_minted, minted_at,
-                        minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
+                        minted_to_wallet, minted_claim_id,
                         minted_tx_hash, minted_asset_address
                     """,
                     (
@@ -1808,7 +1801,6 @@ class SeasonWorkbenchService(ClaimsMintMixin):
                         req.is_minted,
                         minted_at,
                         self._normalize_optional_text(req.minted_to_wallet),
-                        self._normalize_optional_text(req.minted_to_solana_wallet),
                         req.minted_claim_id,
                         self._normalize_optional_text(req.minted_tx_hash),
                         self._normalize_optional_text(req.minted_asset_address),
@@ -1864,7 +1856,6 @@ class SeasonWorkbenchService(ClaimsMintMixin):
                         is_minted = %s,
                         minted_at = %s,
                         minted_to_wallet = %s,
-                        minted_to_solana_wallet = %s,
                         minted_claim_id = %s,
                         minted_tx_hash = %s,
                         minted_asset_address = %s
@@ -1876,7 +1867,7 @@ class SeasonWorkbenchService(ClaimsMintMixin):
                         roi_percentage, entry_bracket, edge, yield, gravity, rank,
                         archetype, archetype_description, archetype_math, rarity_bracket,
                         is_minted, minted_at,
-                        minted_to_wallet, minted_to_solana_wallet, minted_claim_id,
+                        minted_to_wallet, minted_claim_id,
                         minted_tx_hash, minted_asset_address
                     """,
                     (
@@ -1891,7 +1882,6 @@ class SeasonWorkbenchService(ClaimsMintMixin):
                         req.is_minted,
                         minted_at,
                         self._normalize_optional_text(req.minted_to_wallet),
-                        self._normalize_optional_text(req.minted_to_solana_wallet),
                         req.minted_claim_id,
                         self._normalize_optional_text(req.minted_tx_hash),
                         self._normalize_optional_text(req.minted_asset_address),
