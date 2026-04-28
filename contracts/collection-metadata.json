@@ -1,0 +1,8 @@
+{
+  "name": "SLOP",
+  "description": "SLOP NFT trading cards.",
+  "image": "https://gateway.pinata.cloud/ipfs/bafybeiaknuidv34pzgcjqybchas5pvj6ioc3ckdgo7rpq3w5ye76y3dham",
+  "external_link": "https://google.com",
+  "seller_fee_basis_points": 400,
+  "fee_recipient": "0xdC65DFF7EED4c1C05511395Ccf19CF507066aCe1"
+}
