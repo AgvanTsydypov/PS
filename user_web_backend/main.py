@@ -3857,7 +3857,6 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
         phase="breach",
         auto_phase=True,
         db_only=False,
-        use_fixed_claim_images=False,
     )
     try:
         return mint_service.run_mint_claim(mint_request)

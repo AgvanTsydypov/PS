@@ -72,8 +72,7 @@ export function ClaimsMint({
   const [claimPhase, setClaimPhase] = useState("breach");
   const [claimAutoPhase, setClaimAutoPhase] = useState(true);
   const [claimDbOnly, setClaimDbOnly] = useState(false);
-  const [claimUseFixedImages, setClaimUseFixedImages] = useState(true);
-  const [claimRecipient, setClaimRecipient] = useState("");
+const [claimRecipient, setClaimRecipient] = useState("");
   const [claimSeasonInfo, setClaimSeasonInfo] = useState("");
   const [claimOutput, setClaimOutput] = useState("");
   const [claimMinting, setClaimMinting] = useState(false);
@@ -141,8 +140,8 @@ export function ClaimsMint({
   useEffect(() => {
     void (async () => {
       try {
-        const cfg = await fetchJSON<{ default_solana_recipient: string }>("/api/config");
-        setClaimRecipient(cfg.default_solana_recipient);
+        const cfg = await fetchJSON<{ default_evm_recipient: string }>("/api/config");
+        setClaimRecipient(cfg.default_evm_recipient ?? "");
       } catch {}
       try {
         const serverTime = await fetchJSON<{ now_utc_iso: string }>("/api/server-time");
@@ -211,14 +210,13 @@ export function ClaimsMint({
       <div className="row">
         <label><input type="checkbox" checked={claimAutoPhase} onChange={(e) => setClaimAutoPhase(e.target.checked)} /> Auto phase</label>
         <label><input type="checkbox" checked={claimDbOnly} onChange={(e) => setClaimDbOnly(e.target.checked)} /> DB only</label>
-        <label><input type="checkbox" checked={claimUseFixedImages} onChange={(e) => setClaimUseFixedImages(e.target.checked)} /> Use fixed claim images</label>
-        {claimMintableTotal !== null && (
+{claimMintableTotal !== null && (
           <span className="muted">
             Mintable remaining: {claimMintableRemaining} / {claimMintableTotal}
           </span>
         )}
         <button
-          disabled={claimMinting || !claimWallet || !claimSeasonId || !claimRecipient.trim() || (!claimUseFixedImages && claimMintableRemaining !== null && claimMintableRemaining <= 0)}
+          disabled={claimMinting || !claimWallet || !claimSeasonId || !claimRecipient.trim() || (claimMintableRemaining !== null && claimMintableRemaining <= 0)}
           onClick={() =>
             void run(async () => {
               setClaimMinting(true);
@@ -233,7 +231,6 @@ export function ClaimsMint({
                     phase: claimPhase,
                     auto_phase: claimAutoPhase,
                     db_only: claimDbOnly,
-                    use_fixed_claim_images: claimUseFixedImages,
                   }),
                 });
                 setClaimOutput((prev) => `${prev}${JSON.stringify(out, null, 2)}\n`);
@@ -256,13 +253,13 @@ export function ClaimsMint({
         <button
           onClick={() =>
             void run(async () => {
-              const data = await fetchJSON<{ address: string }>("/api/master-collection");
-              if (!data.address) throw new Error("MASTER_COLLECTION_ADDRESS is not set");
-              window.open(`https://explorer.solana.com/address/${data.address}?cluster=devnet`, "_blank");
+              const data = await fetchJSON<{ address: string; explorer_url: string }>("/api/master-collection");
+              if (!data.address) throw new Error("EVM_CONTRACT_ADDRESS is not set");
+              window.open(data.explorer_url, "_blank");
             })
           }
         >
-          Open Master Collection
+          Open Contract on Etherscan
         </button>
       </div>
       {claimMinting ? <div className="muted">Mint in progress... please wait.</div> : null}

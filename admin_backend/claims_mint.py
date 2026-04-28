@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2.extras
 from pydantic import BaseModel
-from solders.pubkey import Pubkey
+from web3 import Web3
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
@@ -27,14 +27,11 @@ from scripts.polystars_card_payload import (
     promote_preview_to_claim,
     unpin_pinata_urls,
 )
-from scripts.solana_service import MintedNftResult, SolanaClient
+from scripts.evm_service import EVM_CONTRACT_ADDRESS_ENV_KEY, EvmClient, MintedNftResult
 
 logger = logging.getLogger(__name__)
 
-MASTER_COLLECTION_ENV_KEY = "MASTER_COLLECTION_ADDRESS"
-BLOCKCHAIN_SOLANA = "solana"
-FIXED_CLAIM_FRONT_IMAGE_URL = "https://gateway.pinata.cloud/ipfs/bafkreieucptbdshpv6pegj74maofwd3frc4666vh7wzwksg5pxtkbc3td4"
-FIXED_CLAIM_BACK_IMAGE_URL = "https://gateway.pinata.cloud/ipfs/bafkreierblyo7tqhbq2qlcyxtorxx76oufadsd2cyvy4ojeigstajpiyx4"
+BLOCKCHAIN_ETHEREUM = "ethereum"
 
 
 @dataclass(frozen=True)
@@ -54,7 +51,6 @@ class MintClaimRequest(BaseModel):
     phase: str = "breach"
     auto_phase: bool = True
     db_only: bool = False
-    use_fixed_claim_images: bool = True
 
 
 class ClaimsMintMixin:
@@ -299,7 +295,7 @@ class ClaimsMintMixin:
                     wallet_address=wallet_normalized,
                     season_id=season_id,
                 )
-                lines.extend(["", "Checklist before insert:", f"- wallet: {wallet_normalized}", f"- blockchain: {BLOCKCHAIN_SOLANA}"])
+                lines.extend(["", "Checklist before insert:", f"- wallet: {wallet_normalized}", f"- blockchain: {BLOCKCHAIN_ETHEREUM}"])
                 lines.append(
                     f"- is_origin_wallet_selected_season: {bool(selected_season_eligibility.get('is_origin_wallet'))}"
                 )
@@ -729,7 +725,7 @@ class ClaimsMintMixin:
             conn.close()
 
     def get_master_collection_address(self) -> str:
-        value = os.environ.get(MASTER_COLLECTION_ENV_KEY, "").strip()
+        value = os.environ.get(EVM_CONTRACT_ADDRESS_ENV_KEY, "").strip()
         if value:
             return value
         env_path = Path(project_root) / ".env"
@@ -740,7 +736,7 @@ class ClaimsMintMixin:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, raw_value = line.split("=", 1)
-            if key.strip() != MASTER_COLLECTION_ENV_KEY:
+            if key.strip() != EVM_CONTRACT_ADDRESS_ENV_KEY:
                 continue
             resolved = raw_value.strip().strip('"').strip("'")
             if resolved:
@@ -756,9 +752,9 @@ class ClaimsMintMixin:
             raise ValueError("Recipient address is required")
 
         try:
-            recipient_address = str(Pubkey.from_string(recipient_raw))
+            recipient_address = Web3.to_checksum_address(recipient_raw)
         except Exception:
-            raise ValueError("Invalid Solana recipient address")
+            raise ValueError("Invalid EVM recipient address (expected 0x…40 hex)")
 
         phase = req.phase
         warnings: List[str] = []
@@ -803,7 +799,7 @@ class ClaimsMintMixin:
             recipient_wallet=recipient_address,
             season_id=req.season_id,
             phase=phase,
-            mint_chain=BLOCKCHAIN_SOLANA,
+            mint_chain=BLOCKCHAIN_ETHEREUM,
         )
         claim_id = reservation["claim_id"]
         collection_mint_number = reservation["collection_mint_number"]
@@ -818,7 +814,7 @@ class ClaimsMintMixin:
                 "recipient_address": recipient_address,
                 "season_id": req.season_id,
                 "phase": phase,
-                "chain": BLOCKCHAIN_SOLANA,
+                "chain": BLOCKCHAIN_ETHEREUM,
                 "allocation": allocation.__dict__,
                 "warnings": warnings,
             }
@@ -829,7 +825,7 @@ class ClaimsMintMixin:
             "claimer_wallet_address": wallet,
             "season_id": req.season_id,
             "snapshot": allocation.snapshot,
-            "blockchain": BLOCKCHAIN_SOLANA,
+            "blockchain": BLOCKCHAIN_ETHEREUM,
         }
 
         card_claim_type = "origin" if allocation.assignment_type == "winner_self" else "looter"
@@ -848,11 +844,9 @@ class ClaimsMintMixin:
                 claim_id=claim_id,
                 collection_mint_number=collection_mint_number,
                 claim_type=card_claim_type,
-                fixed_front_image_url=FIXED_CLAIM_FRONT_IMAGE_URL if req.use_fixed_claim_images else "",
-                fixed_back_image_url=FIXED_CLAIM_BACK_IMAGE_URL if req.use_fixed_claim_images else "",
             )
 
-            mint_client = SolanaClient(keypair_path=Path(project_root) / "my-keypair.json")
+            mint_client = EvmClient()
             mint_result = mint_client.mint_user_nft(
                 user_wallet_address=recipient_address,
                 season_name=season_name,
@@ -865,7 +859,7 @@ class ClaimsMintMixin:
             self.finalize_completed_claim(
                 claim_id=claim_id,
                 mint_result=mint_result,
-                mint_chain=BLOCKCHAIN_SOLANA,
+                mint_chain=BLOCKCHAIN_ETHEREUM,
             )
         except Exception:
             # release_reserved_claim is a no-op once finalize_completed_claim
@@ -930,7 +924,7 @@ class ClaimsMintMixin:
             "recipient_address": recipient_address,
             "season_id": req.season_id,
             "phase": phase,
-            "chain": BLOCKCHAIN_SOLANA,
+            "chain": BLOCKCHAIN_ETHEREUM,
             "allocation": allocation.__dict__,
             "mint_result": mint_result.__dict__,
             "polystars_card": polystars_card,

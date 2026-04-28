@@ -28,7 +28,6 @@ import psycopg2.extras
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from solders.pubkey import Pubkey
 
 try:
     import boto3
@@ -51,11 +50,9 @@ from admin_backend.claims_mint import (
     ClaimsMintMixin,
     MintClaimRequest,
     WinnerClaimAllocation,
-    MASTER_COLLECTION_ENV_KEY,
-    BLOCKCHAIN_SOLANA,
-    FIXED_CLAIM_FRONT_IMAGE_URL,
-    FIXED_CLAIM_BACK_IMAGE_URL,
+    BLOCKCHAIN_ETHEREUM,
 )
+from scripts.evm_service import EVM_CONTRACT_ADDRESS_ENV_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +65,7 @@ def _user_web_wallet_actions_env_override() -> bool:
     )
 
 
-DEFAULT_SOLANA_RECIPIENT = "H1wsggroxpW3LwCCv8dVeiJW73oYPkcDGgSqhiT5Zbz3"
+DEFAULT_EVM_RECIPIENT = "0xdC65DFF7EED4c1C05511395Ccf19CF507066aCe1"
 
 
 class EligibilityRequest(BaseModel):
@@ -2492,7 +2489,7 @@ def server_time() -> Dict[str, str]:
 @app.get("/api/config")
 def get_config() -> Dict[str, Any]:
     return {
-        "default_solana_recipient": DEFAULT_SOLANA_RECIPIENT,
+        "default_evm_recipient": DEFAULT_EVM_RECIPIENT,
     }
 
 
@@ -2632,7 +2629,7 @@ async def mint_claim(req: MintClaimRequest) -> Dict[str, Any]:
             "Mint failed for wallet=%s season_id=%s chain=%s",
             req.wallet,
             req.season_id,
-            BLOCKCHAIN_SOLANA,
+            BLOCKCHAIN_ETHEREUM,
         )
         await ws_hub.broadcast("mint_finished", {"status": "error", "error": str(exc)})
         raise HTTPException(status_code=400, detail=str(exc))
@@ -2766,7 +2763,11 @@ async def run_reset(req: ResetRequest) -> Dict[str, str]:
 @app.get("/api/master-collection")
 def master_collection() -> Dict[str, str]:
     address = service.get_master_collection_address()
-    return {"address": address}
+    chain_id = int(os.environ.get("EVM_CHAIN_ID", "11155111") or "11155111")
+    etherscan_bases = {1: "https://etherscan.io", 11155111: "https://sepolia.etherscan.io"}
+    base = etherscan_bases.get(chain_id, "https://sepolia.etherscan.io")
+    explorer_url = f"{base}/address/{address}" if address else ""
+    return {"address": address, "explorer_url": explorer_url}
 
 
 @app.get("/api/winners")
