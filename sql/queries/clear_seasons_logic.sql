@@ -90,6 +90,32 @@ BEGIN
   END IF;
 END $$;
 
+-- 7) Drop every per-season participants partition. ``participants`` is
+--    LIST-partitioned by season_id; if the matching seasons row goes away
+--    the partition becomes orphan data that ``refresh_participants_for_season``
+--    still treats as "this event already belongs to another season" and
+--    silently starves the new season's pool. TRUNCATE is not enough here —
+--    the partitions themselves have to be detached and dropped so a fresh
+--    set is created the next time ``participants_ensure_partition`` runs.
+DO $$
+DECLARE
+  partition_name TEXT;
+BEGIN
+  IF to_regclass('public.participants') IS NULL THEN
+    RETURN;
+  END IF;
+  FOR partition_name IN
+    SELECT c.relname
+    FROM pg_inherits i
+    JOIN pg_class    c ON c.oid = i.inhrelid
+    WHERE i.inhparent = 'public.participants'::regclass
+      AND c.relname LIKE 'participants_season_%'
+  LOOP
+    EXECUTE format('ALTER TABLE participants DETACH PARTITION %I', partition_name);
+    EXECUTE format('DROP TABLE %I', partition_name);
+  END LOOP;
+END $$;
+
 -- Per-season mint numbers use a trigger (no global sequence). If an old DB still has the
 -- legacy global sequence from earlier migrations, reset it so admin "Reset" leaves a clean state.
 ALTER SEQUENCE IF EXISTS user_generated_cards_collection_mint_seq RESTART WITH 1;
