@@ -1,7 +1,8 @@
 """
-OPTIMIZED Parallel fetcher with proper connection pooling
-Fixes the bottleneck caused by too many sessions
-Now includes rate limiting to respect API limits
+Events fetcher for Gamma: GET /events/keyset (cursor pagination).
+
+Older offset-based parallel paging against /events is incompatible with the
+documented keyset API (no offset; follow next_cursor).
 """
 
 import json
@@ -10,8 +11,7 @@ import os
 import sys
 from datetime import datetime
 from typing import List, Dict, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock, Semaphore
+from threading import Lock
 from collections import deque
 import requests
 import fetch_events_config as config
@@ -104,78 +104,75 @@ class SharedPolymarketClient:
             'Content-Type': 'application/json',
         })
     
-    def get_events(self, 
-                   limit: int = 10, 
-                   offset: int = 0,
-                   closed: Optional[bool] = None,
-                   end_date_min: Optional[str] = None,
-                   end_date_max: Optional[str] = None,
-                   order: str = 'id',
-                   ascending: bool = False) -> tuple[Optional[List[Dict]], Optional[str]]:
+    def get_events_keyset(
+        self,
+        limit: int = 100,
+        after_cursor: Optional[str] = None,
+        closed: Optional[bool] = None,
+        end_date_min: Optional[str] = None,
+        end_date_max: Optional[str] = None,
+        order: str = 'id',
+        ascending: bool = False,
+    ) -> tuple[Optional[List[Dict]], Optional[str], Optional[str]]:
         """
-        Fetch events (thread-safe with rate limiting)
-        
-        Args:
-            limit: Number of events per page
-            offset: Pagination offset
-            closed: Filter by closed status
-            end_date_min: Minimum end date (ISO format, server-side filter)
-            end_date_max: Maximum end date (ISO format, server-side filter)
-            order: Sort field
-            ascending: Sort direction
-        
+        Fetch one page via Gamma keyset pagination (GET /events/keyset).
+
+        Docs: offset is rejected on this endpoint; use after_cursor from the
+        previous response's next_cursor.
+
+        Note: volume_min is supported by the OpenAPI spec but has triggered 500s
+        from Gamma in practice; min volume is enforced in _filter_events.
+
         Returns:
-            tuple: (events_list, error_message)
-                - ([], None) = Empty result (valid, no more data)
-                - ([...], None) = Success with data
-                - (None, error) = Failed request
+            (events, next_cursor, error)
+            - error set => failed request (events/next_cursor undefined)
+            - error None => success; next_cursor None means last page
         """
         try:
-            # Wait if necessary to respect rate limit
             if self.rate_limiter:
                 self.rate_limiter.wait_if_needed()
-            
-            params = {
-                'limit': limit, 
-                'offset': offset, 
-                'order': order, 
-                'ascending': str(ascending).lower()
+
+            params: Dict[str, object] = {
+                'limit': min(max(limit, 1), 500),
+                'order': order,
+                'ascending': str(ascending).lower(),
             }
+            if after_cursor is not None:
+                params['after_cursor'] = after_cursor
             if closed is not None:
                 params['closed'] = str(closed).lower()
-            
-            # Add server-side date filtering (major performance improvement!)
             if end_date_min:
                 params['end_date_min'] = end_date_min
             if end_date_max:
                 params['end_date_max'] = end_date_max
-            
-            url = f"{self.BASE_URL}/events"
-            response = self.session.get(url, params=params, timeout=30)
+
+            url = f"{self.BASE_URL}/events/keyset"
+            response = self.session.get(url, params=params, timeout=60)
             response.raise_for_status()
             data = response.json()
-            
-            # Return empty list if no data (valid response)
-            if not data:
-                return ([], None)
-            
-            return (data, None)
-            
+
+            if not isinstance(data, dict):
+                return (None, None, f'unexpected JSON type: {type(data).__name__}')
+
+            events = data.get('events') or []
+            next_cursor = data.get('next_cursor')
+            if next_cursor is not None and not isinstance(next_cursor, str):
+                next_cursor = str(next_cursor)
+
+            return (events, next_cursor, None)
+
         except Exception as e:
-            # Return None with error message for failed requests
-            return (None, str(e))
+            return (None, None, str(e))
 
 
 class OptimizedParallelEventFetcher:
-    """Optimized parallel fetcher with shared connection pool and rate limiting"""
-    
+    """Gamma /events/keyset fetcher (sequential cursors) with pooled HTTP and rate limits."""
+
     def __init__(self, max_workers: int = 20, enable_rate_limiting: bool = True):
         """
-        Initialize optimized fetcher
-        
         Args:
-            max_workers: Number of parallel threads (default: 20)
-            enable_rate_limiting: Enable rate limiting to respect API limits (default: True)
+            max_workers: Connection pool sizing hint (pagination is sequential).
+            enable_rate_limiting: Respect Gamma rate limits (default: True).
         """
         self.max_workers = max_workers
         
@@ -201,18 +198,15 @@ class OptimizedParallelEventFetcher:
             'start_time': None,
             'end_time': None,
             'failed_requests': 0,
-            'retried_requests': 0,
-            'retry_successes': 0
         }
         self.lock = Lock()
         self.all_events = []
-        self.failed_offsets = []  # Track failed offsets for retry
     
     def fetch_all_events(self) -> List[Dict]:
-        """Fetch all events using parallel requests with shared connection pool"""
+        """Fetch all events via GET /events/keyset (sequential cursor chain)."""
         self.stats['start_time'] = datetime.now()
-        
-        print("🚀 PolyStars - OPTIMIZED Parallel Events Fetcher")
+
+        print("🚀 PolyStars - Events fetcher (Gamma /events/keyset)")
         print("=" * 70)
         print(f"📋 Configuration:")
         print(f"   • Minimum Event Volume: ${config.MIN_VOLUME:,.0f}")
@@ -221,172 +215,113 @@ class OptimizedParallelEventFetcher:
         print(f"   • Minimum Market Volume: ${config.MIN_MARKET_VOLUME:,.0f}")
         print(f"   • Closed Only: {config.CLOSED_ONLY}")
         print(f"   • Resolution Status: {config.RESOLUTION_STATUS}")
-        print(f"   • Batch Size: {config.BATCH_SIZE}")
-        print(f"   • Parallel Workers: {self.max_workers}")
+        print(f"   • Page size: 500 (keyset max; fewer round-trips)")
         print(f"   • Max Events: {config.MAX_EVENTS or 'Unlimited'}")
         print(f"   • Connection Pooling: ENABLED ✅")
         if self.rate_limiter:
             print(f"   • Rate Limiting: ENABLED ✅ (450/10s safe limit)")
         else:
             print(f"   • Rate Limiting: DISABLED ⚠️")
-        
+
         if config.START_DATE or config.END_DATE:
-            print(f"   • Date Range (SERVER-SIDE FILTERING 🚀):")
+            print(f"   • Date Range (CLIENT-SIDE — see note below):")
             if config.START_DATE:
                 print(f"      From: {config.START_DATE.strftime('%Y-%m-%d')}")
             if config.END_DATE:
                 print(f"      To:   {config.END_DATE.strftime('%Y-%m-%d')}")
+            print(
+                "      Note: Gamma /events/keyset returns HTTP 500 after a few pages "
+                "when end_date_min/max are sent with cursors; dates are applied in "
+                "_filter_events instead."
+            )
         else:
             print(f"   • Date Range: All dates")
-        
+
         print("=" * 70)
         print()
-        
-        # Step 1: Fetch initial batch
-        print("🔍 Determining data size...", end=" ", flush=True)
-        initial_batch, initial_error = self._fetch_single_page(0)
-        
-        if initial_error:
-            print(f"❌ Failed to fetch initial batch")
-            print(f"   API Error: {initial_batch}")
-            self.stats['end_time'] = datetime.now()
-            return []
-        
-        if initial_batch is None:
-            print("✓ No events found matching filters")
-            self.stats['end_time'] = datetime.now()
-            return []
-        
-        if not isinstance(initial_batch, list) or len(initial_batch) == 0:
-            print("✓ No events found matching filters")
-            self.stats['end_time'] = datetime.now()
-            return []
-        
-        print(f"✓ Got {len(initial_batch)} events from API")
-        
-        # Process initial batch
-        filtered_initial = self._filter_events(initial_batch)
-        with self.lock:
-            self.all_events.extend(filtered_initial)
-            self.stats['total_fetched'] += len(initial_batch)
-            self.stats['total_filtered'] += len(filtered_initial)
-            self.stats['pages_processed'] += 1
-        
-        print(f"   After client-side filtering: {len(filtered_initial)} events matched all criteria")
-        
-        # Step 2: Parallel pagination with smart batching and early stopping
-        # Submit batches and stop when we hit empty results
-        print(f"📊 Starting parallel fetch with smart early stopping...")
-        print(f"⚡ Using {self.max_workers} parallel workers")
+
+        # Keyset + server-side end_date_* breaks pagination (500 from Gamma); omit here.
+        page_limit = 500
+        cursor: Optional[str] = None
+        last_progress = time.time()
+        max_pages = int(os.getenv("POLYSTARS_KEYSET_MAX_PAGES", "100000"))
+
+        print("🔍 Fetching pages (keyset cursor chain)...", flush=True)
         print("-" * 70)
-        
-        # Step 3: Fetch pages in parallel batches
-        last_update = time.time()
-        empty_results = 0
-        error_results = 0
-        successful_results = 0
-        current_offset = config.BATCH_SIZE
-        BATCH_SIZE_PAGES = 50  # Process 50 pages per batch
-        EMPTY_THRESHOLD = 3  # Stop after 3 consecutive empty batches
-        consecutive_empty_batches = 0
-        
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            while True:
-                # Submit a batch of pages
-                offsets = [current_offset + (i * config.BATCH_SIZE) for i in range(BATCH_SIZE_PAGES)]
-                future_to_offset = {
-                    executor.submit(self._fetch_and_filter_page, offset): offset 
-                    for offset in offsets
-                }
-                
-                batch_had_data = False
-                
-                # Process this batch
-                for future in as_completed(future_to_offset):
-                    offset = future_to_offset[future]
-                    
-                    try:
-                        result, is_error = future.result()
-                        
-                        if is_error:
-                            error_results += 1
-                            with self.lock:
-                                self.stats['failed_requests'] += 1
-                                self.failed_offsets.append(offset)
-                        elif result is None:
-                            empty_results += 1
-                        else:
-                            successful_results += 1
-                            batch_had_data = True
-                        
-                    except Exception as e:
-                        with self.lock:
-                            self.stats['failed_requests'] += 1
-                            self.failed_offsets.append(offset)
-                        error_results += 1
-                    
-                    # Progress update
-                    current_time = time.time()
-                    if current_time - last_update >= 0.5:
-                        with self.lock:
-                            elapsed = (datetime.now() - self.stats['start_time']).total_seconds()
-                            rate = self.stats['pages_processed'] / elapsed if elapsed > 0 else 0
-                            
-                            rate_info = ""
-                            if self.rate_limiter:
-                                current_rate = self.rate_limiter.get_current_rate()
-                                rate_info = f" | API: {current_rate}/450"
-                            
-                            print(
-                                f"📥 Progress: {self.stats['pages_processed']:,} pages | "
-                                f"{self.stats['total_filtered']:,} matched | "
-                                f"{rate:.1f} pages/s{rate_info} | "
-                                f"{self.stats['failed_requests']} failed",
-                                end="\r",
-                                flush=True
-                            )
-                        last_update = current_time
-                    
-                    # Check max events limit
-                    if config.MAX_EVENTS:
-                        with self.lock:
-                            if len(self.all_events) >= config.MAX_EVENTS:
-                                print(f"\n✅ Reached maximum events limit: {config.MAX_EVENTS}")
-                                break
-                
-                # Check if batch was empty
-                if not batch_had_data:
-                    consecutive_empty_batches += 1
-                    if consecutive_empty_batches >= EMPTY_THRESHOLD:
-                        print(f"\n✅ Stopping: {EMPTY_THRESHOLD} consecutive empty batches")
-                        break
-                else:
-                    consecutive_empty_batches = 0
-                
-                # Move to next batch
-                current_offset += BATCH_SIZE_PAGES * config.BATCH_SIZE
-                
-                # Safety limit
-                if current_offset > 500000:
-                    print(f"\n⚠️ Reached safety limit (offset > 500k)")
+
+        while True:
+            if config.MAX_EVENTS and len(self.all_events) >= config.MAX_EVENTS:
+                print(f"\n✅ Reached maximum events limit: {config.MAX_EVENTS}")
+                break
+
+            if self.stats['pages_processed'] >= max_pages:
+                print(f"\n⚠️ Stopped: POLYSTARS_KEYSET_MAX_PAGES={max_pages} safety cap")
+                break
+
+            events, next_cursor, error = None, None, None
+            for attempt in range(1, 5):
+                events, next_cursor, error = self.client.get_events_keyset(
+                    limit=page_limit,
+                    after_cursor=cursor,
+                    closed=config.CLOSED_ONLY,
+                    end_date_min=None,
+                    end_date_max=None,
+                    order='id',
+                    ascending=False,
+                )
+                if error is None:
                     break
-        
-        total_futures = successful_results + empty_results + error_results
-        
+                with self.lock:
+                    self.stats['failed_requests'] += 1
+                time.sleep(min(0.5 * (2 ** (attempt - 1)), 6.0))
+
+            if error is not None:
+                print(f"\n❌ Stopped after repeated API errors at cursor={cursor!r}")
+                print(f"   Last error: {error}")
+                break
+
+            assert events is not None
+            if len(events) == 0 and not next_cursor:
+                break
+
+            filtered = self._filter_events(events)
+            with self.lock:
+                self.all_events.extend(filtered)
+                self.stats['total_fetched'] += len(events)
+                self.stats['total_filtered'] += len(filtered)
+                self.stats['pages_processed'] += 1
+
+            now = time.time()
+            if now - last_progress >= 0.5:
+                elapsed = (datetime.now() - self.stats['start_time']).total_seconds()
+                rate = self.stats['pages_processed'] / elapsed if elapsed > 0 else 0
+                rate_info = ""
+                if self.rate_limiter:
+                    rate_info = f" | API: {self.rate_limiter.get_current_rate()}/450"
+                print(
+                    f"📥 Progress: {self.stats['pages_processed']:,} pages | "
+                    f"{self.stats['total_filtered']:,} matched | "
+                    f"{rate:.2f} pages/s{rate_info} | "
+                    f"{self.stats['failed_requests']} failed retries",
+                    end="\r",
+                    flush=True,
+                )
+                last_progress = now
+
+            # Do NOT stop based on endDate vs START_DATE while paginating by id: id order
+            # is not monotone with endDate (e.g. a page of pre-2024 outcomes can appear
+            # before later pages that still contain 2024–2026 events with lower ids).
+
+            if not next_cursor:
+                break
+            cursor = next_cursor
+
         print()
         print("-" * 70)
-        print(f"📊 Completed processing {total_futures} page requests")
-        successful = total_futures - empty_results - error_results
-        print(f"   • Successful (with data): {successful}")
-        print(f"   • Empty (no more data): {empty_results}")
-        print(f"   • Failed (errors/timeouts): {error_results}")
-        if error_results > 0:
-            print(f"   ⚠️  WARNING: {error_results} requests failed - retrying...")
+        print(f"📊 Completed {self.stats['pages_processed']:,} keyset page(s)")
+        if self.stats['failed_requests']:
+            print(f"   • Failed request attempts (retried): {self.stats['failed_requests']}")
         print("-" * 70)
-        
-        # RETRY FAILED REQUESTS
-        if self.failed_offsets:
-            self._retry_failed_requests()
         
         # Apply MAX_EVENTS limit to final result
         # (Early stopping during pagination may have fetched more events in parallel)
@@ -398,165 +333,7 @@ class OptimizedParallelEventFetcher:
         
         self.stats['end_time'] = datetime.now()
         return self.all_events
-    
-    def _retry_failed_requests(self, max_retries: int = 3):
-        """
-        Retry failed requests with exponential backoff
-        
-        Args:
-            max_retries: Maximum number of retry attempts per request
-        """
-        retry_attempt = 1
-        
-        while self.failed_offsets and retry_attempt <= max_retries:
-            print()
-            print(f"🔄 Retry attempt {retry_attempt}/{max_retries}")
-            print(f"   Retrying {len(self.failed_offsets)} failed requests...")
-            
-            # Get failed offsets and clear the list
-            with self.lock:
-                offsets_to_retry = list(self.failed_offsets)
-                self.failed_offsets = []
-            
-            # Exponential backoff: wait before retrying
-            if retry_attempt > 1:
-                wait_time = 2 ** (retry_attempt - 1)  # 2, 4, 8 seconds
-                print(f"   Waiting {wait_time}s before retry...")
-                time.sleep(wait_time)
-            
-            # Retry with fewer workers to be more gentle
-            retry_workers = min(10, self.max_workers // 2)
-            retry_successes = 0
-            last_update = time.time()
-            
-            with ThreadPoolExecutor(max_workers=retry_workers) as executor:
-                future_to_offset = {
-                    executor.submit(self._fetch_and_filter_page, offset): offset 
-                    for offset in offsets_to_retry
-                }
-                
-                for future in as_completed(future_to_offset):
-                    offset = future_to_offset[future]
-                    
-                    try:
-                        result, is_error = future.result()
-                        
-                        with self.lock:
-                            self.stats['retried_requests'] += 1
-                        
-                        if is_error:
-                            # Still failed, will retry again
-                            with self.lock:
-                                self.failed_offsets.append(offset)
-                        else:
-                            # Success!
-                            retry_successes += 1
-                            with self.lock:
-                                self.stats['retry_successes'] += 1
-                        
-                        # Progress update
-                        current_time = time.time()
-                        if current_time - last_update >= 1.0:
-                            with self.lock:
-                                remaining = len(self.failed_offsets)
-                                print(
-                                    f"   📥 Retry progress: {retry_successes} succeeded, "
-                                    f"{remaining} still failing...",
-                                    end="\r",
-                                    flush=True
-                                )
-                            last_update = current_time
-                        
-                    except Exception as e:
-                        with self.lock:
-                            self.stats['retried_requests'] += 1
-                            self.failed_offsets.append(offset)
-            
-            print()
-            print(f"   ✓ Retry {retry_attempt} completed: {retry_successes} recovered")
-            
-            retry_attempt += 1
-        
-        # Final summary
-        with self.lock:
-            final_failures = len(self.failed_offsets)
-            if final_failures > 0:
-                print(f"   ⚠️  {final_failures} requests still failed after {max_retries} retries")
-            else:
-                print(f"   ✅ All failed requests recovered!")
-        
-        print("-" * 70)
-    
-    def _fetch_single_page(self, offset: int) -> tuple[Optional[List[Dict]] | str, bool]:
-        """
-        Fetch a single page using shared client
-        
-        Returns:
-            tuple: (events_list_or_error, is_error)
-                - ([], False) = Empty result (no more data)
-                - ([...], False) = Success with data
-                - (error_string, True) = Failed request (should retry)
-        """
-        # Prepare date parameters for server-side filtering
-        end_date_min = None
-        end_date_max = None
-        
-        if config.START_DATE:
-            # Try ISO format with 'Z' timezone indicator
-            end_date_min = config.START_DATE.strftime('%Y-%m-%dT%H:%M:%SZ')
-        if config.END_DATE:
-            # Try ISO format with 'Z' timezone indicator
-            end_date_max = config.END_DATE.strftime('%Y-%m-%dT%H:%M:%SZ')
-        
-        events, error = self.client.get_events(
-            limit=config.BATCH_SIZE,
-            offset=offset,
-            closed=config.CLOSED_ONLY,
-            end_date_min=end_date_min,
-            end_date_max=end_date_max,
-            order='id',
-            ascending=False
-        )
-        
-        if error:
-            # Failed request - return error message
-            return (error, True)
-        
-        if not events or len(events) == 0:
-            # Empty result (no more data)
-            return (None, False)
-        
-        return (events, False)
-    
-    def _fetch_and_filter_page(self, offset: int) -> tuple[Optional[int], bool]:
-        """
-        Fetch and filter a single page (thread-safe)
-        
-        Returns:
-            tuple: (filtered_count, is_error)
-        """
-        result, is_error = self._fetch_single_page(offset)
-        
-        if is_error:
-            # Failed request - don't count as processed
-            # result is error message (string)
-            return (None, True)
-        
-        if result is None:
-            # Empty result (end of data)
-            return (None, False)
-        
-        # result is events list
-        filtered = self._filter_events(result)
-        
-        with self.lock:
-            self.all_events.extend(filtered)
-            self.stats['total_fetched'] += len(result)
-            self.stats['total_filtered'] += len(filtered)
-            self.stats['pages_processed'] += 1
-        
-        return (len(filtered), False)
-    
+
     def _filter_events(self, events: List[Dict]) -> List[Dict]:
         """Filter events by configured criteria and filter markets by volume"""
         filtered = []
@@ -703,13 +480,7 @@ class OptimizedParallelEventFetcher:
         print(f"📄 Pages processed: {self.stats['pages_processed']:,}")
         print(f"📊 Total events fetched: {self.stats['total_fetched']:,}")
         print(f"✅ Events matched all filters: {self.stats['total_filtered']:,}")
-        print(f"❌ Failed requests: {self.stats['failed_requests']}")
-        
-        if self.stats['retried_requests'] > 0:
-            print(f"\n🔄 Retry Statistics:")
-            print(f"   • Total retry attempts: {self.stats['retried_requests']:,}")
-            print(f"   • Successfully recovered: {self.stats['retry_successes']:,}")
-            print(f"   • Still failed: {len(self.failed_offsets):,}")
+        print(f"❌ Failed request attempts (before success): {self.stats['failed_requests']}")
         
         if duration > 0:
             print(f"⚡ Speed: {self.stats['pages_processed']/duration:.1f} pages/s")
@@ -817,7 +588,6 @@ def main():
         print("      Fetch and upload to PostgreSQL + save to JSON")
         return
     
-    print("🔬 Testing optimal worker count...")
     print()
     
     # Initialize database uploader if auto_upload is enabled
@@ -841,7 +611,6 @@ def main():
             uploader = None
             print()
     
-    # Start with 35 workers (optimized)
     fetcher = OptimizedParallelEventFetcher(max_workers=35)
     
     events = fetcher.fetch_all_events()
