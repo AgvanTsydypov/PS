@@ -26,9 +26,8 @@ type GeneratedCardItem = {
   slug: string;
   owner_wallet: string;
   owner_proxy_wallet?: string | null;
-  /** Polymarket proxy on the allocation row (winner_wallets_nft_to_claim.proxy_wallet). */
+  /** Polymarket proxy on the allocation row (claims.proxy_wallet). */
   winner_proxy_wallet?: string | null;
-  winner_row_id: number;
   season_id: number;
   event_id?: string | null;
   event_slug?: string | null;

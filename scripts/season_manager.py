@@ -139,7 +139,11 @@ class SeasonManager:
             conn.close()
 
     def is_origin_wallet_for_season(self, user_wallet: str, season_id: int) -> bool:
-        """Check whether wallet is in Origins snapshot for a specific season."""
+        """Check whether wallet is in the participants partition for this season.
+
+        An "origin" is any wallet that has at least one row in the season's
+        ``participants`` partition. Looters (non-origins) have no rows there.
+        """
         conn = psycopg2.connect(**self.connection_params)
         try:
             with conn.cursor() as cursor:
@@ -147,7 +151,7 @@ class SeasonManager:
                     """
                     SELECT EXISTS (
                         SELECT 1
-                        FROM winner_wallets_nft_to_claim
+                        FROM participants
                         WHERE season_id = %s
                           AND lower(proxy_wallet) = lower(%s)
                     )
@@ -162,10 +166,12 @@ class SeasonManager:
         self, user_wallet: str, season_id: int
     ) -> Optional[Dict[str, Any]]:
         """
-        Return mint status for user's origin snapshot row in this season.
+        Return mint status for the wallet's origin slot in this season.
 
-        Useful to detect cases where an Origin allocation was already consumed
-        in open/public phases by another claimant.
+        Under the queue model, "Origin allocation already minted" means
+        there exists an active claim (QUEUED/PENDING/PROCESSING/COMPLETED)
+        on this season for the same proxy_wallet, regardless of who the
+        claimer (user_wallet) is. Returns None when no such claim exists.
         """
         conn = psycopg2.connect(**self.connection_params)
         try:
@@ -174,16 +180,19 @@ class SeasonManager:
                     """
                     SELECT
                         id,
-                        proxy_wallet AS wallet_address,
-                        COALESCE(is_minted, FALSE) AS is_minted,
-                        minted_to_wallet,
-                        minted_claim_id,
-                        minted_tx_hash,
-                        minted_asset_address,
-                        minted_at
-                    FROM winner_wallets_nft_to_claim
+                        proxy_wallet      AS wallet_address,
+                        TRUE              AS is_minted,
+                        user_wallet       AS minted_to_wallet,
+                        id                AS minted_claim_id,
+                        tx_hash           AS minted_tx_hash,
+                        asset_address     AS minted_asset_address,
+                        COALESCE(timestamp, created_at) AS minted_at
+                    FROM claims
                     WHERE season_id = %s
+                      AND proxy_wallet IS NOT NULL
                       AND lower(proxy_wallet) = lower(%s)
+                      AND status IN ('QUEUED','PENDING','PROCESSING','COMPLETED')
+                    ORDER BY created_at DESC
                     LIMIT 1
                     """,
                     (season_id, user_wallet),
@@ -197,6 +206,7 @@ class SeasonManager:
         """
         Compatibility helper:
         checks Origins membership for the currently active standard season.
+        Reads from the participants partition for that season.
         """
         conn = psycopg2.connect(**self.connection_params)
         try:
@@ -213,9 +223,9 @@ class SeasonManager:
                     )
                     SELECT EXISTS (
                         SELECT 1
-                        FROM winner_wallets_nft_to_claim sow
-                        JOIN active_standard a ON a.id = sow.season_id
-                        WHERE lower(sow.proxy_wallet) = lower(%s)
+                        FROM participants p
+                        JOIN active_standard a ON a.id = p.season_id
+                        WHERE lower(p.proxy_wallet) = lower(%s)
                     )
                     """,
                     (user_wallet,),

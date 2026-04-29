@@ -340,10 +340,8 @@ const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "eligibility", label: "Eligibility" },
   { key: "claims", label: "Claims Mint" },
   { key: "seasonClaims", label: "Season Claims" },
-  { key: "winners", label: "Winner Wallets" },
   { key: "eventCards", label: "Event Cards" },
   { key: "eventPictures", label: "Event Pictures" },
-  { key: "cardBuilder", label: "Card Builder" },
   { key: "scenarios", label: "Scenarios" },
   { key: "userWeb", label: "User web" },
   { key: "reset", label: "Reset" },
@@ -3582,7 +3580,7 @@ export default function HomePage() {
         <section className="panel">
           <div className="muted">
             Reset uses sql/queries/clear_seasons_logic.sql and truncates seasons, claims, season_events_log,
-            winner_wallets_nft_to_claim, and preview_cards (with RESTART IDENTITY). Any legacy global
+            and preview_cards (with RESTART IDENTITY). Any legacy global
             card-mint sequence is also restarted to 1; new mint numbers are per-season via trigger. After the
             SQL succeeds, all objects under the R2 prefix <span className="mono">{`{R2_PREFIX}/cards-images/`}</span>{" "}
             (same as generated card SVG uploads) are deleted from the configured bucket.

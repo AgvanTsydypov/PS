@@ -8,7 +8,7 @@ make_real_connection() and _DirectDBManager return genuine psycopg2 objects.
 
 Scripts imported for integration tests (e.g. polystars_card_payload) are
 already cached in sys.modules from the unit-test run.  That is intentional:
-promote_preview_to_claim never calls psycopg2.connect() directly; it calls
+denormalize_card_onto_claim never calls psycopg2.connect() directly; it calls
 manager.get_connection(), which we supply as _DirectDBManager below.  The
 cached module state therefore does not affect correctness.
 """
@@ -52,7 +52,7 @@ def make_real_connection():
 class _DirectDBManager:
     """Minimal DataLoadingManager substitute.
 
-    promote_preview_to_claim only calls manager.get_connection(); this class
+    denormalize_card_onto_claim only calls manager.get_connection(); this class
     satisfies that contract by returning a genuine psycopg2 connection without
     going through DataLoadingManager (which has the mock baked in from unit
     test setup).

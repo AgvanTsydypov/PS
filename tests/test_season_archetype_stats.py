@@ -2,7 +2,7 @@
 Unit tests for season catalog + opened-archetype stats (user_web_backend).
 
 Data source: PostgreSQL ``claims`` (``status = 'COMPLETED'``) with archetype
-from ``card_payload_json`` or ``winner_wallets_nft_to_claim.archetype``.
+read from ``card_payload_json`` or the snapshotted ``claims.archetype`` column.
 """
 
 from __future__ import annotations

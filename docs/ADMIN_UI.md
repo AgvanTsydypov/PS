@@ -127,7 +127,7 @@ Manipulates season DB records directly for testing phase transitions without wai
 
 Wipes all season data using `sql/queries/clear_seasons_logic.sql`.
 
-Affected tables: `seasons`, `claims`, `season_events_log`, `winner_wallets_nft_to_claim`.
+Affected tables: `seasons`, `claims`, `season_events_log`, `participants` (partitions), `preview_cards`.
 
 Check the confirmation checkbox, then click **Run reset SQL**.
 

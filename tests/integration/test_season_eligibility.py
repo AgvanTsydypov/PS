@@ -12,9 +12,9 @@ Phase windows (start_date = T):
   transmission T+9d → T+10d (closed)
   hard stop   T+10d+        (closed)
 
-Fixture cleanup: DELETE in FK order (claims → winner_wallets → seasons).
-winner_wallets ON DELETE CASCADE removes preview_cards automatically.
-claims.winner_row_id ON DELETE SET NULL is safe to delete last.
+Fixture cleanup: drop the season's participants partition first (which clears
+its rows), then DELETE the matching claims and the season row itself. There
+is no longer a winner_wallets table to coordinate with.
 """
 
 from __future__ import annotations
@@ -62,17 +62,33 @@ def _insert_season(cur, *, start_offset_days: float, season_type: str = "standar
 
 def _insert_winner(cur, *, season_id: int, proxy_wallet: str = _ORIGIN_WALLET,
                    is_minted: bool = False, minted_to_wallet: str | None = None) -> int:
+    """Insert an Origin participant for the season's partition.
+
+    Under the queue model, ``is_minted`` / ``minted_to_wallet`` are recorded
+    by inserting an active claim row keyed on the same proxy_wallet (which is
+    what ``_get_origin_snapshot_mint_status`` now reads from). Returns the
+    synthetic participant rowid (1).
+    """
+    cur.execute("SELECT participants_ensure_partition(%s)", (season_id,))
     cur.execute(
         """
-        INSERT INTO winner_wallets_nft_to_claim
-            (season_id, proxy_wallet, window_start, window_end,
-             is_minted, minted_to_wallet)
-        VALUES (%s, %s, NOW(), NOW() + INTERVAL '30 days', %s, %s)
-        RETURNING id
+        INSERT INTO participants
+            (season_id, proxy_wallet, event_slug, archetype)
+        VALUES (%s, %s, %s, 'OPERATOR')
+        ON CONFLICT (season_id, proxy_wallet, event_slug) DO NOTHING
         """,
-        (season_id, proxy_wallet, is_minted, minted_to_wallet),
+        (season_id, proxy_wallet, f"test-event-{season_id}-{proxy_wallet[:10]}"),
     )
-    return cur.fetchone()[0]
+    if is_minted:
+        cur.execute(
+            """
+            INSERT INTO claims (
+                user_wallet, season_id, phase_type, status, proxy_wallet
+            ) VALUES (%s, %s, 'vault', 'COMPLETED', %s)
+            """,
+            (minted_to_wallet or proxy_wallet, season_id, proxy_wallet),
+        )
+    return 1
 
 
 def _insert_claim(cur, *, season_id: int, wallet: str = _ORIGIN_WALLET,
@@ -88,13 +104,14 @@ def _insert_claim(cur, *, season_id: int, wallet: str = _ORIGIN_WALLET,
     return cur.fetchone()[0]
 
 
-def _cleanup(conn, *, claim_ids=(), winner_ids=(), season_ids=()):
+def _cleanup(conn, *, claim_ids=(), winner_ids=(), season_ids=()):  # noqa: ARG001 — winner_ids kept for call-site parity
     with conn.cursor() as cur:
         for cid in claim_ids:
             cur.execute("DELETE FROM claims WHERE id = %s", (cid,))
-        for wid in winner_ids:
-            cur.execute("DELETE FROM winner_wallets_nft_to_claim WHERE id = %s", (wid,))
         for sid in season_ids:
+            # Drop partition first to also clear participants rows for the season.
+            cur.execute("SELECT participants_drop_partition(%s)", (sid,))
+            cur.execute("DELETE FROM claims WHERE season_id = %s", (sid,))
             cur.execute("DELETE FROM seasons WHERE id = %s", (sid,))
     conn.commit()
 
@@ -396,21 +413,21 @@ class TestCheckUserEligibilityForSeason:
             conn.close()
 
     def test_origin_allocation_minted_by_same_wallet_blocks(self, breach_season, real_season_manager):
-        """If the origin row is already is_minted=TRUE, even the original wallet can't claim again."""
+        """If the origin's slot already has an active claim, even the original wallet can't claim again."""
         conn = make_real_connection()
-        wid2 = None
+        cid = None
         try:
-            # Add a second winner row for _ORIGIN_WALLET with is_minted=TRUE
-            # (the fixture already created one without is_minted; update it)
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    UPDATE winner_wallets_nft_to_claim
-                    SET is_minted = TRUE, minted_to_wallet = %s
-                    WHERE id = %s
+                    INSERT INTO claims (
+                        user_wallet, season_id, phase_type, status, proxy_wallet
+                    ) VALUES (%s, %s, 'vault', 'COMPLETED', %s)
+                    RETURNING id
                     """,
-                    (_ORIGIN_WALLET, breach_season["winner_id"]),
+                    (_ORIGIN_WALLET, breach_season["season_id"], _ORIGIN_WALLET),
                 )
+                cid = cur.fetchone()[0]
             conn.commit()
 
             result = real_season_manager.check_user_eligibility_for_season(
@@ -418,31 +435,30 @@ class TestCheckUserEligibilityForSeason:
             )
             assert result["eligible_now"] is False
             assert result["origin_snapshot_is_minted"] is True
-            assert "minted" in result["ineligible_reason"].lower()
+            assert "minted" in (result["ineligible_reason"] or "").lower()
         finally:
-            # Restore is_minted to FALSE so fixture cleanup can proceed cleanly
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE winner_wallets_nft_to_claim SET is_minted = FALSE, "
-                    "minted_to_wallet = NULL WHERE id = %s",
-                    (breach_season["winner_id"],),
-                )
-            conn.commit()
+            if cid:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM claims WHERE id = %s", (cid,))
+                conn.commit()
             conn.close()
 
     def test_origin_allocation_minted_by_different_wallet_blocks(self, breach_season, real_season_manager):
-        """Origin row minted to a *different* wallet → ineligible with that wallet mentioned."""
+        """Origin slot consumed by a *different* claimer → ineligible with that wallet mentioned."""
         conn = make_real_connection()
+        cid = None
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    UPDATE winner_wallets_nft_to_claim
-                    SET is_minted = TRUE, minted_to_wallet = %s
-                    WHERE id = %s
+                    INSERT INTO claims (
+                        user_wallet, season_id, phase_type, status, proxy_wallet
+                    ) VALUES (%s, %s, 'vault', 'COMPLETED', %s)
+                    RETURNING id
                     """,
-                    (_OTHER_WALLET, breach_season["winner_id"]),
+                    (_OTHER_WALLET, breach_season["season_id"], _ORIGIN_WALLET),
                 )
+                cid = cur.fetchone()[0]
             conn.commit()
 
             result = real_season_manager.check_user_eligibility_for_season(
@@ -451,13 +467,10 @@ class TestCheckUserEligibilityForSeason:
             assert result["eligible_now"] is False
             assert _OTHER_WALLET in (result["ineligible_reason"] or "")
         finally:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE winner_wallets_nft_to_claim SET is_minted = FALSE, "
-                    "minted_to_wallet = NULL WHERE id = %s",
-                    (breach_season["winner_id"],),
-                )
-            conn.commit()
+            if cid:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM claims WHERE id = %s", (cid,))
+                conn.commit()
             conn.close()
 
     def test_response_shape_contains_all_expected_keys(self, breach_season, real_season_manager):
