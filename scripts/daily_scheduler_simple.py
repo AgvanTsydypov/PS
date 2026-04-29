@@ -2194,6 +2194,30 @@ class SimplifiedScheduler:
         total_rows = 0
         try:
             cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            # Drop orphan partitions whose seasons row was deleted (e.g. after
+            # a manual reset). Leaving them around is not just clutter — the
+            # 1-event-↔-1-season guard inside refresh_participants_for_season
+            # treats their rows as "event already belongs to another season"
+            # and silently starves the live season's pool.
+            cursor.execute(
+                """
+                SELECT c.relname AS partition_name,
+                       SUBSTRING(c.relname FROM 'participants_season_(\\d+)')::BIGINT AS season_id
+                FROM pg_inherits i
+                JOIN pg_class    c ON c.oid = i.inhrelid
+                WHERE i.inhparent = 'public.participants'::regclass
+                  AND c.relname LIKE 'participants_season_%'
+                """
+            )
+            existing_partitions = [dict(r) for r in cursor.fetchall()]
+            for part in existing_partitions:
+                pid = int(part["season_id"])
+                cursor.execute("SELECT 1 FROM seasons WHERE id = %s", (pid,))
+                if cursor.fetchone() is None:
+                    cursor.execute("SELECT participants_drop_partition(%s)", (pid,))
+                    print(f"   🗑️  dropped orphan partition for season_id={pid}")
+            conn.commit()
+
             # All seasons that should have a current partition: every season
             # with a row. Closed standard seasons stay readable until the
             # operator explicitly drops their partition.
