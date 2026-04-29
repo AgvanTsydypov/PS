@@ -64,7 +64,8 @@
       "Bash(awk 'NR<=1433 || NR>=1937' /c/Users/AgvanD/Desktop/University/QM/PolyStars/scripts/daily_scheduler_simple.py)",
       "Bash(awk 'NR<1455 || NR>1841' /c/Users/AgvanD/Desktop/University/QM/PolyStars/admin_backend/main.py)",
       "Bash(awk 'NR<509 || NR>706' /c/Users/AgvanD/Desktop/University/QM/PolyStars/sql/schemas/create_seasons_system.sql)",
-      "Bash(mv /tmp/sql.tmp /c/Users/AgvanD/Desktop/University/QM/PolyStars/sql/schemas/create_seasons_system.sql)"
+      "Bash(mv /tmp/sql.tmp /c/Users/AgvanD/Desktop/University/QM/PolyStars/sql/schemas/create_seasons_system.sql)",
+      "WebFetch(domain:docs.polymarket.com)"
     ]
   },
   "enabledMcpjsonServers": [
