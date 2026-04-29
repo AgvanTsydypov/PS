@@ -25,7 +25,6 @@ type GeneratedCardItem = {
   owner_wallet: string;
   owner_proxy_wallet?: string | null;
   winner_proxy_wallet?: string | null;
-  winner_row_id: number;
   season_id: number;
   event_id?: string | null;
   event_slug?: string | null;

@@ -886,32 +886,23 @@ CREATE INDEX IF NOT EXISTS idx_wallet_siwe_challenges_expires_at
 DO $$ BEGIN RAISE NOTICE '✅ wallet_siwe_challenges table created'; END $$;
 
 -- ============================================================================
--- 11. PARTICIPANTS SNAPSHOT MATERIALIZED VIEW
+-- 11. PARTICIPANTS ANALYTICS VIEW
 -- ============================================================================
-DO $$ BEGIN RAISE NOTICE '👥 Creating participants materialized view...'; END $$;
+-- This view holds the raw analytic computation (event aggregates → archetype
+-- scoring) over user_closed_positions. It is unpartitioned and wallet/event-
+-- scoped — no season concept lives here.
+--
+-- The CONCRETE per-season data is materialized into the partitioned table
+-- ``participants`` (created by sql/schemas/create_seasons_system.sql §12).
+-- The daily scheduler refreshes one partition per active season by INSERTing
+-- the slice of this view that corresponds to that season's working events.
+-- Code that needs read access to season-scoped participant rows should query
+-- the ``participants`` table; this view is intended for the refresh path
+-- and ad-hoc analytics only.
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '👥 Creating participants_analytics view...'; END $$;
 
-DO $$
-DECLARE
-    rel_kind "char";
-BEGIN
-    SELECT c.relkind
-    INTO rel_kind
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'public'
-      AND c.relname = 'participants';
-
-    -- Migrate old participants table/view to materialized view format.
-    IF rel_kind = 'r' THEN
-        EXECUTE 'DROP TABLE public.participants';
-    ELSIF rel_kind = 'v' THEN
-        EXECUTE 'DROP VIEW public.participants';
-    ELSIF rel_kind = 'm' THEN
-        EXECUTE 'DROP MATERIALIZED VIEW public.participants';
-    END IF;
-END $$;
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS participants AS
+CREATE OR REPLACE VIEW participants_analytics AS
 WITH event_aggregates AS (
     SELECT
         user_closed_positions.proxy_wallet,
@@ -1111,14 +1102,13 @@ SELECT
 FROM archetyped_traders at
 LEFT JOIN leaderboard_latest ll ON ll.proxy_wallet::text = at.proxy_wallet;
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_participants_proxy_wallet_event_slug
-    ON participants(proxy_wallet, event_slug);
-CREATE INDEX IF NOT EXISTS idx_participants_event_slug ON participants(event_slug);
-CREATE INDEX IF NOT EXISTS idx_participants_event_id ON participants(event_id);
-CREATE INDEX IF NOT EXISTS idx_participants_proxy_wallet ON participants(proxy_wallet);
-CREATE INDEX IF NOT EXISTS idx_participants_rank ON participants(rank);
+COMMENT ON VIEW participants_analytics IS
+    'Per (proxy_wallet, event_slug) analytic projection over user_closed_positions: '
+    'event aggregates, percentile ranks, archetype classification. Unpartitioned, '
+    'recomputed on every SELECT. The partitioned table participants stores a '
+    'season-scoped materialization of this view, refreshed once per day per active season.';
 
-DO $$ BEGIN RAISE NOTICE '✅ participants materialized view created'; END $$;
+DO $$ BEGIN RAISE NOTICE '✅ participants_analytics view created'; END $$;
 
 -- Tracking views
 CREATE OR REPLACE VIEW recent_loads AS

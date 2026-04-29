@@ -102,24 +102,25 @@ Event data → Agent1 (Claude API) → card title, lore, metrics → `event_card
 Models controlled by `POLYSTARS_EVENT_CARDS_MODEL` and `POLYSTARS_TAG_COLORS_MODEL` (default: `gemini-2.5-flash`).
 
 **Season lifecycle** (`season_manager.py`):
-Four phases: Breach (days 1–3, 20% supply cap) → Vault (days 4–6, Origins only) → Scavenge (days 7–9) → Transmission (day 10, closed). Winners are determined by PnL snapshot stored in `winner_wallets`.
+Four phases: Breach (days 1–3, 20% supply cap) → Vault (days 4–6, Origins only) → Scavenge (days 7–9) → Transmission (day 10, closed). Each season's eligible Origin pool is stored in the `participants` partitioned table (one partition per `season_id`).
 
-**NFT minting** (`solana_service.py`, `polystars_card_payload.py`, `cardgen/`):
-User requests mint → check eligibility → generate SVG (front+back) → rasterize via Playwright → upload to R2/Pinata → build Metaplex metadata → sign + submit Solana transaction → write to `claims` table.
+**NFT minting** (queue model, `polystars_card_payload.py`, `cardgen/`, `daily_scheduler_simple.py:process_mint_queue`):
+User clicks Mint → admin/user API allocates a participant row (origin: best-archetype self-row; looter: random unclaimed) and INSERTs a `claims` row with `status='QUEUED'` carrying the full snapshot. The daily cron worker picks QUEUED rows under `FOR UPDATE SKIP LOCKED`, builds the SVG/PNG card, uploads to Pinata, submits the EVM mint, and finalizes the row to `COMPLETED`. Caps (`total_supply`, `per_event_cap`, `per_tag_cap`) are enforced at insert time by the `claims_check_caps` trigger on the small claims table, not on the multi-million-row participants table.
 
-**User auth**: SIWE (Sign-In With Ethereum) via wagmi/ConnectKit → verify signature + Polymarket proxy wallet check → JWT cookie → eligibility check via `winner_wallets`.
+**User auth**: SIWE (Sign-In With Ethereum) via wagmi/ConnectKit → verify signature + Polymarket proxy wallet check → JWT cookie → eligibility check via the active season's `participants` partition.
 
 ### Key Database Tables
 `events`, `markets`, `redemptions`, `positions`, `leaderboard` — Polymarket data.
 `event_cards` — AI-generated card content per event.
 `tags`, `event_tags` — normalized tag metadata with hex colors.
-`seasons`, `winner_wallets`, `claims` — season lifecycle and NFT distribution tracking.
+`seasons`, `participants` (partitioned by season_id), `claims` — season lifecycle, eligible-Origin pool, and NFT mint queue / completion log.
+`preview_cards` — preview-only buffer for the home-showcase ticker; cleared by the cron worker on successful mint.
 
 ### Admin API Tabs (port 8001)
-Overview · Eligibility · Claims · Winners · Event Cards · Card Builder · Scenarios · User Web · Reset
+Overview · Eligibility · Claims · Event Cards · Event Pictures · Scenarios · User Web · Reset
 
 ### User API (port 8011)
-SIWE auth flow, `/api/me/eligibility`, `/api/cards/get`, `/api/me/mint`, `/api/master-collection`.
+SIWE auth flow, `/api/me/eligibility`, `/api/me/mint` (queues a claim), `/api/master-collection`.
 
 ## Required Environment Variables
 

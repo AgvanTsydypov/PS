@@ -504,10 +504,10 @@ class SimplifiedScheduler:
                       AND erq.resolution_ready_at < nw.window_end
                       AND NOT EXISTS (
                           SELECT 1
-                          FROM winner_wallets_nft_to_claim ww
+                          FROM participants pp
                           WHERE (
-                              (e.id IS NOT NULL AND ww.event_id = e.id)
-                              OR (e.slug IS NOT NULL AND ww.event_slug = e.slug)
+                              (e.id IS NOT NULL AND pp.event_id = e.id)
+                              OR (e.slug IS NOT NULL AND pp.event_slug = e.slug)
                           )
                       )
                 ),
@@ -638,11 +638,11 @@ class SimplifiedScheduler:
                     )
                     AND NOT EXISTS (
                         SELECT 1
-                        FROM winner_wallets_nft_to_claim ww
-                        WHERE ww.season_id <> b.season_id
+                        FROM participants pp
+                        WHERE pp.season_id <> b.season_id
                           AND (
-                              (e.id IS NOT NULL AND ww.event_id = e.id)
-                              OR (e.slug IS NOT NULL AND ww.event_slug = e.slug)
+                              (e.id IS NOT NULL AND pp.event_id = e.id)
+                              OR (e.slug IS NOT NULL AND pp.event_slug = e.slug)
                           )
                     )
                     GROUP BY e.id, e.slug, e.volume, COALESCE(NULLIF(BTRIM(ec.primary_tag), ''), '__UNTAGGED__')
@@ -1392,598 +1392,45 @@ class SimplifiedScheduler:
 
     def _snapshot_origin_wallets_for_season(self, cursor, season_id: int, season_start_date: datetime) -> int:
         """
-        Freeze season winners snapshot at season start into winner_wallets_nft_to_claim.
+        Materialize the season's ``participants`` partition.
 
-        Rules:
+        Under the queue model this is the only side-effect that matters at
+        season-creation time. Returns the number of rows loaded into the
+        partition so callers can keep their existing logging.
+
+        Window selection:
         - standard: [season_start - STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS - 10d,
                      season_start - STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS)
-                    bound by event resolution anchor (resolution_ready_at), not end_date
-        - genesis: [GENESIS_START_DATE, GENESIS_END_DATE + 1 day)
-        - derive working events from positions in the selected window
-        - sample random participant rows from participants for those events
-        - enforce unique wallet per season (one proxy wallet max)
-        - sample size follows season NFT supply (standard/genesis)
-        - no single event may exceed a capped share of rows (default 50% of target N);
-          slots cut from capped events are re-split by volume among events still under the cap
+                    anchored by event_resolution_queue.resolution_ready_at
+        - genesis:  [GENESIS_START_DATE, GENESIS_END_DATE + 1 day)
+                    anchored by events.end_date / creation_date / start_date
         """
         season_start_date = self._utc_day_start(season_start_date)
-
-        cursor.execute(
-            """
-            SELECT type
-            FROM seasons
-            WHERE id = %s
-            """,
-            (season_id,),
-        )
+        cursor.execute("SELECT type FROM seasons WHERE id = %s", (season_id,))
         season_row = cursor.fetchone()
         season_type = (season_row or {}).get("type") if isinstance(season_row, dict) else (season_row[0] if season_row else None)
-        first_standard_season_id: Optional[int] = None
-        first_standard_window_start: Optional[datetime] = None
         if season_type == "standard":
-            cursor.execute(
-                """
-                SELECT id, start_date
-                FROM seasons
-                WHERE type = 'standard'
-                ORDER BY start_date ASC, id ASC
-                LIMIT 1
-                """
-            )
-            first_standard_row = cursor.fetchone()
-            if first_standard_row:
-                if isinstance(first_standard_row, dict):
-                    first_standard_season_id = int(first_standard_row.get("id"))
-                    first_standard_start_date = self._utc_day_start(first_standard_row.get("start_date"))
-                else:
-                    first_standard_season_id = int(first_standard_row[0])
-                    first_standard_start_date = self._utc_day_start(first_standard_row[1])
-                first_standard_window_start = (
-                    first_standard_start_date
-                    - timedelta(days=STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS)
-                    - timedelta(days=ORIGIN_LOOKBACK_DAYS_STANDARD)
-                )
-        is_first_standard_season = bool(
-            season_type == "standard"
-            and first_standard_season_id is not None
-            and int(season_id) == int(first_standard_season_id)
-            and first_standard_window_start is not None
-        )
-        if season_type == "standard":
-            # Snapshot window is season-driven: previous cycle boundary.
             window_end = season_start_date - timedelta(days=STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS)
             window_start = window_end - timedelta(days=ORIGIN_LOOKBACK_DAYS_STANDARD)
-            source = "participants_randomized_resolution_ready_standard"
-            rank_limit = STANDARD_SEASON_TOTAL_SUPPLY_TEST
             use_resolution_anchor = True
         else:
             window_start = datetime.combine(GENESIS_START_DATE, datetime.min.time(), tzinfo=timezone.utc)
-            # Exclusive upper bound includes all rows of GENESIS_END_DATE.
             window_end = datetime.combine(
                 GENESIS_END_DATE + timedelta(days=1),
                 datetime.min.time(),
                 tzinfo=timezone.utc,
             )
-            source = "participants_randomized_genesis_window"
-            rank_limit = GENESIS_SEASON_TOTAL_SUPPLY_TEST
             use_resolution_anchor = False
-        snapshot_max_share = _snapshot_max_single_event_share()
-        if rank_limit <= 1:
-            per_event_cap = 1
-        else:
-            per_event_cap = max(1, int(math.floor(rank_limit * snapshot_max_share + 1e-15)))
-        candidate_pool_cap = max(50, per_event_cap * _snapshot_candidate_pool_multiplier())
-        candidate_fetch_batch_size = _snapshot_candidate_fetch_batch_size()
 
-        # Idempotent re-snapshot in case of retries / manual re-initialization.
+        cursor.execute("SELECT participants_ensure_partition(%s)", (season_id,))
         cursor.execute(
-            """
-            DELETE FROM winner_wallets_nft_to_claim
-            WHERE season_id = %s
-            """,
-            (season_id,),
+            "SELECT refresh_participants_for_season(%s, %s, %s, %s) AS n",
+            (season_id, window_start, window_end, use_resolution_anchor),
         )
-        candidate_sql = """
-            WITH
-            working_events AS (
-                SELECT
-                    e.id AS event_id,
-                    e.slug AS event_slug,
-                    MAX(COALESCE(erq.resolution_ready_at, erq.closed_time)) AS season_anchor_at,
-                    COALESCE(e.volume, 0) AS event_volume
-                FROM events e
-                LEFT JOIN event_resolution_queue erq
-                  ON erq.event_id = e.id
-                WHERE (
-                    (
-                        %s = TRUE
-                        AND COALESCE(erq.closed, FALSE) = TRUE
-                        AND erq.status = 'processed'
-                        AND erq.resolution_ready_at IS NOT NULL
-                        AND (
-                            (
-                                erq.resolution_ready_at >= %s
-                                AND erq.resolution_ready_at < %s
-                            )
-                            OR (
-                                %s = TRUE
-                                AND erq.resolution_ready_at < %s
-                                AND NOT (
-                                    COALESCE(e.end_date::date, e.creation_date::date, e.start_date::date)
-                                    BETWEEN %s AND %s
-                                )
-                            )
-                        )
-                    ) OR (
-                        %s = FALSE
-                        AND COALESCE(e.end_date, e.creation_date, e.start_date) >= %s
-                        AND COALESCE(e.end_date, e.creation_date, e.start_date) < %s
-                    )
-                )
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM winner_wallets_nft_to_claim ww
-                    WHERE ww.season_id <> %s
-                      AND (
-                          (e.id IS NOT NULL AND ww.event_id = e.id)
-                          OR (e.slug IS NOT NULL AND ww.event_slug = e.slug)
-                      )
-                )
-                GROUP BY e.id, e.slug, e.volume
-            ),
-            working_events_enriched AS (
-                SELECT
-                    we.event_id,
-                    we.event_slug,
-                    we.season_anchor_at,
-                    we.event_volume,
-                    COALESCE(NULLIF(BTRIM(ec.primary_tag), ''), '__UNTAGGED__') AS primary_tag
-                FROM working_events we
-                LEFT JOIN event_cards ec
-                  ON ec.event_id = we.event_id
-            ),
-            working_events_tag_capped AS (
-                SELECT
-                    ranked.event_id,
-                    ranked.event_slug,
-                    ranked.season_anchor_at,
-                    ranked.event_volume
-                FROM (
-                    SELECT
-                        we.*,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY we.primary_tag
-                            ORDER BY
-                                we.event_volume DESC,
-                                we.season_anchor_at DESC NULLS LAST,
-                                COALESCE(we.event_id, we.event_slug) ASC
-                        ) AS primary_tag_rank
-                    FROM working_events_enriched we
-                ) ranked
-                WHERE %s = FALSE OR ranked.primary_tag_rank <= %s
-            ),
-            working_events_selected AS (
-                SELECT
-                    ranked.event_id,
-                    ranked.event_slug,
-                    ranked.event_volume
-                FROM (
-                    SELECT
-                        we.*,
-                        ROW_NUMBER() OVER (
-                            ORDER BY
-                                we.event_volume DESC,
-                                we.season_anchor_at DESC NULLS LAST,
-                                COALESCE(we.event_id, we.event_slug) ASC
-                        ) AS season_event_rank
-                    FROM working_events_tag_capped we
-                ) ranked
-                WHERE %s = FALSE OR ranked.season_event_rank <= %s
-            ),
-            candidate_participants AS (
-                SELECT
-                    LOWER(p.proxy_wallet) AS proxy_wallet,
-                    COALESCE(p.event_id, we.event_id) AS event_id,
-                    COALESCE(p.event_slug, we.event_slug) AS event_slug,
-                    p.entry_cwap,
-                    p.total_volume,
-                    p.total_pnl,
-                    p.roi_percentage,
-                    p.entry_bracket,
-                    p.edge,
-                    p.yield,
-                    p.gravity,
-                    p.rank,
-                    p.archetype,
-                    p.archetype_description,
-                    p.archetype_math,
-                    p.rarity_bracket,
-                    COALESCE(e.volume, we.event_volume, 0) AS event_volume,
-                    RANDOM() AS random_key
-                FROM participants p
-                JOIN working_events_selected we
-                  ON (
-                    (we.event_id IS NOT NULL AND p.event_id = we.event_id)
-                    OR (we.event_slug IS NOT NULL AND p.event_slug = we.event_slug)
-                  )
-                LEFT JOIN events e
-                  ON e.id = COALESCE(p.event_id, we.event_id)
-                WHERE p.proxy_wallet IS NOT NULL
-            ),
-            per_wallet_per_event_random AS (
-                SELECT DISTINCT ON (proxy_wallet, COALESCE(event_id, event_slug))
-                    proxy_wallet,
-                    event_id,
-                    event_slug,
-                    entry_cwap,
-                    total_volume,
-                    total_pnl,
-                    roi_percentage,
-                    entry_bracket,
-                    edge,
-                    yield,
-                    gravity,
-                    rank,
-                    archetype,
-                    archetype_description,
-                    archetype_math,
-                    rarity_bracket,
-                    event_volume,
-                    random_key
-                FROM candidate_participants
-                WHERE event_id IS NOT NULL OR event_slug IS NOT NULL
-                ORDER BY proxy_wallet, COALESCE(event_id, event_slug), random_key
-            ),
-            ranked_candidate_pool AS (
-                SELECT
-                    proxy_wallet,
-                    event_id,
-                    event_slug,
-                    entry_cwap,
-                    total_volume,
-                    total_pnl,
-                    roi_percentage,
-                    entry_bracket,
-                    edge,
-                    yield,
-                    gravity,
-                    rank,
-                    archetype,
-                    archetype_description,
-                    archetype_math,
-                    rarity_bracket,
-                    event_volume,
-                    random_key,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY COALESCE(event_id, CONCAT('slug:', event_slug))
-                        ORDER BY random_key
-                    ) AS event_candidate_rank
-                FROM per_wallet_per_event_random
-            )
-            SELECT
-                proxy_wallet,
-                event_id,
-                event_slug,
-                entry_cwap,
-                total_volume,
-                total_pnl,
-                roi_percentage,
-                entry_bracket,
-                edge,
-                yield,
-                gravity,
-                rank,
-                archetype,
-                archetype_description,
-                archetype_math,
-                rarity_bracket,
-                event_volume,
-                random_key
-            FROM ranked_candidate_pool
-            WHERE event_candidate_rank <= %s
-            ORDER BY random_key
-            """
-        candidate_params = (
-            use_resolution_anchor,
-            window_start,
-            window_end,
-            is_first_standard_season,
-            first_standard_window_start,
-            GENESIS_START_DATE,
-            GENESIS_END_DATE,
-            use_resolution_anchor,
-            window_start,
-            window_end,
-            season_id,
-            use_resolution_anchor,
-            STANDARD_SNAPSHOT_PRIMARY_TAG_CAP,
-            use_resolution_anchor,
-            STANDARD_SNAPSHOT_EVENT_LIMIT,
-            candidate_pool_cap,
-        )
-        candidate_cursor_name = (
-            f"season_snapshot_candidates_{season_id}_{int(time.time() * 1000)}"
-        )
-        candidate_cursor = cursor.connection.cursor(
-            name=candidate_cursor_name,
-            cursor_factory=psycopg2.extras.RealDictCursor,
-        )
-        candidate_cursor.itersize = candidate_fetch_batch_size
-        candidate_cursor.execute(
-            candidate_sql,
-            candidate_params,
-        )
-        # Group candidates by event and preserve one unique wallet max per season.
-        event_candidates: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        event_volume_by_key: Dict[str, float] = {}
-        seen_wallet_event: set[tuple[str, str]] = set()
-        total_candidate_rows = 0
-        try:
-            while True:
-                batch = candidate_cursor.fetchmany(candidate_fetch_batch_size)
-                if not batch:
-                    break
-                for raw_row in batch:
-                    total_candidate_rows += 1
-                    row = dict(raw_row)
-                    wallet = str(row.get("proxy_wallet") or "").strip().lower()
-                    if not wallet:
-                        continue
-                    event_id = str(row.get("event_id") or "").strip() or None
-                    event_slug = str(row.get("event_slug") or "").strip() or None
-                    if not event_id and not event_slug:
-                        continue
-                    event_key = event_id or f"slug:{event_slug}"
-                    wallet_event_key = (wallet, event_key)
-                    if wallet_event_key in seen_wallet_event:
-                        continue
-                    seen_wallet_event.add(wallet_event_key)
-
-                    raw_event_volume = row.get("event_volume")
-                    try:
-                        event_volume = float(raw_event_volume or 0)
-                    except Exception:
-                        event_volume = 0.0
-                    event_volume_by_key[event_key] = max(
-                        event_volume_by_key.get(event_key, 0.0),
-                        max(event_volume, 0.0),
-                    )
-                    event_candidates[event_key].append(row)
-        finally:
-            candidate_cursor.close()
-        if not total_candidate_rows:
-            return 0
-        print(
-            f"📦 Snapshot candidate pool streamed: rows={total_candidate_rows}, "
-            f"events={len(event_candidates)}, per_event_prefetch_cap={candidate_pool_cap}, "
-            f"batch_size={candidate_fetch_batch_size}"
-        )
-        event_keys = [key for key, rows in event_candidates.items() if rows]
-        if not event_keys:
-            return 0
-
-        # Guarantee every event in the season snapshot receives coverage.
-        # If requested N is too small, raise effective target to number of events.
-        effective_limit = rank_limit
-        if effective_limit < len(event_keys):
-            print(
-                f"⚠️ Snapshot target {rank_limit} is smaller than event count {len(event_keys)}; "
-                f"raising target to {len(event_keys)} to guarantee event coverage"
-            )
-            effective_limit = len(event_keys)
-
-        # Allocate per-event quotas proportionally to event volume share.
-        base_quota = {key: 1 for key in event_keys}
-        remaining_slots = max(0, effective_limit - len(event_keys))
-        positive_total_volume = sum(v for key, v in event_volume_by_key.items() if key in event_keys and v > 0)
-
-        if positive_total_volume > 0:
-            exact_extras: Dict[str, float] = {
-                key: remaining_slots * (event_volume_by_key.get(key, 0.0) / positive_total_volume)
-                for key in event_keys
-            }
-        else:
-            exact_extras = {key: (remaining_slots / len(event_keys)) for key in event_keys}
-
-        floor_extras = {key: int(exact_extras[key]) for key in event_keys}
-        quotas = {key: base_quota[key] + floor_extras[key] for key in event_keys}
-        leftover = remaining_slots - sum(floor_extras.values())
-        if leftover > 0:
-            remainders = sorted(
-                event_keys,
-                key=lambda key: (exact_extras[key] - floor_extras[key], event_volume_by_key.get(key, 0.0)),
-                reverse=True,
-            )
-            for key in remainders[:leftover]:
-                quotas[key] += 1
-
-        for key in event_keys:
-            quotas[key] = min(quotas[key], per_event_cap)
-        # Slots freed by the per-event cap go back proportionally to volume among
-        # events that still have room below the cap (not all to the single largest).
-        while sum(quotas.values()) < effective_limit:
-            deficit = effective_limit - sum(quotas.values())
-            eligible = [k for k in event_keys if quotas[k] < per_event_cap]
-            if deficit <= 0 or not eligible:
-                break
-            rooms = {k: per_event_cap - quotas[k] for k in eligible}
-            total_room = sum(rooms.values())
-            if total_room <= 0:
-                break
-            to_add_total = min(deficit, total_room)
-            positive_redist = sum(max(event_volume_by_key.get(k, 0.0), 0.0) for k in eligible)
-            if positive_redist > 0:
-                redist_exact = {
-                    k: to_add_total * (max(event_volume_by_key.get(k, 0.0), 0.0) / positive_redist)
-                    for k in eligible
-                }
-            else:
-                redist_exact = {k: float(to_add_total) / len(eligible) for k in eligible}
-            redist_floor: Dict[str, int] = {}
-            for k in eligible:
-                redist_floor[k] = min(max(int(redist_exact[k]), 0), rooms[k])
-            leftover_redist = to_add_total - sum(redist_floor.values())
-            if leftover_redist > 0:
-                remainders_redist = sorted(
-                    eligible,
-                    key=lambda k: (
-                        redist_exact[k] - redist_floor[k],
-                        event_volume_by_key.get(k, 0.0),
-                        k,
-                    ),
-                    reverse=True,
-                )
-                for k in remainders_redist:
-                    if leftover_redist <= 0:
-                        break
-                    if redist_floor[k] >= rooms[k]:
-                        continue
-                    redist_floor[k] += 1
-                    leftover_redist -= 1
-            added = sum(redist_floor.values())
-            if added == 0:
-                break
-            for k in eligible:
-                quotas[k] += redist_floor[k]
-
-        # Randomized per-event pools are already shuffled by random_key in SQL output.
-        event_index = {key: 0 for key in event_keys}
-        used_wallets: set[str] = set()
-        selected_rows: List[Dict[str, Any]] = []
-        selected_count_by_key: Dict[str, int] = defaultdict(int)
-
-        def _take_next_for_event(event_key: str) -> Optional[Dict[str, Any]]:
-            pool = event_candidates[event_key]
-            idx = event_index[event_key]
-            while idx < len(pool):
-                row = pool[idx]
-                idx += 1
-                wallet = str(row.get("proxy_wallet") or "").strip().lower()
-                if not wallet or wallet in used_wallets:
-                    continue
-                event_index[event_key] = idx
-                return row
-            event_index[event_key] = idx
-            return None
-
-        # Pass 1: guarantee at least one row per event whenever possible.
-        for key in event_keys:
-            row = _take_next_for_event(key)
-            if row is None:
-                quotas[key] = 0
-                continue
-            wallet = str(row.get("proxy_wallet") or "").strip().lower()
-            used_wallets.add(wallet)
-            selected_rows.append(row)
-            selected_count_by_key[key] += 1
-            quotas[key] = max(0, quotas[key] - 1)
-
-        # Pass 2: fill remaining quota per event proportionally.
-        while len(selected_rows) < effective_limit:
-            progress = False
-            ranked_keys = sorted(event_keys, key=lambda key: (quotas.get(key, 0), event_volume_by_key.get(key, 0.0)), reverse=True)
-            for key in ranked_keys:
-                if quotas.get(key, 0) <= 0:
-                    continue
-                if selected_count_by_key[key] >= per_event_cap:
-                    quotas[key] = 0
-                    continue
-                row = _take_next_for_event(key)
-                if row is None:
-                    quotas[key] = 0
-                    continue
-                wallet = str(row.get("proxy_wallet") or "").strip().lower()
-                used_wallets.add(wallet)
-                selected_rows.append(row)
-                selected_count_by_key[key] += 1
-                quotas[key] = max(0, quotas[key] - 1)
-                progress = True
-                if len(selected_rows) >= effective_limit:
-                    break
-            if not progress:
-                break
-
-        # Pass 3: if quota fill was blocked by wallet overlap / sparse pools,
-        # backfill from any remaining candidates with unused wallets.
-        if len(selected_rows) < effective_limit:
-            for key in sorted(event_keys, key=lambda k: event_volume_by_key.get(k, 0.0), reverse=True):
-                while len(selected_rows) < effective_limit:
-                    if selected_count_by_key[key] >= per_event_cap:
-                        break
-                    row = _take_next_for_event(key)
-                    if row is None:
-                        break
-                    wallet = str(row.get("proxy_wallet") or "").strip().lower()
-                    used_wallets.add(wallet)
-                    selected_rows.append(row)
-                    selected_count_by_key[key] += 1
-                if len(selected_rows) >= effective_limit:
-                    break
-
-        if not selected_rows:
-            return 0
-
-        insert_values = []
-        for row in selected_rows:
-            insert_values.append(
-                (
-                    season_id,
-                    str(row.get("proxy_wallet") or "").strip().lower(),
-                    source,
-                    window_start,
-                    window_end,
-                    row.get("event_id"),
-                    row.get("event_slug"),
-                    row.get("entry_cwap"),
-                    row.get("total_volume"),
-                    row.get("total_pnl"),
-                    row.get("roi_percentage"),
-                    row.get("entry_bracket"),
-                    row.get("edge"),
-                    row.get("yield"),
-                    row.get("gravity"),
-                    row.get("rank"),
-                    row.get("archetype"),
-                    row.get("archetype_description"),
-                    row.get("archetype_math"),
-                    row.get("rarity_bracket"),
-                )
-            )
-
-        cursor.executemany(
-            """
-            INSERT INTO winner_wallets_nft_to_claim (
-                season_id,
-                proxy_wallet,
-                source,
-                window_start,
-                window_end,
-                snapshot_at,
-                event_id,
-                event_slug,
-                entry_cwap,
-                total_volume,
-                total_pnl,
-                roi_percentage,
-                entry_bracket,
-                edge,
-                yield,
-                gravity,
-                rank,
-                archetype,
-                archetype_description,
-                archetype_math,
-                rarity_bracket
-            )
-            VALUES (
-                %s, %s, %s, %s, %s, NOW(),
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s
-            )
-            """,
-            insert_values,
-        )
-        return int(cursor.rowcount or len(insert_values))
+        result = cursor.fetchone()
+        if isinstance(result, dict):
+            return int(result.get("n") or 0)
+        return int((result or [0])[0] or 0)
 
     def ensure_genesis_season(self, cursor, now: datetime):
         """
@@ -2094,7 +1541,7 @@ class SimplifiedScheduler:
                     cursor.execute(
                         """
                         SELECT COUNT(*)
-                        FROM winner_wallets_nft_to_claim
+                        FROM participants
                         WHERE season_id = %s
                         """,
                         (genesis_id,),
@@ -2211,7 +1658,7 @@ class SimplifiedScheduler:
                         cursor.execute(
                             """
                             SELECT COUNT(*)
-                            FROM winner_wallets_nft_to_claim
+                            FROM participants
                             WHERE season_id = %s
                             """,
                             (season_id_for_step,),
@@ -2698,10 +2145,36 @@ class SimplifiedScheduler:
             print(f"\n❌ Failed (code {e.returncode})")
             return {'success': False, 'duration': duration, 'error': str(e), 'records': 0, 'markets': 0}
 
+    def _participants_window_for_season(
+        self,
+        season_type: str,
+        season_start_date: datetime,
+    ) -> tuple[datetime, datetime, bool]:
+        """
+        Return (window_start, window_end, use_resolution_anchor) for a season's
+        participants partition. Mirrors _snapshot_origin_wallets_for_season.
+        """
+        if season_type == "standard":
+            normalized_start = self._utc_day_start(season_start_date)
+            window_end = normalized_start - timedelta(days=STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS)
+            window_start = window_end - timedelta(days=ORIGIN_LOOKBACK_DAYS_STANDARD)
+            return window_start, window_end, True
+        # Genesis: full configured genesis date range.
+        window_start = datetime.combine(
+            GENESIS_START_DATE, datetime.min.time(), tzinfo=timezone.utc
+        )
+        window_end = datetime.combine(
+            GENESIS_END_DATE + timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+        return window_start, window_end, False
+
     def refresh_participants_snapshot(self) -> Dict:
         """
-        Full refresh of participants materialized view.
-        Runs as a post-downstream step.
+        Refresh per-season partitions of the participants table. The legacy
+        materialized-view refresh has been replaced by one TRUNCATE+INSERT
+        per active season, driven by refresh_participants_for_season() in SQL.
         """
         print(f"\n{'='*70}")
         print("🚀 RUNNING: Participants Snapshot Refresh")
@@ -2713,51 +2186,278 @@ class SimplifiedScheduler:
 
         start_time = time.time()
         conn = self.manager.get_connection()
-        prev_autocommit = conn.autocommit
         cursor = None
+        per_season_results: List[Dict[str, Any]] = []
+        total_rows = 0
         try:
-            # REFRESH ... CONCURRENTLY must run outside an explicit transaction block.
-            conn.autocommit = True
-            cursor = conn.cursor()
-            used_concurrent_refresh = True
-            try:
-                cursor.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY participants")
-            except Exception as concurrent_err:
-                print(
-                    "⚠️ Concurrent refresh unavailable, falling back to standard refresh: "
-                    f"{concurrent_err}"
-                )
-                used_concurrent_refresh = False
-                cursor.execute("REFRESH MATERIALIZED VIEW participants")
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            # All seasons that should have a current partition: every season
+            # with a row. Closed standard seasons stay readable until the
+            # operator explicitly drops their partition.
+            cursor.execute(
+                """
+                SELECT id, type, start_date
+                FROM seasons
+                ORDER BY id ASC
+                """
+            )
+            seasons = [dict(r) for r in cursor.fetchall()]
 
-            cursor.execute("SELECT COUNT(*) FROM participants")
-            row = cursor.fetchone()
-            refreshed_rows = int(row[0] or 0) if row else 0
+            for season in seasons:
+                season_id = int(season["id"])
+                season_type = str(season["type"])
+                window_start, window_end, use_resolution_anchor = (
+                    self._participants_window_for_season(season_type, season["start_date"])
+                )
+                cursor.execute(
+                    "SELECT participants_ensure_partition(%s)",
+                    (season_id,),
+                )
+                cursor.execute(
+                    "SELECT refresh_participants_for_season(%s, %s, %s, %s) AS inserted",
+                    (season_id, window_start, window_end, use_resolution_anchor),
+                )
+                inserted_row = cursor.fetchone() or {}
+                inserted = int(inserted_row.get("inserted") or 0)
+                total_rows += inserted
+                per_season_results.append({
+                    "season_id": season_id,
+                    "season_type": season_type,
+                    "rows": inserted,
+                })
+                print(
+                    f"   🧬 season {season_id:>3} ({season_type}): "
+                    f"{inserted:,} participant rows"
+                )
+                conn.commit()
 
             duration = time.time() - start_time
-            mode = "concurrent" if used_concurrent_refresh else "standard"
             print(
-                f"\n✅ Completed ({duration:.1f}s) - {refreshed_rows:,} rows refreshed "
-                f"({mode} refresh)"
+                f"\n✅ Completed ({duration:.1f}s) - {total_rows:,} rows across "
+                f"{len(per_season_results)} season partition(s)"
             )
             return {
                 'success': True,
                 'duration': duration,
-                'records': refreshed_rows,
-                'refresh_mode': mode,
+                'records': total_rows,
+                'per_season': per_season_results,
+                'refresh_mode': 'per_season_partition',
             }
         except Exception as e:
-            if not conn.autocommit:
+            try:
                 conn.rollback()
+            except Exception:
+                pass
             duration = time.time() - start_time
             print(f"\n❌ Failed ({duration:.1f}s): {e}")
             return {'success': False, 'duration': duration, 'error': str(e), 'records': 0}
         finally:
-            conn.autocommit = prev_autocommit
             if cursor is not None:
                 cursor.close()
             conn.close()
-    
+
+    def _get_season_name_for_claim(self, cursor, season_id: int) -> str:
+        cursor.execute(
+            "SELECT type, season_number FROM seasons WHERE id = %s",
+            (season_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return f"season-{season_id}"
+        if isinstance(row, dict):
+            return f"{row['type']}#{row['season_number']}"
+        return f"{row[0]}#{row[1]}"
+
+    def process_mint_queue(self, max_claims: int = 100) -> Dict:
+        """Process QUEUED claims into on-chain mints. Picks up to ``max_claims``
+        claims in FIFO order, atomically transitions each QUEUED → PROCESSING,
+        builds the card payload (front/back PNGs + Pinata upload), submits the
+        EVM mint, and finalizes to COMPLETED. Failures land in FAILED with the
+        error message. Idempotent under FOR UPDATE SKIP LOCKED — multiple
+        worker processes can run safely."""
+        print(f"\n{'='*70}")
+        print("🪙 RUNNING: Mint Queue Worker")
+        print(f"{'='*70}")
+        if self.dry_run:
+            print("🔍 DRY RUN — skipping queue worker")
+            return {'success': True, 'skipped': True, 'processed': 0}
+        if not _env_bool("MINT_QUEUE_ENABLED", True):
+            print("⏸️  MINT_QUEUE_ENABLED=0 — skipping queue worker")
+            return {'success': True, 'skipped': True, 'processed': 0}
+
+        # Lazy import: heavy deps (web3 + Playwright via cardgen) only loaded here.
+        from web3 import Web3
+        from scripts.evm_service import EvmClient
+        from scripts.polystars_card_payload import (
+            build_polystars_card_from_claim,
+            denormalize_card_onto_claim,
+            unpin_pinata_urls,
+        )
+
+        BLOCKCHAIN_ETHEREUM = "ethereum"
+        start_time = time.time()
+        processed = completed = failed = 0
+        per_claim_results: List[Dict[str, Any]] = []
+
+        for _ in range(max_claims):
+            # Atomic claim pickup: FOR UPDATE SKIP LOCKED + transition to PROCESSING.
+            conn = self.manager.get_connection()
+            row: Optional[Dict[str, Any]] = None
+            try:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE claims
+                        SET    status = 'PROCESSING', updated_at = NOW()
+                        WHERE  id = (
+                            SELECT id FROM claims
+                            WHERE  status = 'QUEUED'
+                            ORDER  BY created_at ASC, id ASC
+                            FOR UPDATE SKIP LOCKED
+                            LIMIT 1
+                        )
+                        RETURNING id, season_id, user_wallet, proxy_wallet,
+                                  claim_type, collection_mint_number
+                        """
+                    )
+                    row = cursor.fetchone()
+                conn.commit()
+            finally:
+                conn.close()
+
+            if not row:
+                break  # Queue is empty.
+            processed += 1
+            claim_id = int(row["id"])
+            season_id = int(row["season_id"])
+            recipient_address = Web3.to_checksum_address(str(row["user_wallet"]).strip())
+            collection_mint_number = (
+                int(row["collection_mint_number"])
+                if row.get("collection_mint_number") is not None else None
+            )
+            print(f"   🪙 claim {claim_id} (season {season_id}, {row.get('claim_type')}): start")
+
+            polystars_card: Optional[Dict[str, Any]] = None
+            try:
+                conn = self.manager.get_connection()
+                try:
+                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                        season_name = self._get_season_name_for_claim(cursor, season_id)
+                finally:
+                    conn.close()
+
+                polystars_card = build_polystars_card_from_claim(
+                    self.manager, claim_id=claim_id
+                )
+                winner_context = {
+                    "assignment_type": (
+                        "winner_self"
+                        if str(row.get("claim_type") or "").lower() == "origin"
+                        else "random_fallback"
+                    ),
+                    "winner_wallet_address": str(row.get("proxy_wallet") or ""),
+                    "claimer_wallet_address": str(row.get("user_wallet") or ""),
+                    "season_id": season_id,
+                    "blockchain": BLOCKCHAIN_ETHEREUM,
+                }
+                client = EvmClient()
+                mint_result = client.mint_user_nft(
+                    user_wallet_address=recipient_address,
+                    season_name=season_name,
+                    claim_id=claim_id,
+                    collection_mint_number=collection_mint_number,
+                    winner_context=winner_context,
+                    polystars_card=polystars_card,
+                )
+
+                conn = self.manager.get_connection()
+                try:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            UPDATE claims
+                            SET    status        = 'COMPLETED',
+                                   tx_hash       = %s,
+                                   asset_address = %s,
+                                   metadata_uri  = %s,
+                                   mint_chain    = %s,
+                                   timestamp     = NOW(),
+                                   updated_at    = NOW()
+                            WHERE  id = %s
+                            """,
+                            (
+                                mint_result.tx_hash,
+                                mint_result.asset_address,
+                                mint_result.metadata_uri,
+                                BLOCKCHAIN_ETHEREUM,
+                                claim_id,
+                            ),
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+                # Denormalize the rendered card payload onto the claim so
+                # /api/cards/{slug} can serve the freshly minted STAR.
+                # A failure here must not undo the on-chain mint — log and continue.
+                try:
+                    denormalize_card_onto_claim(
+                        self.manager, claim_id=claim_id, polystars_card=polystars_card,
+                    )
+                except Exception as denorm_exc:
+                    print(f"   ⚠️  claim {claim_id}: denormalize failed: {denorm_exc}")
+                completed += 1
+                per_claim_results.append({
+                    "claim_id": claim_id, "status": "COMPLETED",
+                    "tx_hash": mint_result.tx_hash,
+                })
+                print(f"   ✅ claim {claim_id}: minted {mint_result.tx_hash}")
+            except Exception as exc:
+                failed += 1
+                err_text = str(exc)[:500]
+                conn = self.manager.get_connection()
+                try:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            UPDATE claims
+                            SET    status        = 'FAILED',
+                                   error_message = %s,
+                                   updated_at    = NOW()
+                            WHERE  id = %s
+                            """,
+                            (err_text, claim_id),
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+                # Best-effort cleanup of any Pinata uploads from a half-built card.
+                if polystars_card:
+                    try:
+                        unpin_pinata_urls([
+                            str(polystars_card.get("front_image_url") or ""),
+                            str(polystars_card.get("back_image_url") or ""),
+                        ])
+                    except Exception:
+                        pass
+                per_claim_results.append({
+                    "claim_id": claim_id, "status": "FAILED", "error": err_text,
+                })
+                print(f"   ❌ claim {claim_id}: {err_text}")
+
+        duration = time.time() - start_time
+        print(
+            f"\n✅ Mint queue worker done in {duration:.1f}s — "
+            f"processed={processed} completed={completed} failed={failed}"
+        )
+        return {
+            'success': True,
+            'duration': duration,
+            'processed': processed,
+            'completed': completed,
+            'failed': failed,
+            'per_claim': per_claim_results,
+        }
+
     def run_daily_pipeline(self, force: bool = False) -> Dict:
         """Run daily data pipeline"""
         
@@ -3099,6 +2799,17 @@ class SimplifiedScheduler:
         else:
             print("   ✅ No incomplete days found")
         
+        # End-of-day mint queue worker. Runs only if MINT_QUEUE_ENABLED=1.
+        # Failures here do not flip the pipeline's overall success flag —
+        # queued claims simply remain QUEUED for the next run.
+        try:
+            mint_batch_size = _env_int("MINT_QUEUE_DAILY_BATCH_SIZE", 200)
+            mint_result = self.process_mint_queue(max_claims=mint_batch_size)
+            results['mint_queue'] = mint_result
+        except Exception as exc:
+            print(f"⚠️  Mint queue worker raised: {exc}")
+            results['mint_queue'] = {'success': False, 'error': str(exc), 'processed': 0}
+
         # Summary
         print("\n" + "="*70)
         print("📊 PIPELINE SUMMARY")
@@ -3114,7 +2825,7 @@ class SimplifiedScheduler:
                 if skipped_count > 0:
                     print(f"⏳ Waiting for lag: {skipped_count} day(s) (need {DATA_LAG_DAYS}-day finalization)")
         print("="*70)
-        
+
         return {'success': all(r.get('success') for r in results.values()), 'results': results}
     
     def run_genesis_load(self) -> Dict:
@@ -3608,6 +3319,8 @@ Examples:
     parser.add_argument('--catch-up', action='store_true', help='Load all missing data automatically')
     parser.add_argument('--season-update', action='store_true', help='Run only seasons lifecycle logic')
     parser.add_argument('--auto-catchup', action='store_true', help='After --historical, automatically run --catch-up')
+    parser.add_argument('--process-mint-queue', action='store_true', help='Run only the mint queue worker (process QUEUED claims into on-chain mints)')
+    parser.add_argument('--mint-queue-batch-size', type=int, default=100, help='Max claims processed per --process-mint-queue invocation (default 100)')
     parser.add_argument('--force', action='store_true', help='Force reload')
     parser.add_argument('--dry-run', action='store_true', help='Dry run (test)')
     args = parser.parse_args()
@@ -3664,9 +3377,18 @@ Examples:
 
         elif args.season_update:
             scheduler.run_standard_season_update()
+            # Always refresh per-season participants partitions so newly-created
+            # seasons (and any drifted-stale ones) get a populated allocation
+            # pool. Without this, ``mintable-count`` and the queue allocator
+            # would see an empty partition for the just-rotated season.
+            scheduler.refresh_participants_snapshot()
             print("\n✅ Season lifecycle update completed")
             sys.exit(0)
-        
+
+        elif args.process_mint_queue:
+            result = scheduler.process_mint_queue(max_claims=args.mint_queue_batch_size)
+            sys.exit(0 if result.get('success') else 1)
+
         else:
             print("Use --help for usage")
             print("\n🚀 Quick start (new server):")

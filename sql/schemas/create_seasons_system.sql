@@ -311,134 +311,20 @@ COMMENT ON COLUMN season_events_log.details IS 'Human-readable event details';
 DO $$ BEGIN RAISE NOTICE '✅ season_events_log table created'; END $$;
 
 -- ============================================================================
--- 6. ORIGIN SNAPSHOTS TABLE (per-season Vault eligibility)
+-- 6. LEGACY winner_wallets_nft_to_claim REMOVAL
 -- ============================================================================
-DO $$ BEGIN RAISE NOTICE '🏛️  Creating winner_wallets_nft_to_claim table...'; END $$;
+-- The queue model writes the full participant snapshot directly onto ``claims``
+-- at QUEUED time, so the per-season frozen Origins table is no longer needed.
+-- Drop dependent views first (they're recreated below from participants when
+-- still useful), then drop the table itself. Idempotent.
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '🗑️  Dropping legacy winner_wallets_nft_to_claim...'; END $$;
 
--- Rename old table from previous migration versions.
-DO $$
-BEGIN
-    IF to_regclass('public.season_origin_wallets') IS NOT NULL
-       AND to_regclass('public.winner_wallets_nft_to_claim') IS NULL THEN
-        ALTER TABLE season_origin_wallets RENAME TO winner_wallets_nft_to_claim;
-    END IF;
-END $$;
-
--- Drop compatibility/analytics views early to avoid dependency errors during column migration.
 DROP VIEW IF EXISTS v_origins_eligibility;
 DROP VIEW IF EXISTS v_origin_wallets;
+DROP TABLE IF EXISTS winner_wallets_nft_to_claim CASCADE;
 
-CREATE TABLE IF NOT EXISTS winner_wallets_nft_to_claim (
-    id BIGSERIAL PRIMARY KEY,
-    season_id INTEGER NOT NULL,
-    proxy_wallet VARCHAR(42) NOT NULL,
-    source TEXT NOT NULL DEFAULT 'top_pnl_30d_season_start',
-    window_start TIMESTAMPTZ NOT NULL,
-    window_end TIMESTAMPTZ NOT NULL,
-    snapshot_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    entry_cwap NUMERIC(20, 4),
-    total_volume NUMERIC(20, 2),
-    total_pnl NUMERIC(20, 2),
-    roi_percentage NUMERIC(20, 2),
-    entry_bracket TEXT,
-    edge TEXT,
-    yield TEXT,
-    gravity TEXT,
-    rank INTEGER,
-    event_id TEXT,
-    event_slug TEXT,
-    archetype TEXT,
-    archetype_description TEXT,
-    archetype_math TEXT,
-    rarity_bracket TEXT,
-    is_minted BOOLEAN NOT NULL DEFAULT FALSE,
-    minted_at TIMESTAMPTZ,
-    minted_to_wallet TEXT,
-    minted_claim_id BIGINT,
-    minted_tx_hash TEXT,
-    minted_asset_address TEXT,
-    CONSTRAINT fk_origin_snapshot_season
-        FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
-    CONSTRAINT winner_proxy_wallet_format_check
-        CHECK (proxy_wallet ~* '^0x[a-f0-9]{40}$'),
-    CONSTRAINT winner_wallet_unique_per_season
-        UNIQUE (season_id, proxy_wallet)
-);
-
--- Ensure columns exist for upgraded databases.
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS proxy_wallet VARCHAR(42);
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS event_id TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS event_slug TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS entry_cwap NUMERIC(20, 4);
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS total_volume NUMERIC(20, 2);
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS total_pnl NUMERIC(20, 2);
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS roi_percentage NUMERIC(20, 2);
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS entry_bracket TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS edge TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS yield TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS gravity TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS rank INTEGER;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS is_minted BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_at TIMESTAMPTZ;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_to_wallet TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_claim_id BIGINT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_tx_hash TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS minted_asset_address TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS archetype TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS archetype_description TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS archetype_math TEXT;
-ALTER TABLE winner_wallets_nft_to_claim ADD COLUMN IF NOT EXISTS rarity_bracket TEXT;
-
--- Backward-compatible migration from legacy column naming.
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'winner_wallets_nft_to_claim'
-          AND column_name = 'wallet_address'
-    ) THEN
-        EXECUTE '
-            UPDATE winner_wallets_nft_to_claim
-            SET proxy_wallet = LOWER(wallet_address)
-            WHERE proxy_wallet IS NULL
-              AND wallet_address IS NOT NULL
-        ';
-    END IF;
-END $$;
-
--- Remove legacy business columns after migrating to participants payload model.
-ALTER TABLE winner_wallets_nft_to_claim DROP COLUMN IF EXISTS wallet_address;
-ALTER TABLE winner_wallets_nft_to_claim DROP COLUMN IF EXISTS total_pnl_window;
-ALTER TABLE winner_wallets_nft_to_claim DROP COLUMN IF EXISTS pnl_rank;
-ALTER TABLE winner_wallets_nft_to_claim DROP COLUMN IF EXISTS market_id;
-ALTER TABLE winner_wallets_nft_to_claim DROP COLUMN IF EXISTS condition_id;
-ALTER TABLE winner_wallets_nft_to_claim DROP COLUMN IF EXISTS event_title;
-
-CREATE INDEX IF NOT EXISTS idx_winners_snapshot_season
-    ON winner_wallets_nft_to_claim(season_id);
-CREATE INDEX IF NOT EXISTS idx_winners_snapshot_proxy_wallet
-    ON winner_wallets_nft_to_claim(proxy_wallet);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_winners_snapshot_season_proxy_wallet
-    ON winner_wallets_nft_to_claim(season_id, proxy_wallet);
-CREATE INDEX IF NOT EXISTS idx_winners_snapshot_season_rank
-    ON winner_wallets_nft_to_claim(season_id, rank);
-CREATE INDEX IF NOT EXISTS idx_winners_snapshot_event_id
-    ON winner_wallets_nft_to_claim(event_id);
-CREATE INDEX IF NOT EXISTS idx_winners_snapshot_event_slug
-    ON winner_wallets_nft_to_claim(event_slug);
-
-COMMENT ON TABLE winner_wallets_nft_to_claim IS 'Frozen per-season randomized participants allocation. Technical mint metadata + participant analytics payload.';
-COMMENT ON COLUMN winner_wallets_nft_to_claim.window_start IS 'Inclusive lower bound used to derive season working events';
-COMMENT ON COLUMN winner_wallets_nft_to_claim.window_end IS 'Exclusive upper bound used to derive season working events';
-COMMENT ON COLUMN winner_wallets_nft_to_claim.event_id IS 'Participant event id sampled from participants materialized view';
-COMMENT ON COLUMN winner_wallets_nft_to_claim.event_slug IS 'Participant event slug sampled from participants materialized view';
-COMMENT ON COLUMN winner_wallets_nft_to_claim.archetype IS 'Archetype label frozen from participants at snapshot time';
-COMMENT ON COLUMN winner_wallets_nft_to_claim.rarity_bracket IS 'Occurrence band text frozen from participants at snapshot time';
-
-DO $$ BEGIN RAISE NOTICE '✅ winner_wallets_nft_to_claim table created'; END $$;
+DO $$ BEGIN RAISE NOTICE '✅ winner_wallets_nft_to_claim dropped'; END $$;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- ``preview_cards`` — home-showcase/preview buffer for unminted cards.
@@ -505,13 +391,24 @@ BEGIN
 END $$;
 DROP FUNCTION IF EXISTS user_generated_cards_assign_season_mint_number();
 
+-- Drop legacy FK + column on existing deployments before recreating the table.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'fk_preview_card_winner_row'
+    ) THEN
+        ALTER TABLE preview_cards DROP CONSTRAINT fk_preview_card_winner_row;
+    END IF;
+END $$;
+ALTER TABLE IF EXISTS preview_cards DROP COLUMN IF EXISTS winner_row_id;
+
 CREATE TABLE IF NOT EXISTS preview_cards (
     id BIGSERIAL PRIMARY KEY,
     collection_mint_number BIGINT,
     slug TEXT NOT NULL UNIQUE,
     owner_wallet VARCHAR(42) NOT NULL,
     owner_proxy_wallet TEXT,
-    winner_row_id BIGINT NOT NULL UNIQUE,
     season_id INTEGER NOT NULL,
     event_id TEXT,
     event_slug TEXT,
@@ -523,8 +420,6 @@ CREATE TABLE IF NOT EXISTS preview_cards (
     back_image_path TEXT NOT NULL,
     card_payload_json JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT fk_preview_card_winner_row
-        FOREIGN KEY (winner_row_id) REFERENCES winner_wallets_nft_to_claim(id) ON DELETE CASCADE,
     CONSTRAINT fk_preview_card_season
         FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
     CONSTRAINT preview_card_owner_wallet_format_check
@@ -595,8 +490,6 @@ CREATE TRIGGER tr_preview_cards_assign_season_mint
 -- Performance indexes for wallet lookup paths used by /api/wallets.
 CREATE INDEX IF NOT EXISTS idx_claims_season_user_wallet_lower
     ON claims(season_id, LOWER(user_wallet));
-CREATE INDEX IF NOT EXISTS idx_winners_snapshot_season_wallet_lower
-    ON winner_wallets_nft_to_claim(season_id, LOWER(proxy_wallet));
 
 DO $$
 BEGIN
@@ -613,246 +506,15 @@ BEGIN
     END IF;
 END $$;
 
--- Backfill snapshots for existing standard/genesis seasons (idempotent).
--- Uses randomized rows from participants constrained to season "working events".
-DO $$
-DECLARE
-    backfilled_count INTEGER := 0;
-BEGIN
-    IF to_regclass('public.user_closed_positions') IS NULL THEN
-        RAISE NOTICE '⚠️  user_closed_positions table not found, skipping winners backfill';
-        RETURN;
-    END IF;
-    IF to_regclass('public.participants') IS NULL THEN
-        RAISE NOTICE '⚠️  participants relation not found, skipping winners backfill';
-        RETURN;
-    END IF;
-
-    WITH target_seasons AS (
-        SELECT
-            s.id,
-            s.type,
-            CASE
-                WHEN s.type = 'standard'
-                    THEN s.start_date - INTERVAL '3 days' - INTERVAL '10 days'
-                ELSE TIMESTAMPTZ '2024-06-01 00:00:00+00'
-            END AS window_start,
-            CASE
-                WHEN s.type = 'standard'
-                    THEN s.start_date - INTERVAL '3 days'
-                ELSE TIMESTAMPTZ '2026-02-07 00:00:00+00'
-            END AS window_end,
-            CASE
-                WHEN s.type = 'standard' THEN 10
-                ELSE 20
-            END AS rank_limit,
-            CASE
-                WHEN s.type = 'standard' THEN 'participants_randomized_standard_backfill'
-                ELSE 'participants_randomized_genesis_backfill'
-            END AS snapshot_source
-        FROM seasons s
-        WHERE s.type IN ('standard', 'genesis')
-          AND NOT EXISTS (
-              SELECT 1
-              FROM winner_wallets_nft_to_claim w
-              WHERE w.season_id = s.id
-          )
-    ),
-    inserted AS (
-        INSERT INTO winner_wallets_nft_to_claim (
-            season_id,
-            proxy_wallet,
-            source,
-            window_start,
-            window_end,
-            snapshot_at,
-            event_id,
-            event_slug,
-            entry_cwap,
-            total_volume,
-            total_pnl,
-            roi_percentage,
-            entry_bracket,
-            edge,
-            yield,
-            gravity,
-            rank,
-            archetype,
-            archetype_description,
-            archetype_math,
-            rarity_bracket
-        )
-        SELECT
-            ts.id AS season_id,
-            picked.proxy_wallet,
-            ts.snapshot_source::TEXT AS source,
-            ts.window_start AS window_start,
-            ts.window_end AS window_end,
-            NOW() AS snapshot_at,
-            picked.event_id,
-            picked.event_slug,
-            picked.entry_cwap,
-            picked.total_volume,
-            picked.total_pnl,
-            picked.roi_percentage,
-            picked.entry_bracket,
-            picked.edge,
-            picked.yield,
-            picked.gravity,
-            picked.rank,
-            picked.archetype,
-            picked.archetype_description,
-            picked.archetype_math,
-            picked.rarity_bracket
-        FROM target_seasons ts
-        CROSS JOIN LATERAL (
-            WITH position_base AS (
-                SELECT
-                    LOWER(ucp.proxy_wallet) AS proxy_wallet,
-                    COALESCE(
-                        ucp.end_date_parsed,
-                        ucp.timestamp_human,
-                        TO_TIMESTAMP(ucp.timestamp_unix)
-                    ) AS position_time,
-                    COALESCE(
-                        ucp.event_id,
-                        e_by_slug.id
-                    ) AS event_id,
-                    COALESCE(ucp.event_slug, e_by_id.slug, e_by_slug.slug) AS event_slug
-                FROM user_closed_positions ucp
-                LEFT JOIN events e_by_id
-                    ON ucp.event_id IS NOT NULL
-                   AND e_by_id.id = ucp.event_id
-                LEFT JOIN LATERAL (
-                    SELECT e.id, e.slug
-                    FROM events e
-                    WHERE ucp.event_slug IS NOT NULL
-                      AND e.slug = ucp.event_slug
-                    LIMIT 1
-                ) e_by_slug ON TRUE
-                WHERE ucp.proxy_wallet IS NOT NULL
-            ),
-            resolved_positions AS (
-                SELECT
-                    pb.event_id,
-                    pb.event_slug,
-                    CASE
-                        WHEN ts.type = 'standard' THEN COALESCE(erq.resolution_ready_at, erq.closed_time)
-                        ELSE pb.position_time
-                    END AS season_anchor_at
-                FROM position_base pb
-                LEFT JOIN event_resolution_queue erq
-                    ON erq.event_id = pb.event_id
-                WHERE (
-                    ts.type = 'standard'
-                    AND pb.event_id IS NOT NULL
-                    AND COALESCE(erq.closed, FALSE) = TRUE
-                    AND COALESCE(erq.resolution_ready_at, erq.closed_time) IS NOT NULL
-                    AND COALESCE(erq.resolution_ready_at, erq.closed_time) >= ts.window_start
-                    AND COALESCE(erq.resolution_ready_at, erq.closed_time) < ts.window_end
-                ) OR (
-                    ts.type = 'genesis'
-                    AND pb.position_time IS NOT NULL
-                    AND pb.position_time >= ts.window_start
-                    AND pb.position_time < ts.window_end
-                )
-            ),
-            working_events AS (
-                SELECT DISTINCT event_id, event_slug
-                FROM resolved_positions
-                WHERE event_id IS NOT NULL OR event_slug IS NOT NULL
-            ),
-            candidate_participants AS (
-                SELECT p.*
-                FROM participants p
-                WHERE p.proxy_wallet IS NOT NULL
-                  AND EXISTS (
-                      SELECT 1
-                      FROM working_events we
-                      WHERE (
-                          we.event_id IS NOT NULL
-                          AND p.event_id = we.event_id
-                      ) OR (
-                          we.event_slug IS NOT NULL
-                          AND p.event_slug = we.event_slug
-                      )
-                  )
-            ),
-            per_wallet_random AS (
-                SELECT DISTINCT ON (LOWER(p.proxy_wallet))
-                    LOWER(p.proxy_wallet) AS proxy_wallet,
-                    p.event_id,
-                    p.event_slug,
-                    p.entry_cwap,
-                    p.total_volume,
-                    p.total_pnl,
-                    p.roi_percentage,
-                    p.entry_bracket,
-                    p.edge,
-                    p.yield,
-                    p.gravity,
-                    p.rank,
-                    p.archetype,
-                    p.archetype_description,
-                    p.archetype_math,
-                    p.rarity_bracket
-                FROM candidate_participants p
-                ORDER BY LOWER(p.proxy_wallet), RANDOM()
-            )
-            SELECT *
-            FROM per_wallet_random
-            ORDER BY RANDOM()
-            LIMIT ts.rank_limit
-        ) AS picked
-        RETURNING 1
-    )
-    SELECT COUNT(*) INTO backfilled_count
-    FROM inserted;
-
-    RAISE NOTICE '✅ winner_wallets_nft_to_claim backfill rows inserted: %', backfilled_count;
-END $$;
-
--- Compatibility view: Origins for currently active standard season.
-DO $$ BEGIN RAISE NOTICE '🏛️  Creating v_origin_wallets compatibility view...'; END $$;
-
--- Recreate view from scratch because old deployments may have different column types.
--- v_origins_eligibility depends on v_origin_wallets and is recreated later in this migration.
-DROP VIEW IF EXISTS v_origins_eligibility;
-DROP VIEW IF EXISTS v_origin_wallets;
-
-CREATE OR REPLACE VIEW v_origin_wallets AS
-WITH active_standard AS (
-    SELECT s.id
-    FROM seasons s
-    WHERE s.type = 'standard'
-      AND s.is_active = TRUE
-    ORDER BY s.start_date DESC, s.id DESC
-    LIMIT 1
-)
-SELECT
-    sow.proxy_wallet AS wallet_address,
-    sow.source,
-    sow.total_pnl AS total_pnl_30d,
-    sow.rank AS pnl_rank
-FROM winner_wallets_nft_to_claim sow
-JOIN active_standard a ON a.id = sow.season_id
-ORDER BY sow.rank NULLS LAST, sow.proxy_wallet;
-
-COMMENT ON VIEW v_origin_wallets IS 'Compatibility view returning Origins wallets snapshot for currently active standard season.';
-
-DO $$ BEGIN RAISE NOTICE '✅ v_origin_wallets compatibility view created'; END $$;
 
 -- ============================================================================
 -- 6b. CLAIMS DENORMALIZATION FOR PUBLIC /cards/{slug} PAGE
 -- ============================================================================
 -- Adds denormalized card-detail columns to ``claims`` so the public permalink
--- for a minted STAR can be served from ``claims`` directly, without reading
--- ``preview_cards``. This decouples the preview buffer (``preview_cards``)
--- from the canonical store for minted cards (``claims``). The mint flow
--- (``promote_preview_to_claim``) populates these columns AND deletes the
--- matching ``preview_cards`` row so minted STARs disappear from the
--- showcase ticker. Backfill below recovers values for claims minted BEFORE
--- this refactor by copying them out of the (pre-rename) preview twin.
+-- for a minted STAR can be served from ``claims`` directly. The cron mint
+-- worker (`process_mint_queue`) calls ``denormalize_card_onto_claim`` after a
+-- successful on-chain mint to populate these and to drop the matching
+-- ``preview_cards`` row so minted STARs disappear from the showcase ticker.
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE '🎯 Adding claims denormalization columns for /cards/{slug}...'; END $$;
 
@@ -863,92 +525,30 @@ ALTER TABLE claims ADD COLUMN IF NOT EXISTS back_image_url     TEXT;
 ALTER TABLE claims ADD COLUMN IF NOT EXISTS primary_tag        TEXT;
 ALTER TABLE claims ADD COLUMN IF NOT EXISTS secondary_tag      TEXT;
 ALTER TABLE claims ADD COLUMN IF NOT EXISTS pattern            TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS winner_row_id      BIGINT;
 ALTER TABLE claims ADD COLUMN IF NOT EXISTS card_payload_json  JSONB;
 
--- FK to winner_wallets_nft_to_claim is ON DELETE SET NULL: a deleted winner
--- row must never cascade into the historical claim (claims are an
--- append-only audit log of on-chain mints and cannot be retroactively
--- removed just because the snapshot they came from was purged).
+-- Drop legacy FK + column from prior deployments. The queue model no longer
+-- uses winner_row_id; the snapshot lives directly on the claims row.
 DO $$
 BEGIN
-    IF NOT EXISTS (
+    IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'fk_claims_winner_row'
     ) THEN
-        ALTER TABLE claims
-            ADD CONSTRAINT fk_claims_winner_row
-            FOREIGN KEY (winner_row_id)
-            REFERENCES winner_wallets_nft_to_claim(id)
-            ON DELETE SET NULL;
+        ALTER TABLE claims DROP CONSTRAINT fk_claims_winner_row;
     END IF;
 END $$;
+DROP INDEX IF EXISTS idx_claims_winner_row_id;
+ALTER TABLE claims DROP COLUMN IF EXISTS winner_row_id;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_card_slug
     ON claims(card_slug)
     WHERE card_slug IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS idx_claims_winner_row_id
-    ON claims(winner_row_id)
-    WHERE winner_row_id IS NOT NULL;
-
--- Backfill from preview_cards (formerly ``user_generated_cards``) via
--- winner_wallets_nft_to_claim.minted_claim_id. Idempotent: only touches rows
--- where card_slug IS NULL. For claims minted before this refactor, the
--- pre-mint dual-write left the mint-time slug and on-chain Pinata URLs on
--- the preview twin, so copying from there is a loss-less migration. After
--- this script the Stage 2 ``promote_preview_to_claim`` DELETEs the preview
--- row on mint, so subsequent claims are populated directly at mint time.
-DO $$
-DECLARE
-    backfilled_count INTEGER := 0;
-BEGIN
-    IF to_regclass('public.preview_cards') IS NULL THEN
-        RAISE NOTICE '⚠️  preview_cards not found, skipping claims denormalization backfill';
-        RETURN;
-    END IF;
-
-    WITH src AS (
-        SELECT
-            c.id AS claim_id,
-            gc.slug AS card_slug,
-            gc.card_title AS card_title,
-            gc.front_image_path AS front_image_url,
-            gc.back_image_path AS back_image_url,
-            gc.primary_tag AS primary_tag,
-            gc.secondary_tag AS secondary_tag,
-            gc.pattern AS pattern,
-            gc.winner_row_id AS winner_row_id,
-            gc.card_payload_json AS card_payload_json
-        FROM claims c
-        JOIN winner_wallets_nft_to_claim w ON w.minted_claim_id = c.id
-        JOIN preview_cards gc ON gc.winner_row_id = w.id
-        WHERE c.card_slug IS NULL
-    ),
-    updated AS (
-        UPDATE claims c
-        SET card_slug          = src.card_slug,
-            card_title         = src.card_title,
-            front_image_url    = src.front_image_url,
-            back_image_url     = src.back_image_url,
-            primary_tag        = src.primary_tag,
-            secondary_tag      = src.secondary_tag,
-            pattern            = src.pattern,
-            winner_row_id      = src.winner_row_id,
-            card_payload_json  = src.card_payload_json
-        FROM src
-        WHERE c.id = src.claim_id
-        RETURNING 1
-    )
-    SELECT COUNT(*) INTO backfilled_count FROM updated;
-    RAISE NOTICE '✅ Claims denormalization backfilled rows: %', backfilled_count;
-END $$;
-
 COMMENT ON COLUMN claims.card_slug IS 'Public permalink slug for /cards/{slug}; mirrors qr_payload baked into the on-chain NFT';
 COMMENT ON COLUMN claims.card_title IS 'Denormalized card title for rendering /cards/{slug} without reading preview_cards';
 COMMENT ON COLUMN claims.front_image_url IS 'Pinata/IPFS URL for the front card image baked into the on-chain NFT';
 COMMENT ON COLUMN claims.back_image_url IS 'Pinata/IPFS URL for the back card image baked into the on-chain NFT';
-COMMENT ON COLUMN claims.winner_row_id IS 'FK to winner_wallets_nft_to_claim row that was minted; allows JOINs for event snapshot';
 COMMENT ON COLUMN claims.card_payload_json IS 'Full polystars_card payload snapshot at mint time, mirroring preview_cards.card_payload_json';
 
 DO $$ BEGIN RAISE NOTICE '✅ Claims denormalization columns ready'; END $$;
@@ -1020,24 +620,6 @@ GROUP BY c.user_wallet;
 
 COMMENT ON VIEW v_user_claim_history IS 'Per-user statistics across all seasons';
 
--- Origins eligibility check
-CREATE OR REPLACE VIEW v_origins_eligibility AS
-SELECT 
-    vo.wallet_address,
-    vo.source,
-    CASE 
-        WHEN c.user_wallet IS NOT NULL THEN TRUE
-        ELSE FALSE
-    END as has_claimed,
-    c.season_id as claimed_season_id,
-    c.timestamp as claim_timestamp
-FROM v_origin_wallets vo
-LEFT JOIN claims c ON LOWER(vo.wallet_address) = LOWER(c.user_wallet)
-    AND c.phase_type = 'vault'
-    AND c.status = 'COMPLETED';
-
-COMMENT ON VIEW v_origins_eligibility IS 'Shows which Origins wallets have claimed their Vault phase NFTs';
-
 DO $$ BEGIN RAISE NOTICE '✅ Analytics views created'; END $$;
 
 -- ============================================================================
@@ -1059,14 +641,14 @@ BEGIN
             LIMIT 1
         )
         SELECT 1
-        FROM winner_wallets_nft_to_claim sow
-        JOIN active_standard a ON a.id = sow.season_id
-        WHERE LOWER(sow.proxy_wallet) = LOWER(wallet_addr)
+        FROM participants p
+        JOIN active_standard a ON a.id = p.season_id
+        WHERE LOWER(p.proxy_wallet) = LOWER(wallet_addr)
     );
 END;
 $$ LANGUAGE plpgsql STABLE;
 
-COMMENT ON FUNCTION is_origin_wallet IS 'Check if a wallet address is eligible for Vault phase in the currently active standard season (from frozen snapshot table)';
+COMMENT ON FUNCTION is_origin_wallet IS 'Check if a wallet has at least one row in the currently active standard season''s participants partition.';
 
 -- Function to get active season for claiming
 CREATE OR REPLACE FUNCTION get_active_season()
@@ -1155,15 +737,461 @@ DO $$ BEGIN RAISE NOTICE ''; END $$;
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE '📊 Getting Origins count...'; END $$;
 
+-- The ``participants`` partitioned table is created later in §12. This stats
+-- block is intentionally guarded so the migration can run end-to-end on a
+-- fresh database where ``participants`` does not yet exist at this point.
 DO $$
 DECLARE
     origins_count INTEGER;
 BEGIN
-    SELECT COUNT(*) INTO origins_count
-    FROM v_origin_wallets;
-    
-    RAISE NOTICE '✅ Total Origins wallets: %', origins_count;
+    IF to_regclass('public.participants') IS NULL THEN
+        RAISE NOTICE 'ℹ️  participants table not created yet — Origins count will be reported after §12';
+        RETURN;
+    END IF;
+    SELECT COUNT(DISTINCT LOWER(proxy_wallet)) INTO origins_count
+    FROM participants;
+    RAISE NOTICE '✅ Total Origins wallets across all season partitions: %', origins_count;
 END $$;
+
+-- ============================================================================
+-- 11. CLAIMS QUEUE MODEL (denormalized snapshot + caps + QUEUED status)
+-- ============================================================================
+-- Rebuilds claims as the single source of truth for both mint state AND the
+-- participant snapshot that goes onto the card. Replaces the indirection via
+-- winner_wallets_nft_to_claim + participants MV: when a user clicks "Mint",
+-- a row is INSERTed here with status 'QUEUED', carrying every field needed
+-- to render the card. A daily cron worker picks QUEUED rows and runs the
+-- on-chain mint, transitioning them to PROCESSING -> COMPLETED.
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '🧾 Extending claims for queue model...'; END $$;
+
+-- 11.1 Per-season cap configuration columns on seasons.
+ALTER TABLE seasons ADD COLUMN IF NOT EXISTS per_event_cap INTEGER;
+ALTER TABLE seasons ADD COLUMN IF NOT EXISTS per_tag_cap   INTEGER;
+
+COMMENT ON COLUMN seasons.per_event_cap IS 'Max claims per (season, event_id). NULL = unlimited.';
+COMMENT ON COLUMN seasons.per_tag_cap   IS 'Max claims per (season, primary_tag). NULL = unlimited.';
+
+-- Backfill defaults derived from total_supply (50% per event, 25% per tag).
+-- Applied only to seasons that have not been configured yet (cap IS NULL).
+UPDATE seasons
+SET per_event_cap = GREATEST(1, CEIL(total_supply * 0.5)::INTEGER)
+WHERE per_event_cap IS NULL AND total_supply IS NOT NULL;
+
+UPDATE seasons
+SET per_tag_cap = GREATEST(1, CEIL(total_supply * 0.25)::INTEGER)
+WHERE per_tag_cap IS NULL AND total_supply IS NOT NULL;
+
+-- 11.1b Auto-fill per_event_cap / per_tag_cap on INSERT when omitted, derived
+--       from total_supply. Mirrors the backfill above so Python-side season
+--       creation does not need to know about cap columns.
+CREATE OR REPLACE FUNCTION seasons_default_caps()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.total_supply IS NOT NULL AND NEW.total_supply > 0 THEN
+        IF NEW.per_event_cap IS NULL THEN
+            NEW.per_event_cap := GREATEST(1, CEIL(NEW.total_supply * 0.5)::INTEGER);
+        END IF;
+        IF NEW.per_tag_cap IS NULL THEN
+            NEW.per_tag_cap := GREATEST(1, CEIL(NEW.total_supply * 0.25)::INTEGER);
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS tr_seasons_default_caps ON seasons;
+CREATE TRIGGER tr_seasons_default_caps
+    BEFORE INSERT ON seasons
+    FOR EACH ROW
+    EXECUTE PROCEDURE seasons_default_caps();
+
+-- 11.2 Snapshot columns on claims (frozen at queue-insert time).
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS proxy_wallet          VARCHAR(42);
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS event_id              TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS event_slug            TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS snapshot_at           TIMESTAMPTZ;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS entry_cwap            NUMERIC(20, 4);
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS total_volume          NUMERIC(20, 2);
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS total_pnl             NUMERIC(20, 2);
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS roi_percentage        NUMERIC(20, 2);
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS entry_bracket         TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS edge                  TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS yield                 TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS gravity               TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS archetype             TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS archetype_description TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS archetype_math        TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS rarity_bracket        TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS participant_rank      INTEGER;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS claim_type            TEXT;
+
+COMMENT ON COLUMN claims.proxy_wallet  IS 'Polymarket proxy wallet of the trader represented on this card. Differs from user_wallet (recipient).';
+COMMENT ON COLUMN claims.claim_type    IS 'origin = claimer minted their own card; looter = claimer minted someone else''s random card.';
+COMMENT ON COLUMN claims.snapshot_at   IS 'When the participant snapshot for this card was frozen onto this row.';
+
+-- 11.3 Extend status CHECK to allow 'QUEUED'. Inline CHECK constraints get
+--      auto-generated names; drop any matching one before recreating.
+DO $$
+DECLARE
+    cons_name TEXT;
+BEGIN
+    FOR cons_name IN
+        SELECT c.conname
+        FROM   pg_constraint c
+        JOIN   pg_class      t ON t.oid = c.conrelid
+        WHERE  t.relname = 'claims'
+          AND  c.contype = 'c'
+          AND  pg_get_constraintdef(c.oid) ILIKE '%status%IN%'
+    LOOP
+        EXECUTE 'ALTER TABLE claims DROP CONSTRAINT ' || quote_ident(cons_name);
+    END LOOP;
+END $$;
+
+ALTER TABLE claims
+    ADD CONSTRAINT claims_status_check
+    CHECK (status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED', 'FAILED'));
+
+-- 11.5 Replace the legacy strict UNIQUE(user_wallet, season_id) with a
+--      partial index that also covers 'QUEUED'. The strict version blocked
+--      retries after FAILED; the partial form scopes uniqueness to the
+--      active set so a user can re-queue after a permanent failure.
+DO $$
+DECLARE
+    cons_name TEXT;
+BEGIN
+    FOR cons_name IN
+        SELECT c.conname
+        FROM   pg_constraint c
+        JOIN   pg_class      t ON t.oid = c.conrelid
+        WHERE  t.relname = 'claims'
+          AND  c.contype = 'u'
+          AND  pg_get_constraintdef(c.oid) ILIKE '%user_wallet%season_id%'
+    LOOP
+        EXECUTE 'ALTER TABLE claims DROP CONSTRAINT ' || quote_ident(cons_name);
+    END LOOP;
+END $$;
+
+DROP INDEX IF EXISTS ux_claims_active_season_user_wallet_lower;
+CREATE UNIQUE INDEX ux_claims_active_season_user_wallet_lower
+    ON claims (season_id, LOWER(user_wallet))
+    WHERE status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
+
+DROP INDEX IF EXISTS ux_claims_active_proxy_wallet;
+CREATE UNIQUE INDEX ux_claims_active_proxy_wallet
+    ON claims (season_id, LOWER(proxy_wallet))
+    WHERE proxy_wallet IS NOT NULL
+      AND status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
+
+DROP INDEX IF EXISTS idx_claims_active_season_event;
+CREATE INDEX idx_claims_active_season_event
+    ON claims (season_id, event_id)
+    WHERE event_id IS NOT NULL
+      AND status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
+
+DROP INDEX IF EXISTS idx_claims_active_season_tag;
+CREATE INDEX idx_claims_active_season_tag
+    ON claims (season_id, primary_tag)
+    WHERE primary_tag IS NOT NULL
+      AND status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
+
+-- Cron worker scan: ORDER BY (season_id, created_at) FOR UPDATE SKIP LOCKED.
+DROP INDEX IF EXISTS idx_claims_queued_pickup;
+CREATE INDEX idx_claims_queued_pickup
+    ON claims (season_id, created_at)
+    WHERE status = 'QUEUED';
+
+-- 11.6 BEFORE INSERT trigger that enforces total_supply, per_event, per_tag.
+--      Runs only when the new row enters the active set (status != FAILED).
+--      Uses partial-index counts (cheap: claims << participants).
+CREATE OR REPLACE FUNCTION claims_check_caps()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_total_supply  INTEGER;
+    v_event_cap     INTEGER;
+    v_tag_cap       INTEGER;
+    v_active_count  INTEGER;
+    v_event_count   INTEGER;
+    v_tag_count     INTEGER;
+BEGIN
+    IF NEW.status = 'FAILED' THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT total_supply, per_event_cap, per_tag_cap
+    INTO   v_total_supply, v_event_cap, v_tag_cap
+    FROM   seasons
+    WHERE  id = NEW.season_id;
+
+    IF v_total_supply IS NULL THEN
+        RAISE EXCEPTION 'Season % not found or has no total_supply', NEW.season_id
+            USING ERRCODE = 'P0002';
+    END IF;
+
+    -- Total supply cap (always enforced when total_supply > 0).
+    IF v_total_supply > 0 THEN
+        SELECT COUNT(*) INTO v_active_count
+        FROM   claims
+        WHERE  season_id = NEW.season_id
+          AND  status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
+
+        IF v_active_count >= v_total_supply THEN
+            RAISE EXCEPTION 'season % total supply (%) exhausted', NEW.season_id, v_total_supply
+                USING ERRCODE = 'check_violation';
+        END IF;
+    END IF;
+
+    -- Per-event cap (skipped if NULL or event_id missing).
+    IF v_event_cap IS NOT NULL AND NEW.event_id IS NOT NULL THEN
+        SELECT COUNT(*) INTO v_event_count
+        FROM   claims
+        WHERE  season_id = NEW.season_id
+          AND  event_id  = NEW.event_id
+          AND  status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
+
+        IF v_event_count >= v_event_cap THEN
+            RAISE EXCEPTION
+                'season % event % cap (%) reached',
+                NEW.season_id, NEW.event_id, v_event_cap
+                USING ERRCODE = 'check_violation';
+        END IF;
+    END IF;
+
+    -- Per-tag cap (skipped if NULL or primary_tag missing).
+    IF v_tag_cap IS NOT NULL AND NEW.primary_tag IS NOT NULL THEN
+        SELECT COUNT(*) INTO v_tag_count
+        FROM   claims
+        WHERE  season_id   = NEW.season_id
+          AND  primary_tag = NEW.primary_tag
+          AND  status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
+
+        IF v_tag_count >= v_tag_cap THEN
+            RAISE EXCEPTION
+                'season % tag % cap (%) reached',
+                NEW.season_id, NEW.primary_tag, v_tag_cap
+                USING ERRCODE = 'check_violation';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS tr_claims_check_caps ON claims;
+CREATE TRIGGER tr_claims_check_caps
+    BEFORE INSERT ON claims
+    FOR EACH ROW
+    EXECUTE PROCEDURE claims_check_caps();
+
+DO $$ BEGIN RAISE NOTICE '✅ Claims queue model ready (snapshot columns, QUEUED status, cap trigger)'; END $$;
+
+-- ============================================================================
+-- 12. PARTICIPANTS PARTITIONED TABLE (replaces materialized view)
+-- ============================================================================
+-- Replaces the global ``participants`` materialized view with a regular table
+-- partitioned BY LIST(season_id). Each season gets its own partition created
+-- alongside the season row. The daily scheduler refreshes each active
+-- partition by calling refresh_participants_for_season(season_id, ...).
+-- The analytic CTE body now lives in the view participants_analytics
+-- (init-db.sql §11), which feeds the per-season INSERT.
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '🧬 Migrating participants MV → partitioned table...'; END $$;
+
+-- 12.1 Drop the legacy materialized view if it still exists. CASCADE clears
+--      the auto-built indexes that lived on the MV. Code reading from
+--      ``participants`` continues to work because the partitioned TABLE we
+--      create below answers to the same name.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname = 'participants'
+          AND c.relkind = 'm'
+    ) THEN
+        EXECUTE 'DROP MATERIALIZED VIEW participants CASCADE';
+        RAISE NOTICE '🗑️  Dropped legacy participants materialized view';
+    END IF;
+END $$;
+
+-- 12.2 Create the partitioned table. Same column shape as the old MV plus
+--      season_id as the partition key. Primary key includes season_id (a
+--      partition key column is required to be in every unique constraint).
+CREATE TABLE IF NOT EXISTS participants (
+    season_id              BIGINT NOT NULL,
+    proxy_wallet           VARCHAR(42) NOT NULL,
+    event_id               TEXT,
+    event_slug             TEXT NOT NULL,
+    entry_cwap             NUMERIC(20, 4),
+    total_volume           NUMERIC(20, 2),
+    total_pnl              NUMERIC(20, 2),
+    roi_percentage         NUMERIC(20, 2),
+    entry_bracket          TEXT,
+    edge                   TEXT,
+    yield                  TEXT,
+    gravity                TEXT,
+    archetype              TEXT,
+    archetype_description  TEXT,
+    archetype_math         TEXT,
+    rarity_bracket         TEXT,
+    rank                   INTEGER,
+    PRIMARY KEY (season_id, proxy_wallet, event_slug)
+) PARTITION BY LIST (season_id);
+
+COMMENT ON TABLE participants IS
+    'Per-season frozen participant pool. Each partition is one season; '
+    'refreshed once per day via refresh_participants_for_season(season_id). '
+    'Replaces the previous global participants materialized view.';
+
+-- Default catch-all partition (rows whose season_id has no dedicated partition).
+CREATE TABLE IF NOT EXISTS participants_default
+    PARTITION OF participants DEFAULT;
+
+-- Shared indexes inherited by every partition.
+CREATE INDEX IF NOT EXISTS idx_participants_event_id
+    ON participants (season_id, event_id);
+CREATE INDEX IF NOT EXISTS idx_participants_event_slug
+    ON participants (season_id, event_slug);
+CREATE INDEX IF NOT EXISTS idx_participants_lower_proxy_wallet
+    ON participants (season_id, LOWER(proxy_wallet));
+CREATE INDEX IF NOT EXISTS idx_participants_archetype
+    ON participants (season_id, LOWER(proxy_wallet), archetype);
+
+-- 12.3 Helper functions for partition management.
+
+-- Create the partition for a season if it does not exist yet. Idempotent.
+CREATE OR REPLACE FUNCTION participants_ensure_partition(p_season_id BIGINT)
+RETURNS VOID AS $$
+DECLARE
+    v_partition_name TEXT;
+BEGIN
+    v_partition_name := 'participants_season_' || p_season_id;
+    IF to_regclass('public.' || quote_ident(v_partition_name)) IS NULL THEN
+        EXECUTE format(
+            'CREATE TABLE %I PARTITION OF participants FOR VALUES IN (%L)',
+            v_partition_name,
+            p_season_id
+        );
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- DETACH and DROP a season's partition. Safe for closed/archived seasons.
+CREATE OR REPLACE FUNCTION participants_drop_partition(p_season_id BIGINT)
+RETURNS VOID AS $$
+DECLARE
+    v_partition_name TEXT;
+BEGIN
+    v_partition_name := 'participants_season_' || p_season_id;
+    IF to_regclass('public.' || quote_ident(v_partition_name)) IS NOT NULL THEN
+        EXECUTE format(
+            'ALTER TABLE participants DETACH PARTITION %I',
+            v_partition_name
+        );
+        EXECUTE format('DROP TABLE %I', v_partition_name);
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- TRUNCATE the partition for a season and reload it from participants_analytics
+-- filtered to the season's working events. Caller passes window bounds and
+-- whether to anchor by event_resolution_queue (standard) or events.end_date
+-- (genesis). Returns the count of rows inserted.
+CREATE OR REPLACE FUNCTION refresh_participants_for_season(
+    p_season_id              BIGINT,
+    p_window_start           TIMESTAMPTZ,
+    p_window_end             TIMESTAMPTZ,
+    p_use_resolution_anchor  BOOLEAN
+)
+RETURNS INTEGER AS $$
+DECLARE
+    v_partition_name TEXT;
+    v_count          INTEGER;
+BEGIN
+    PERFORM participants_ensure_partition(p_season_id);
+    v_partition_name := 'participants_season_' || p_season_id;
+    EXECUTE 'TRUNCATE TABLE ' || quote_ident(v_partition_name);
+
+    INSERT INTO participants (
+        season_id, proxy_wallet, event_id, event_slug,
+        entry_cwap, total_volume, total_pnl, roi_percentage,
+        entry_bracket, edge, yield, gravity,
+        archetype, archetype_description, archetype_math, rarity_bracket,
+        rank
+    )
+    SELECT
+        p_season_id,
+        pa.proxy_wallet,
+        pa.event_id,
+        pa.event_slug,
+        pa.entry_cwap, pa.total_volume, pa.total_pnl, pa.roi_percentage,
+        pa.entry_bracket, pa.edge, pa.yield, pa.gravity,
+        pa.archetype, pa.archetype_description, pa.archetype_math, pa.rarity_bracket,
+        pa.rank
+    FROM participants_analytics pa
+    WHERE pa.proxy_wallet IS NOT NULL
+      AND pa.event_slug   IS NOT NULL
+      AND EXISTS (
+          SELECT 1
+          FROM events e
+          LEFT JOIN event_resolution_queue erq ON erq.event_id = e.id
+          WHERE (
+                  (pa.event_id IS NOT NULL AND e.id = pa.event_id)
+              OR  (e.slug = pa.event_slug)
+          )
+          AND (
+              (
+                  p_use_resolution_anchor
+                  AND COALESCE(erq.closed, FALSE) = TRUE
+                  AND erq.status = 'processed'
+                  AND erq.resolution_ready_at IS NOT NULL
+                  AND erq.resolution_ready_at >= p_window_start
+                  AND erq.resolution_ready_at <  p_window_end
+              )
+              OR
+              (
+                  NOT p_use_resolution_anchor
+                  AND COALESCE(e.end_date, e.creation_date, e.start_date) >= p_window_start
+                  AND COALESCE(e.end_date, e.creation_date, e.start_date) <  p_window_end
+              )
+          )
+          -- 1 event ↔ 1 season: skip events already loaded into another partition.
+          AND NOT EXISTS (
+              SELECT 1
+              FROM participants other
+              WHERE other.season_id <> p_season_id
+                AND (
+                    (e.id IS NOT NULL AND other.event_id = e.id)
+                 OR (other.event_slug = e.slug)
+                )
+          )
+      );
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION refresh_participants_for_season(BIGINT, TIMESTAMPTZ, TIMESTAMPTZ, BOOLEAN) IS
+    'TRUNCATE the season''s participants partition and reload it from '
+    'participants_analytics filtered to the season''s working events. '
+    'Caller decides the window and resolution anchor based on season type.';
+
+-- 12.4 Pre-create partitions for every existing season so the partitioned
+--      table is immediately usable. Initial population happens lazily on the
+--      first refresh_participants_for_season() call from the daily scheduler.
+DO $$
+DECLARE
+    s RECORD;
+BEGIN
+    FOR s IN SELECT id FROM seasons LOOP
+        PERFORM participants_ensure_partition(s.id::BIGINT);
+    END LOOP;
+END $$;
+
+DO $$ BEGIN RAISE NOTICE '✅ participants partitioned table ready (call refresh_participants_for_season per active season)'; END $$;
 
 -- ============================================================================
 -- COMPLETION
@@ -1173,9 +1201,8 @@ DO $$ BEGIN RAISE NOTICE '✅ PolyStars Seasons System migration complete!'; END
 DO $$ BEGIN RAISE NOTICE ''; END $$;
 DO $$ BEGIN RAISE NOTICE '📦 Created:'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - Enums: season_type, phase_type'; END $$;
-DO $$ BEGIN RAISE NOTICE '   - Tables: seasons, claims, season_events_log, winner_wallets_nft_to_claim'; END $$;
-DO $$ BEGIN RAISE NOTICE '   - View: v_origin_wallets (compatibility)'; END $$;
-DO $$ BEGIN RAISE NOTICE '   - Analytics views: v_active_seasons, v_season_leaderboard, v_user_claim_history, v_origins_eligibility'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - Tables: seasons, claims, season_events_log, participants (partitioned)'; END $$;
+DO $$ BEGIN RAISE NOTICE '   - Analytics views: v_active_seasons, v_season_leaderboard, v_user_claim_history, participants_analytics'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - Functions: is_origin_wallet(), get_active_season(), decrement_season_supply()'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - Trigger: trigger_update_season_supply'; END $$;
 DO $$ BEGIN RAISE NOTICE ''; END $$;

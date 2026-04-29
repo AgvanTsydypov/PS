@@ -2,7 +2,6 @@
 Unit tests for the Scenarios tab service logic and Pydantic models.
 
 Covers:
-  - SimulateGeneratedCardsBatchRequest field validation
   - SeasonWorkbenchService.parse_iso_datetime_utc
   - SeasonWorkbenchService.apply_advanced_scenario (validation only, DB mocked)
 """
@@ -12,76 +11,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
-
-
-# ---------------------------------------------------------------------------
-# SimulateGeneratedCardsBatchRequest
-# ---------------------------------------------------------------------------
-
-class TestSimulateGeneratedCardsBatchRequest:
-    @pytest.fixture(autouse=True)
-    def _import(self):
-        from admin_backend.main import SimulateGeneratedCardsBatchRequest
-        self.Model = SimulateGeneratedCardsBatchRequest
-
-    def test_defaults(self):
-        req = self.Model()
-        assert req.max_count == 50
-        assert req.origin_match_fraction == pytest.approx(0.1)
-        assert req.maximum_diversity is True
-        assert req.request_id is None
-
-    def test_max_count_min_boundary(self):
-        req = self.Model(max_count=1)
-        assert req.max_count == 1
-
-    def test_max_count_max_boundary(self):
-        req = self.Model(max_count=200)
-        assert req.max_count == 200
-
-    def test_max_count_zero_rejected(self):
-        with pytest.raises(ValidationError):
-            self.Model(max_count=0)
-
-    def test_max_count_above_200_rejected(self):
-        with pytest.raises(ValidationError):
-            self.Model(max_count=201)
-
-    def test_origin_match_fraction_zero_valid(self):
-        req = self.Model(origin_match_fraction=0.0)
-        assert req.origin_match_fraction == pytest.approx(0.0)
-
-    def test_origin_match_fraction_one_valid(self):
-        req = self.Model(origin_match_fraction=1.0)
-        assert req.origin_match_fraction == pytest.approx(1.0)
-
-    def test_origin_match_fraction_negative_rejected(self):
-        with pytest.raises(ValidationError):
-            self.Model(origin_match_fraction=-0.01)
-
-    def test_origin_match_fraction_above_one_rejected(self):
-        with pytest.raises(ValidationError):
-            self.Model(origin_match_fraction=1.01)
-
-    def test_maximum_diversity_false_accepted(self):
-        req = self.Model(maximum_diversity=False)
-        assert req.maximum_diversity is False
-
-    def test_request_id_accepted(self):
-        req = self.Model(request_id="abc-123")
-        assert req.request_id == "abc-123"
-
-    def test_all_fields_together(self):
-        req = self.Model(
-            max_count=100,
-            origin_match_fraction=0.5,
-            maximum_diversity=False,
-            request_id="run-42",
-        )
-        assert req.max_count == 100
-        assert req.origin_match_fraction == pytest.approx(0.5)
-        assert req.maximum_diversity is False
-        assert req.request_id == "run-42"
 
 
 # ---------------------------------------------------------------------------

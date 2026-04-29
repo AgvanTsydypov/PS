@@ -192,10 +192,17 @@ const [claimRecipient, setClaimRecipient] = useState("");
           <option value="non_origin">non_origin</option>
         </select>
         <label>Wallet</label>
-        <select value={claimWallet} onChange={(e) => onWalletChange(e.target.value)} disabled={walletsLoading}>
-          <option value="">Select wallet</option>
-          {wallets.map((w) => <option key={w} value={w}>{w}</option>)}
-        </select>
+        <input
+          list="claim-wallet-options"
+          value={claimWallet}
+          onChange={(e) => onWalletChange(e.target.value)}
+          disabled={walletsLoading}
+          placeholder="Select or paste wallet address"
+          style={{ minWidth: 420 }}
+        />
+        <datalist id="claim-wallet-options">
+          {wallets.map((w) => <option key={w} value={w} />)}
+        </datalist>
         {walletsLoading ? <span className="muted">Loading wallets...</span> : null}
         {!walletsLoading ? <span className="muted">Loaded wallets: {wallets.length}</span> : null}
         <label>Phase</label>
@@ -220,7 +227,7 @@ const [claimRecipient, setClaimRecipient] = useState("");
           onClick={() =>
             void run(async () => {
               setClaimMinting(true);
-              setClaimOutput((prev) => `${prev}[${new Date().toISOString()}] Mint request started...\n`);
+              setClaimOutput((prev) => `${prev}[${new Date().toISOString()}] Queueing mint request...\n`);
               try {
                 const out = await fetchJSON<Record<string, unknown>>("/api/claims/mint", {
                   method: "POST",
@@ -240,7 +247,7 @@ const [claimRecipient, setClaimRecipient] = useState("");
                 await refreshOverview();
               } catch (e) {
                 const message = e instanceof Error ? e.message : String(e);
-                setClaimOutput((prev) => `${prev}[${new Date().toISOString()}] Mint failed: ${message}\n`);
+                setClaimOutput((prev) => `${prev}[${new Date().toISOString()}] Queue failed: ${message}\n`);
                 throw e;
               } finally {
                 setClaimMinting(false);
@@ -248,7 +255,7 @@ const [claimRecipient, setClaimRecipient] = useState("");
             })
           }
         >
-          {claimMinting ? "Minting..." : "Claim (Mint STAR)"}
+          {claimMinting ? "Queueing..." : "Add to Mint Queue"}
         </button>
         <button
           onClick={() =>
@@ -262,7 +269,7 @@ const [claimRecipient, setClaimRecipient] = useState("");
           Open Contract on Etherscan
         </button>
       </div>
-      {claimMinting ? <div className="muted">Mint in progress... please wait.</div> : null}
+      {claimMinting ? <div className="muted">Queueing mint... on-chain transaction will run in the next batch.</div> : null}
       <div className="claims-columns">
         <div className="claims-left">
           {liveCountdown.length > 0 ? (

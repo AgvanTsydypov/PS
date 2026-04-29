@@ -69,7 +69,6 @@ WHERE type IN ('genesis', 'standard');
 DELETE FROM season_events_log;
 
 -- 6) Универсальная очистка (работает и до/после миграций):
---    * winners table rename (`winner_wallets_nft_to_claim`)
 --    * preview-buffer rename (`user_generated_cards` → `preview_cards`)
 DO $$
 DECLARE
@@ -81,17 +80,11 @@ BEGIN
     preview_table := 'user_generated_cards';
   END IF;
 
-  IF to_regclass('public.winner_wallets_nft_to_claim') IS NOT NULL THEN
-    IF preview_table IS NOT NULL THEN
-      EXECUTE format(
-        'TRUNCATE TABLE claims, seasons, season_events_log, %I, winner_wallets_nft_to_claim RESTART IDENTITY',
-        preview_table
-      );
-    ELSE
-      TRUNCATE TABLE claims, seasons, season_events_log, winner_wallets_nft_to_claim RESTART IDENTITY;
-    END IF;
-  ELSIF to_regclass('public.season_origin_wallets') IS NOT NULL THEN
-    TRUNCATE TABLE claims, seasons, season_events_log, season_origin_wallets RESTART IDENTITY;
+  IF preview_table IS NOT NULL THEN
+    EXECUTE format(
+      'TRUNCATE TABLE claims, seasons, season_events_log, %I RESTART IDENTITY',
+      preview_table
+    );
   ELSE
     TRUNCATE TABLE claims, seasons, season_events_log RESTART IDENTITY;
   END IF;

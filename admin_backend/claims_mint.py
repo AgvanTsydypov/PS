@@ -14,6 +14,8 @@ from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import psycopg2
+import psycopg2.errors
 import psycopg2.extras
 from pydantic import BaseModel
 from web3 import Web3
@@ -22,12 +24,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from scripts.polystars_card_payload import (
-    build_polystars_card_for_mint,
-    promote_preview_to_claim,
-    unpin_pinata_urls,
-)
-from scripts.evm_service import EVM_CONTRACT_ADDRESS_ENV_KEY, EvmClient, MintedNftResult
+from scripts.evm_service import EVM_CONTRACT_ADDRESS_ENV_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +32,45 @@ BLOCKCHAIN_ETHEREUM = "ethereum"
 
 
 @dataclass(frozen=True)
-class WinnerClaimAllocation:
-    row_id: int
-    winner_wallet_address: str
-    assignment_type: str
-    pnl_value: float
-    rank: int
+class ParticipantAllocation:
+    """Allocation drawn directly from the per-season participants partition.
+
+    Carries every column needed to write a full claims-row snapshot at queue time.
+    """
+    proxy_wallet: str
+    event_id: Optional[str]
+    event_slug: Optional[str]
+    claim_type: str  # 'origin' | 'looter'
     snapshot: Dict[str, Any]
+
+
+# Looter random pick can lose to a concurrent INSERT on the unique index over
+# (season_id, LOWER(proxy_wallet)). Retry with a fresh random pick before
+# bubbling up. The cap-violation path also retries since a different random
+# pick may belong to an event/tag that has not exhausted its cap yet.
+LOOTER_ALLOC_MAX_ATTEMPTS = 6
+
+
+# Best → worst ranking used to pick the most flattering archetype an origin
+# wallet has across its events in the season. Tiebreaker is RANDOM().
+_ARCHETYPE_PRIORITY_CASE_SQL = """
+        CASE p.archetype
+            WHEN 'INSIDER'     THEN 1
+            WHEN 'ANOMALY'     THEN 2
+            WHEN 'ICARUS'      THEN 3
+            WHEN 'EXTRACTOR'   THEN 4
+            WHEN 'SIGNAL'      THEN 5
+            WHEN 'VECTOR'      THEN 6
+            WHEN 'GRAVITON'    THEN 7
+            WHEN 'EQUILIBRIUM' THEN 8
+            WHEN 'BURNER'      THEN 9
+            WHEN 'BOT'         THEN 10
+            WHEN 'PASSENGER'   THEN 11
+            WHEN 'OPERATOR'    THEN 12
+            WHEN 'SUBSTRATE'   THEN 13
+            ELSE 99
+        END
+"""
 
 
 class MintClaimRequest(BaseModel):
@@ -51,6 +80,54 @@ class MintClaimRequest(BaseModel):
     phase: str = "breach"
     auto_phase: bool = True
     db_only: bool = False
+
+
+_PARTICIPANT_ALLOCATION_COLUMNS = """
+    p.proxy_wallet,
+    p.event_id,
+    p.event_slug,
+    p.entry_cwap,
+    p.total_volume,
+    p.total_pnl,
+    p.roi_percentage,
+    p.entry_bracket,
+    p.edge,
+    p.yield,
+    p.gravity,
+    p.archetype,
+    p.archetype_description,
+    p.archetype_math,
+    p.rarity_bracket,
+    p.rank
+"""
+
+
+def _participant_row_to_allocation(row: Dict[str, Any], claim_type: str) -> ParticipantAllocation:
+    snapshot: Dict[str, Any] = {
+        "proxy_wallet":          str(row["proxy_wallet"]),
+        "event_id":              row.get("event_id"),
+        "event_slug":            row.get("event_slug"),
+        "entry_cwap":            row.get("entry_cwap"),
+        "total_volume":          row.get("total_volume"),
+        "total_pnl":             row.get("total_pnl"),
+        "roi_percentage":        row.get("roi_percentage"),
+        "entry_bracket":         row.get("entry_bracket"),
+        "edge":                  row.get("edge"),
+        "yield":                 row.get("yield"),
+        "gravity":               row.get("gravity"),
+        "archetype":             row.get("archetype"),
+        "archetype_description": row.get("archetype_description"),
+        "archetype_math":        row.get("archetype_math"),
+        "rarity_bracket":        row.get("rarity_bracket"),
+        "rank":                  row.get("rank"),
+    }
+    return ParticipantAllocation(
+        proxy_wallet=str(row["proxy_wallet"]),
+        event_id=row.get("event_id"),
+        event_slug=row.get("event_slug"),
+        claim_type=claim_type,
+        snapshot=snapshot,
+    )
 
 
 class ClaimsMintMixin:
@@ -350,363 +427,276 @@ class ClaimsMintMixin:
         finally:
             conn.close()
 
-    @staticmethod
-    def _extract_image(record: Optional[Dict[str, Any]]) -> Optional[str]:
-        if not record:
+    def _allocate_for_origin(
+        self,
+        cursor: Any,
+        wallet: str,
+        season_id: int,
+    ) -> Optional[ParticipantAllocation]:
+        """Pick the most flattering archetype row this wallet has in the
+        season's participants partition. Returns None if the wallet is not in
+        the partition (i.e., not an origin for this season)."""
+        cursor.execute(
+            f"""
+            SELECT {_PARTICIPANT_ALLOCATION_COLUMNS}
+            FROM participants p
+            WHERE p.season_id = %s
+              AND LOWER(p.proxy_wallet) = LOWER(%s)
+            ORDER BY {_ARCHETYPE_PRIORITY_CASE_SQL}, random()
+            LIMIT 1
+            """,
+            (season_id, wallet),
+        )
+        row = cursor.fetchone()
+        if not row:
             return None
-        image = str(record.get("event_image") or "").strip()
-        return image or None
+        return _participant_row_to_allocation(dict(row), claim_type="origin")
 
-    def _resolve_event_image_url(self, cursor: Any, row: Dict[str, Any]) -> Optional[str]:
-        event_id = str(row.get("event_id") or "").strip()
-        event_slug = str(row.get("event_slug") or "").strip()
+    def _allocate_for_looter(
+        self,
+        cursor: Any,
+        season_id: int,
+    ) -> ParticipantAllocation:
+        """Pick a uniformly random unclaimed participant row from the season's
+        partition. Excludes proxy_wallets that already have an active claim
+        (QUEUED/PENDING/PROCESSING/COMPLETED) for this season."""
+        cursor.execute(
+            f"""
+            SELECT {_PARTICIPANT_ALLOCATION_COLUMNS}
+            FROM participants p
+            WHERE p.season_id = %s
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM claims c
+                  WHERE c.season_id = %s
+                    AND c.proxy_wallet IS NOT NULL
+                    AND LOWER(c.proxy_wallet) = LOWER(p.proxy_wallet)
+                    AND c.status IN ('QUEUED','PENDING','PROCESSING','COMPLETED')
+              )
+            ORDER BY random()
+            LIMIT 1
+            """,
+            (season_id, season_id),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError(
+                "No unclaimed participant rows remaining for this season "
+                "(season pool exhausted)."
+            )
+        return _participant_row_to_allocation(dict(row), claim_type="looter")
+
+    def _resolve_primary_tag_for_event(
+        self,
+        cursor: Any,
+        event_id: Optional[str],
+        event_slug: Optional[str],
+    ) -> Optional[str]:
+        """Look up event_cards.primary_tag for the trigger's per-tag cap check."""
         if event_id:
             cursor.execute(
-                """
-                SELECT COALESCE(NULLIF(TRIM(image), ''), NULLIF(TRIM(icon), '')) AS event_image
-                FROM events WHERE id = %s LIMIT 1
-                """,
+                "SELECT primary_tag FROM event_cards WHERE event_id = %s LIMIT 1",
                 (event_id,),
             )
-            image = self._extract_image(cursor.fetchone())
-            if image:
-                return image
+            row = cursor.fetchone()
+            if row:
+                value = row.get("primary_tag") if isinstance(row, dict) else row[0]
+                tag = str(value or "").strip()
+                if tag:
+                    return tag
         if event_slug:
             cursor.execute(
-                """
-                SELECT COALESCE(NULLIF(TRIM(image), ''), NULLIF(TRIM(icon), '')) AS event_image
-                FROM events WHERE slug = %s LIMIT 1
-                """,
+                "SELECT primary_tag FROM event_cards WHERE event_slug = %s LIMIT 1",
                 (event_slug,),
             )
-            image = self._extract_image(cursor.fetchone())
-            if image:
-                return image
+            row = cursor.fetchone()
+            if row:
+                value = row.get("primary_tag") if isinstance(row, dict) else row[0]
+                tag = str(value or "").strip()
+                if tag:
+                    return tag
         return None
 
-    def _build_winner_allocation(
+    def _insert_queued_claim(
         self,
-        row: Dict[str, Any],
-        assignment_type: str,
-        event_image_url: Optional[str] = None,
-    ) -> WinnerClaimAllocation:
-        snapshot: Dict[str, Any] = {
-            "winner_row_id": int(row["id"]),
-            "winner_wallet_address": str(row["wallet_address"]),
-            "source": row.get("source"),
-            "total_pnl_window": float(row.get("total_pnl") or 0),
-            "pnl_rank": int(row.get("rank") or 0),
-            "window_start": row.get("window_start").isoformat() if row.get("window_start") else None,
-            "window_end": row.get("window_end").isoformat() if row.get("window_end") else None,
-            "snapshot_at": row.get("snapshot_at").isoformat() if row.get("snapshot_at") else None,
-            "event_id": row.get("event_id"),
-            "event_slug": row.get("event_slug"),
-            "entry_cwap": row.get("entry_cwap"),
-            "total_volume": row.get("total_volume"),
-            "roi_percentage": row.get("roi_percentage"),
-            "entry_bracket": row.get("entry_bracket"),
-            "edge": row.get("edge"),
-            "yield": row.get("yield"),
-            "gravity": row.get("gravity"),
-            "event_image_url": event_image_url,
-        }
-        return WinnerClaimAllocation(
-            row_id=int(row["id"]),
-            winner_wallet_address=str(row["wallet_address"]),
-            assignment_type=assignment_type,
-            pnl_value=float(row.get("total_pnl") or 0),
-            rank=int(row.get("rank") or 0),
-            snapshot=snapshot,
-        )
-
-    def allocate_winner_claim_row(self, wallet: str, season_id: int) -> WinnerClaimAllocation:
-        conn = self.manager.get_connection()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-                cursor.execute(
-                    """
-                    SELECT
-                        w.id,
-                        w.proxy_wallet AS wallet_address,
-                        w.source,
-                        w.window_start,
-                        w.window_end,
-                        w.snapshot_at,
-                        w.event_id,
-                        w.event_slug,
-                        w.entry_cwap,
-                        w.total_volume,
-                        w.total_pnl,
-                        w.roi_percentage,
-                        w.entry_bracket,
-                        w.edge,
-                        w.yield,
-                        w.gravity,
-                        w.rank,
-                        COALESCE(w.is_minted, FALSE) AS is_minted,
-                        w.minted_to_wallet
-                    FROM winner_wallets_nft_to_claim w
-                    JOIN event_cards ec ON ec.event_id = w.event_id
-                    WHERE w.season_id = %s
-                      AND LOWER(w.proxy_wallet) = LOWER(%s)
-                      AND ec.manual_image_url IS NOT NULL
-                      AND BTRIM(ec.manual_image_url) <> ''
-                    LIMIT 1
-                    """,
-                    (season_id, wallet),
-                )
-                row = cursor.fetchone()
-                if row:
-                    if bool(row["is_minted"]):
-                        assignee = row.get("minted_to_wallet")
-                        suffix = f" (assigned to {assignee})" if assignee else ""
-                        raise ValueError(f"This winner row was already minted and cannot be reused{suffix}.")
-                    event_image_url = self._resolve_event_image_url(cursor, row)
-                    return self._build_winner_allocation(row=row, assignment_type="winner_self", event_image_url=event_image_url)
-
-                cursor.execute(
-                    """
-                    SELECT
-                        w.id,
-                        w.proxy_wallet AS wallet_address,
-                        w.source,
-                        w.window_start,
-                        w.window_end,
-                        w.snapshot_at,
-                        w.event_id,
-                        w.event_slug,
-                        w.entry_cwap,
-                        w.total_volume,
-                        w.total_pnl,
-                        w.roi_percentage,
-                        w.entry_bracket,
-                        w.edge,
-                        w.yield,
-                        w.gravity,
-                        w.rank
-                    FROM winner_wallets_nft_to_claim w
-                    JOIN event_cards ec ON ec.event_id = w.event_id
-                    WHERE w.season_id = %s
-                      AND COALESCE(w.is_minted, FALSE) = FALSE
-                      AND ec.manual_image_url IS NOT NULL
-                      AND BTRIM(ec.manual_image_url) <> ''
-                    ORDER BY RANDOM()
-                    LIMIT 1
-                    """,
-                    (season_id,),
-                )
-                fallback_row = cursor.fetchone()
-                if not fallback_row:
-                    raise ValueError("No unminted winner rows with manual_image_url left in this season.")
-                event_image_url = self._resolve_event_image_url(cursor, fallback_row)
-                return self._build_winner_allocation(
-                    row=fallback_row,
-                    assignment_type="random_fallback",
-                    event_image_url=event_image_url,
-                )
-        finally:
-            conn.close()
-
-    def reserve_pending_claim(
-        self,
+        cursor: Any,
         *,
-        wallet: str,
-        recipient_wallet: str,
+        user_wallet: str,
         season_id: int,
         phase: str,
-        mint_chain: str,
-        placeholder_metadata_uri: str = "https://gateway.pinata.cloud/ipfs/QmPendingMetadataPlaceholder",
-    ) -> Dict[str, int]:
+        allocation: ParticipantAllocation,
+        primary_tag: Optional[str],
+    ) -> Dict[str, Any]:
+        """Insert a QUEUED claim row carrying the full participant snapshot.
+
+        Raises psycopg2.errors.UniqueViolation on collisions
+        (active claim already exists for this user_wallet OR proxy_wallet),
+        and check_violation when the cap trigger refuses the row.
         """
-        Insert a PENDING claim row up-front so the BEFORE-INSERT trigger assigns a
-        per-season collection_mint_number. Returns both the freshly issued claim id
-        and its per-season mint number, which are later used to name the NFT and
-        finalize the row once the mint transaction succeeds.
-        """
-        insert_sql = """
+        snap = allocation.snapshot
+        cursor.execute(
+            """
             INSERT INTO claims (
-                user_wallet,
-                season_id,
-                phase_type,
-                timestamp,
-                status,
-                metadata_uri,
+                user_wallet, season_id, phase_type, status,
+                proxy_wallet, event_id, event_slug, primary_tag,
+                snapshot_at,
+                entry_cwap, total_volume, total_pnl, roi_percentage,
+                entry_bracket, edge, yield, gravity,
+                archetype, archetype_description, archetype_math, rarity_bracket,
+                participant_rank, claim_type,
                 mint_chain,
-                created_at,
-                updated_at
+                created_at, updated_at
             )
-            VALUES (%s, %s, %s, NOW(), %s, %s, %s, NOW(), NOW())
+            VALUES (
+                %s, %s, %s, 'QUEUED',
+                %s, %s, %s, %s,
+                NOW(),
+                %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s,
+                %s,
+                NOW(), NOW()
+            )
             RETURNING id, collection_mint_number
+            """,
+            (
+                user_wallet, season_id, phase,
+                allocation.proxy_wallet,
+                allocation.event_id,
+                allocation.event_slug,
+                primary_tag,
+                snap.get("entry_cwap"), snap.get("total_volume"),
+                snap.get("total_pnl"),  snap.get("roi_percentage"),
+                snap.get("entry_bracket"), snap.get("edge"),
+                snap.get("yield"),         snap.get("gravity"),
+                snap.get("archetype"),     snap.get("archetype_description"),
+                snap.get("archetype_math"), snap.get("rarity_bracket"),
+                snap.get("rank"), allocation.claim_type,
+                BLOCKCHAIN_ETHEREUM,
+            ),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise RuntimeError("INSERT INTO claims returned no row")
+        if isinstance(row, dict):
+            return {
+                "claim_id": int(row["id"]),
+                "collection_mint_number": int(row["collection_mint_number"])
+                    if row.get("collection_mint_number") is not None else None,
+            }
+        return {
+            "claim_id": int(row[0]),
+            "collection_mint_number": int(row[1]) if row[1] is not None else None,
+        }
+
+    def run_queue_mint_request(self, req: MintClaimRequest) -> Dict[str, Any]:
+        """Allocate a participant slot and INSERT a QUEUED claim for it.
+
+        Origins always get their best-archetype row. Looters get a uniformly
+        random unclaimed row, with retry on collision. The on-chain mint is
+        performed later by the daily cron worker (see _process_queued_claims_batch).
         """
-        for attempt in range(2):
+        wallet = req.wallet.strip().lower()
+        recipient_raw = req.recipient_address.strip()
+        if not wallet:
+            raise ValueError("Wallet is required")
+        if not recipient_raw:
+            raise ValueError("Recipient address is required")
+        try:
+            recipient_address = Web3.to_checksum_address(recipient_raw)
+        except Exception:
+            raise ValueError("Invalid EVM recipient address (expected 0x…40 hex)")
+
+        phase = req.phase
+        if req.auto_phase:
+            detected_phase, phase_error = self.derive_claim_phase_type(req.season_id)
+            if not detected_phase:
+                raise ValueError(phase_error or "Phase detection failed")
+            phase = detected_phase
+
+        supported_phases = set(self.get_claim_phase_enum_values())
+        if phase not in supported_phases:
+            supported = ", ".join(sorted(supported_phases)) if supported_phases else "(none)"
+            raise ValueError(f"DB enum phase_type does not support '{phase}'. Supported: {supported}")
+
+        last_error: Optional[Exception] = None
+        for attempt in range(LOOTER_ALLOC_MAX_ATTEMPTS):
             conn = self.manager.get_connection()
             try:
-                with conn.cursor() as cursor:
-                    cursor.execute(
-                        insert_sql,
-                        (
-                            wallet,
-                            season_id,
-                            phase,
-                            "PENDING",
-                            placeholder_metadata_uri,
-                            mint_chain,
-                        ),
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                    origin_alloc = self._allocate_for_origin(cursor, wallet, req.season_id)
+                    is_origin = origin_alloc is not None
+                    if phase == "vault" and not is_origin:
+                        raise ValueError("Wallet is non-origin but phase='vault'")
+                    allocation: ParticipantAllocation = (
+                        origin_alloc
+                        if origin_alloc is not None
+                        else self._allocate_for_looter(cursor, req.season_id)
                     )
-                    row = cursor.fetchone()
-                    if not row:
-                        raise RuntimeError("Failed to reserve pending claim row")
-                    claim_id = int(row[0])
-                    collection_mint_number = int(row[1]) if row[1] is not None else None
+                    primary_tag = self._resolve_primary_tag_for_event(
+                        cursor,
+                        allocation.event_id,
+                        allocation.event_slug,
+                    )
+                    try:
+                        inserted = self._insert_queued_claim(
+                            cursor,
+                            user_wallet=wallet,
+                            season_id=req.season_id,
+                            phase=phase,
+                            allocation=allocation,
+                            primary_tag=primary_tag,
+                        )
+                    except psycopg2.errors.UniqueViolation as exc:
+                        conn.rollback()
+                        constraint = (
+                            getattr(getattr(exc, "diag", None), "constraint_name", None)
+                            or ""
+                        )
+                        if "user_wallet" in constraint:
+                            raise ValueError(
+                                "This user wallet already has an active claim in this season."
+                            ) from exc
+                        if is_origin:
+                            raise ValueError(
+                                "This origin wallet has already been claimed in this season."
+                            ) from exc
+                        # Looter race: retry with another random pick.
+                        last_error = exc
+                        continue
+                    except Exception as exc:
+                        conn.rollback()
+                        # Cap-violation: looters retry with another random pick;
+                        # origins fail permanently because their slot is structurally unavailable.
+                        pgcode = getattr(exc, "pgcode", "") or ""
+                        if pgcode == "23514" and not is_origin:
+                            last_error = exc
+                            continue
+                        raise
+
                 conn.commit()
-                if collection_mint_number is None:
-                    raise RuntimeError("collection_mint_number was not assigned by trigger")
+                self.clear_wallets_cache()
                 return {
-                    "claim_id": claim_id,
-                    "collection_mint_number": collection_mint_number,
+                    "status": "queued",
+                    "claim_id": inserted["claim_id"],
+                    "collection_mint_number": inserted["collection_mint_number"],
+                    "wallet": wallet,
+                    "recipient_address": recipient_address,
+                    "season_id": req.season_id,
+                    "phase": phase,
+                    "chain": BLOCKCHAIN_ETHEREUM,
+                    "claim_type": allocation.claim_type,
+                    "allocation": allocation.snapshot,
+                    "attempt": attempt + 1,
                 }
-            except Exception as exc:
-                conn.rollback()
-                text = str(exc).lower()
-                if attempt == 0 and (
-                    "value too long for type character varying" in text
-                    or "column \"collection_mint_number\" of relation \"claims\"" in text
-                    or "function claims_assign_season_mint_number" in text
-                ):
-                    self.ensure_claims_schema_for_mint()
-                    continue
-                raise
             finally:
                 conn.close()
-        raise RuntimeError("Failed to reserve pending claim row after schema retry")
 
-    def release_reserved_claim(self, claim_id: int) -> bool:
-        """
-        Free a PENDING claim row reserved by `reserve_pending_claim` when the
-        subsequent mint pipeline fails. Only deletes rows that are still PENDING
-        and have no on-chain artefacts (tx_hash / asset_address), so a successful
-        finalize can never be undone by a stray rollback. Returns True if a row
-        was actually released.
-        """
-        conn = self.manager.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    DELETE FROM claims
-                    WHERE id = %s
-                      AND status = 'PENDING'
-                      AND tx_hash IS NULL
-                      AND asset_address IS NULL
-                    """,
-                    (claim_id,),
-                )
-                deleted = cursor.rowcount == 1
-            conn.commit()
-            return deleted
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-    def finalize_completed_claim(
-        self,
-        *,
-        claim_id: int,
-        mint_result: MintedNftResult,
-        mint_chain: str,
-    ) -> None:
-        """
-        Mark a previously reserved PENDING claim row as COMPLETED and attach the
-        on-chain mint artefacts. Used after `reserve_pending_claim` + successful mint.
-        """
-        conn = self.manager.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    UPDATE claims
-                    SET
-                        tx_hash = %s,
-                        metadata_uri = %s,
-                        asset_address = %s,
-                        status = 'COMPLETED',
-                        mint_chain = %s,
-                        timestamp = NOW(),
-                        updated_at = NOW()
-                    WHERE id = %s
-                    """,
-                    (
-                        mint_result.tx_hash,
-                        mint_result.metadata_uri,
-                        mint_result.asset_address,
-                        mint_chain,
-                        claim_id,
-                    ),
-                )
-                if cursor.rowcount != 1:
-                    raise RuntimeError(
-                        f"Failed to finalize claim {claim_id}: row not found or updated twice"
-                    )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-    def get_season_name(self, season_id: int) -> str:
-        conn = self.manager.get_connection()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-                cursor.execute("SELECT type, season_number FROM seasons WHERE id = %s", (season_id,))
-                row = cursor.fetchone()
-                if not row:
-                    return f"season-{season_id}"
-                return f"{row['type']}#{row['season_number']}"
-        finally:
-            conn.close()
-
-    def mark_winner_row_as_minted(
-        self,
-        allocation: WinnerClaimAllocation,
-        claim_id: int,
-        claimer_wallet: str,
-        mint_result: MintedNftResult,
-    ) -> None:
-        conn = self.manager.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    UPDATE winner_wallets_nft_to_claim
-                    SET
-                        is_minted = TRUE,
-                        minted_at = NOW(),
-                        minted_to_wallet = %s,
-                        minted_claim_id = %s,
-                        minted_tx_hash = %s,
-                        minted_asset_address = %s
-                    WHERE id = %s
-                      AND COALESCE(is_minted, FALSE) = FALSE
-                    """,
-                    (
-                        claimer_wallet,
-                        claim_id,
-                        mint_result.tx_hash,
-                        mint_result.asset_address,
-                        allocation.row_id,
-                    ),
-                )
-                if cursor.rowcount != 1:
-                    raise RuntimeError("Winner row is already marked as minted.")
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        raise RuntimeError(
+            f"Failed to allocate a looter slot after {LOOTER_ALLOC_MAX_ATTEMPTS} attempts; "
+            f"last error: {last_error}"
+        )
 
     def get_master_collection_address(self) -> str:
         value = os.environ.get(EVM_CONTRACT_ADDRESS_ENV_KEY, "").strip()
@@ -727,190 +717,3 @@ class ClaimsMintMixin:
                 return resolved
         return ""
 
-    def run_mint_claim(self, req: MintClaimRequest) -> Dict[str, Any]:
-        wallet = req.wallet.strip().lower()
-        recipient_raw = req.recipient_address.strip()
-        if not wallet:
-            raise ValueError("Wallet is required")
-        if not recipient_raw:
-            raise ValueError("Recipient address is required")
-
-        try:
-            recipient_address = Web3.to_checksum_address(recipient_raw)
-        except Exception:
-            raise ValueError("Invalid EVM recipient address (expected 0x…40 hex)")
-
-        phase = req.phase
-        warnings: List[str] = []
-        if req.auto_phase:
-            detected_phase, phase_error = self.derive_claim_phase_type(req.season_id)
-            if detected_phase:
-                phase = detected_phase
-            elif phase_error:
-                warnings.append(phase_error)
-                raise ValueError(phase_error)
-
-        try:
-            eligibility = self.season_manager.check_user_eligibility(wallet)
-            stream = self._resolve_stream_for_season_id(eligibility, req.season_id)
-            warning_reason: Optional[str] = None
-            if stream:
-                stream_is_origin = bool(stream.get("is_origin_wallet", eligibility.get("is_origin_wallet")))
-                if not bool(stream.get("eligible_now", False)):
-                    warning_reason = str(stream.get("ineligible_reason") or "Wallet not eligible for this season now")
-                elif phase == "vault" and not stream_is_origin:
-                    warning_reason = "Wallet is non-origin but phase='vault'"
-            elif phase == "vault" and not bool(eligibility.get("is_origin_wallet")):
-                warning_reason = "Wallet is non-origin but phase='vault'"
-            if warning_reason:
-                warnings.append(warning_reason)
-                raise ValueError(warning_reason)
-        except Exception:
-            raise
-
-        supported_phases = set(self.get_claim_phase_enum_values())
-        if phase not in supported_phases:
-            supported = ", ".join(sorted(supported_phases)) if supported_phases else "(none)"
-            raise ValueError(f"DB enum phase_type does not support '{phase}'. Supported: {supported}")
-
-        allocation = self.allocate_winner_claim_row(wallet=wallet, season_id=req.season_id)
-        season_name = self.get_season_name(req.season_id)
-
-        # Reserve a PENDING claim row up-front so the DB trigger assigns a per-season
-        # collection_mint_number we can use for both the NFT name and the card payload.
-        reservation = self.reserve_pending_claim(
-            wallet=wallet,
-            recipient_wallet=recipient_address,
-            season_id=req.season_id,
-            phase=phase,
-            mint_chain=BLOCKCHAIN_ETHEREUM,
-        )
-        claim_id = reservation["claim_id"]
-        collection_mint_number = reservation["collection_mint_number"]
-
-        if req.db_only:
-            self.clear_wallets_cache()
-            return {
-                "status": "db_only_inserted",
-                "claim_id": claim_id,
-                "collection_mint_number": collection_mint_number,
-                "wallet": wallet,
-                "recipient_address": recipient_address,
-                "season_id": req.season_id,
-                "phase": phase,
-                "chain": BLOCKCHAIN_ETHEREUM,
-                "allocation": allocation.__dict__,
-                "warnings": warnings,
-            }
-
-        winner_context = {
-            "assignment_type": allocation.assignment_type,
-            "winner_wallet_address": allocation.winner_wallet_address,
-            "claimer_wallet_address": wallet,
-            "season_id": req.season_id,
-            "snapshot": allocation.snapshot,
-            "blockchain": BLOCKCHAIN_ETHEREUM,
-        }
-
-        card_claim_type = "origin" if allocation.assignment_type == "winner_self" else "looter"
-
-        # Everything between reservation and finalize can fail (Pinata upload,
-        # EVM RPC, transaction confirmation). On any failure we:
-        #   1. Release the PENDING claim row so collection_mint_number stays gapless.
-        #   2. Unpin any card images already uploaded to Pinata so they don't
-        #      accumulate as orphaned pins. Metadata JSON unpin is handled inside
-        #      mint_user_nft itself (it knows the URI at the point of failure).
-        polystars_card: dict[str, Any] | None = None
-        try:
-            polystars_card = build_polystars_card_for_mint(
-                self.manager,
-                winner_row_id=allocation.row_id,
-                claim_id=claim_id,
-                collection_mint_number=collection_mint_number,
-                claim_type=card_claim_type,
-            )
-
-            mint_client = EvmClient()
-            mint_result = mint_client.mint_user_nft(
-                user_wallet_address=recipient_address,
-                season_name=season_name,
-                claim_id=claim_id,
-                collection_mint_number=collection_mint_number,
-                winner_context=winner_context,
-                polystars_card=polystars_card,
-            )
-
-            self.finalize_completed_claim(
-                claim_id=claim_id,
-                mint_result=mint_result,
-                mint_chain=BLOCKCHAIN_ETHEREUM,
-            )
-        except Exception:
-            # release_reserved_claim is a no-op once finalize_completed_claim
-            # has set tx_hash / asset_address, so a partial success is never
-            # silently erased.
-            try:
-                self.release_reserved_claim(claim_id)
-            except Exception:
-                pass
-            # Unpin card images that were already uploaded to Pinata.
-            # Metadata JSON unpin is handled inside mint_user_nft.
-            if polystars_card:
-                try:
-                    unpin_pinata_urls([
-                        str(polystars_card.get("front_image_url") or ""),
-                        str(polystars_card.get("back_image_url") or ""),
-                    ])
-                except Exception:
-                    pass
-            raise
-        self.mark_winner_row_as_minted(
-            allocation=allocation,
-            claim_id=claim_id,
-            claimer_wallet=wallet,
-            mint_result=mint_result,
-        )
-        # Promote the preview row into a minted ``claims`` row. This path is
-        # the SAME for both the admin-workbench mint button and the public
-        # ``POST /api/me/mint`` user mint — both routes end up in this
-        # ``run_mint_claim`` method on ``SeasonWorkbenchService``. The helper
-        # atomically (a) denormalizes card fields onto ``claims`` so the
-        # public permalink ``/api/cards/{slug}`` can be served straight from
-        # ``claims``, and (b) DELETEs the matching row from
-        # ``preview_cards`` so the preview vanishes from the home
-        # showcase ticker and from ``/api/preview/{slug}``. Run AFTER
-        # ``mark_winner_row_as_minted`` so ``minted_asset_address`` is
-        # available for the explorer/MagicEden links on first page load.
-        # Persistence failures must not roll back a successful mint — the
-        # on-chain NFT is already final and authoritative.
-        try:
-            promote_preview_to_claim(
-                self.manager,
-                claim_id=claim_id,
-                winner_row_id=allocation.row_id,
-                owner_wallet=wallet,
-                polystars_card=polystars_card,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to promote preview into claims for claim_id=%s; "
-                "mint succeeded so skipping rollback",
-                claim_id,
-            )
-        self.clear_wallets_cache()
-
-        return {
-            "status": "mint_completed",
-            "claim_id": claim_id,
-            "collection_mint_number": collection_mint_number,
-            "wallet": wallet,
-            "recipient_address": recipient_address,
-            "season_id": req.season_id,
-            "phase": phase,
-            "chain": BLOCKCHAIN_ETHEREUM,
-            "allocation": allocation.__dict__,
-            "mint_result": mint_result.__dict__,
-            "polystars_card": polystars_card,
-            "warnings": warnings,
-            "collection_address": self.get_master_collection_address(),
-        }

@@ -84,74 +84,6 @@ _PTIER_CSS_COLORS: Dict[str, str] = {
     "P50": "#38BE50",
     "BASE": "#B6BBC8",
 }
-_CARD_SOURCE_SQL = """
-SELECT
-    w.id AS winner_row_id,
-    w.season_id,
-    s.type AS season_type,
-    s.season_number,
-    w.proxy_wallet,
-    w.event_id,
-    w.event_slug,
-    e.title AS event_title,
-    COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
-    COALESCE(w.entry_cwap, p.entry_cwap) AS entry_cwap,
-    COALESCE(w.total_volume, p.total_volume) AS total_volume,
-    COALESCE(w.total_pnl, p.total_pnl) AS total_pnl,
-    w.entry_bracket,
-    COALESCE(w.archetype, p.archetype) AS archetype,
-    COALESCE(w.archetype_description, p.archetype_description) AS archetype_description,
-    COALESCE(w.archetype_math, p.archetype_math) AS archetype_math,
-    COALESCE(w.rarity_bracket, p.rarity_bracket) AS rarity_bracket,
-    w.edge,
-    w.yield,
-    w.gravity,
-    w.rank,
-    ec.reccurence,
-    ec.manual_image_url,
-    ec.card_title,
-    ec.card_lore,
-    ec.primary_tag,
-    ec.secondary_tag,
-    tp.hex_color AS primary_tag_hex_color,
-    s.start_date AS season_start_date,
-    s.end_date AS season_end_date,
-    s.total_supply AS season_size
-FROM winner_wallets_nft_to_claim w
-JOIN event_cards ec ON ec.event_id = w.event_id
-LEFT JOIN LATERAL (
-    SELECT
-        p.entry_cwap,
-        p.total_volume,
-        p.total_pnl,
-        p.archetype,
-        p.archetype_description,
-        p.archetype_math,
-        p.rarity_bracket
-    FROM participants p
-    WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
-      AND (
-          (w.event_id IS NOT NULL AND p.event_id = w.event_id)
-          OR
-          (w.event_slug IS NOT NULL AND p.event_slug = w.event_slug)
-      )
-    ORDER BY
-        CASE
-            WHEN w.event_id IS NOT NULL AND p.event_id = w.event_id THEN 0
-            WHEN w.event_slug IS NOT NULL AND p.event_slug = w.event_slug THEN 1
-            ELSE 2
-        END,
-        p.rank ASC NULLS LAST
-    LIMIT 1
-) p ON TRUE
-LEFT JOIN events e ON e.id = w.event_id
-LEFT JOIN seasons s ON s.id = w.season_id
-LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
-WHERE w.id = %s
-LIMIT 1
-"""
-
-
 def _fmt_date_field(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -319,17 +251,6 @@ def _build_render_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return render_payload
 
 
-def _load_card_source_row(manager: DataLoadingManager, winner_row_id: int) -> Optional[Dict[str, Any]]:
-    conn = manager.get_connection()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-            cursor.execute(_CARD_SOURCE_SQL, (winner_row_id,))
-            row = cursor.fetchone()
-            return dict(row) if row else None
-    finally:
-        conn.close()
-
-
 def _build_card_payload_from_source_row(
     row: Dict[str, Any],
     *,
@@ -435,51 +356,84 @@ def _attach_generated_card_images(payload: Dict[str, Any]) -> Dict[str, Any]:
     return output
 
 
-def _load_preview_slug_for_winner_row(
-    manager: DataLoadingManager, winner_row_id: int
-) -> Optional[str]:
-    """Return the existing ``preview_cards.slug`` for this winner slot.
+_CARD_SOURCE_FROM_CLAIM_SQL = """
+SELECT
+    c.id AS claim_id,
+    c.season_id,
+    s.type AS season_type,
+    s.season_number,
+    c.proxy_wallet,
+    c.event_id,
+    c.event_slug,
+    e.title AS event_title,
+    COALESCE(NULLIF(BTRIM(e.image), ''), NULLIF(BTRIM(e.icon), '')) AS event_image_url,
+    c.entry_cwap,
+    c.total_volume,
+    c.total_pnl,
+    c.entry_bracket,
+    c.archetype,
+    c.archetype_description,
+    c.archetype_math,
+    c.rarity_bracket,
+    c.edge,
+    c.yield,
+    c.gravity,
+    c.participant_rank AS rank,
+    c.claim_type,
+    ec.reccurence,
+    ec.manual_image_url,
+    ec.card_title,
+    ec.card_lore,
+    ec.primary_tag,
+    ec.secondary_tag,
+    tp.hex_color AS primary_tag_hex_color,
+    s.start_date AS season_start_date,
+    s.end_date AS season_end_date,
+    s.total_supply AS season_size,
+    c.collection_mint_number
+FROM claims c
+LEFT JOIN event_cards ec ON ec.event_id = c.event_id
+LEFT JOIN events e ON e.id = c.event_id
+LEFT JOIN seasons s ON s.id = c.season_id
+LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
+WHERE c.id = %s
+LIMIT 1
+"""
 
-    ``winner_row_id`` has a UNIQUE constraint on ``preview_cards``, so
-    at most one preview row can exist per slot. Returns ``None`` if the slot
-    was never previewed (admin-initiated mint without a preview round-trip),
-    which signals ``build_polystars_card_for_mint`` to fall back to a fresh
-    random slug rather than fail — admin mints must not require a preview.
-    """
+
+def _load_card_source_row_from_claim(
+    manager: DataLoadingManager, claim_id: int
+) -> Optional[Dict[str, Any]]:
     conn = manager.get_connection()
     try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT slug FROM preview_cards WHERE winner_row_id = %s LIMIT 1",
-                (winner_row_id,),
-            )
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(_CARD_SOURCE_FROM_CLAIM_SQL, (claim_id,))
             row = cursor.fetchone()
+            return dict(row) if row else None
     finally:
         conn.close()
-    if not row:
-        return None
-    slug = str((row[0] if not isinstance(row, dict) else row.get("slug")) or "").strip()
-    return slug or None
 
 
-def build_polystars_card_for_mint(
+def build_polystars_card_from_claim(
     manager: DataLoadingManager,
     *,
-    winner_row_id: int,
     claim_id: int,
-    claim_type: str,
-    collection_mint_number: Optional[int] = None,
 ) -> Dict[str, Any]:
-    row = _load_card_source_row(manager, winner_row_id)
+    """Build the mint-ready card payload reading the snapshot directly from
+    the claims row. Used by the daily cron worker to materialize card images
+    for QUEUED claims, after the snapshot has been frozen at queue-insert time.
+    """
+    row = _load_card_source_row_from_claim(manager, claim_id)
     if not row:
-        raise ValueError(f"winner_wallets_nft_to_claim id={winner_row_id} not found")
-    preview_slug = _load_preview_slug_for_winner_row(manager, winner_row_id)
+        raise ValueError(f"claims id={claim_id} not found")
+    claim_type = str(row.get("claim_type") or "looter").strip().lower() or "looter"
+    collection_mint_number = row.get("collection_mint_number")
     payload = _build_card_payload_from_source_row(
         row,
         claim_id=claim_id,
         claim_type=claim_type,
-        collection_mint_number=collection_mint_number,
-        preview_slug=preview_slug,
+        collection_mint_number=int(collection_mint_number) if collection_mint_number is not None else None,
+        preview_slug=None,
     )
     return _attach_generated_card_images(payload)
 
@@ -496,33 +450,21 @@ def _slug_from_qr_payload(qr_payload: Any) -> Optional[str]:
     return tail or None
 
 
-def promote_preview_to_claim(
+def denormalize_card_onto_claim(
     manager: DataLoadingManager,
     *,
     claim_id: int,
-    winner_row_id: int,
-    owner_wallet: str,  # noqa: ARG001 — kept for call-site parity; owner EOA is already on claims.user_wallet
     polystars_card: Dict[str, Any],
 ) -> None:
-    """Promote a preview row into a minted ``claims`` row.
+    """Persist the rendered card payload onto the minted ``claims`` row.
 
-    ``preview_cards`` is a preview-only buffer and ``claims`` is the
-    canonical store for minted STARs. This helper is the one place where a
-    row transitions between the two tables:
+    Under the queue model, the cron worker calls this after a successful
+    on-chain mint so ``/api/cards/{slug}`` (which reads ``claims``) can
+    resolve the freshly minted STAR without joining anywhere else.
 
-    1. ``UPDATE claims`` — denormalize ``card_slug``, ``card_title``,
-       ``front_image_url``, ``back_image_url``, ``primary_tag``,
-       ``secondary_tag``, ``pattern``, ``winner_row_id`` and
-       ``card_payload_json`` onto the existing minted-claim row so the public
-       ``/api/cards/{slug}`` endpoint can resolve it from ``claims`` alone.
-    2. ``DELETE FROM preview_cards WHERE winner_row_id = %s`` — drop
-       the preview row so it disappears from the home ticker feed and cannot
-       be served by ``/api/preview/{slug}`` after mint. The minted card keeps
-       its permalink at ``/api/cards/{slug}`` (slug is reused across the
-       preview → mint transition by ``build_polystars_card_for_mint``).
-
-    Both writes run in the same transaction: either the preview is promoted
-    atomically or nothing changes and the mint can be retried safely.
+    Also opportunistically drops any matching ``preview_cards`` row by slug
+    so the showcase ticker no longer surfaces a card that is already minted.
+    Both writes share a single transaction.
     """
     slug = _slug_from_qr_payload(polystars_card.get("qr_payload"))
     if not slug:
@@ -551,7 +493,6 @@ def promote_preview_to_claim(
                     primary_tag       = %s,
                     secondary_tag    = %s,
                     pattern           = %s,
-                    winner_row_id     = %s,
                     card_payload_json = %s::jsonb,
                     updated_at        = NOW()
                 WHERE id = %s
@@ -564,14 +505,13 @@ def promote_preview_to_claim(
                     primary_tag,
                     secondary_tag,
                     pattern,
-                    winner_row_id,
                     card_payload_json,
                     claim_id,
                 ),
             )
             cursor.execute(
-                "DELETE FROM preview_cards WHERE winner_row_id = %s",
-                (winner_row_id,),
+                "DELETE FROM preview_cards WHERE slug = %s",
+                (slug,),
             )
         conn.commit()
     except Exception:

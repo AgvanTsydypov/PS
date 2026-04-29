@@ -180,67 +180,12 @@ class TestResolveStreamForSeasonId:
 
 
 # ---------------------------------------------------------------------------
-# Showcase/mint policy pinning
-#
-# On successful mint the admin API must promote the preview row into a minted
-# ``claims`` row via ``promote_preview_to_claim``. That helper denormalizes
-# card-detail fields onto ``claims`` (the canonical store for minted STARs)
-# and DELETEs the matching preview row from ``preview_cards`` so the minted
-# STAR disappears from the home showcase ticker. The old
-# ``persist_user_generated_card_for_mint`` (which wrote the minted card into
-# the preview buffer) must be fully replaced — admin_backend should no
-# longer import it, so a future refactor can't silently revert to the
-# preview-only-table-as-canonical-store shape we're explicitly moving away
-# from.
-# ---------------------------------------------------------------------------
-
-class TestAdminMintBackendPromotesPreview:
-    def _admin_module(self):
-        import unittest.mock as mock
-
-        with (
-            mock.patch("scripts.data_loading_manager.DataLoadingManager._ensure_tables"),
-            mock.patch("scripts.season_manager.SeasonManager.__init__", return_value=None),
-            mock.patch(
-                "scripts.daily_scheduler_simple.SimplifiedScheduler.__init__",
-                return_value=None,
-            ),
-        ):
-            import admin_backend.main as m
-        return m
-
-    def test_admin_imports_promote_helper(self):
-        m = self._admin_module()
-        assert hasattr(m, "promote_preview_to_claim"), (
-            "admin_backend must import promote_preview_to_claim so the minted "
-            "STAR is written into the canonical ``claims`` table (not only "
-            "into the ``preview_cards`` preview buffer)"
-        )
-
-    def test_promote_helper_is_callable(self):
-        m = self._admin_module()
-        assert callable(m.promote_preview_to_claim)
-
-    def test_admin_no_longer_imports_legacy_persist_helper(self):
-        m = self._admin_module()
-        assert not hasattr(m, "persist_user_generated_card_for_mint"), (
-            "admin_backend must not import persist_user_generated_card_for_mint "
-            "anymore — its role was replaced by promote_preview_to_claim, and "
-            "keeping the legacy symbol around would make it easy to silently "
-            "regress the mint flow back to preview-only-table-as-canonical-store"
-        )
-
-
-# ---------------------------------------------------------------------------
 # Home-ticker SQL pinning
 #
 # The home-page showcase (``/api/cards/ticker``) samples ``preview_cards``.
-# After Stage 2 this table is a strict preview-only buffer — minted rows are
-# deleted by ``promote_preview_to_claim`` — so the ticker SQL must NOT reach
-# into ``winner_wallets_nft_to_claim.is_minted`` to filter them out. That old
-# JOIN was transition-scaffolding and its lingering presence would indicate
-# that the promotion cleanup (DELETE-on-mint) had silently regressed back to
-# the dual-write shape.
+# preview_cards is a strict preview-only buffer — minted rows are deleted by
+# the cron worker's ``denormalize_card_onto_claim``. The ticker SQL must
+# therefore not reach into any winner-wallet legacy table to filter them out.
 # ---------------------------------------------------------------------------
 
 def _user_web_module():
@@ -265,9 +210,9 @@ class TestCardsTickerSqlPreviewOnly:
     def test_samples_from_preview_cards(self):
         assert "from preview_cards" in self.normalized
 
-    def test_does_not_join_winner_wallets_for_is_minted_signal(self):
-        """preview_cards is preview-only — minted rows are deleted."""
-        assert "join winner_wallets_nft_to_claim" not in self.normalized
+    def test_does_not_join_legacy_winner_wallets(self):
+        """preview_cards is preview-only — minted rows are deleted; ticker SQL must stay decoupled."""
+        assert "winner_wallets_nft_to_claim" not in self.normalized
         assert "is_minted" not in self.normalized
 
     def test_uses_random_order_and_limit(self):

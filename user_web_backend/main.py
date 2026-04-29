@@ -239,32 +239,6 @@ _cards_ticker_cache: Dict[Tuple[int, str], Tuple[float, Dict[str, Any]]] = {}
 USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS = float(
     os.getenv("USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS", "30")
 )
-_winner_catalog_join_total_lock = threading.Lock()
-_winner_catalog_join_total_cache: Tuple[float, int] = (0.0, 0)
-
-# Rows that can ever produce a card (manual image present). Used for supply totals.
-_WINNER_CATALOG_JOIN = """
-FROM winner_wallets_nft_to_claim w
-JOIN event_cards ec ON ec.event_id = w.event_id
-WHERE ec.manual_image_url IS NOT NULL
-  AND BTRIM(ec.manual_image_url) <> ''
-"""
-
-# Subset: catalog rows not yet used for a generated card (pick target for /api/cards/get).
-#
-# ``is_minted = FALSE`` is defense-in-depth. ``promote_preview_to_claim`` deletes
-# the preview row from ``preview_cards`` on mint, which by itself would flip
-# ``gc.id IS NULL`` back to true and make an already-minted winner look eligible
-# for a fresh preview slot — hence the explicit minted-filter guard.
-_ELIGIBLE_WINNER_BASE = """
-FROM winner_wallets_nft_to_claim w
-JOIN event_cards ec ON ec.event_id = w.event_id
-LEFT JOIN preview_cards gc ON gc.winner_row_id = w.id
-WHERE ec.manual_image_url IS NOT NULL
-  AND BTRIM(ec.manual_image_url) <> ''
-  AND gc.id IS NULL
-  AND COALESCE(w.is_minted, FALSE) = FALSE
-"""
 
 # Home-page ticker feed: random sample of preview_cards rows.
 #
@@ -690,7 +664,6 @@ def _ensure_preview_cards_schema() -> None:
                     slug TEXT NOT NULL UNIQUE,
                     owner_wallet VARCHAR(42) NOT NULL,
                     owner_proxy_wallet TEXT,
-                    winner_row_id BIGINT NOT NULL UNIQUE,
                     season_id INTEGER NOT NULL,
                     event_id TEXT,
                     event_slug TEXT,
@@ -702,8 +675,6 @@ def _ensure_preview_cards_schema() -> None:
                     back_image_path TEXT NOT NULL,
                     card_payload_json JSONB NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    CONSTRAINT fk_preview_card_winner_row
-                        FOREIGN KEY (winner_row_id) REFERENCES winner_wallets_nft_to_claim(id) ON DELETE CASCADE,
                     CONSTRAINT fk_preview_card_season
                         FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
                     CONSTRAINT preview_card_owner_wallet_format_check
@@ -886,7 +857,7 @@ def _normalize_proxy_wallet_for_compare(addr: Optional[str]) -> Optional[str]:
 def _resolve_card_claim_type(winner_proxy_wallet: Optional[str], session_signin_proxy_wallet: Optional[str]) -> str:
     """SVG OWNERSHIP band: ORIGIN SECURED vs LOOTER TAKEOVER.
 
-    - *Winner side*: `winner_wallets_nft_to_claim.proxy_wallet` (trader identity on the allocation row).
+    - *Winner side*: `claims.proxy_wallet` (trader identity frozen on the allocation row).
     - *Session side*: Polymarket `proxy_wallet` from `user_wallet_signins` for the **dashboard EOA** (JWT `sub`
       from Authorization — the wallet that signed in; never from request body or query params).
 
@@ -1020,31 +991,6 @@ def _generated_card_slug(season_type: Optional[str], season_number: Any) -> str:
     return f"card-{normalized_type}-s{normalized_number}-{random_chunk}-{uuid_chunk}"
 
 
-def _count_winner_catalog_join(cursor: Any) -> int:
-    cursor.execute(
-        f"""
-        SELECT COUNT(*) AS total_count
-        {_WINNER_CATALOG_JOIN}
-        """
-    )
-    row = cursor.fetchone()
-    raw = (row.get("total_count") if isinstance(row, dict) else row[0]) if row else 0
-    return int(raw or 0)
-
-
-def _winner_catalog_join_total_cached(cursor: Any) -> int:
-    global _winner_catalog_join_total_cache
-    now = monotonic()
-    with _winner_catalog_join_total_lock:
-        ts, cached_total = _winner_catalog_join_total_cache
-        if ts > 0 and (now - ts) < USER_WEB_CARD_SUPPLY_JOIN_TOTAL_CACHE_TTL:
-            return cached_total
-    total = _count_winner_catalog_join(cursor)
-    with _winner_catalog_join_total_lock:
-        _winner_catalog_join_total_cache = (monotonic(), total)
-    return total
-
-
 def _configure_user_web_timing_logging() -> None:
     """Uvicorn only configures its own loggers; app logger.info would be dropped (root level WARNING)."""
     global _user_web_timing_log_handler_installed
@@ -1065,72 +1011,6 @@ def _log_card_get_phase(phase: str, phase_start: float) -> float:
         ms = (monotonic() - phase_start) * 1000.0
         logger.info("POST /api/cards/get phase=%s elapsed_ms=%.1f", phase, ms)
     return monotonic()
-
-
-def _pick_eligible_winner_row_id(cursor: Any) -> Optional[int]:
-    """Uniform random eligible row across all seasons (weights by per-season eligible count).
-
-    Eligible rows are mostly ~333 per season with one larger season (~2k). Probing global
-    min/max id skews toward dense id ranges; instead we pick a season with probability
-    proportional to its eligible count, then RANDOM() within that season (small sets).
-    """
-    cursor.execute(
-        f"""
-        SELECT w.season_id AS season_id, COUNT(*)::bigint AS eligible_count
-        {_ELIGIBLE_WINNER_BASE}
-        GROUP BY w.season_id
-        ORDER BY w.season_id
-        """
-    )
-    season_rows = cursor.fetchall()
-    if not season_rows:
-        return None
-
-    parsed: List[Tuple[Optional[int], int]] = []
-    total = 0
-    for r in season_rows:
-        sid_raw = r.get("season_id") if isinstance(r, dict) else r[0]
-        c_raw = r.get("eligible_count") if isinstance(r, dict) else r[1]
-        c = int(c_raw or 0)
-        if c <= 0:
-            continue
-        sid: Optional[int] = int(sid_raw) if sid_raw is not None else None
-        parsed.append((sid, c))
-        total += c
-    if total <= 0 or not parsed:
-        return None
-
-    pick = secrets.randbelow(total)
-    cumulative = 0
-    chosen_season: Optional[int]
-    for sid, c in parsed:
-        if pick < cumulative + c:
-            chosen_season = sid
-            break
-        cumulative += c
-    else:
-        return None
-
-    season_filter = "AND w.season_id IS NULL" if chosen_season is None else "AND w.season_id = %s"
-    season_params: Tuple[Any, ...] = () if chosen_season is None else (chosen_season,)
-
-    for _ in range(8):
-        cursor.execute(
-            f"""
-            SELECT w.id
-            {_ELIGIBLE_WINNER_BASE}
-              {season_filter}
-            ORDER BY RANDOM()
-            LIMIT 1
-            FOR UPDATE OF w SKIP LOCKED
-            """,
-            season_params,
-        )
-        row = cursor.fetchone()
-        if row:
-            rid = row.get("id") if isinstance(row, dict) else row[0]
-            return int(rid)
-    return None
 
 
 def _absolute_asset_url(request: Request, asset_path: str) -> str:
@@ -1260,97 +1140,42 @@ def _ensure_generated_card_assets_on_r2(row: Dict[str, Any]) -> Dict[str, Any]:
     return row
 
 
-def _load_card_source_row(cursor: Any, winner_row_id: int) -> Optional[Dict[str, Any]]:
-    cursor.execute(
-        """
-        SELECT
-            w.id AS winner_row_id,
-            w.season_id,
-            s.type AS season_type,
-            s.season_number,
-            w.proxy_wallet,
-            w.event_id,
-            w.event_slug,
-            e.title AS event_title,
-            COALESCE(w.entry_cwap, p.entry_cwap) AS entry_cwap,
-            COALESCE(w.total_volume, p.total_volume) AS total_volume,
-            COALESCE(w.total_pnl, p.total_pnl) AS total_pnl,
-            w.entry_bracket,
-            COALESCE(w.archetype, p.archetype) AS archetype,
-            COALESCE(w.archetype_description, p.archetype_description) AS archetype_description,
-            COALESCE(w.archetype_math, p.archetype_math) AS archetype_math,
-            COALESCE(w.rarity_bracket, p.rarity_bracket) AS rarity_bracket,
-            w.edge,
-            w.yield,
-            w.gravity,
-            w.rank,
-            ec.reccurence,
-            ec.manual_image_url,
-            ec.card_title,
-            ec.card_lore,
-            ec.primary_tag,
-            ec.secondary_tag,
-            tp.hex_color AS primary_tag_hex_color,
-            s.start_date  AS season_start_date,
-            s.end_date    AS season_end_date,
-            s.total_supply AS season_size
-        FROM winner_wallets_nft_to_claim w
-        JOIN event_cards ec ON ec.event_id = w.event_id
-        LEFT JOIN LATERAL (
-            SELECT
-                p.entry_cwap,
-                p.total_volume,
-                p.total_pnl,
-                p.archetype,
-                p.archetype_description,
-                p.archetype_math,
-                p.rarity_bracket
-            FROM participants p
-            WHERE LOWER(p.proxy_wallet) = LOWER(w.proxy_wallet)
-              AND (
-                  (w.event_id IS NOT NULL AND p.event_id = w.event_id)
-                  OR
-                  (w.event_slug IS NOT NULL AND p.event_slug = w.event_slug)
-              )
-            ORDER BY
-                CASE
-                    WHEN w.event_id IS NOT NULL AND p.event_id = w.event_id THEN 0
-                    WHEN w.event_slug IS NOT NULL AND p.event_slug = w.event_slug THEN 1
-                    ELSE 2
-                END,
-                p.rank ASC NULLS LAST
-            LIMIT 1
-        ) p ON TRUE
-        LEFT JOIN events e ON e.id = w.event_id
-        LEFT JOIN seasons s ON s.id = w.season_id
-        LEFT JOIN tags tp ON LOWER(BTRIM(tp.label)) = LOWER(BTRIM(ec.primary_tag))
-        WHERE w.id = %s
-          AND ec.manual_image_url IS NOT NULL
-          AND BTRIM(ec.manual_image_url) <> ''
-        LIMIT 1
-        """,
-        (winner_row_id,),
-    )
-    row = cursor.fetchone()
-    return dict(row) if row else None
-
-
 def _generated_cards_supply_counts(
     cursor: Any,
     *,
-    use_cached_join_total: bool = True,
+    use_cached_join_total: bool = True,  # noqa: ARG001 — kept for call-site parity
 ) -> Tuple[int, int]:
-    if use_cached_join_total:
-        total_available = _winner_catalog_join_total_cached(cursor)
-    else:
-        total_available = _count_winner_catalog_join(cursor)
-    cursor.execute("SELECT COUNT(*) AS claimed_count FROM preview_cards")
-    claimed_row = cursor.fetchone()
-    claimed_count = int(
-        (claimed_row.get("claimed_count") if isinstance(claimed_row, dict) else claimed_row[0]) if claimed_row else 0
+    """Return (total_pool, remaining_pool) using the participants partitions
+    of all seasons. Total = participants whose event has a ready
+    ``manual_image_url``. Remaining = same minus proxy_wallets that already
+    have an active claim in their season."""
+    cursor.execute(
+        """
+        SELECT
+            COUNT(*) AS total_count,
+            COUNT(*) FILTER (
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM claims c
+                    WHERE c.season_id = p.season_id
+                      AND c.proxy_wallet IS NOT NULL
+                      AND LOWER(c.proxy_wallet) = LOWER(p.proxy_wallet)
+                      AND c.status IN ('QUEUED','PENDING','PROCESSING','COMPLETED')
+                )
+            ) AS remaining_count
+        FROM participants p
+        JOIN event_cards ec ON ec.event_id = p.event_id
+        WHERE ec.manual_image_url IS NOT NULL
+          AND BTRIM(ec.manual_image_url) <> ''
+        """
     )
-    remaining_available = max(total_available - claimed_count, 0)
-    return total_available, remaining_available
+    row = cursor.fetchone() or {}
+    if isinstance(row, dict):
+        total = int(row.get("total_count") or 0)
+        remaining = int(row.get("remaining_count") or 0)
+    else:
+        total = int(row[0] or 0)
+        remaining = int(row[1] or 0)
+    return total, remaining
 
 
 def _format_generated_card_row(row: Dict[str, Any], request: Request, include_payload: bool = True) -> Dict[str, Any]:
@@ -2115,12 +1940,11 @@ def season_opened_archetype_counts(season_id: int) -> Dict[str, Any]:
                     SELECT
                         COALESCE(
                             NULLIF(BTRIM(UPPER(c.card_payload_json->>'archetype')), ''),
-                            NULLIF(BTRIM(UPPER(w.archetype)), ''),
+                            NULLIF(BTRIM(UPPER(c.archetype)), ''),
                             ''
                         ) AS raw_label,
                         COUNT(*)::bigint AS cnt
                     FROM claims c
-                    LEFT JOIN winner_wallets_nft_to_claim w ON w.id = c.winner_row_id
                     WHERE c.season_id = %s
                       AND c.status = 'COMPLETED'
                     GROUP BY 1
@@ -2178,7 +2002,7 @@ def wallet_ticker(limit: int = 100) -> Dict[str, Any]:
                 SELECT proxy_wallet AS wallet_address
                 FROM (
                     SELECT DISTINCT lower(proxy_wallet) AS proxy_wallet
-                    FROM winner_wallets_nft_to_claim
+                    FROM participants
                     WHERE proxy_wallet IS NOT NULL
                 ) t
                 ORDER BY random()
@@ -2464,7 +2288,6 @@ SELECT
     gc.slug,
     gc.owner_wallet,
     gc.owner_proxy_wallet,
-    gc.winner_row_id,
     gc.season_id,
     gc.event_id,
     gc.event_slug,
@@ -2491,11 +2314,10 @@ SELECT
     e.start_date AS event_start_date,
     e.end_date AS event_end_date,
     e.closed_time AS event_closed_time,
-    wwin.proxy_wallet AS winner_proxy_wallet,
+    gc.owner_proxy_wallet AS winner_proxy_wallet,
     NULL::text AS minted_asset_address
 FROM preview_cards gc
 LEFT JOIN events e ON e.id = gc.event_id
-LEFT JOIN winner_wallets_nft_to_claim wwin ON wwin.id = gc.winner_row_id
 WHERE gc.slug = %s
 LIMIT 1
 """
@@ -2512,10 +2334,9 @@ SELECT
     c.card_slug AS slug,
     c.user_wallet AS owner_wallet,
     uws.proxy_wallet AS owner_proxy_wallet,
-    c.winner_row_id,
     c.season_id,
-    w.event_id AS event_id,
-    w.event_slug AS event_slug,
+    c.event_id AS event_id,
+    c.event_slug AS event_slug,
     c.card_title,
     c.primary_tag,
     c.secondary_tag,
@@ -2539,11 +2360,10 @@ SELECT
     e.start_date AS event_start_date,
     e.end_date AS event_end_date,
     e.closed_time AS event_closed_time,
-    w.proxy_wallet AS winner_proxy_wallet,
+    c.proxy_wallet AS winner_proxy_wallet,
     c.asset_address AS minted_asset_address
 FROM claims c
-LEFT JOIN winner_wallets_nft_to_claim w ON w.id = c.winner_row_id
-LEFT JOIN events e ON e.id = w.event_id
+LEFT JOIN events e ON e.id = c.event_id
 LEFT JOIN user_wallet_signins uws ON LOWER(uws.wallet_address) = LOWER(c.user_wallet)
 WHERE c.card_slug = %s
 LIMIT 1
@@ -2634,183 +2454,6 @@ def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
     if not row:
         raise HTTPException(status_code=404, detail="Card not found")
     return _build_card_detail_response(row, request)
-
-
-@app.post("/api/cards/get")
-def get_card(request: Request) -> UserGeneratedCardResponse:
-    _require_wallet_actions_enabled()
-    phase_t = monotonic()
-    # EOA tied to dashboard session (JWT only — same wallet user connected at sign-in).
-    session_wallet_eoa = _extract_wallet_from_request(request).lower()
-    if not Web3.is_address(session_wallet_eoa):
-        raise HTTPException(status_code=400, detail="Invalid connected wallet")
-
-    slug: Optional[str] = None
-    uploaded_front_key: Optional[str] = None
-    uploaded_back_key: Optional[str] = None
-    conn = _get_connection()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-            session_signin_proxy_wallet = _load_signin_proxy_for_session_wallet(cursor, session_wallet_eoa)
-            phase_t = _log_card_get_phase("load_session_signin_proxy", phase_t)
-
-            winner_row_id = _pick_eligible_winner_row_id(cursor)
-            phase_t = _log_card_get_phase("pick_eligible_winner", phase_t)
-            if winner_row_id is None:
-                total_available, _ = _generated_cards_supply_counts(
-                    cursor,
-                    use_cached_join_total=False,
-                )
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "All cards have already been generated."
-                        if total_available > 0
-                        else "No card-builder rows with manual images are available yet."
-                    ),
-                )
-            source_row = _load_card_source_row(cursor, winner_row_id=winner_row_id)
-            phase_t = _log_card_get_phase("load_card_source_row_db", phase_t)
-            if not source_row:
-                raise HTTPException(status_code=400, detail="Selected row has no renderable card payload")
-
-            payload = _build_card_payload_from_source_row(
-                source_row,
-                session_signin_proxy_wallet=session_signin_proxy_wallet,
-            )
-            slug = _generated_card_slug(payload.get("season_type"), payload.get("season_number"))
-            payload["qr_payload"] = f"{CARD_BASE_URL}/cards/{slug}"
-            image_url = str(payload.get("image_url") or "").strip()
-            if not image_url:
-                raise HTTPException(status_code=400, detail="Selected row is missing manual image URL")
-
-            # ── Step 1: INSERT first (placeholder paths). ─────────────────────────
-            cursor.execute(
-                """
-                INSERT INTO preview_cards (
-                    slug,
-                    owner_wallet,
-                    owner_proxy_wallet,
-                    winner_row_id,
-                    season_id,
-                    event_id,
-                    event_slug,
-                    card_title,
-                    primary_tag,
-                    secondary_tag,
-                    pattern,
-                    front_image_path,
-                    back_image_path,
-                    card_payload_json
-                ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
-                )
-                RETURNING
-                    id,
-                    slug,
-                    owner_wallet,
-                    owner_proxy_wallet,
-                    winner_row_id,
-                    season_id,
-                    event_id,
-                    event_slug,
-                    card_title,
-                    primary_tag,
-                    secondary_tag,
-                    pattern,
-                    front_image_path,
-                    back_image_path,
-                    card_payload_json,
-                    created_at
-                """,
-                (
-                    slug,
-                    session_wallet_eoa,
-                    session_signin_proxy_wallet,
-                    winner_row_id,
-                    int(source_row.get("season_id") or 0),
-                    source_row.get("event_id"),
-                    source_row.get("event_slug"),
-                    str(payload.get("card_title") or ""),
-                    str(payload.get("primary_tag") or ""),
-                    str(payload.get("secondary_tag") or ""),
-                    None,
-                    "",   # placeholder — updated below after SVG render
-                    "",   # placeholder — updated below after SVG render
-                    json.dumps(payload),
-                ),
-            )
-            created_row = cursor.fetchone()
-            phase_t = _log_card_get_phase("insert_generated_card", phase_t)
-
-            # ── Step 2: Stamp a preview placeholder on the mint-number slot. ───────
-            # Preview cards are NOT part of the minted collection yet, so the
-            # "Collection mint #N" line on the card-back SVG is rendered as a
-            # plain dash for previews. The real number is assigned to the
-            # matching ``claims`` row at mint time (see promote_preview_to_claim).
-            payload["collection_mint_number"] = "-"
-
-            # ── Step 3: Render SVGs + rasterize to PNG. ────────────────────────────
-            # Showcase cards share the NFT pipeline: SVG -> PNG via the shared
-            # headless-browser pool, then uploaded to R2 as image/png. The only
-            # difference from a real mint is the destination (R2 vs Pinata).
-            render_payload = _build_render_payload(payload)
-            phase_t = _log_card_get_phase("fetch_manual_image_http", phase_t)
-            front_png, back_png = render_card_pngs(render_payload)
-            phase_t = _log_card_get_phase("rasterize_png_local", phase_t)
-
-            # ── Step 4: Upload to R2 ──────────────────────────────────────────────
-            front_image_path, back_image_path, uploaded_front_key, uploaded_back_key = upload_card_assets_to_r2(
-                slug,
-                front_png,
-                back_png,
-            )
-            phase_t = _log_card_get_phase("r2_put_object_x2", phase_t)
-
-            # ── Step 5: Update record with real paths and final payload ───────────
-            cursor.execute(
-                """
-                UPDATE preview_cards
-                SET front_image_path = %s,
-                    back_image_path  = %s,
-                    card_payload_json = %s::jsonb
-                WHERE slug = %s
-                """,
-                (front_image_path, back_image_path, json.dumps(payload), slug),
-            )
-            # Refresh created_row to reflect updated paths for the response.
-            created_row = dict(created_row)
-            created_row["front_image_path"] = front_image_path
-            created_row["back_image_path"] = back_image_path
-            created_row["card_payload_json"] = payload
-            total_available, remaining_available = _generated_cards_supply_counts(cursor)
-            phase_t = _log_card_get_phase("supply_counts_db", phase_t)
-        conn.commit()
-        phase_t = _log_card_get_phase("transaction_commit", phase_t)
-    except HTTPException:
-        conn.rollback()
-        delete_r2_object_by_key(uploaded_front_key)
-        delete_r2_object_by_key(uploaded_back_key)
-        raise
-    except Exception:
-        conn.rollback()
-        delete_r2_object_by_key(uploaded_front_key)
-        delete_r2_object_by_key(uploaded_back_key)
-        logger.exception("Failed to generate card for wallet=%s", session_wallet_eoa)
-        raise HTTPException(status_code=503, detail="Failed to generate card. Please retry shortly.")
-    finally:
-        conn.close()
-
-    card_payload = _format_generated_card_row(dict(created_row), request=request, include_payload=True)
-    phase_t = _log_card_get_phase("format_response_row", phase_t)
-
-    return UserGeneratedCardResponse(
-        status="ok",
-        message="Card generated successfully",
-        card=card_payload,
-        remaining_available=remaining_available,
-        total_available=total_available,
-    )
 
 
 @app.get("/api/master-collection")
@@ -2914,7 +2557,7 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
         db_only=False,
     )
     try:
-        return mint_service.run_mint_claim(mint_request)
+        return mint_service.run_queue_mint_request(mint_request)
     except HTTPException:
         raise
     except Exception:
