@@ -5,6 +5,39 @@ import { fetchJSON } from "../lib/api";
 
 type LocalCountdownItem = { label: string; value: string };
 
+type ClaimsMintableSummary = {
+  total_mintable: number;
+  remaining_mintable: number;
+  total_supply: number;
+  minted_active: number;
+  per_event_cap: number | null;
+  top_event_count: number;
+  status_counts: {
+    queued: number;
+    pending: number;
+    processing: number;
+    completed: number;
+    failed: number;
+  };
+};
+
+function pctClass(numerator: number, denominator: number | null | undefined): string {
+  if (!denominator || denominator <= 0) return "supply-meter-zero";
+  const pct = (numerator / denominator) * 100;
+  if (pct >= 90) return "supply-meter-red";
+  if (pct >= 70) return "supply-meter-yellow";
+  return "supply-meter-green";
+}
+
+function fmtPct(numerator: number, denominator: number | null | undefined): string {
+  if (!denominator || denominator <= 0) return "—";
+  return `${((numerator / denominator) * 100).toFixed(1)}%`;
+}
+
+function formatInt(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
 function parseUtcDisplayDate(raw: string): Date | null {
   const value = raw.trim();
   if (!value) return null;
@@ -76,8 +109,9 @@ const [claimRecipient, setClaimRecipient] = useState("");
   const [claimSeasonInfo, setClaimSeasonInfo] = useState("");
   const [claimOutput, setClaimOutput] = useState("");
   const [claimMinting, setClaimMinting] = useState(false);
-  const [claimMintableTotal, setClaimMintableTotal] = useState<number | null>(null);
-  const [claimMintableRemaining, setClaimMintableRemaining] = useState<number | null>(null);
+  const [claimMintableSummary, setClaimMintableSummary] = useState<ClaimsMintableSummary | null>(null);
+  const claimMintableTotal = claimMintableSummary?.total_mintable ?? null;
+  const claimMintableRemaining = claimMintableSummary?.remaining_mintable ?? null;
   const [serverNowBaseMs, setServerNowBaseMs] = useState<number | null>(null);
   const [clientNowAtSyncMs, setClientNowAtSyncMs] = useState<number | null>(null);
   const [syncedNowMs, setSyncedNowMs] = useState<number | null>(null);
@@ -130,11 +164,10 @@ const [claimRecipient, setClaimRecipient] = useState("");
 
   const refreshClaimMintableCount = async () => {
     if (!claimSeasonId) return;
-    const data = await fetchJSON<{ total_mintable: number; remaining_mintable: number }>(
+    const data = await fetchJSON<ClaimsMintableSummary>(
       `/api/claims/mintable-count?season_id=${claimSeasonId}`,
     );
-    setClaimMintableTotal(data.total_mintable);
-    setClaimMintableRemaining(data.remaining_mintable);
+    setClaimMintableSummary(data);
   };
 
   useEffect(() => {
@@ -214,16 +247,80 @@ const [claimRecipient, setClaimRecipient] = useState("");
         <label>Recipient</label>
         <input value={claimRecipient} onChange={(e) => setClaimRecipient(e.target.value)} style={{ minWidth: 420 }} />
       </div>
+      {claimMintableSummary ? (
+        <div className="mint-summary">
+          <div className="mint-summary-row">
+            <div className="mint-summary-label">Season supply</div>
+            <div className="mint-summary-value">
+              <strong>{formatInt(claimMintableSummary.minted_active)}</strong>
+              <span className="muted"> / {formatInt(claimMintableSummary.total_supply)}</span>
+              <span className={`mint-summary-pct ${pctClass(claimMintableSummary.minted_active, claimMintableSummary.total_supply)}`}>
+                {fmtPct(claimMintableSummary.minted_active, claimMintableSummary.total_supply)}
+              </span>
+            </div>
+            <div className="mint-summary-meter">
+              <div
+                className={`mint-summary-meter-fill ${pctClass(claimMintableSummary.minted_active, claimMintableSummary.total_supply)}`}
+                style={{
+                  width: claimMintableSummary.total_supply > 0
+                    ? `${Math.min(100, (claimMintableSummary.minted_active / claimMintableSummary.total_supply) * 100)}%`
+                    : "0%",
+                }}
+              />
+            </div>
+            <div className="mint-summary-detail muted">
+              {claimMintableSummary.status_counts.queued} queued ·{" "}
+              {claimMintableSummary.status_counts.pending} pending ·{" "}
+              {claimMintableSummary.status_counts.processing} processing ·{" "}
+              {claimMintableSummary.status_counts.completed} completed ·{" "}
+              {claimMintableSummary.status_counts.failed} failed
+            </div>
+          </div>
+
+          <div className="mint-summary-row">
+            <div
+              className="mint-summary-label"
+              title="How many distinct Origin proxy_wallets remain in the allocation pool, out of the partition's total. Looter mints draw from this; once a wallet is minted in this season, it leaves the pool."
+            >
+              Pool remaining
+            </div>
+            <div className="mint-summary-value">
+              <strong>{formatInt(claimMintableSummary.remaining_mintable)}</strong>
+              <span className="muted"> / {formatInt(claimMintableSummary.total_mintable)}</span>
+            </div>
+          </div>
+
+          <div className="mint-summary-row">
+            <div
+              className="mint-summary-label"
+              title="Largest single-event bucket of active claims in this season vs per_event_cap. When this hits the cap, looter retries skip rows tied to that event."
+            >
+              Per-event cap (max)
+            </div>
+            <div className="mint-summary-value">
+              <strong>{formatInt(claimMintableSummary.top_event_count)}</strong>
+              <span className="muted"> / {claimMintableSummary.per_event_cap == null ? "∞" : formatInt(claimMintableSummary.per_event_cap)}</span>
+              <span className={`mint-summary-pct ${pctClass(claimMintableSummary.top_event_count, claimMintableSummary.per_event_cap)}`}>
+                {fmtPct(claimMintableSummary.top_event_count, claimMintableSummary.per_event_cap)}
+              </span>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div className="row">
         <label><input type="checkbox" checked={claimAutoPhase} onChange={(e) => setClaimAutoPhase(e.target.checked)} /> Auto phase</label>
         <label><input type="checkbox" checked={claimDbOnly} onChange={(e) => setClaimDbOnly(e.target.checked)} /> DB only</label>
-{claimMintableTotal !== null && (
-          <span className="muted">
-            Mintable remaining: {claimMintableRemaining} / {claimMintableTotal}
-          </span>
-        )}
         <button
-          disabled={claimMinting || !claimWallet || !claimSeasonId || !claimRecipient.trim() || (claimMintableRemaining !== null && claimMintableRemaining <= 0)}
+          disabled={
+            claimMinting ||
+            !claimWallet ||
+            !claimSeasonId ||
+            !claimRecipient.trim() ||
+            (claimMintableRemaining !== null && claimMintableRemaining <= 0) ||
+            (claimMintableSummary !== null &&
+              claimMintableSummary.total_supply > 0 &&
+              claimMintableSummary.minted_active >= claimMintableSummary.total_supply)
+          }
           onClick={() =>
             void run(async () => {
               setClaimMinting(true);

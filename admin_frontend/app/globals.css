@@ -397,3 +397,70 @@ table:not(.event-cards-table) td {
     grid-template-columns: 1fr;
   }
 }
+
+/* Claims Mint — season summary panel */
+.mint-summary {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  border: 1px solid #2a2f3a;
+  border-radius: 6px;
+  background: #161a22;
+  font-size: 13px;
+}
+.mint-summary-row {
+  display: grid;
+  grid-template-columns: 170px 200px 1fr;
+  align-items: center;
+  gap: 12px;
+}
+.mint-summary-label {
+  color: #c8cdd9;
+  cursor: help;
+}
+.mint-summary-value {
+  font-variant-numeric: tabular-nums;
+}
+.mint-summary-value strong {
+  color: #f0f2f7;
+}
+.mint-summary-pct {
+  margin-left: 8px;
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.mint-summary-meter {
+  height: 6px;
+  background: #20242d;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.mint-summary-meter-fill {
+  height: 100%;
+  transition: width 0.25s ease;
+}
+.mint-summary-detail {
+  grid-column: 1 / -1;
+  font-size: 12px;
+}
+.supply-meter-zero { background: #20242d; color: #888; }
+.supply-meter-green { background: rgba(56, 190, 80, 0.18); color: #38be50; }
+.supply-meter-green.mint-summary-meter-fill { background: #38be50; color: inherit; }
+.supply-meter-yellow { background: rgba(255, 191, 0, 0.18); color: #ffbf00; }
+.supply-meter-yellow.mint-summary-meter-fill { background: #ffbf00; color: inherit; }
+.supply-meter-red { background: rgba(220, 53, 69, 0.20); color: #ff6b78; }
+.supply-meter-red.mint-summary-meter-fill { background: #dc3545; color: inherit; }
+
+@media (max-width: 900px) {
+  .mint-summary-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  .mint-summary-meter {
+    grid-column: 1 / -1;
+  }
+  .mint-summary-detail {
+    grid-column: 1 / -1;
+  }
+}

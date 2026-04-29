@@ -2064,10 +2064,20 @@ def season_claims(season_id: int) -> Dict[str, Any]:
 
 @app.get("/api/claims/mintable-count")
 def claims_mintable_count(season_id: int) -> Dict[str, Any]:
-    """Pool-for-allocation semantics: total = participants in the season's
-    partition whose event has a ready manual_image_url; remaining = same
-    minus proxy_wallets already locked by an active claim
-    (QUEUED/PENDING/PROCESSING/COMPLETED) in this season."""
+    """Mint-state summary for a season. Returns three metrics:
+
+    * Pool: ``total_mintable`` / ``remaining_mintable`` — participants in the
+      season's partition whose event has a ready ``manual_image_url``;
+      remaining excludes proxy_wallets already locked by an active claim.
+    * Supply: ``total_supply`` / ``minted_active`` — the season-wide cap from
+      ``seasons.total_supply`` and how many active claims have been written.
+      Broken down by status (``status_counts``).
+    * Per-event cap: ``per_event_cap`` / ``top_event_count`` — the largest
+      single (event, season) bucket of active claims vs the configured cap.
+
+    All COUNTs run against the small claims table (partial indexes on
+    status), so this endpoint is cheap even with millions of participants.
+    """
     try:
         conn = service.manager.get_connection()
         try:
@@ -2094,10 +2104,76 @@ def claims_mintable_count(season_id: int) -> Dict[str, Any]:
                     """,
                     (season_id,),
                 )
-                row = cursor.fetchone()
-                total = int(row["total_mintable"]) if row else 0
-                remaining = int(row["remaining_mintable"]) if row else 0
-                return {"season_id": season_id, "total_mintable": total, "remaining_mintable": remaining}
+                pool_row = cursor.fetchone() or {}
+                total = int(pool_row.get("total_mintable") or 0)
+                remaining = int(pool_row.get("remaining_mintable") or 0)
+
+                cursor.execute(
+                    """
+                    SELECT total_supply, per_event_cap
+                    FROM seasons WHERE id = %s
+                    """,
+                    (season_id,),
+                )
+                season_row = cursor.fetchone() or {}
+                total_supply = int(season_row.get("total_supply") or 0)
+                per_event_cap = season_row.get("per_event_cap")
+
+                cursor.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE status = 'QUEUED')     AS queued,
+                        COUNT(*) FILTER (WHERE status = 'PENDING')    AS pending,
+                        COUNT(*) FILTER (WHERE status = 'PROCESSING') AS processing,
+                        COUNT(*) FILTER (WHERE status = 'COMPLETED')  AS completed,
+                        COUNT(*) FILTER (WHERE status = 'FAILED')     AS failed
+                    FROM claims WHERE season_id = %s
+                    """,
+                    (season_id,),
+                )
+                status_row = cursor.fetchone() or {}
+                status_counts = {
+                    "queued":     int(status_row.get("queued") or 0),
+                    "pending":    int(status_row.get("pending") or 0),
+                    "processing": int(status_row.get("processing") or 0),
+                    "completed":  int(status_row.get("completed") or 0),
+                    "failed":     int(status_row.get("failed") or 0),
+                }
+                minted_active = (
+                    status_counts["queued"]
+                    + status_counts["pending"]
+                    + status_counts["processing"]
+                    + status_counts["completed"]
+                )
+
+                cursor.execute(
+                    """
+                    SELECT
+                        COALESCE(MAX(cnt), 0) AS top_event_count
+                    FROM (
+                        SELECT COUNT(*) AS cnt
+                        FROM claims
+                        WHERE season_id = %s
+                          AND event_id IS NOT NULL
+                          AND status IN ('QUEUED','PENDING','PROCESSING','COMPLETED')
+                        GROUP BY event_id
+                    ) t
+                    """,
+                    (season_id,),
+                )
+                top_event = cursor.fetchone() or {}
+                top_event_count = int(top_event.get("top_event_count") or 0)
+
+                return {
+                    "season_id":         season_id,
+                    "total_mintable":    total,
+                    "remaining_mintable": remaining,
+                    "total_supply":      total_supply,
+                    "minted_active":     minted_active,
+                    "per_event_cap":     per_event_cap,
+                    "top_event_count":   top_event_count,
+                    "status_counts":     status_counts,
+                }
         finally:
             conn.close()
     except Exception as exc:

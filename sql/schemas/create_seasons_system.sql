@@ -767,23 +767,20 @@ DO $$ BEGIN RAISE NOTICE '🧾 Extending claims for queue model...'; END $$;
 
 -- 11.1 Per-season cap configuration columns on seasons.
 ALTER TABLE seasons ADD COLUMN IF NOT EXISTS per_event_cap INTEGER;
-ALTER TABLE seasons ADD COLUMN IF NOT EXISTS per_tag_cap   INTEGER;
+-- Drop the legacy per_tag_cap column (and any matching default trigger
+-- output) — tag-level diversification is now intentionally not enforced.
+ALTER TABLE seasons DROP COLUMN IF EXISTS per_tag_cap;
 
 COMMENT ON COLUMN seasons.per_event_cap IS 'Max claims per (season, event_id). NULL = unlimited.';
-COMMENT ON COLUMN seasons.per_tag_cap   IS 'Max claims per (season, primary_tag). NULL = unlimited.';
 
--- Backfill defaults derived from total_supply (50% per event, 25% per tag).
+-- Backfill default per_event_cap derived from total_supply (50% of supply).
 -- Applied only to seasons that have not been configured yet (cap IS NULL).
 UPDATE seasons
 SET per_event_cap = GREATEST(1, CEIL(total_supply * 0.5)::INTEGER)
 WHERE per_event_cap IS NULL AND total_supply IS NOT NULL;
 
-UPDATE seasons
-SET per_tag_cap = GREATEST(1, CEIL(total_supply * 0.25)::INTEGER)
-WHERE per_tag_cap IS NULL AND total_supply IS NOT NULL;
-
--- 11.1b Auto-fill per_event_cap / per_tag_cap on INSERT when omitted, derived
---       from total_supply. Mirrors the backfill above so Python-side season
+-- 11.1b Auto-fill per_event_cap on INSERT when omitted, derived from
+--       total_supply. Mirrors the backfill above so Python-side season
 --       creation does not need to know about cap columns.
 CREATE OR REPLACE FUNCTION seasons_default_caps()
 RETURNS TRIGGER AS $$
@@ -791,9 +788,6 @@ BEGIN
     IF NEW.total_supply IS NOT NULL AND NEW.total_supply > 0 THEN
         IF NEW.per_event_cap IS NULL THEN
             NEW.per_event_cap := GREATEST(1, CEIL(NEW.total_supply * 0.5)::INTEGER);
-        END IF;
-        IF NEW.per_tag_cap IS NULL THEN
-            NEW.per_tag_cap := GREATEST(1, CEIL(NEW.total_supply * 0.25)::INTEGER);
         END IF;
     END IF;
     RETURN NEW;
@@ -889,11 +883,8 @@ CREATE INDEX idx_claims_active_season_event
     WHERE event_id IS NOT NULL
       AND status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
 
+-- Per-tag index removed along with per_tag_cap.
 DROP INDEX IF EXISTS idx_claims_active_season_tag;
-CREATE INDEX idx_claims_active_season_tag
-    ON claims (season_id, primary_tag)
-    WHERE primary_tag IS NOT NULL
-      AND status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
 
 -- Cron worker scan: ORDER BY (season_id, created_at) FOR UPDATE SKIP LOCKED.
 DROP INDEX IF EXISTS idx_claims_queued_pickup;
@@ -901,7 +892,7 @@ CREATE INDEX idx_claims_queued_pickup
     ON claims (season_id, created_at)
     WHERE status = 'QUEUED';
 
--- 11.6 BEFORE INSERT trigger that enforces total_supply, per_event, per_tag.
+-- 11.6 BEFORE INSERT trigger that enforces total_supply and per_event cap.
 --      Runs only when the new row enters the active set (status != FAILED).
 --      Uses partial-index counts (cheap: claims << participants).
 CREATE OR REPLACE FUNCTION claims_check_caps()
@@ -909,17 +900,15 @@ RETURNS TRIGGER AS $$
 DECLARE
     v_total_supply  INTEGER;
     v_event_cap     INTEGER;
-    v_tag_cap       INTEGER;
     v_active_count  INTEGER;
     v_event_count   INTEGER;
-    v_tag_count     INTEGER;
 BEGIN
     IF NEW.status = 'FAILED' THEN
         RETURN NEW;
     END IF;
 
-    SELECT total_supply, per_event_cap, per_tag_cap
-    INTO   v_total_supply, v_event_cap, v_tag_cap
+    SELECT total_supply, per_event_cap
+    INTO   v_total_supply, v_event_cap
     FROM   seasons
     WHERE  id = NEW.season_id;
 
@@ -953,22 +942,6 @@ BEGIN
             RAISE EXCEPTION
                 'season % event % cap (%) reached',
                 NEW.season_id, NEW.event_id, v_event_cap
-                USING ERRCODE = 'check_violation';
-        END IF;
-    END IF;
-
-    -- Per-tag cap (skipped if NULL or primary_tag missing).
-    IF v_tag_cap IS NOT NULL AND NEW.primary_tag IS NOT NULL THEN
-        SELECT COUNT(*) INTO v_tag_count
-        FROM   claims
-        WHERE  season_id   = NEW.season_id
-          AND  primary_tag = NEW.primary_tag
-          AND  status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
-
-        IF v_tag_count >= v_tag_cap THEN
-            RAISE EXCEPTION
-                'season % tag % cap (%) reached',
-                NEW.season_id, NEW.primary_tag, v_tag_cap
                 USING ERRCODE = 'check_violation';
         END IF;
     END IF;
