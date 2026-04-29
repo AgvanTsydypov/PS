@@ -124,3 +124,18 @@ OUTPUT_DIR = "output"
 # Output filename (None = auto-generate with timestamp)
 OUTPUT_FILENAME = None  # e.g., "events_20240706.json"
 
+# ============================================================================
+# GENESIS-ONLY OVERRIDES (applied only when POLYSTARS_IS_GENESIS=true)
+# ============================================================================
+
+# Force-include these event IDs in the Genesis batch even if they don't meet
+# the 100M volume floor. Fetched by id after the main keyset walk and merged.
+GENESIS_INCLUDE_EVENT_IDS = {
+    38884, 194167, 34587, 23656, 225752, 200970, 100300, 100199, 102773,
+    226986, 220474, 194119, 194107, 194106, 190338, 189845, 162818, 67284,
+    69987, 301949, 237260, 238474, 108633,
+}
+
+# Drop these event IDs from the Genesis batch even if they pass other filters.
+GENESIS_EXCLUDE_EVENT_IDS = {14228, 14023, 11968, 11385, 903215}
+

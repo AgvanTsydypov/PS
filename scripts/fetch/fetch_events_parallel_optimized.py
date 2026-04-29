@@ -111,6 +111,8 @@ class SharedPolymarketClient:
         closed: Optional[bool] = None,
         end_date_min: Optional[str] = None,
         end_date_max: Optional[str] = None,
+        volume_min: Optional[float] = None,
+        volume_max: Optional[float] = None,
         order: str = 'id',
         ascending: bool = False,
     ) -> tuple[Optional[List[Dict]], Optional[str], Optional[str]]:
@@ -119,9 +121,6 @@ class SharedPolymarketClient:
 
         Docs: offset is rejected on this endpoint; use after_cursor from the
         previous response's next_cursor.
-
-        Note: volume_min is supported by the OpenAPI spec but has triggered 500s
-        from Gamma in practice; min volume is enforced in _filter_events.
 
         Returns:
             (events, next_cursor, error)
@@ -145,6 +144,10 @@ class SharedPolymarketClient:
                 params['end_date_min'] = end_date_min
             if end_date_max:
                 params['end_date_max'] = end_date_max
+            if volume_min is not None:
+                params['volume_min'] = volume_min
+            if volume_max is not None:
+                params['volume_max'] = volume_max
 
             url = f"{self.BASE_URL}/events/keyset"
             response = self.session.get(url, params=params, timeout=60)
@@ -163,6 +166,30 @@ class SharedPolymarketClient:
 
         except Exception as e:
             return (None, None, str(e))
+
+    def get_events_by_ids(self, ids: List[int]) -> tuple[Optional[List[Dict]], Optional[str]]:
+        """
+        Fetch specific events by id (used for Genesis force-include list).
+        Bypasses date/volume/status filters — caller is asserting these are wanted.
+        """
+        if not ids:
+            return ([], None)
+        try:
+            if self.rate_limiter:
+                self.rate_limiter.wait_if_needed()
+            params: Dict[str, object] = {
+                'limit': min(max(len(ids), 1), 500),
+                'id': list(ids),
+            }
+            url = f"{self.BASE_URL}/events/keyset"
+            response = self.session.get(url, params=params, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, dict):
+                return (None, f'unexpected JSON type: {type(data).__name__}')
+            return (data.get('events') or [], None)
+        except Exception as e:
+            return (None, str(e))
 
 
 class OptimizedParallelEventFetcher:
@@ -185,6 +212,8 @@ class OptimizedParallelEventFetcher:
             rate_limiter=self.rate_limiter
         )
         
+        self.is_genesis = os.getenv('POLYSTARS_IS_GENESIS', 'false').strip().lower() == 'true'
+
         self.stats = {
             'total_fetched': 0,
             'total_filtered': 0,
@@ -192,6 +221,8 @@ class OptimizedParallelEventFetcher:
             'total_filtered_by_volume': 0,
             'total_filtered_by_max_volume': 0,
             'total_filtered_by_status': 0,
+            'total_filtered_by_genesis_exclude': 0,
+            'total_added_by_genesis_include': 0,
             'total_markets_original': 0,
             'total_markets_filtered': 0,
             'pages_processed': 0,
@@ -223,28 +254,46 @@ class OptimizedParallelEventFetcher:
         else:
             print(f"   • Rate Limiting: DISABLED ⚠️")
 
+        use_server_filters = os.getenv("POLYSTARS_KEYSET_USE_SERVER_FILTERS", "1") not in ("0", "false", "False")
+
+        server_end_date_min: Optional[str] = None
+        server_end_date_max: Optional[str] = None
+        server_volume_min: Optional[float] = None
+        server_volume_max: Optional[float] = None
+        if use_server_filters:
+            if config.START_DATE:
+                server_end_date_min = config.START_DATE.strftime('%Y-%m-%dT%H:%M:%SZ')
+            if config.END_DATE:
+                server_end_date_max = config.END_DATE.strftime('%Y-%m-%dT%H:%M:%SZ')
+            if config.MIN_VOLUME:
+                server_volume_min = float(config.MIN_VOLUME)
+            if config.MAX_VOLUME:
+                server_volume_max = float(config.MAX_VOLUME)
+
         if config.START_DATE or config.END_DATE:
-            print(f"   • Date Range (CLIENT-SIDE — see note below):")
+            label = "SERVER-SIDE" if use_server_filters else "CLIENT-SIDE (server filters disabled via env)"
+            print(f"   • Date Range ({label}):")
             if config.START_DATE:
                 print(f"      From: {config.START_DATE.strftime('%Y-%m-%d')}")
             if config.END_DATE:
                 print(f"      To:   {config.END_DATE.strftime('%Y-%m-%d')}")
-            print(
-                "      Note: Gamma /events/keyset returns HTTP 500 after a few pages "
-                "when end_date_min/max are sent with cursors; dates are applied in "
-                "_filter_events instead."
-            )
         else:
             print(f"   • Date Range: All dates")
+        if use_server_filters:
+            print(f"   • Server filters: end_date_min/max + volume_min/max (POLYSTARS_KEYSET_USE_SERVER_FILTERS=1)")
+            print(f"   • Order: endDate ascending (early-stop friendly)")
+        else:
+            print(f"   • Server filters: DISABLED (POLYSTARS_KEYSET_USE_SERVER_FILTERS=0) — full id-desc scan")
 
         print("=" * 70)
         print()
 
-        # Keyset + server-side end_date_* breaks pagination (500 from Gamma); omit here.
         page_limit = 500
         cursor: Optional[str] = None
         last_progress = time.time()
         max_pages = int(os.getenv("POLYSTARS_KEYSET_MAX_PAGES", "100000"))
+        keyset_order = 'endDate' if use_server_filters else 'id'
+        keyset_ascending = True if use_server_filters else False
 
         print("🔍 Fetching pages (keyset cursor chain)...", flush=True)
         print("-" * 70)
@@ -264,10 +313,12 @@ class OptimizedParallelEventFetcher:
                     limit=page_limit,
                     after_cursor=cursor,
                     closed=config.CLOSED_ONLY,
-                    end_date_min=None,
-                    end_date_max=None,
-                    order='id',
-                    ascending=False,
+                    end_date_min=server_end_date_min,
+                    end_date_max=server_end_date_max,
+                    volume_min=server_volume_min,
+                    volume_max=server_volume_max,
+                    order=keyset_order,
+                    ascending=keyset_ascending,
                 )
                 if error is None:
                     break
@@ -322,7 +373,61 @@ class OptimizedParallelEventFetcher:
         if self.stats['failed_requests']:
             print(f"   • Failed request attempts (retried): {self.stats['failed_requests']}")
         print("-" * 70)
-        
+
+        if self.is_genesis and config.GENESIS_INCLUDE_EVENT_IDS:
+            existing_ids = {
+                self._get_event_id(e) for e in self.all_events
+            }
+            existing_ids.discard(None)
+            missing = sorted(
+                set(config.GENESIS_INCLUDE_EVENT_IDS) - existing_ids
+            )
+            if missing:
+                print(f"\n🧬 Genesis force-include: fetching {len(missing)} extra event(s) by id...")
+                extras, err = self.client.get_events_by_ids(missing)
+                if err:
+                    print(f"   ⚠️  Force-include fetch failed: {err}")
+                elif extras:
+                    excluded_ids = config.GENESIS_EXCLUDE_EVENT_IDS or set()
+                    added = 0
+                    skipped_excluded: List[int] = []
+                    skipped_out_of_window: List[int] = []
+                    for ev in extras:
+                        eid = self._get_event_id(ev)
+                        if eid is None:
+                            continue
+                        if eid in excluded_ids:
+                            skipped_excluded.append(eid)
+                            continue
+                        # Window check: out-of-Genesis-window force-includes will
+                        # be picked up later via daily ingestion — don't pull twice.
+                        if not self._check_date_range(ev):
+                            skipped_out_of_window.append(eid)
+                            continue
+                        ev = self._filter_markets_by_volume(ev)
+                        with self.lock:
+                            self.all_events.append(ev)
+                            self.stats['total_fetched'] += 1
+                            self.stats['total_filtered'] += 1
+                            self.stats['total_added_by_genesis_include'] += 1
+                        added += 1
+                    print(f"   ✅ Added {added} force-include event(s)")
+                    if skipped_out_of_window:
+                        print(
+                            f"   ⏭️  Skipped {len(skipped_out_of_window)} force-include id(s) outside "
+                            f"Genesis window (will be picked up by daily): {skipped_out_of_window}"
+                        )
+                    if skipped_excluded:
+                        print(f"   ⏭️  Skipped {len(skipped_excluded)} force-include id(s) also in exclude list: {skipped_excluded}")
+                    found_ids = {self._get_event_id(e) for e in extras}
+                    not_found = [i for i in missing if i not in found_ids]
+                    if not_found:
+                        print(f"   ⚠️  Not returned by API: {not_found}")
+                else:
+                    print(f"   ⚠️  No events returned for force-include ids")
+            else:
+                print(f"\n🧬 Genesis force-include: all {len(config.GENESIS_INCLUDE_EVENT_IDS)} ids already present")
+
         # Apply MAX_EVENTS limit to final result
         # (Early stopping during pagination may have fetched more events in parallel)
         if config.MAX_EVENTS and len(self.all_events) > config.MAX_EVENTS:
@@ -339,6 +444,13 @@ class OptimizedParallelEventFetcher:
         filtered = []
         
         for event in events:
+            if self.is_genesis and config.GENESIS_EXCLUDE_EVENT_IDS:
+                event_id = self._get_event_id(event)
+                if event_id is not None and event_id in config.GENESIS_EXCLUDE_EVENT_IDS:
+                    with self.lock:
+                        self.stats['total_filtered_by_genesis_exclude'] += 1
+                    continue
+
             if not self._check_date_range(event):
                 with self.lock:
                     self.stats['total_filtered_by_date'] += 1
@@ -390,6 +502,16 @@ class OptimizedParallelEventFetcher:
         
         return True
     
+    def _get_event_id(self, event: Dict) -> Optional[int]:
+        """Extract numeric event id (Gamma returns it as string in some payloads)."""
+        raw = event.get('id')
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return None
+
     def _get_event_date(self, event: Dict) -> Optional[datetime]:
         """Extract and parse event date"""
         end_date_str = event.get('endDate') or event.get('endDateIso')
@@ -492,6 +614,9 @@ class OptimizedParallelEventFetcher:
         if config.MAX_VOLUME:
             print(f"   • Excluded by max volume (>${config.MAX_VOLUME:,.0f}): {self.stats['total_filtered_by_max_volume']:,}")
         print(f"   • Excluded by resolution status: {self.stats['total_filtered_by_status']:,}")
+        if self.is_genesis:
+            print(f"   • Excluded by Genesis exclude list: {self.stats['total_filtered_by_genesis_exclude']:,}")
+            print(f"   • Added by Genesis include list: {self.stats['total_added_by_genesis_include']:,}")
         
         if self.stats['total_markets_original'] > 0:
             markets_removed = self.stats['total_markets_original'] - self.stats['total_markets_filtered']
