@@ -65,7 +65,14 @@
       "Bash(awk 'NR<1455 || NR>1841' /c/Users/AgvanD/Desktop/University/QM/PolyStars/admin_backend/main.py)",
       "Bash(awk 'NR<509 || NR>706' /c/Users/AgvanD/Desktop/University/QM/PolyStars/sql/schemas/create_seasons_system.sql)",
       "Bash(mv /tmp/sql.tmp /c/Users/AgvanD/Desktop/University/QM/PolyStars/sql/schemas/create_seasons_system.sql)",
-      "WebFetch(domain:docs.polymarket.com)"
+      "WebFetch(domain:docs.polymarket.com)",
+      "Bash(POLYSTARS_START_DATE=2026-04-01 POLYSTARS_END_DATE=2026-04-29 POLYSTARS_MIN_VOLUME=5000000 POLYSTARS_MAX_EVENTS=500 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)",
+      "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_START_DATE=2026-04-01 POLYSTARS_END_DATE=2026-04-29 POLYSTARS_MIN_VOLUME=5000000 POLYSTARS_MAX_EVENTS=500 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)",
+      "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_START_DATE=2026-04-28 POLYSTARS_END_DATE=2026-04-28 POLYSTARS_MIN_VOLUME=5000000 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)",
+      "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_KEYSET_USE_SERVER_FILTERS=0 POLYSTARS_START_DATE=2026-04-28 POLYSTARS_END_DATE=2026-04-28 POLYSTARS_MIN_VOLUME=5000000 POLYSTARS_KEYSET_MAX_PAGES=3 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)",
+      "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_IS_GENESIS=true POLYSTARS_START_DATE=2024-07-06 POLYSTARS_END_DATE=2026-01-05 POLYSTARS_MIN_VOLUME=100000000 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)",
+      "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_IS_GENESIS=false POLYSTARS_START_DATE=2024-07-06 POLYSTARS_END_DATE=2026-01-05 POLYSTARS_MIN_VOLUME=100000000 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)",
+      "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_IS_GENESIS=true POLYSTARS_START_DATE=2024-06-01 POLYSTARS_END_DATE=2026-03-20 POLYSTARS_MIN_VOLUME=100000000 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)"
     ]
   },
   "enabledMcpjsonServers": [

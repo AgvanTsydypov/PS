@@ -64,6 +64,7 @@ from scripts.data_loading_manager import (
     EVENTS_LAG_DAYS,
     RESOLUTION_READY_OFFSET_DAYS,
 )
+from scripts.fetch.fetch_events_config import GENESIS_INCLUDE_EVENT_IDS
 from scripts.ai import Agent1QuantCardGenerator, Agent2ColoristGenerator
 
 STANDARD_SEASON_TOTAL_SUPPLY_TEST = 333
@@ -926,6 +927,7 @@ class SimplifiedScheduler:
         return [dict(row) for row in cursor.fetchall()]
 
     def _get_genesis_event_ids_missing_cards(self, cursor: Any, limit: int) -> List[str]:
+        force_include_ids = [str(i) for i in GENESIS_INCLUDE_EVENT_IDS]
         cursor.execute(
             """
             SELECT e.id
@@ -936,12 +938,13 @@ class SimplifiedScheduler:
             WHERE ec.event_id IS NULL
               AND (
                   COALESCE(e.end_date::date, e.creation_date::date, e.start_date::date)
-                  BETWEEN %s AND %s
+                      BETWEEN %s AND %s
+                  OR e.id = ANY(%s::text[])
               )
             ORDER BY COALESCE(e.end_date, e.creation_date, e.start_date) ASC, e.id ASC
             LIMIT %s
             """,
-            (GENESIS_START_DATE, GENESIS_END_DATE, limit),
+            (GENESIS_START_DATE, GENESIS_END_DATE, force_include_ids, limit),
         )
         rows = cursor.fetchall()
         event_ids: List[str] = []

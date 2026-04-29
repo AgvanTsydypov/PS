@@ -26,6 +26,7 @@ if project_root not in sys.path:
 
 from scripts.ai import Agent1QuantCardGenerator
 from scripts.data_loading_manager import GENESIS_END_DATE, GENESIS_START_DATE
+from scripts.fetch.fetch_events_config import GENESIS_INCLUDE_EVENT_IDS
 
 load_dotenv()
 
@@ -159,6 +160,7 @@ def _select_candidate_event_ids(
     retry_errors: bool,
     include_genesis: bool,
 ) -> List[str]:
+    force_include_ids = [str(i) for i in GENESIS_INCLUDE_EVENT_IDS] if include_genesis else []
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
         cursor.execute(
             """
@@ -177,11 +179,12 @@ def _select_candidate_event_ids(
                       AND COALESCE(e.end_date::date, e.creation_date::date, e.start_date::date)
                           BETWEEN %s AND %s
                   )
+                  OR e.id = ANY(%s::text[])
               )
             ORDER BY COALESCE(q.processed_at, q.updated_at, q.created_at, e.end_date, e.creation_date, e.start_date) ASC, e.id ASC
             LIMIT %s
             """,
-            (retry_errors, include_genesis, GENESIS_START_DATE, GENESIS_END_DATE, batch_size),
+            (retry_errors, include_genesis, GENESIS_START_DATE, GENESIS_END_DATE, force_include_ids, batch_size),
         )
         rows = cursor.fetchall()
     return [str(row["id"]) for row in rows]
