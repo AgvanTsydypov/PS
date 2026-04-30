@@ -299,7 +299,7 @@ export default function GeneratedCardsTicker({
       return (
         <Link
           key={cardId}
-          href={`/preview/${encodeURIComponent(item.slug)}`}
+          href={`/cards/${encodeURIComponent(item.slug)}`}
           className="card-ticker-item card-ticker-item-lite home-card-panel-item"
           aria-label={`Open card: ${label}`}
         >
@@ -315,7 +315,7 @@ export default function GeneratedCardsTicker({
         aria-hidden={isClone || undefined}
       >
         <Link
-          href={`/preview/${encodeURIComponent(item.slug)}`}
+          href={`/cards/${encodeURIComponent(item.slug)}`}
           className="card-center-hotspot"
           tabIndex={-1}
           aria-label={`Open card: ${label}`}
@@ -345,13 +345,16 @@ export default function GeneratedCardsTicker({
             markCardPressStart(event.currentTarget, event.clientX, event.clientY);
           }}
           onClick={(event) => {
+            // Unified URL: ticker items always link to /cards/{slug}. The
+            // backend serves preview rows from the same endpoint with
+            // ``is_preview: true``, so the slug stays stable across the
+            // preview → mint transition.
             if (
               navigateToCardIfCenterClick(
                 event.currentTarget,
                 item.slug,
                 event.clientX,
                 event.clientY,
-                { basePath: "/preview" },
               )
             ) {
               return;
@@ -493,7 +496,7 @@ export default function GeneratedCardsTicker({
               return (
                 <Link
                   key={cardId}
-                  href={`/preview/${encodeURIComponent(item.slug)}`}
+                  href={`/cards/${encodeURIComponent(item.slug)}`}
                   className="card-ticker-item card-ticker-item-lite"
                   aria-label={`Open card: ${label}`}
                 >

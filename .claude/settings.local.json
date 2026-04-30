@@ -72,7 +72,9 @@
       "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_KEYSET_USE_SERVER_FILTERS=0 POLYSTARS_START_DATE=2026-04-28 POLYSTARS_END_DATE=2026-04-28 POLYSTARS_MIN_VOLUME=5000000 POLYSTARS_KEYSET_MAX_PAGES=3 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)",
       "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_IS_GENESIS=true POLYSTARS_START_DATE=2024-07-06 POLYSTARS_END_DATE=2026-01-05 POLYSTARS_MIN_VOLUME=100000000 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)",
       "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_IS_GENESIS=false POLYSTARS_START_DATE=2024-07-06 POLYSTARS_END_DATE=2026-01-05 POLYSTARS_MIN_VOLUME=100000000 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)",
-      "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_IS_GENESIS=true POLYSTARS_START_DATE=2024-06-01 POLYSTARS_END_DATE=2026-03-20 POLYSTARS_MIN_VOLUME=100000000 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)"
+      "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_IS_GENESIS=true POLYSTARS_START_DATE=2024-06-01 POLYSTARS_END_DATE=2026-03-20 POLYSTARS_MIN_VOLUME=100000000 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)",
+      "Bash(bash -n scripts/cron/docker-entrypoint-scheduler.sh)",
+      "Bash(awk '/def.*me.*card|def.*my.*card|@app\\\\.get.*me.*card/,/^def / {print NR\": \"$0}' user_web_backend/main.py)"
     ]
   },
   "enabledMcpjsonServers": [

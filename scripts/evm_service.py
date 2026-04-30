@@ -73,7 +73,53 @@ _MINT_ABI: list[dict] = [
         "name": "BatchMinted",
         "type": "event",
     },
+    {
+        "inputs": [{"internalType": "uint256", "name": "tokenId", "type": "uint256"}],
+        "name": "ownerOf",
+        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
 ]
+
+
+# ── module-level helpers (reusable from read-only callers) ────────────────────
+
+def parse_asset_address(asset_address: str) -> tuple[str | None, int | None]:
+    """Split ``"<contract>/<tokenId>"`` into ``(contract_address, token_id)``.
+
+    Returns ``(None, None)`` for empty / malformed input. ``token_id`` is
+    ``None`` when the trailing segment isn't a valid integer (the contract
+    part may still be returned for diagnostics).
+    """
+    if not asset_address:
+        return None, None
+    parts = asset_address.strip().rsplit("/", 1)
+    if len(parts) != 2:
+        return None, None
+    contract = parts[0].strip() or None
+    try:
+        token_id = int(parts[1].strip())
+    except (ValueError, TypeError):
+        return contract, None
+    return contract, token_id
+
+
+def etherscan_base_url(chain_id: int) -> str:
+    return {
+        1: "https://etherscan.io",
+        11155111: "https://sepolia.etherscan.io",
+        8453: "https://basescan.org",
+        84532: "https://sepolia.basescan.org",
+    }.get(int(chain_id), "https://etherscan.io")
+
+
+def etherscan_tx_url(tx_hash: str, chain_id: int) -> str:
+    return f"{etherscan_base_url(chain_id)}/tx/{tx_hash}"
+
+
+def etherscan_nft_url(contract_address: str, token_id: int, chain_id: int) -> str:
+    return f"{etherscan_base_url(chain_id)}/nft/{contract_address}/{token_id}"
 
 
 @dataclass(frozen=True)
@@ -643,3 +689,63 @@ class EvmClient:
         if isinstance(exc, timeout_types):
             return True
         return "timeout" in str(exc).lower() or "timed out" in str(exc).lower()
+
+
+class EvmReader:
+    """Read-only ERC-721 client for ownership / metadata lookups.
+
+    Unlike :class:`EvmClient`, this requires no private key — it never sends
+    transactions. Used by the user-web backend to verify on-chain ownership
+    of minted PolyStars NFTs without granting that service mint authority.
+    """
+
+    def __init__(
+        self,
+        rpc_url: str | None = None,
+        contract_address: str | None = None,
+        chain_id: int | None = None,
+        request_timeout_seconds: float = 15.0,
+    ) -> None:
+        env_rpc = os.environ.get(EVM_RPC_URL_ENV_KEY, "").strip()
+        self.rpc_url = rpc_url or env_rpc or EvmClient.DEFAULT_RPC_URL
+
+        env_contract = os.environ.get(EVM_CONTRACT_ADDRESS_ENV_KEY, "").strip()
+        raw_contract = contract_address or env_contract
+        if not raw_contract:
+            raise ValueError(f"{EVM_CONTRACT_ADDRESS_ENV_KEY} is not set")
+        self.contract_address = Web3.to_checksum_address(raw_contract)
+
+        env_chain_id = os.environ.get(EVM_CHAIN_ID_ENV_KEY, "").strip()
+        self._chain_id_override: int | None = (
+            chain_id if chain_id is not None else (int(env_chain_id) if env_chain_id else None)
+        )
+        self._chain_id_cached: int | None = None
+
+        self._w3 = Web3(
+            Web3.HTTPProvider(self.rpc_url, request_kwargs={"timeout": request_timeout_seconds})
+        )
+        self._contract = self._w3.eth.contract(address=self.contract_address, abi=_MINT_ABI)
+
+    @property
+    def chain_id(self) -> int:
+        if self._chain_id_override is not None:
+            return int(self._chain_id_override)
+        if self._chain_id_cached is None:
+            self._chain_id_cached = int(self._w3.eth.chain_id)
+        return self._chain_id_cached
+
+    def owner_of(self, token_id: int) -> str | None:
+        """Return the current owner's checksum address, or ``None`` if the
+        token does not exist (``ownerOf`` reverts for unminted/burnt) or the
+        RPC call fails. Never raises — callers can treat ``None`` as
+        "not owned by anyone the caller cares about"."""
+        try:
+            addr = self._contract.functions.ownerOf(int(token_id)).call()
+        except ContractLogicError:
+            return None
+        except Exception:
+            return None
+        try:
+            return Web3.to_checksum_address(str(addr))
+        except Exception:
+            return None

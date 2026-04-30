@@ -95,6 +95,19 @@ const nextConfig = {
       },
     ];
   },
+  // Legacy ``/preview/{slug}`` URLs (and any QR codes / external links that
+  // still reference them) are permanently redirected to the unified
+  // ``/cards/{slug}`` URL space. The backend handles both rows from a
+  // single endpoint, so the old preview route is no longer needed.
+  async redirects() {
+    return [
+      {
+        source: "/preview/:slug",
+        destination: "/cards/:slug",
+        permanent: true,
+      },
+    ];
+  },
 };
 
 module.exports = nextConfig;

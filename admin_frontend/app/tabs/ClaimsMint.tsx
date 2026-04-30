@@ -109,6 +109,7 @@ const [claimRecipient, setClaimRecipient] = useState("");
   const [claimSeasonInfo, setClaimSeasonInfo] = useState("");
   const [claimOutput, setClaimOutput] = useState("");
   const [claimMinting, setClaimMinting] = useState(false);
+  const [mintQueueRunning, setMintQueueRunning] = useState(false);
   const [claimMintableSummary, setClaimMintableSummary] = useState<ClaimsMintableSummary | null>(null);
   const claimMintableTotal = claimMintableSummary?.total_mintable ?? null;
   const claimMintableRemaining = claimMintableSummary?.remaining_mintable ?? null;
@@ -364,6 +365,40 @@ const [claimRecipient, setClaimRecipient] = useState("");
           }
         >
           Open Contract on Etherscan
+        </button>
+        <button
+          disabled={mintQueueRunning}
+          title="Equivalent to running: scripts/daily_scheduler_simple.py --process-mint-queue --mint-queue-batch-size 5"
+          onClick={() =>
+            void run(async () => {
+              setMintQueueRunning(true);
+              setClaimOutput(
+                (prev) =>
+                  `${prev}[${new Date().toISOString()}] Running mint queue worker (batch=5)...\n`,
+              );
+              try {
+                const out = await fetchJSON<Record<string, unknown>>(
+                  "/api/actions/process-mint-queue?batch_size=5",
+                  { method: "POST" },
+                );
+                setClaimOutput((prev) => `${prev}${JSON.stringify(out, null, 2)}\n`);
+                await refreshClaimMintableCount();
+                await refreshSeasonClaims();
+                await refreshOverview();
+              } catch (e) {
+                const message = e instanceof Error ? e.message : String(e);
+                setClaimOutput(
+                  (prev) =>
+                    `${prev}[${new Date().toISOString()}] Mint queue run failed: ${message}\n`,
+                );
+                throw e;
+              } finally {
+                setMintQueueRunning(false);
+              }
+            })
+          }
+        >
+          {mintQueueRunning ? "Running..." : "Run Mint Worker (5)"}
         </button>
       </div>
       {claimMinting ? <div className="muted">Queueing mint... on-chain transaction will run in the next batch.</div> : null}

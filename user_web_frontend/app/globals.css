@@ -1511,12 +1511,17 @@ main {
 
 .season-tooltip {
   position: absolute;
-  left: 0;
-  top: calc(100% + 8px);
+  /* Anchor to the LEFT of the hovered card. ``right: calc(100% + 8px)``
+     places the tooltip's right edge 8px to the left of the card's left
+     edge; ``top: 0`` aligns its top with the card's top. The slide-in
+     transform comes from the right (translateX(4px) → 0) so the motion
+     reads as "the tooltip emerges from the card". */
+  right: calc(100% + 8px);
+  top: 0;
   /* Must outrank hovered NFT cards (.nft-card-wrapper-active = 20,
      .card-ticker-item.nft-card-wrapper-active = 22) so the tooltip is
      never hidden behind a ticker card that happens to be in its
-     "active/scaled" state directly below the seasons board. */
+     "active/scaled" state next to the seasons board. */
   z-index: 60;
   width: min(320px, calc(100vw - 80px));
   padding: 10px 12px;
@@ -1527,14 +1532,31 @@ main {
   font-size: 12px;
   line-height: 1.45;
   opacity: 0;
-  transform: translateY(-4px);
+  transform: translateX(4px);
   pointer-events: none;
   transition: opacity 0.15s ease, transform 0.15s ease;
 }
 
 .season-card:hover .season-tooltip {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateX(0);
+}
+
+/* Mobile fallback: there's not enough horizontal room next to the card
+   on narrow viewports, so flip the tooltip back below the card to keep
+   it readable. The 720px breakpoint matches where the dashboard's
+   single-column layout kicks in. */
+@media (max-width: 720px) {
+  .season-tooltip {
+    right: auto;
+    left: 0;
+    top: calc(100% + 8px);
+    transform: translateY(-4px);
+  }
+
+  .season-card:hover .season-tooltip {
+    transform: translateY(0);
+  }
 }
 
 .auth-info-panel {
@@ -2227,6 +2249,15 @@ button:disabled {
   text-transform: uppercase;
 }
 
+/* Preview-mode variant: same chip slot, amber accent so users can tell at
+   a glance the card hasn't been minted yet. Sits in place of the
+   "Collection mint #N" chip on /cards/{slug} when the row came out of
+   preview_cards rather than claims. */
+.card-detail-chip-preview {
+  border-color: #f0c43a;
+  color: #f0c43a;
+}
+
 .card-detail-panel {
   padding: 0;
   border: 0;
@@ -2348,6 +2379,37 @@ button:disabled {
   letter-spacing: 0.12em;
   text-transform: uppercase;
   font-weight: 500;
+}
+
+/* ── Pending-claim pill ────────────────────────────────────────────────────
+   Shown in place of the Mint button when the backend reports an active
+   claim (QUEUED / PROCESSING / COMPLETED) for this wallet+season. Same
+   slot as the button so layout doesn't shift when state flips. */
+.season-mint-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  line-height: 1.3;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.season-mint-pill-queued {
+  color: #f0c43a; /* amber: still in our queue, no on-chain action yet */
+}
+
+.season-mint-pill-processing {
+  color: #4aa3ff; /* blue: tx in flight */
+}
+
+.season-mint-pill-completed {
+  color: var(--bd-brand); /* brand: NFT is yours */
 }
 
 .season-board-actions-row {

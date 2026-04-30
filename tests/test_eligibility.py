@@ -34,14 +34,34 @@ def _run(
     season_id: int = 1,
     phase: dict = None,
     already_claimed: bool = False,
+    active_claim: dict = None,
     is_origin: bool = False,
     origin_snapshot: dict = None,
 ):
+    """Execute ``check_user_eligibility_for_season`` with all DB-touching
+    helpers mocked. ``already_claimed`` is the legacy boolean knob from before
+    eligibility carried the structured ``pending_claim`` payload; pass
+    ``active_claim={...}`` to assert against specific status-aware reasons
+    (QUEUED vs PROCESSING vs COMPLETED) — when omitted, ``already_claimed=True``
+    builds a generic COMPLETED-shaped stub so the existing tests keep working.
+    """
     from scripts.season_manager import SeasonManager
     sm = SeasonManager.__new__(SeasonManager)
+    if active_claim is None and already_claimed:
+        active_claim = {
+            "claim_id": 1,
+            "status": "COMPLETED",
+            "phase_type": None,
+            "queued_at": None,
+            "updated_at": None,
+            "collection_mint_number": None,
+            "tx_hash": None,
+            "asset_address": None,
+            "card_slug": None,
+        }
     with (
         patch.object(sm, "get_current_phase", return_value=phase or _phase()),
-        patch.object(sm, "_has_claimed_in_season", return_value=already_claimed),
+        patch.object(sm, "_get_active_claim_for_season", return_value=active_claim),
         patch.object(sm, "is_origin_wallet_for_season", return_value=is_origin),
         patch.object(sm, "_get_origin_snapshot_mint_status", return_value=origin_snapshot),
     ):
@@ -102,9 +122,10 @@ class TestClaimsClosed:
 
 class TestAlreadyClaimed:
     def test_already_claimed_blocks_eligibility(self):
+        # Default active_claim shape is COMPLETED → "Already minted"
         result = _run(already_claimed=True)
         assert result["eligible_now"] is False
-        assert "already claimed" in result["ineligible_reason"].lower()
+        assert "already minted" in result["ineligible_reason"].lower()
 
     def test_already_claimed_takes_priority_over_open_phase(self):
         result = _run(
@@ -112,6 +133,56 @@ class TestAlreadyClaimed:
             already_claimed=True,
         )
         assert result["eligible_now"] is False
+
+    def test_queued_claim_renders_status_aware_reason(self):
+        """A row in QUEUED must produce a "Mint queued" reason, not the
+        generic "already claimed" — this is the user-facing fix that lets
+        the dashboard render an informative pill instead of a confusing
+        rejection."""
+        result = _run(
+            active_claim={
+                "claim_id": 7, "status": "QUEUED", "phase_type": "breach",
+                "queued_at": None, "updated_at": None,
+                "collection_mint_number": None, "tx_hash": None,
+                "asset_address": None, "card_slug": None,
+            },
+        )
+        assert result["eligible_now"] is False
+        assert "queued" in result["ineligible_reason"].lower()
+        assert "#7" in result["ineligible_reason"]
+        assert result["pending_claim"]["status"] == "QUEUED"
+        assert result["pending_claim"]["claim_id"] == 7
+
+    def test_processing_claim_renders_in_progress_reason(self):
+        result = _run(
+            active_claim={
+                "claim_id": 9, "status": "PROCESSING", "phase_type": "breach",
+                "queued_at": None, "updated_at": None,
+                "collection_mint_number": None, "tx_hash": None,
+                "asset_address": None, "card_slug": None,
+            },
+        )
+        assert result["eligible_now"] is False
+        assert "in progress" in result["ineligible_reason"].lower()
+        assert result["pending_claim"]["status"] == "PROCESSING"
+
+    def test_completed_with_mint_number_includes_number_in_reason(self):
+        result = _run(
+            active_claim={
+                "claim_id": 3, "status": "COMPLETED", "phase_type": "vault",
+                "queued_at": None, "updated_at": None,
+                "collection_mint_number": 42, "tx_hash": "0xabc",
+                "asset_address": "0xCAFE.../42", "card_slug": "card-x",
+            },
+        )
+        assert result["eligible_now"] is False
+        assert "#42" in result["ineligible_reason"]
+
+    def test_pending_claim_is_null_when_no_active_claim(self):
+        """No active claim → pending_claim is explicitly None so the frontend
+        can use a simple null check instead of guessing from other fields."""
+        result = _run()
+        assert result["pending_claim"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +252,7 @@ class TestResponseStructure:
             "already_claimed", "eligible_now", "ineligible_reason",
             "requires_origin", "is_claim_open", "is_origin_wallet",
             "origin_snapshot_is_minted", "origin_snapshot_minted_to_wallet",
+            "pending_claim",
         }
         assert set(result.keys()) == expected_keys
 

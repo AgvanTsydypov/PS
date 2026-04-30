@@ -178,40 +178,34 @@ class ClaimsMintMixin:
                     WHERE c.id = n.id
                     """
                 )
+                # Replace the legacy unique index over (season_id, collection_mint_number)
+                # with a *partial* one that enforces uniqueness only on COMPLETED rows.
+                # Allocation now happens in the mint queue worker right before the
+                # EVM mint (see process_mint_queue → _allocate_collection_mint_number),
+                # and a failed pre-mint clears the number back to NULL on the same row.
+                # Without the partial predicate, two FAILED rows in the same season
+                # that both got tentatively allocated number N would collide here even
+                # though only the COMPLETED one matters.
+                cursor.execute("DROP INDEX IF EXISTS ux_claims_season_collection_mint")
                 cursor.execute(
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_season_collection_mint
                         ON claims(season_id, collection_mint_number)
+                        WHERE status = 'COMPLETED'
+                          AND collection_mint_number IS NOT NULL
                     """
                 )
-                # Trigger assigns a per-season sequential collection_mint_number on INSERT.
-                cursor.execute(
-                    """
-                    CREATE OR REPLACE FUNCTION claims_assign_season_mint_number()
-                    RETURNS TRIGGER AS $$
-                    BEGIN
-                        IF NEW.collection_mint_number IS NOT NULL THEN
-                            RETURN NEW;
-                        END IF;
-                        PERFORM pg_advisory_xact_lock(9283742, NEW.season_id);
-                        SELECT COALESCE(MAX(collection_mint_number), 0) + 1
-                        INTO NEW.collection_mint_number
-                        FROM claims
-                        WHERE season_id = NEW.season_id;
-                        RETURN NEW;
-                    END;
-                    $$ LANGUAGE plpgsql
-                    """
-                )
+                # Drop the legacy BEFORE-INSERT trigger that auto-allocated
+                # collection_mint_number at queue time. Under the queue model that
+                # caused the on-chain count to be inflated by every QUEUED row,
+                # including those that ultimately FAILED — so users were minting
+                # NFT "#42" while only 30 had ever actually landed on chain.
+                # The cron worker now allocates the number atomically right before
+                # card render so the rendered card image and the on-chain mint
+                # number always match, and gaps only occur for genuinely failed
+                # mint attempts (not for stale QUEUED rows).
                 cursor.execute("DROP TRIGGER IF EXISTS tr_claims_assign_season_mint ON claims")
-                cursor.execute(
-                    """
-                    CREATE TRIGGER tr_claims_assign_season_mint
-                        BEFORE INSERT ON claims
-                        FOR EACH ROW
-                        EXECUTE PROCEDURE claims_assign_season_mint_number()
-                    """
-                )
+                cursor.execute("DROP FUNCTION IF EXISTS claims_assign_season_mint_number()")
             conn.commit()
         except Exception:
             conn.rollback()
@@ -522,6 +516,7 @@ class ClaimsMintMixin:
         cursor: Any,
         *,
         user_wallet: str,
+        recipient_address: str,
         season_id: int,
         phase: str,
         allocation: ParticipantAllocation,
@@ -537,7 +532,7 @@ class ClaimsMintMixin:
         cursor.execute(
             """
             INSERT INTO claims (
-                user_wallet, season_id, phase_type, status,
+                user_wallet, recipient_address, season_id, phase_type, status,
                 proxy_wallet, event_id, event_slug, primary_tag,
                 snapshot_at,
                 entry_cwap, total_volume, total_pnl, roi_percentage,
@@ -548,7 +543,7 @@ class ClaimsMintMixin:
                 created_at, updated_at
             )
             VALUES (
-                %s, %s, %s, 'QUEUED',
+                %s, %s, %s, %s, 'QUEUED',
                 %s, %s, %s, %s,
                 NOW(),
                 %s, %s, %s, %s,
@@ -561,7 +556,7 @@ class ClaimsMintMixin:
             RETURNING id, collection_mint_number
             """,
             (
-                user_wallet, season_id, phase,
+                user_wallet, recipient_address, season_id, phase,
                 allocation.proxy_wallet,
                 allocation.event_id,
                 allocation.event_slug,
@@ -593,9 +588,15 @@ class ClaimsMintMixin:
     def run_queue_mint_request(self, req: MintClaimRequest) -> Dict[str, Any]:
         """Allocate a participant slot and INSERT a QUEUED claim for it.
 
-        Origins always get their best-archetype row. Looters get a uniformly
-        random unclaimed row, with retry on collision. The on-chain mint is
-        performed later by the daily cron worker (see _process_queued_claims_batch).
+        Origins get their best-archetype row when available. If an Origin's
+        proxy_wallet is already locked by an active claim (a looter beat
+        them to their own slot), the Origin transparently falls back to
+        the looter pool — *unless* the season is in the ``vault`` phase,
+        which is Origins-only by design and has no looter mode.
+
+        Looters get a uniformly random unclaimed row, with retry on
+        collision. The on-chain mint is performed later by the daily cron
+        worker (see process_mint_queue).
         """
         wallet = req.wallet.strip().lower()
         recipient_raw = req.recipient_address.strip()
@@ -621,14 +622,31 @@ class ClaimsMintMixin:
             raise ValueError(f"DB enum phase_type does not support '{phase}'. Supported: {supported}")
 
         last_error: Optional[Exception] = None
+        # When True, this caller's own Origin slot is already taken — skip
+        # _allocate_for_origin on retries and route them through the looter
+        # pool. Survives across iterations so we don't keep re-fetching the
+        # same blocked row on every attempt.
+        force_looter_path = False
         for attempt in range(LOOTER_ALLOC_MAX_ATTEMPTS):
             conn = self.manager.get_connection()
             try:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-                    origin_alloc = self._allocate_for_origin(cursor, wallet, req.season_id)
+                    origin_alloc = (
+                        None
+                        if force_looter_path
+                        else self._allocate_for_origin(cursor, wallet, req.season_id)
+                    )
                     is_origin = origin_alloc is not None
                     if phase == "vault" and not is_origin:
-                        raise ValueError("Wallet is non-origin but phase='vault'")
+                        # Vault is Origins-only. If the caller is non-Origin
+                        # to begin with, OR their Origin slot was just shown
+                        # to be locked, vault has nothing else to give them.
+                        raise ValueError(
+                            "Wallet is non-origin but phase='vault'"
+                            if not force_looter_path
+                            else "This origin wallet has already been claimed in this season "
+                                 "(vault phase does not allow looter fallback)."
+                        )
                     allocation: ParticipantAllocation = (
                         origin_alloc
                         if origin_alloc is not None
@@ -643,6 +661,7 @@ class ClaimsMintMixin:
                         inserted = self._insert_queued_claim(
                             cursor,
                             user_wallet=wallet,
+                            recipient_address=recipient_address,
                             season_id=req.season_id,
                             phase=phase,
                             allocation=allocation,
@@ -659,10 +678,14 @@ class ClaimsMintMixin:
                                 "This user wallet already has an active claim in this season."
                             ) from exc
                         if is_origin:
-                            raise ValueError(
-                                "This origin wallet has already been claimed in this season."
-                            ) from exc
-                        # Looter race: retry with another random pick.
+                            # Origin's own proxy_wallet is locked by an active
+                            # claim. Outside vault we transparently retry as
+                            # a looter. Inside vault we already raised above.
+                            force_looter_path = True
+                            last_error = exc
+                            continue
+                        # Looter race on proxy_wallet: another caller grabbed
+                        # the same random row. Retry with a fresh random pick.
                         last_error = exc
                         continue
                     except Exception as exc:
@@ -689,6 +712,7 @@ class ClaimsMintMixin:
                     "claim_type": allocation.claim_type,
                     "allocation": allocation.snapshot,
                     "attempt": attempt + 1,
+                    "origin_fallback_to_looter": force_looter_path and allocation.claim_type == "looter",
                 }
             finally:
                 conn.close()

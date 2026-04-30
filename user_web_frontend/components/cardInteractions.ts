@@ -192,9 +192,12 @@ export function navigateToCardIfCenterClick(
     typeof clientY === "number" &&
     isCenterZoneByWrapperCoordinates(target, clientX, clientY);
   if (!pointerInCenterByPress && !pointerInCenterByMove && !pointerInCenterByClick) return false;
-  // Two permalinks: ``/cards/{slug}`` for minted STARs (claims-backed) and
-  // ``/preview/{slug}`` for live showcase previews (preview_cards).
-  // Callers whose card is a preview must pass ``basePath: "/preview"``.
+  // Single unified permalink: ``/cards/{slug}``. The backend serves both
+  // minted STARs (claims-backed) and live showcase previews (preview_cards)
+  // from the same endpoint, with ``is_preview`` flagging which underlying
+  // store answered. ``basePath`` is therefore vestigial — kept on the
+  // signature so older call sites compile, but defaulting to /cards
+  // covers every current caller.
   const base = (options?.basePath ?? "/cards").replace(/\/+$/, "");
   const targetPath = `${base}/${encodeURIComponent(slug)}`;
   const resolved = new URL(targetPath, window.location.origin);
