@@ -2204,6 +2204,39 @@ async def mint_claim(req: MintClaimRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/actions/process-mint-queue")
+async def run_process_mint_queue(batch_size: int = 5) -> Dict[str, Any]:
+    """Manually trigger the mint queue worker from the admin UI.
+
+    Equivalent to running on the host:
+
+        scripts/daily_scheduler_simple.py --process-mint-queue \\
+            --mint-queue-batch-size {batch_size}
+
+    Used to flush a small batch immediately instead of waiting for the next
+    hourly cron tick. The global ``pg_advisory_lock`` inside
+    ``process_mint_queue`` already guards against overlapping with the
+    hourly cron, so this is safe to invoke at any time — if the cron is
+    already running, this call returns ``skipped: true``.
+
+    Runs in a thread executor so the FastAPI event loop is not blocked
+    while the worker performs Pinata uploads + EVM transactions.
+    """
+    safe_batch = max(1, min(int(batch_size or 0) or 5, 100))
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: service.scheduler.process_mint_queue(max_claims=safe_batch),
+        )
+        return result
+    except Exception as exc:
+        logger.exception(
+            "Manual process_mint_queue failed (batch_size=%d)", safe_batch
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/actions/season-update")
 async def run_season_update() -> Dict[str, str]:
     try:

@@ -74,6 +74,18 @@ type WalletSessionResponse = {
   trader_rank?: string | null;
 };
 
+type PendingClaim = {
+  claim_id: number;
+  status: string;          // "QUEUED" | "PENDING" | "PROCESSING" | "COMPLETED"
+  phase_type?: string | null;
+  queued_at?: string | null;
+  updated_at?: string | null;
+  collection_mint_number?: number | null;
+  tx_hash?: string | null;
+  asset_address?: string | null;
+  card_slug?: string | null;
+};
+
 type EligibilityStream = {
   season_id: number | null;
   season_type: string | null;
@@ -85,6 +97,7 @@ type EligibilityStream = {
   requires_origin?: boolean;
   is_claim_open?: boolean;
   is_origin_wallet?: boolean;
+  pending_claim?: PendingClaim | null;
 };
 
 type EligibilityResponse = {
@@ -882,6 +895,10 @@ export default function UserDashboard() {
       setMintError("Wallet is not registered on Polymarket — minting is not allowed.");
       return;
     }
+    if (!hasPolymarketRank(traderRank)) {
+      setMintError("Wallet has no Polymarket trader rank — minting is not allowed.");
+      return;
+    }
     setMintingSeasonId(seasonId);
     setMintError("");
     setMintResultText(`[${new Date().toISOString()}] Mint request started for season ${seasonId}...`);
@@ -953,10 +970,51 @@ export default function UserDashboard() {
     const isAnyMinting = mintingSeasonId !== null;
     const supplyEmpty = season.remaining <= 0;
     const isPmRegistered = isRegisteredOnPolymarket(proxyWallet);
+    const hasRank = hasPolymarketRank(traderRank);
+
+    // Pending-claim short-circuit: if the backend says this wallet has a
+    // QUEUED/PROCESSING (or already-COMPLETED) claim for this season, render
+    // a status pill instead of a generic disabled button. Distinguishes the
+    // three meaningful states for the user — waiting in queue, on-chain mint
+    // in progress, and already done — using the structured ``pending_claim``
+    // payload rather than parsing the human ``ineligible_reason`` string.
+    const pending = stream?.pending_claim ?? null;
+    if (pending) {
+      const status = String(pending.status || "").toUpperCase();
+      const claimSuffix =
+        pending.claim_id != null ? ` (claim #${pending.claim_id})` : "";
+      let pillLabel = "";
+      let pillClass = "season-mint-pill";
+      if (status === "QUEUED" || status === "PENDING") {
+        pillLabel = `Mint queued${claimSuffix} — awaiting next worker run`;
+        pillClass += " season-mint-pill-queued";
+      } else if (status === "PROCESSING") {
+        pillLabel = `Mint in progress${claimSuffix} — on-chain transaction pending`;
+        pillClass += " season-mint-pill-processing";
+      } else if (status === "COMPLETED") {
+        const mintNo = pending.collection_mint_number;
+        pillLabel =
+          mintNo != null
+            ? `Already minted in this season — STAR #${mintNo}`
+            : "Already minted in this season";
+        pillClass += " season-mint-pill-completed";
+      } else {
+        pillLabel = `Active claim${claimSuffix} (${status || "unknown"})`;
+      }
+      return (
+        <div className="season-mint-action">
+          <span className={pillClass} role="status">
+            {pillLabel}
+          </span>
+        </div>
+      );
+    }
 
     let blockedReason = "";
     if (!isPmRegistered) {
       blockedReason = "Wallet is not registered on Polymarket — minting is not allowed.";
+    } else if (!hasRank) {
+      blockedReason = "Wallet has no Polymarket trader rank — minting is not allowed.";
     } else if (supplyEmpty) {
       blockedReason = "No supply remaining for this season.";
     } else if (eligibilityLoading && !stream) {

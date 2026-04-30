@@ -85,6 +85,12 @@ CLEANUP_SCHEDULE="0 3 * * 0"
 CLEANUP_SCRIPT="$PROJECT_DIR/scripts/utils/cleanup_old_logs.py"
 CLEANUP_LOG="$PROJECT_DIR/logs/cleanup.log"
 
+# Job 5: Mint queue worker (hourly, on the hour). Decoupled from the
+# daily pipeline so claims queued mid-day get minted within ~1h.
+MINT_QUEUE_SCHEDULE="0 * * * *"
+MINT_QUEUE_BATCH_SIZE="${MINT_QUEUE_HOURLY_BATCH_SIZE:-100}"
+MINT_QUEUE_LOG="$PROJECT_DIR/logs/mint_queue.log"
+
 # Clear existing crontab
 crontab -r 2>/dev/null || true
 
@@ -102,6 +108,9 @@ crontab -r 2>/dev/null || true
   echo ""
   echo "# Weekly log cleanup - keep 14 days (3:00 AM UTC every Sunday)"
   echo "$CLEANUP_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $CLEANUP_SCRIPT --keep-days 14 2>&1 | tee -a $CLEANUP_LOG"
+  echo ""
+  echo "# Mint queue worker (every hour at :00)"
+  echo "$MINT_QUEUE_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $SCHEDULER_SCRIPT --process-mint-queue --mint-queue-batch-size $MINT_QUEUE_BATCH_SIZE 2>&1 | tee -a $MINT_QUEUE_LOG"
 ) | crontab -
 
 echo "✅ Cron jobs added successfully!"
@@ -109,6 +118,7 @@ echo "   Season update: $SEASON_UPDATE_SCHEDULE (00:00 AM UTC)"
 echo "   Preflight low-volume cleanup: $PREFLIGHT_SCHEDULE (1:30 AM UTC)"
 echo "   Daily pipeline: $DAILY_SCHEDULE (2:00 AM UTC)"
 echo "   Weekly cleanup: $CLEANUP_SCHEDULE (3:00 AM UTC every Sunday)"
+echo "   Mint queue worker: $MINT_QUEUE_SCHEDULE (every hour, batch=$MINT_QUEUE_BATCH_SIZE)"
 echo ""
 crontab -l
 
@@ -125,12 +135,14 @@ echo "   • Season update: 00:00 AM UTC"
 echo "   • Preflight low-volume cleanup: 01:30 AM UTC"
 echo "   • Daily pipeline: 2:00 AM UTC"
 echo "   • Log cleanup: 3:00 AM UTC (Sundays)"
+echo "   • Mint queue worker: every hour at :00"
 echo ""
 echo "📝 Logs:"
 echo "   • Season update: /app/logs/season_update.log"
 echo "   • Preflight cleanup: /app/logs/preflight_low_volume.log"
 echo "   • Pipeline: /app/logs/scheduler.log"
 echo "   • Cleanup: /app/logs/cleanup.log"
+echo "   • Mint queue: /app/logs/mint_queue.log"
 echo "   • Docker logs: docker logs -f polystars_scheduler (real-time)"
 echo ""
 echo "Manual commands:"

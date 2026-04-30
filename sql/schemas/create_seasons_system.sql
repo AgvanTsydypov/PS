@@ -819,10 +819,12 @@ ALTER TABLE claims ADD COLUMN IF NOT EXISTS archetype_math        TEXT;
 ALTER TABLE claims ADD COLUMN IF NOT EXISTS rarity_bracket        TEXT;
 ALTER TABLE claims ADD COLUMN IF NOT EXISTS participant_rank      INTEGER;
 ALTER TABLE claims ADD COLUMN IF NOT EXISTS claim_type            TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS recipient_address     TEXT;
 
-COMMENT ON COLUMN claims.proxy_wallet  IS 'Polymarket proxy wallet of the trader represented on this card. Differs from user_wallet (recipient).';
-COMMENT ON COLUMN claims.claim_type    IS 'origin = claimer minted their own card; looter = claimer minted someone else''s random card.';
-COMMENT ON COLUMN claims.snapshot_at   IS 'When the participant snapshot for this card was frozen onto this row.';
+COMMENT ON COLUMN claims.proxy_wallet      IS 'Polymarket proxy wallet of the trader represented on this card. Differs from user_wallet (claimer EOA).';
+COMMENT ON COLUMN claims.claim_type        IS 'origin = claimer minted their own card; looter = claimer minted someone else''s random card.';
+COMMENT ON COLUMN claims.snapshot_at       IS 'When the participant snapshot for this card was frozen onto this row.';
+COMMENT ON COLUMN claims.recipient_address IS 'On-chain recipient of the minted NFT. Frozen at queue-insert time. Defaults to user_wallet for self-mints; admin can specify a different EOA.';
 
 -- 11.3 Extend status CHECK to allow 'QUEUED'. Inline CHECK constraints get
 --      auto-generated names; drop any matching one before recreating.

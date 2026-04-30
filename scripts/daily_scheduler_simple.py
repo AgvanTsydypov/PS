@@ -145,6 +145,27 @@ GENESIS_START_OFFSET_FROM_END_DAYS = 10
 
 
 # ==========================================
+# MINT QUEUE WORKER CONSTANTS
+# ==========================================
+# Stable bigint key for pg_advisory_lock — guarantees only one mint queue
+# worker is processing claims at a time (across containers/hosts), even if
+# the hourly cron tick fires while a long batch is still running. Holding
+# the lock is on a dedicated connection for the duration of the run.
+MINT_QUEUE_ADVISORY_LOCK_KEY = 727461
+
+# A claim row stuck in PROCESSING for longer than this is considered to
+# have come from a crashed prior run. The recovery pass at the start of
+# each worker invocation either requeues it (if no tx_hash → never made
+# it on-chain) or auto-finalizes it to COMPLETED (if tx_hash is set →
+# already minted, just never flipped). Default 30 min covers worst-case
+# Pinata + EVM tx + cardgen for a single claim with plenty of slack.
+MINT_QUEUE_STALE_PROCESSING_MINUTES = _env_int(
+    "MINT_QUEUE_STALE_PROCESSING_MINUTES",
+    30,
+)
+
+
+# ==========================================
 # LOGGING SETUP
 # ==========================================
 class DualLogger:
@@ -2283,6 +2304,61 @@ class SimplifiedScheduler:
                 cursor.close()
             conn.close()
 
+    def _recover_stale_processing(self) -> Dict[str, int]:
+        """Heal claims left in PROCESSING by a crashed prior worker run.
+
+        Two cases:
+
+        * ``tx_hash IS NULL`` — EVM mint never went out, the row never
+          touched the chain. Safe to flip back to ``QUEUED`` so the next
+          pickup re-attempts it from scratch.
+
+        * ``tx_hash IS NOT NULL`` — EVM mint already happened (the durable
+          tx_hash write committed), only the final ``COMPLETED`` flip
+          didn't land. Re-minting this would be a double-spend; instead
+          finalize it to ``COMPLETED`` with the existing artifacts.
+
+        Both cases gate on ``updated_at < NOW() - INTERVAL 'N minutes'``
+        so an in-flight claim from a sibling worker is never touched.
+        """
+        threshold_minutes = max(1, int(MINT_QUEUE_STALE_PROCESSING_MINUTES))
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    UPDATE claims
+                    SET    status                 = 'QUEUED',
+                           collection_mint_number = NULL,
+                           error_message          = '[auto-reset: stale PROCESSING with no tx_hash at '
+                                                    || NOW()::text || ']',
+                           updated_at             = NOW()
+                    WHERE  status = 'PROCESSING'
+                      AND  tx_hash IS NULL
+                      AND  updated_at < NOW() - INTERVAL '{threshold_minutes} minutes'
+                    """
+                )
+                requeued = cursor.rowcount or 0
+
+                cursor.execute(
+                    f"""
+                    UPDATE claims
+                    SET    status        = 'COMPLETED',
+                           timestamp     = COALESCE(timestamp, NOW()),
+                           error_message = '[auto-completed: tx_hash present on stuck PROCESSING at '
+                                           || NOW()::text || ']',
+                           updated_at    = NOW()
+                    WHERE  status = 'PROCESSING'
+                      AND  tx_hash IS NOT NULL
+                      AND  updated_at < NOW() - INTERVAL '{threshold_minutes} minutes'
+                    """
+                )
+                auto_completed = cursor.rowcount or 0
+            conn.commit()
+            return {'requeued': requeued, 'auto_completed': auto_completed}
+        finally:
+            conn.close()
+
     def _get_season_name_for_claim(self, cursor, season_id: int) -> str:
         cursor.execute(
             "SELECT type, season_number FROM seasons WHERE id = %s",
@@ -2299,9 +2375,21 @@ class SimplifiedScheduler:
         """Process QUEUED claims into on-chain mints. Picks up to ``max_claims``
         claims in FIFO order, atomically transitions each QUEUED → PROCESSING,
         builds the card payload (front/back PNGs + Pinata upload), submits the
-        EVM mint, and finalizes to COMPLETED. Failures land in FAILED with the
-        error message. Idempotent under FOR UPDATE SKIP LOCKED — multiple
-        worker processes can run safely."""
+        EVM mint, persists on-chain artifacts as a durability barrier, then
+        flips to COMPLETED. Failures land in FAILED with the error message.
+
+        Concurrency safety:
+          * ``pg_advisory_lock`` blocks overlapping invocations (e.g. an hourly
+            cron tick firing while the prior batch is still running).
+          * Per-claim ``FOR UPDATE SKIP LOCKED`` makes pickups race-free even if
+            the advisory lock is bypassed.
+
+        Crash recovery:
+          * ``_recover_stale_processing`` heals rows left in PROCESSING by a
+            crashed prior run before the new pickup loop starts. Rows with no
+            ``tx_hash`` requeue; rows with a ``tx_hash`` auto-finalize to
+            COMPLETED so we never re-mint an already-on-chain claim.
+        """
         print(f"\n{'='*70}")
         print("🪙 RUNNING: Mint Queue Worker")
         print(f"{'='*70}")
@@ -2312,178 +2400,361 @@ class SimplifiedScheduler:
             print("⏸️  MINT_QUEUE_ENABLED=0 — skipping queue worker")
             return {'success': True, 'skipped': True, 'processed': 0}
 
-        # Lazy import: heavy deps (web3 + Playwright via cardgen) only loaded here.
-        from web3 import Web3
-        from scripts.evm_service import EvmClient
-        from scripts.polystars_card_payload import (
-            build_polystars_card_from_claim,
-            denormalize_card_onto_claim,
-            unpin_pinata_urls,
-        )
-
-        BLOCKCHAIN_ETHEREUM = "ethereum"
-        start_time = time.time()
-        processed = completed = failed = 0
-        per_claim_results: List[Dict[str, Any]] = []
-
-        for _ in range(max_claims):
-            # Atomic claim pickup: FOR UPDATE SKIP LOCKED + transition to PROCESSING.
-            conn = self.manager.get_connection()
-            row: Optional[Dict[str, Any]] = None
-            try:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-                    cursor.execute(
-                        """
-                        UPDATE claims
-                        SET    status = 'PROCESSING', updated_at = NOW()
-                        WHERE  id = (
-                            SELECT id FROM claims
-                            WHERE  status = 'QUEUED'
-                            ORDER  BY created_at ASC, id ASC
-                            FOR UPDATE SKIP LOCKED
-                            LIMIT 1
-                        )
-                        RETURNING id, season_id, user_wallet, proxy_wallet,
-                                  claim_type, collection_mint_number
-                        """
-                    )
-                    row = cursor.fetchone()
-                conn.commit()
-            finally:
-                conn.close()
-
-            if not row:
-                break  # Queue is empty.
-            processed += 1
-            claim_id = int(row["id"])
-            season_id = int(row["season_id"])
-            recipient_address = Web3.to_checksum_address(str(row["user_wallet"]).strip())
-            collection_mint_number = (
-                int(row["collection_mint_number"])
-                if row.get("collection_mint_number") is not None else None
+        # Acquire global advisory lock on a dedicated connection. Held until
+        # the function returns, so concurrent workers find pg_try_advisory_lock
+        # returning false and exit without touching the queue.
+        lock_conn = self.manager.get_connection()
+        try:
+            with lock_conn.cursor() as lcur:
+                lcur.execute(
+                    "SELECT pg_try_advisory_lock(%s)",
+                    (MINT_QUEUE_ADVISORY_LOCK_KEY,),
+                )
+                got_lock = bool(lcur.fetchone()[0])
+        except Exception:
+            lock_conn.close()
+            raise
+        if not got_lock:
+            lock_conn.close()
+            print(
+                "⏸️  Mint queue worker skipped — another instance holds the "
+                f"advisory lock (key={MINT_QUEUE_ADVISORY_LOCK_KEY})"
             )
-            print(f"   🪙 claim {claim_id} (season {season_id}, {row.get('claim_type')}): start")
+            return {
+                'success': True, 'skipped': True, 'processed': 0,
+                'reason': 'concurrent_run',
+            }
 
-            polystars_card: Optional[Dict[str, Any]] = None
+        try:
+            # Heal stale PROCESSING rows from a crashed prior run BEFORE
+            # picking up new work, so a newly-queued claim doesn't get stuck
+            # behind a corpse blocking the queue.
             try:
+                recovery = self._recover_stale_processing()
+                if recovery['requeued'] or recovery['auto_completed']:
+                    print(
+                        f"🔧 Recovery: requeued={recovery['requeued']} "
+                        f"auto_completed={recovery['auto_completed']} "
+                        f"(threshold={MINT_QUEUE_STALE_PROCESSING_MINUTES}min)"
+                    )
+            except Exception as recovery_exc:
+                print(f"⚠️  Recovery pass raised (continuing): {recovery_exc}")
+
+            # Lazy import: heavy deps (web3 + Playwright via cardgen) only loaded here.
+            from web3 import Web3
+            from scripts.evm_service import EvmClient
+            from scripts.polystars_card_payload import (
+                build_polystars_card_from_claim,
+                denormalize_card_onto_claim,
+                unpin_pinata_urls,
+            )
+
+            BLOCKCHAIN_ETHEREUM = "ethereum"
+            start_time = time.time()
+            processed = completed = failed = 0
+            per_claim_results: List[Dict[str, Any]] = []
+
+            for _ in range(max_claims):
+                # Atomic claim pickup: FOR UPDATE SKIP LOCKED + transition to PROCESSING.
+                conn = self.manager.get_connection()
+                row: Optional[Dict[str, Any]] = None
+                try:
+                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                        cursor.execute(
+                            """
+                            UPDATE claims
+                            SET    status = 'PROCESSING', updated_at = NOW()
+                            WHERE  id = (
+                                SELECT id FROM claims
+                                WHERE  status = 'QUEUED'
+                                ORDER  BY created_at ASC, id ASC
+                                FOR UPDATE SKIP LOCKED
+                                LIMIT 1
+                            )
+                            RETURNING id, season_id, user_wallet, recipient_address,
+                                      proxy_wallet, claim_type, collection_mint_number
+                            """
+                        )
+                        row = cursor.fetchone()
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                if not row:
+                    break  # Queue is empty.
+                processed += 1
+                claim_id = int(row["id"])
+                season_id = int(row["season_id"])
+                pre_existing_mint_number = (
+                    int(row["collection_mint_number"])
+                    if row.get("collection_mint_number") is not None else None
+                )
+                print(f"   🪙 claim {claim_id} (season {season_id}, {row.get('claim_type')}): start")
+
+                # Allocate collection_mint_number now (post-pickup, pre-card-
+                # render). Reads MAX(...) over COMPLETED claims for this
+                # season, advances by 1, persists onto the PROCESSING row.
+                # ``pg_advisory_xact_lock(season_id)`` serializes allocators
+                # at the season level even if the global advisory_lock above
+                # were somehow bypassed. ``WHERE collection_mint_number IS NULL``
+                # makes this idempotent for stuck-PROCESSING retries.
+                #
+                # The ``MAX over COMPLETED`` rule (not ``MAX over all rows``)
+                # is what gives the user-facing guarantee: the on-chain mint
+                # count and the rendered card number are both equal to "how
+                # many NFTs have actually landed on chain in this season",
+                # never inflated by FAILED/QUEUED rows that never minted.
                 conn = self.manager.get_connection()
                 try:
                     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-                        season_name = self._get_season_name_for_claim(cursor, season_id)
-                finally:
-                    conn.close()
-
-                polystars_card = build_polystars_card_from_claim(
-                    self.manager, claim_id=claim_id
-                )
-                winner_context = {
-                    "assignment_type": (
-                        "winner_self"
-                        if str(row.get("claim_type") or "").lower() == "origin"
-                        else "random_fallback"
-                    ),
-                    "winner_wallet_address": str(row.get("proxy_wallet") or ""),
-                    "claimer_wallet_address": str(row.get("user_wallet") or ""),
-                    "season_id": season_id,
-                    "blockchain": BLOCKCHAIN_ETHEREUM,
-                }
-                client = EvmClient()
-                mint_result = client.mint_user_nft(
-                    user_wallet_address=recipient_address,
-                    season_name=season_name,
-                    claim_id=claim_id,
-                    collection_mint_number=collection_mint_number,
-                    winner_context=winner_context,
-                    polystars_card=polystars_card,
-                )
-
-                conn = self.manager.get_connection()
-                try:
-                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT pg_advisory_xact_lock(9283742, %s)",
+                            (season_id,),
+                        )
                         cursor.execute(
                             """
                             UPDATE claims
-                            SET    status        = 'COMPLETED',
-                                   tx_hash       = %s,
-                                   asset_address = %s,
-                                   metadata_uri  = %s,
-                                   mint_chain    = %s,
-                                   timestamp     = NOW(),
-                                   updated_at    = NOW()
+                            SET    collection_mint_number = (
+                                       SELECT COALESCE(MAX(collection_mint_number), 0) + 1
+                                       FROM   claims
+                                       WHERE  season_id = %s
+                                         AND  status    = 'COMPLETED'
+                                   ),
+                                   updated_at = NOW()
                             WHERE  id = %s
+                              AND  collection_mint_number IS NULL
+                            RETURNING collection_mint_number
                             """,
-                            (
-                                mint_result.tx_hash,
-                                mint_result.asset_address,
-                                mint_result.metadata_uri,
-                                BLOCKCHAIN_ETHEREUM,
-                                claim_id,
-                            ),
+                            (season_id, claim_id),
                         )
+                        alloc_row = cursor.fetchone()
                     conn.commit()
                 finally:
                     conn.close()
-                # Denormalize the rendered card payload onto the claim so
-                # /api/cards/{slug} can serve the freshly minted STAR.
-                # A failure here must not undo the on-chain mint — log and continue.
-                try:
-                    denormalize_card_onto_claim(
-                        self.manager, claim_id=claim_id, polystars_card=polystars_card,
+
+                if alloc_row and alloc_row.get("collection_mint_number") is not None:
+                    collection_mint_number: Optional[int] = int(
+                        alloc_row["collection_mint_number"]
                     )
-                except Exception as denorm_exc:
-                    print(f"   ⚠️  claim {claim_id}: denormalize failed: {denorm_exc}")
-                completed += 1
-                per_claim_results.append({
-                    "claim_id": claim_id, "status": "COMPLETED",
-                    "tx_hash": mint_result.tx_hash,
-                })
-                print(f"   ✅ claim {claim_id}: minted {mint_result.tx_hash}")
-            except Exception as exc:
-                failed += 1
-                err_text = str(exc)[:500]
-                conn = self.manager.get_connection()
-                try:
-                    with conn.cursor() as cursor:
-                        cursor.execute(
-                            """
-                            UPDATE claims
-                            SET    status        = 'FAILED',
-                                   error_message = %s,
-                                   updated_at    = NOW()
-                            WHERE  id = %s
-                            """,
-                            (err_text, claim_id),
-                        )
-                    conn.commit()
-                finally:
-                    conn.close()
-                # Best-effort cleanup of any Pinata uploads from a half-built card.
-                if polystars_card:
-                    try:
-                        unpin_pinata_urls([
-                            str(polystars_card.get("front_image_url") or ""),
-                            str(polystars_card.get("back_image_url") or ""),
-                        ])
-                    except Exception:
-                        pass
-                per_claim_results.append({
-                    "claim_id": claim_id, "status": "FAILED", "error": err_text,
-                })
-                print(f"   ❌ claim {claim_id}: {err_text}")
+                else:
+                    # No new allocation happened — either the row already had
+                    # a number from a prior PROCESSING attempt that crashed
+                    # post-allocation, or the UPDATE matched nothing (very
+                    # unlikely; would mean the row was deleted between
+                    # pickup and allocation). Fall back to whatever was on
+                    # the row at pickup time.
+                    collection_mint_number = pre_existing_mint_number
+                if collection_mint_number is not None:
+                    print(f"   🔢 claim {claim_id}: collection_mint_number = {collection_mint_number}")
 
-        duration = time.time() - start_time
-        print(
-            f"\n✅ Mint queue worker done in {duration:.1f}s — "
-            f"processed={processed} completed={completed} failed={failed}"
-        )
-        return {
-            'success': True,
-            'duration': duration,
-            'processed': processed,
-            'completed': completed,
-            'failed': failed,
-            'per_claim': per_claim_results,
-        }
+                polystars_card: Optional[Dict[str, Any]] = None
+                # Once True, the EVM mint has been broadcast and the row has
+                # an on-chain identity. A subsequent exception MUST NOT mark
+                # the row as FAILED — that would obscure a successful mint.
+                # The recovery pass will auto-finalize it on the next run.
+                on_chain_completed = False
+                try:
+                    # Recipient priority: ``claims.recipient_address`` (admin/UI
+                    # may set it to a different EOA than the claimer), with
+                    # fallback to ``user_wallet`` (the claimer EOA itself) for
+                    # legacy rows that don't carry a recipient yet. Validation
+                    # is intentionally inside the per-claim try so a row with
+                    # bad data (e.g. seeded test value ``0xlooter``) lands in
+                    # FAILED instead of crashing the whole batch.
+                    raw_recipient = (
+                        str(row.get("recipient_address") or "").strip()
+                        or str(row.get("user_wallet") or "").strip()
+                    )
+                    try:
+                        recipient_address = Web3.to_checksum_address(raw_recipient)
+                    except Exception as exc:
+                        raise ValueError(
+                            f"Invalid recipient address on claim row: {raw_recipient!r}"
+                        ) from exc
+
+                    conn = self.manager.get_connection()
+                    try:
+                        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                            season_name = self._get_season_name_for_claim(cursor, season_id)
+                    finally:
+                        conn.close()
+
+                    polystars_card = build_polystars_card_from_claim(
+                        self.manager, claim_id=claim_id
+                    )
+                    winner_context = {
+                        "assignment_type": (
+                            "winner_self"
+                            if str(row.get("claim_type") or "").lower() == "origin"
+                            else "random_fallback"
+                        ),
+                        "winner_wallet_address": str(row.get("proxy_wallet") or ""),
+                        "claimer_wallet_address": str(row.get("user_wallet") or ""),
+                        "season_id": season_id,
+                        "blockchain": BLOCKCHAIN_ETHEREUM,
+                    }
+                    client = EvmClient()
+                    mint_result = client.mint_user_nft(
+                        user_wallet_address=recipient_address,
+                        season_name=season_name,
+                        claim_id=claim_id,
+                        collection_mint_number=collection_mint_number,
+                        winner_context=winner_context,
+                        polystars_card=polystars_card,
+                    )
+                    on_chain_completed = True
+
+                    # Durability barrier: persist on-chain artifacts immediately
+                    # while status is still PROCESSING. Once this commit lands,
+                    # the EVM tx is permanently recorded — a crash before the
+                    # COMPLETED flip is recoverable by the next run's stale-
+                    # PROCESSING pass (which auto-finalizes rows that already
+                    # have a tx_hash, never re-minting them).
+                    conn = self.manager.get_connection()
+                    try:
+                        with conn.cursor() as cursor:
+                            cursor.execute(
+                                """
+                                UPDATE claims
+                                SET    tx_hash       = %s,
+                                       asset_address = %s,
+                                       metadata_uri  = %s,
+                                       mint_chain    = %s,
+                                       timestamp     = NOW(),
+                                       updated_at    = NOW()
+                                WHERE  id = %s
+                                """,
+                                (
+                                    mint_result.tx_hash,
+                                    mint_result.asset_address,
+                                    mint_result.metadata_uri,
+                                    BLOCKCHAIN_ETHEREUM,
+                                    claim_id,
+                                ),
+                            )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    # Denormalize the rendered card payload onto the claim so
+                    # /api/cards/{slug} can serve the freshly minted STAR.
+                    # A failure here must not undo the on-chain mint — log and continue.
+                    try:
+                        denormalize_card_onto_claim(
+                            self.manager, claim_id=claim_id, polystars_card=polystars_card,
+                        )
+                    except Exception as denorm_exc:
+                        print(f"   ⚠️  claim {claim_id}: denormalize failed: {denorm_exc}")
+                    # Final flip to COMPLETED — separate commit from the
+                    # tx_hash write so failure modes are unambiguous on
+                    # recovery (PROCESSING + tx_hash = stuck post-mint).
+                    conn = self.manager.get_connection()
+                    try:
+                        with conn.cursor() as cursor:
+                            cursor.execute(
+                                """
+                                UPDATE claims
+                                SET    status     = 'COMPLETED',
+                                       updated_at = NOW()
+                                WHERE  id = %s
+                                """,
+                                (claim_id,),
+                            )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    completed += 1
+                    per_claim_results.append({
+                        "claim_id": claim_id, "status": "COMPLETED",
+                        "tx_hash": mint_result.tx_hash,
+                    })
+                    print(f"   ✅ claim {claim_id}: minted {mint_result.tx_hash}")
+                except Exception as exc:
+                    err_text = str(exc)[:500]
+                    if on_chain_completed:
+                        # EVM tx already broadcast — do NOT mark FAILED.
+                        # Leave the row in PROCESSING so the recovery pass
+                        # on the next run auto-finalizes it (idempotent
+                        # finalization based on tx_hash presence).
+                        print(
+                            f"   ⚠️  claim {claim_id}: post-mint step failed but EVM tx "
+                            f"already broadcast — leaving for recovery pass: {err_text}"
+                        )
+                        per_claim_results.append({
+                            "claim_id": claim_id,
+                            "status": "RECOVERY_PENDING",
+                            "tx_hash": getattr(mint_result, "tx_hash", None),
+                            "error": err_text,
+                        })
+                        continue
+                    failed += 1
+                    # Pre-mint failure: clear ``collection_mint_number`` so it
+                    # doesn't burn a slot in the per-season mint sequence.
+                    # The next claim picked up will compute MAX(...)+1 over
+                    # COMPLETED only and reuse this number cleanly. We do this
+                    # ONLY here (not in the on_chain_completed branch above):
+                    # if the EVM tx already broadcast, the recovery pass will
+                    # auto-finalize that row to COMPLETED and the number must
+                    # stay (it matches what was put on the rendered card and
+                    # in the metadata that the contract committed to).
+                    conn = self.manager.get_connection()
+                    try:
+                        with conn.cursor() as cursor:
+                            cursor.execute(
+                                """
+                                UPDATE claims
+                                SET    status                 = 'FAILED',
+                                       error_message          = %s,
+                                       collection_mint_number = NULL,
+                                       updated_at             = NOW()
+                                WHERE  id = %s
+                                """,
+                                (err_text, claim_id),
+                            )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    # Best-effort cleanup of any Pinata uploads from a half-built
+                    # card. Only safe before the EVM mint — afterwards the pins
+                    # are referenced by on-chain metadata and must NOT be removed.
+                    if polystars_card:
+                        try:
+                            unpin_pinata_urls([
+                                str(polystars_card.get("front_image_url") or ""),
+                                str(polystars_card.get("back_image_url") or ""),
+                            ])
+                        except Exception:
+                            pass
+                    per_claim_results.append({
+                        "claim_id": claim_id, "status": "FAILED", "error": err_text,
+                    })
+                    print(f"   ❌ claim {claim_id}: {err_text}")
+
+            duration = time.time() - start_time
+            print(
+                f"\n✅ Mint queue worker done in {duration:.1f}s — "
+                f"processed={processed} completed={completed} failed={failed}"
+            )
+            return {
+                'success': True,
+                'duration': duration,
+                'processed': processed,
+                'completed': completed,
+                'failed': failed,
+                'per_claim': per_claim_results,
+            }
+        finally:
+            try:
+                with lock_conn.cursor() as lcur:
+                    lcur.execute(
+                        "SELECT pg_advisory_unlock(%s)",
+                        (MINT_QUEUE_ADVISORY_LOCK_KEY,),
+                    )
+            except Exception:
+                pass
+            try:
+                lock_conn.close()
+            except Exception:
+                pass
 
     def run_daily_pipeline(self, force: bool = False) -> Dict:
         """Run daily data pipeline"""
@@ -2826,16 +3097,10 @@ class SimplifiedScheduler:
         else:
             print("   ✅ No incomplete days found")
         
-        # End-of-day mint queue worker. Runs only if MINT_QUEUE_ENABLED=1.
-        # Failures here do not flip the pipeline's overall success flag —
-        # queued claims simply remain QUEUED for the next run.
-        try:
-            mint_batch_size = _env_int("MINT_QUEUE_DAILY_BATCH_SIZE", 200)
-            mint_result = self.process_mint_queue(max_claims=mint_batch_size)
-            results['mint_queue'] = mint_result
-        except Exception as exc:
-            print(f"⚠️  Mint queue worker raised: {exc}")
-            results['mint_queue'] = {'success': False, 'error': str(exc), 'processed': 0}
+        # NOTE: The mint queue worker is intentionally NOT invoked here.
+        # It runs on its own hourly cron (--process-mint-queue) so that
+        # claims queued during the day get minted within ~1h instead of
+        # waiting for the next 02:00 UTC daily pipeline run.
 
         # Summary
         print("\n" + "="*70)

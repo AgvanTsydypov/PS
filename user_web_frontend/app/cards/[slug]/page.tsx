@@ -57,8 +57,13 @@ type GeneratedCardItem = {
   };
   created_at: string;
   asset_address?: string | null;
+  /** Etherscan / L2 block-explorer URL — backend computes it from
+   *  ``asset_address`` ("<contract>/<tokenId>") + ``EVM_CHAIN_ID``. */
   explorer_asset_url?: string | null;
-  magiceden_url?: string | null;
+  /** Backend flag: ``true`` when the slug was found in the preview buffer
+   *  rather than the minted ``claims`` table. Drives the conditional render
+   *  for minted-only chips (mint number, explorer links). */
+  is_preview?: boolean;
 };
 
 type LoadStatus = "loading" | "ok" | "not-found" | "error";
@@ -141,7 +146,17 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                 </div>
               </div>
               <div className="card-detail-chip-row">
-                <span className="card-detail-chip">Collection mint #{card.collection_mint_number ?? "N/A"}</span>
+                {/* Minted-only chip: only the on-chain row carries a mint
+                    number. Preview rows have no slot allocated yet. */}
+                {!card.is_preview ? (
+                  <span className="card-detail-chip">
+                    Collection mint #{card.collection_mint_number ?? "N/A"}
+                  </span>
+                ) : (
+                  <span className="card-detail-chip card-detail-chip-preview">
+                    Preview — not yet minted
+                  </span>
+                )}
                 <span className="card-detail-chip">
                   {String(payload.season_type ?? "season")} #{String(payload.season_number ?? card.season_id)}
                 </span>
@@ -172,34 +187,28 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                     <dd>{card.event_id ?? "N/A"}</dd>
                     <dt>Event slug</dt>
                     <dd>{event.slug ?? card.event_slug ?? "N/A"}</dd>
-                    <dt>Explorer</dt>
-                    <dd>
-                      {isSafeExternalUrl(card.explorer_asset_url) ? (
-                        <a
-                          href={card.explorer_asset_url!}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          {card.asset_address ?? "Open on Explorer"}
-                        </a>
-                      ) : (
-                        "N/A"
-                      )}
-                    </dd>
-                    <dt>Magic Eden</dt>
-                    <dd>
-                      {isSafeExternalUrl(card.magiceden_url) ? (
-                        <a
-                          href={card.magiceden_url!}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          {card.asset_address ?? "Open on Magic Eden"}
-                        </a>
-                      ) : (
-                        "N/A"
-                      )}
-                    </dd>
+                    {/* Explorer row references an on-chain asset; preview
+                        cards have no on-chain identity yet, so suppress
+                        entirely. Magic Eden was Solana-era and is gone —
+                        the EVM equivalent is the Etherscan NFT page. */}
+                    {!card.is_preview ? (
+                      <>
+                        <dt>Explorer</dt>
+                        <dd>
+                          {isSafeExternalUrl(card.explorer_asset_url) ? (
+                            <a
+                              href={card.explorer_asset_url!}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              {card.asset_address ?? "Open on Explorer"}
+                            </a>
+                          ) : (
+                            "N/A"
+                          )}
+                        </dd>
+                      </>
+                    ) : null}
                   </dl>
                 </section>
               </div>

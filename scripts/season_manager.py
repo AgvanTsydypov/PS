@@ -116,25 +116,59 @@ class SeasonManager:
         """
         Check if user already has a claim in this season.
 
-        We treat pending/processing/completed as already claimed or in progress
-        to prevent duplicate mint attempts.
+        Treats QUEUED/PENDING/PROCESSING/COMPLETED as already-claimed to prevent
+        duplicate mint attempts. QUEUED was added with the queue-worker model —
+        before this fix, a user with a queued-but-not-yet-minted claim would see
+        the dashboard mint button as enabled and hit a unique-violation on retry.
+        """
+        return self._get_active_claim_for_season(wallet_address, season_id) is not None
+
+    def _get_active_claim_for_season(
+        self, wallet_address: str, season_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Return the user's most recent non-failed claim row for this season,
+        or ``None`` if there isn't one. "Active" means status is one of
+        ``QUEUED / PENDING / PROCESSING / COMPLETED`` — anything that prevents
+        the user from re-queueing another mint in the same season.
+
+        Used by eligibility checks so the dashboard can render an informative
+        "Mint in progress (claim #N, status=QUEUED)" pill instead of a generic
+        "already claimed" rejection — the latter was misleading because it
+        didn't say *which* state the claim is in.
         """
         conn = psycopg2.connect(**self.connection_params)
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM claims
-                        WHERE lower(user_wallet) = lower(%s)
-                          AND season_id = %s
-                          AND status IN ('PENDING', 'PROCESSING', 'COMPLETED')
-                    )
+                    SELECT id, status, phase_type, created_at, updated_at,
+                           collection_mint_number, tx_hash, asset_address,
+                           card_slug
+                    FROM   claims
+                    WHERE  lower(user_wallet) = lower(%s)
+                      AND  season_id = %s
+                      AND  status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED')
+                    ORDER  BY created_at DESC, id DESC
+                    LIMIT  1
                     """,
                     (wallet_address, season_id),
                 )
-                return bool(cursor.fetchone()[0])
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                created_at = row[3]
+                updated_at = row[4]
+                return {
+                    "claim_id": int(row[0]),
+                    "status": str(row[1] or "").upper(),
+                    "phase_type": (str(row[2]).strip() or None) if row[2] else None,
+                    "queued_at": created_at.isoformat() if created_at else None,
+                    "updated_at": updated_at.isoformat() if updated_at else None,
+                    "collection_mint_number": int(row[5]) if row[5] is not None else None,
+                    "tx_hash": (str(row[6]).strip() or None) if row[6] else None,
+                    "asset_address": (str(row[7]).strip() or None) if row[7] else None,
+                    "card_slug": (str(row[8]).strip() or None) if row[8] else None,
+                }
         finally:
             conn.close()
 
@@ -439,7 +473,8 @@ class SeasonManager:
         """Check eligibility for a specific season id."""
         normalized_wallet = wallet_address.lower()
         phase_info = self.get_current_phase(season_id)
-        already_claimed = self._has_claimed_in_season(normalized_wallet, season_id)
+        active_claim = self._get_active_claim_for_season(normalized_wallet, season_id)
+        already_claimed = active_claim is not None
         is_origin_for_stream = self.is_origin_wallet_for_season(normalized_wallet, season_id)
         origin_snapshot_status = (
             self._get_origin_snapshot_mint_status(normalized_wallet, season_id)
@@ -452,7 +487,31 @@ class SeasonManager:
 
         if already_claimed:
             eligible_now = False
-            ineligible_reason = "User already claimed (or has active claim) in current season"
+            # Status-aware message so the dashboard can show what the user
+            # is actually waiting for (queue → worker pickup → on-chain mint
+            # → completed) instead of a generic "already claimed".
+            status = (active_claim or {}).get("status") or ""
+            claim_id = (active_claim or {}).get("claim_id")
+            mint_number = (active_claim or {}).get("collection_mint_number")
+            if status == "COMPLETED":
+                if mint_number is not None:
+                    ineligible_reason = f"Already minted in current season (mint #{mint_number})"
+                else:
+                    ineligible_reason = "Already minted in current season"
+            elif status == "PROCESSING":
+                ineligible_reason = (
+                    f"Mint in progress (claim #{claim_id}) — please wait for the next worker tick"
+                    if claim_id is not None
+                    else "Mint in progress — please wait for the next worker tick"
+                )
+            elif status in ("QUEUED", "PENDING"):
+                ineligible_reason = (
+                    f"Mint queued (claim #{claim_id}) — awaiting next worker run"
+                    if claim_id is not None
+                    else "Mint queued — awaiting next worker run"
+                )
+            else:
+                ineligible_reason = "User already claimed (or has active claim) in current season"
         elif not phase_info["is_claim_open"]:
             eligible_now = False
             ineligible_reason = f"Claims closed in current phase: {phase_info['phase']}"
@@ -490,5 +549,12 @@ class SeasonManager:
                 if origin_snapshot_status
                 else None
             ),
+            # The full active-claim row, exposed so the dashboard can render
+            # an informative pending-mint pill ("Mint in progress — claim #N,
+            # status=QUEUED") instead of a generic disabled button. ``None``
+            # when the wallet has no QUEUED/PROCESSING/COMPLETED claim for
+            # this season; in that case ``ineligible_reason`` (if any) comes
+            # from phase rules, not from a duplicate-claim block.
+            "pending_claim": active_claim,
         }
 

@@ -182,10 +182,13 @@ class TestResolveStreamForSeasonId:
 # ---------------------------------------------------------------------------
 # Home-ticker SQL pinning
 #
-# The home-page showcase (``/api/cards/ticker``) samples ``preview_cards``.
-# preview_cards is a strict preview-only buffer — minted rows are deleted by
-# the cron worker's ``denormalize_card_onto_claim``. The ticker SQL must
-# therefore not reach into any winner-wallet legacy table to filter them out.
+# The home-page showcase (``/api/cards/ticker``) now samples minted STARs
+# directly from ``claims`` (queue model). It must select COMPLETED rows
+# only, must alias the claims-side column names (``card_slug``,
+# ``front_image_url``, ``back_image_url``) to the ticker's historical
+# names (``slug``, ``front_image_path``, ``back_image_path``) so the
+# downstream cache and frontend code stay stable, and must never reach
+# into any legacy winner-wallets table.
 # ---------------------------------------------------------------------------
 
 def _user_web_module():
@@ -207,11 +210,11 @@ class TestCardsTickerSqlPreviewOnly:
     def normalized(self) -> str:
         return " ".join(self.sql.split()).lower()
 
-    def test_samples_from_preview_cards(self):
-        assert "from preview_cards" in self.normalized
+    def test_samples_from_claims_completed(self):
+        assert "from claims" in self.normalized
+        assert "status = 'completed'" in self.normalized
 
     def test_does_not_join_legacy_winner_wallets(self):
-        """preview_cards is preview-only — minted rows are deleted; ticker SQL must stay decoupled."""
         assert "winner_wallets_nft_to_claim" not in self.normalized
         assert "is_minted" not in self.normalized
 
@@ -219,36 +222,40 @@ class TestCardsTickerSqlPreviewOnly:
         assert "order by random()" in self.normalized
         assert "limit %s" in self.normalized
 
-    def test_selects_required_columns(self):
-        for column in (
-            "gc.slug",
-            "gc.card_title",
-            "gc.front_image_path",
-            "gc.back_image_path",
-            "gc.created_at",
+    def test_aliases_claim_columns_to_ticker_shape(self):
+        """Frontend depends on these legacy column names — keep the alias."""
+        for alias in (
+            "as slug",
+            "as front_image_path",
+            "as back_image_path",
+            "as created_at",
         ):
-            assert column in self.normalized, f"missing column {column!r}"
+            assert alias in self.normalized, f"missing alias {alias!r}"
 
-    def test_does_not_touch_claims_table(self):
-        """Ticker feeds from the preview buffer only; minted STARs live in
-        ``claims`` and are served by ``/api/cards/{slug}``."""
-        assert "from claims" not in self.normalized
-        assert "join claims" not in self.normalized
+    def test_filters_out_unrenderable_claims(self):
+        """QUEUED/PENDING/PROCESSING rows have no card_slug yet; FAILED rows
+        have no on-chain artefact. Both must be excluded."""
+        assert "card_slug is not null" in self.normalized
+        assert "front_image_url is not null" in self.normalized
+        assert "back_image_url" in self.normalized
 
 
 # ---------------------------------------------------------------------------
-# Card-detail endpoint split (preview vs minted)
+# Unified card-detail endpoint (/api/cards/{slug})
 #
-# ``/api/preview/{slug}`` must read the live preview buffer and MUST NOT reach
-# into ``claims`` — preview rows are authoritative there and joining claims
-# would only confuse the shape. Conversely, ``/api/cards/{slug}`` must read
-# denormalized card fields straight off ``claims`` and MUST NOT read
-# ``preview_cards`` — otherwise a minted STAR would still depend on
-# the preview buffer it was supposed to be promoted out of.
+# A single URL serves both minted STARs and preview cards. The endpoint
+# tries the ``claims`` SQL first; on miss it falls back to the
+# ``preview_cards`` SQL and stamps ``is_preview=true`` on the response.
+# The two SQL strings keep the same alias shape so the shared formatter
+# can render either source. Splitting the legacy ``/api/preview/{slug}``
+# endpoint off was a regression — slugs naturally migrate from preview to
+# minted inside the cron worker (``denormalize_card_onto_claim`` writes
+# the slug to claims and deletes the preview row in one transaction), so
+# the URL must be stable across that transition.
 # ---------------------------------------------------------------------------
 
 
-class TestCardDetailEndpointSplit:
+class TestCardDetailEndpoint:
     @property
     def preview_sql(self) -> str:
         return " ".join(_user_web_module()._PREVIEW_CARD_DETAIL_SQL.split()).lower()
@@ -285,13 +292,295 @@ class TestCardDetailEndpointSplit:
 
     def test_preview_sql_does_not_expose_collection_mint_number(self):
         """Previews are not part of the minted collection, so the
-        ``collection_mint_number`` must not leak through the public API.
-        Minted ``/api/cards/{slug}`` still surfaces it (from ``claims``)."""
+        ``collection_mint_number`` must not leak through the API even
+        through the unified endpoint. Minted rows still surface it (from
+        ``claims``); the page hides the chip when ``is_preview`` is true."""
         assert "collection_mint_number" not in self.preview_sql
         assert "c.collection_mint_number" in self.minted_sql
 
-    def test_endpoints_are_registered(self):
+    def test_unified_cards_endpoint_is_registered(self):
         m = _user_web_module()
         routes = {getattr(r, "path", None) for r in m.app.routes}
-        assert "/api/preview/{slug}" in routes
         assert "/api/cards/{slug}" in routes
+
+    def test_legacy_preview_endpoint_is_removed(self):
+        """The old ``/api/preview/{slug}`` route was unified into
+        ``/api/cards/{slug}``. Asserting it's gone makes sure a future
+        refactor doesn't accidentally re-add a parallel path that drifts
+        away from the unified one."""
+        m = _user_web_module()
+        routes = {getattr(r, "path", None) for r in m.app.routes}
+        assert "/api/preview/{slug}" not in routes
+
+    def test_unified_endpoint_attempts_minted_then_preview(self):
+        """The endpoint body must reference both SQL strings so a slug
+        served by either store is reachable. Source-text check guards
+        against a refactor that drops the preview fallback and silently
+        404s the ticker links."""
+        import inspect
+        from user_web_backend.main import card_by_slug
+        src = inspect.getsource(card_by_slug)
+        assert "_MINTED_CARD_DETAIL_SQL" in src
+        assert "_PREVIEW_CARD_DETAIL_SQL" in src
+        # ``is_preview`` flag must be stamped onto both branches so the
+        # frontend can render the right chips.
+        assert 'is_preview' in src
+        # Order matters: minted first, preview as fallback. A reversed
+        # order would surface stale preview data even after a successful
+        # mint (between the moment the claims row is written and the
+        # moment the preview row is deleted, both could match the slug).
+        minted_pos = src.index("_MINTED_CARD_DETAIL_SQL")
+        preview_pos = src.index("_PREVIEW_CARD_DETAIL_SQL")
+        assert minted_pos < preview_pos
+
+
+# ---------------------------------------------------------------------------
+# /api/me/cards — owned-on-chain PolyStars NFTs
+#
+# Replaces a previously deleted Solana/Metaplex DAS implementation. The
+# endpoint MUST query claims (the new queue model writes the on-chain
+# artefacts there) and MUST filter to COMPLETED rows with an asset_address.
+# Pre-merge guards on the SQL shape make sure a future refactor doesn't
+# silently break the dashboard panel by selecting QUEUED/PROCESSING rows
+# (no asset_address yet) or losing the season-name JOIN that surfaces
+# "Genesis #1" / "Standard #2" labels.
+# ---------------------------------------------------------------------------
+
+
+class TestMeCardsSql:
+    @property
+    def sql(self) -> str:
+        return " ".join(_user_web_module()._ME_CARDS_CLAIMS_SQL.split()).lower()
+
+    def test_reads_claims_only(self):
+        assert "from claims" in self.sql
+        assert "from preview_cards" not in self.sql
+
+    def test_filters_to_completed_with_asset_address(self):
+        assert "c.status = 'completed'" in self.sql
+        assert "c.asset_address is not null" in self.sql
+        assert "c.asset_address <> ''" in self.sql
+
+    def test_matches_recipient_with_legacy_user_wallet_fallback(self):
+        """Queue-model rows store the NFT recipient on ``recipient_address``;
+        legacy rows from before the column existed instead carry the recipient
+        on ``user_wallet``. The endpoint must accept both so old claims still
+        appear on the dashboard after the migration."""
+        assert "lower(c.recipient_address) = %s" in self.sql
+        assert "c.recipient_address is null" in self.sql
+        assert "lower(c.user_wallet) = %s" in self.sql
+
+    def test_joins_seasons_for_label(self):
+        """``season_type`` and ``season_number`` come from ``seasons``, not
+        the claim row itself; without this join the dashboard cannot render
+        "Genesis #1" / "Standard #2" labels."""
+        assert "left join seasons s on s.id = c.season_id" in self.sql
+        assert "s.type" in self.sql
+        assert "s.season_number" in self.sql
+
+    def test_aliases_match_frontend_response_shape(self):
+        """Frontend ``MyMintedNftItem`` (UserDashboard.tsx ~L121) expects
+        these exact keys on each item — keep the SQL aliases in sync."""
+        for alias in (
+            "as claim_id",
+            "as asset_address",
+            "as tx_hash",
+            "as metadata_uri",
+            "as season_id",
+            "as season_type",
+            "as season_number",
+            "as phase",
+            "as collection_mint_number",
+            "as name",
+            "as front_image_url",
+            "as back_image_url",
+            "as card_slug",
+            "as minted_at",
+        ):
+            assert alias in self.sql, f"missing alias {alias!r}"
+
+    def test_endpoint_is_registered(self):
+        m = _user_web_module()
+        routes = {getattr(r, "path", None) for r in m.app.routes}
+        assert "/api/me/cards" in routes
+
+
+class TestEvmServiceParseAssetAddress:
+    """``parse_asset_address`` is the bridge between our DB's ``asset_address``
+    string ``"<contract>/<tokenId>"`` and the EVM reader's integer-only
+    ``ownerOf(tokenId)`` call. A regression here would silently drop minted
+    NFTs from the dashboard."""
+
+    @property
+    def parse(self):
+        from scripts.evm_service import parse_asset_address
+        return parse_asset_address
+
+    def test_well_formed_pair(self):
+        contract, token_id = self.parse("0xABC1234567890123456789012345678901234567/42")
+        assert contract == "0xABC1234567890123456789012345678901234567"
+        assert token_id == 42
+
+    def test_handles_surrounding_whitespace(self):
+        contract, token_id = self.parse("  0xfeedface00000000000000000000000000000000/0  ")
+        assert contract == "0xfeedface00000000000000000000000000000000"
+        assert token_id == 0
+
+    def test_empty_returns_none_pair(self):
+        assert self.parse("") == (None, None)
+        assert self.parse(None) == (None, None)  # type: ignore[arg-type]
+
+    def test_no_slash_returns_none_pair(self):
+        assert self.parse("0xABC1234567890123456789012345678901234567") == (None, None)
+
+    def test_non_integer_token_id_returns_contract_with_none_tid(self):
+        contract, token_id = self.parse("0xABC1234567890123456789012345678901234567/notanumber")
+        assert contract == "0xABC1234567890123456789012345678901234567"
+        assert token_id is None
+
+
+class TestEvmServiceExplorerUrls:
+    """Explorer URL builders are the SOLE source of links the user can use to
+    inspect their NFT on-chain — wrong base for the configured chain ID
+    would land them on Etherscan mainnet for a Sepolia token (404). Lock
+    the chain → base mapping with a static test."""
+
+    @property
+    def builders(self):
+        from scripts.evm_service import etherscan_base_url, etherscan_nft_url, etherscan_tx_url
+        return etherscan_base_url, etherscan_nft_url, etherscan_tx_url
+
+    def test_sepolia_uses_sepolia_etherscan(self):
+        base, nft, tx = self.builders
+        assert base(11155111) == "https://sepolia.etherscan.io"
+        assert tx("0xdead", 11155111) == "https://sepolia.etherscan.io/tx/0xdead"
+        assert (
+            nft("0xCAFEBABECAFEBABECAFEBABECAFEBABECAFEBABE", 7, 11155111)
+            == "https://sepolia.etherscan.io/nft/0xCAFEBABECAFEBABECAFEBABECAFEBABECAFEBABE/7"
+        )
+
+    def test_mainnet_uses_root_etherscan(self):
+        base, _nft, tx = self.builders
+        assert base(1) == "https://etherscan.io"
+        assert "https://etherscan.io/tx/0xabc" == tx("0xabc", 1)
+
+    def test_unknown_chain_falls_back_to_mainnet_etherscan(self):
+        base, _nft, _tx = self.builders
+        assert base(999999) == "https://etherscan.io"
+
+
+# ---------------------------------------------------------------------------
+# collection_mint_number — allocated post-pickup, MAX over COMPLETED.
+#
+# Old behaviour: a BEFORE-INSERT trigger assigned the next number on every
+# claims INSERT (including QUEUED rows that may never mint). Result: the
+# user-facing "mint #N" inflated past the actual on-chain mint count, so a
+# user could see "you got mint #42" while only 30 NFTs had ever landed.
+#
+# New behaviour: the cron worker allocates the number under
+# pg_advisory_xact_lock(season_id) right after pickup using
+# MAX(collection_mint_number) + 1 over COMPLETED rows only. On pre-mint
+# failure the number is cleared back to NULL so the next attempt reuses
+# it cleanly. The card is rendered AFTER allocation, guaranteeing the
+# number printed on the card image and the number in the database row
+# always match.
+#
+# These tests guard the static SQL strings — a future refactor that
+# accidentally restored the trigger or computed MAX over all rows would
+# silently re-introduce the inflation bug.
+# ---------------------------------------------------------------------------
+
+
+class TestCollectionMintNumberAllocationPolicy:
+    @property
+    def schema_migration_source(self) -> str:
+        """Read the schema-migration method body as plain source text. The
+        method runs ``cursor.execute(...)`` with several SQL strings; checking
+        the literal source is sufficient for the policy guards we want to lock
+        in."""
+        import inspect
+        from admin_backend.claims_mint import ClaimsMintMixin
+        return inspect.getsource(ClaimsMintMixin.ensure_claims_schema_for_mint)
+
+    @property
+    def worker_source(self) -> str:
+        """Read the cron worker method as plain source text."""
+        import inspect
+        from scripts.daily_scheduler_simple import SimplifiedScheduler
+        return inspect.getsource(SimplifiedScheduler.process_mint_queue)
+
+    @property
+    def recovery_source(self) -> str:
+        import inspect
+        from scripts.daily_scheduler_simple import SimplifiedScheduler
+        return inspect.getsource(SimplifiedScheduler._recover_stale_processing)
+
+    def test_legacy_assign_trigger_is_dropped(self):
+        """The BEFORE-INSERT trigger MUST be dropped — leaving it in place
+        would double-allocate (trigger at INSERT + worker at pickup) and
+        violate the partial unique index."""
+        sql = self.schema_migration_source
+        assert "DROP TRIGGER IF EXISTS tr_claims_assign_season_mint" in sql
+        assert "DROP FUNCTION IF EXISTS claims_assign_season_mint_number" in sql
+        # And the legacy CREATE TRIGGER / CREATE FUNCTION must NOT come back.
+        assert "CREATE TRIGGER tr_claims_assign_season_mint" not in sql
+        assert "claims_assign_season_mint_number()" not in sql or "DROP" in sql
+
+    def test_unique_index_is_partial_on_completed(self):
+        """A non-partial unique on (season_id, collection_mint_number) would
+        block reuse of a number after a pre-mint FAILED row (until manually
+        cleared). The partial predicate makes the unique apply only to rows
+        the user actually sees — COMPLETED ones."""
+        sql = self.schema_migration_source
+        assert "CREATE UNIQUE INDEX" in sql
+        assert "ux_claims_season_collection_mint" in sql
+        assert "WHERE status = 'COMPLETED'" in sql
+
+    def test_worker_allocates_under_advisory_lock_per_season(self):
+        """Without per-season locking, two workers (or two iterations
+        bypassing the global advisory lock) could allocate the same MAX+1
+        and collide on commit when both rows reach COMPLETED."""
+        src = self.worker_source
+        assert "pg_advisory_xact_lock(9283742, %s)" in src
+
+    def test_worker_allocation_reads_max_over_completed_only(self):
+        """The whole point of the new policy: the next number is
+        ``MAX(collection_mint_number) + 1`` over COMPLETED claims, not over
+        all rows. Computing MAX over QUEUED/PROCESSING/FAILED would re-
+        introduce the inflation bug the change was meant to fix."""
+        src = self.worker_source
+        assert "FROM   claims" in src or "FROM claims" in src
+        assert "status    = 'COMPLETED'" in src or "status = 'COMPLETED'" in src
+        assert "COALESCE(MAX(collection_mint_number), 0) + 1" in src
+
+    def test_worker_allocation_is_idempotent(self):
+        """The allocation UPDATE must be guarded by
+        ``WHERE collection_mint_number IS NULL`` so a stuck-PROCESSING row
+        re-picked up after recovery doesn't get a fresh number that
+        contradicts what was already rendered onto its card image."""
+        src = self.worker_source
+        assert "AND  collection_mint_number IS NULL" in src
+
+    def test_pre_mint_failure_clears_collection_mint_number(self):
+        """Pre-mint failure must release the number back into the pool
+        (set to NULL) so the next claim reuses it. The post-mint failure
+        path (``on_chain_completed=True``) MUST NOT clear it because the
+        EVM tx already committed the metadata that references this number."""
+        src = self.worker_source
+        assert "collection_mint_number = NULL" in src
+
+    def test_recovery_pass_clears_number_only_on_requeue_branch(self):
+        """A row reset to QUEUED must lose its tentative number (the next
+        worker pickup will allocate a fresh one). A row auto-completed
+        because tx_hash is present MUST keep its number — the on-chain NFT
+        already references it."""
+        src = self.recovery_source
+        assert "status                 = 'QUEUED'" in src
+        # The QUEUED branch nulls the number.
+        assert "collection_mint_number = NULL" in src
+        # The COMPLETED branch in the same method MUST NOT touch the column.
+        # Find the second UPDATE (auto-completed) by splitting on the first
+        # branch's text — sanity check that the COMPLETED branch doesn't set
+        # collection_mint_number = NULL.
+        completed_branch = src.split("auto-completed", 1)[-1]
+        assert "collection_mint_number = NULL" not in completed_branch

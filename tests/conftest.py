@@ -28,9 +28,11 @@ _mock_psycopg2 = MagicMock()
 _mock_psycopg2.connect.return_value = _mock_conn
 _mock_psycopg2.extras = MagicMock()
 _mock_psycopg2.extras.RealDictCursor = MagicMock()
+_mock_psycopg2.errors = MagicMock()
 
 sys.modules.setdefault("psycopg2", _mock_psycopg2)
 sys.modules.setdefault("psycopg2.extras", _mock_psycopg2.extras)
+sys.modules.setdefault("psycopg2.errors", _mock_psycopg2.errors)
 
 # ---------------------------------------------------------------------------
 # Stub scripts.cardgen.assets so polystars_card_payload can be imported

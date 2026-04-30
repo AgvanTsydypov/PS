@@ -14,6 +14,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -240,19 +241,30 @@ USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS = float(
     os.getenv("USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS", "30")
 )
 
-# Home-page ticker feed: random sample of preview_cards rows.
+# Home-page ticker feed: random sample of minted STARs.
 #
-# ``preview_cards`` is a preview-only buffer — ``promote_preview_to_claim``
-# deletes the row on mint — so the ticker does not need any extra filter to
-# exclude minted STARs: they simply aren't in this table anymore. The minted
-# card keeps its permalink at ``/api/cards/{slug}`` served out of ``claims``.
+# Under the queue model the canonical store of any card the user can
+# interact with is ``claims`` (denormalized via ``denormalize_card_onto_claim``
+# right after the on-chain mint succeeds). We read straight from there and
+# alias to the ticker's historical column shape (``slug``, ``card_title``,
+# ``front_image_path``, ``back_image_path``, ``created_at``) so the
+# downstream cache and frontend code do not need to change.
+#
+# Only ``status = 'COMPLETED'`` rows with a non-empty ``card_slug`` are
+# eligible — QUEUED/PENDING/PROCESSING claims have no rendered card yet,
+# and FAILED claims have no on-chain artefact to point at.
 _CARDS_TICKER_SAMPLE_SQL = """
-SELECT gc.slug,
-       gc.card_title,
-       gc.front_image_path,
-       gc.back_image_path,
-       gc.created_at
-FROM preview_cards gc
+SELECT c.card_slug                                AS slug,
+       c.card_title                               AS card_title,
+       c.front_image_url                          AS front_image_path,
+       c.back_image_url                           AS back_image_path,
+       COALESCE(c.timestamp, c.created_at)        AS created_at
+FROM claims c
+WHERE c.status = 'COMPLETED'
+  AND c.card_slug IS NOT NULL
+  AND BTRIM(c.card_slug) <> ''
+  AND c.front_image_url IS NOT NULL
+  AND c.back_image_url  IS NOT NULL
 ORDER BY RANDOM()
 LIMIT %s
 """
@@ -1458,10 +1470,9 @@ def _has_valid_polymarket_rank(trader_rank: Optional[str]) -> bool:
     """Returns True only when ``trader_rank`` is a real Polymarket leaderboard rank.
 
     Empty/null values, "Not registered in PM" and "No trades yet" all mean the
-    user does not have a leaderboard rank yet. Used for UI surfaces only —
-    minting eligibility uses ``_is_registered_on_polymarket`` because users
-    that are registered with Polymarket but haven't traded yet must still be
-    allowed to mint.
+    user does not have a leaderboard rank yet. Used both for UI surfaces and
+    as a hard mint gate in ``/api/me/mint`` — wallets without a real rank
+    (registered but never traded) are not allowed to mint.
     """
     if trader_rank is None:
         return False
@@ -2332,7 +2343,7 @@ SELECT
     c.id,
     c.collection_mint_number,
     c.card_slug AS slug,
-    c.user_wallet AS owner_wallet,
+    COALESCE(NULLIF(c.recipient_address, ''), c.user_wallet) AS owner_wallet,
     uws.proxy_wallet AS owner_proxy_wallet,
     c.season_id,
     c.event_id AS event_id,
@@ -2364,19 +2375,22 @@ SELECT
     c.asset_address AS minted_asset_address
 FROM claims c
 LEFT JOIN events e ON e.id = c.event_id
-LEFT JOIN user_wallet_signins uws ON LOWER(uws.wallet_address) = LOWER(c.user_wallet)
+LEFT JOIN user_wallet_signins uws ON LOWER(uws.wallet_address) = LOWER(COALESCE(NULLIF(c.recipient_address, ''), c.user_wallet))
 WHERE c.card_slug = %s
 LIMIT 1
 """
 
 
 def _build_card_detail_response(row_dict: Dict[str, Any], request: Request) -> Dict[str, Any]:
-    """Shared formatter for ``/api/preview/{slug}`` and ``/api/cards/{slug}``.
+    """Shared formatter for the unified ``/api/cards/{slug}`` endpoint.
 
-    Both endpoints select the same aliased column shape (slug, card_title,
-    front_image_path, back_image_path, card_payload_json, event_*,
-    winner_proxy_wallet, minted_asset_address) so one formatter can serve
-    both preview and minted rows.
+    Both the minted-claim SQL and the preview-buffer SQL select the same
+    aliased column shape (slug, card_title, front_image_path,
+    back_image_path, card_payload_json, event_*, winner_proxy_wallet,
+    minted_asset_address) so one formatter can serve both preview and
+    minted rows. The caller stamps ``card["is_preview"]`` to tell the
+    frontend whether to render the minted-only chips (mint number,
+    explorer links).
     """
     card = _format_generated_card_row(row_dict, request=request, include_payload=True)
     event_snapshot = {
@@ -2403,6 +2417,26 @@ def _build_card_detail_response(row_dict: Dict[str, Any], request: Request) -> D
     card["event_snapshot"] = event_snapshot
     minted_asset_address = str(row_dict.get("minted_asset_address") or "").strip() or None
     card["asset_address"] = minted_asset_address
+
+    # Etherscan/L2-explorer link for minted rows. Computed from the
+    # ``"<contract>/<tokenId>"`` asset_address string so we don't need an
+    # RPC round-trip on the read path. ``EVM_CHAIN_ID`` env decides which
+    # explorer host (``etherscan_nft_url`` knows mainnet, Sepolia, Base,
+    # Base Sepolia; falls back to mainnet for unknowns). Preview rows have
+    # no asset_address yet → no link.
+    explorer_url: Optional[str] = None
+    if minted_asset_address:
+        try:
+            from scripts.evm_service import parse_asset_address, etherscan_nft_url
+            contract_part, token_id = parse_asset_address(minted_asset_address)
+            if contract_part and token_id is not None:
+                chain_id_raw = os.environ.get("EVM_CHAIN_ID", "").strip()
+                chain_id = int(chain_id_raw) if chain_id_raw else 1
+                explorer_url = etherscan_nft_url(contract_part, token_id, chain_id)
+        except Exception:
+            explorer_url = None
+    card["explorer_asset_url"] = explorer_url
+
     return {"card": card}
 
 
@@ -2420,40 +2454,42 @@ def _fetch_card_detail_row(sql: str, slug: str, log_label: str) -> Optional[Dict
     return dict(row) if row else None
 
 
-@app.get("/api/preview/{slug}")
-def preview_card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
-    """Public preview-card detail — reads the live preview buffer (``preview_cards``).
-
-    Serves the home-showcase ticker links. Preview rows are deleted on mint by
-    ``promote_preview_to_claim``, so a slug that was minted will 404 here and
-    must be requested from ``/api/cards/{slug}`` instead.
-    """
-    normalized_slug = str(slug or "").strip()
-    if not normalized_slug:
-        raise HTTPException(status_code=400, detail="Card slug is required")
-
-    row = _fetch_card_detail_row(_PREVIEW_CARD_DETAIL_SQL, normalized_slug, "preview card")
-    if not row:
-        raise HTTPException(status_code=404, detail="Card not found")
-    return _build_card_detail_response(row, request)
-
-
 @app.get("/api/cards/{slug}")
 def card_by_slug(slug: str, request: Request) -> Dict[str, Any]:
-    """Public minted-STAR detail — reads denormalized fields off ``claims``.
+    """Unified card detail — serves both minted STARs and preview cards.
 
-    The card-detail row is written by ``promote_preview_to_claim`` at mint
-    time; preview cards (not yet minted) are served from
-    ``/api/preview/{slug}`` and will 404 here.
+    Lookup order:
+      1. ``claims`` (minted): denormalized card fields written by
+         ``denormalize_card_onto_claim`` after a successful on-chain mint.
+         Carries ``collection_mint_number`` and on-chain explorer links.
+      2. ``preview_cards`` (preview): the live showcase buffer, populated
+         before any winner has been allocated. Same JSON shape, but
+         ``collection_mint_number`` / ``asset_address`` are absent.
+
+    A slug naturally migrates from preview → minted: the cron worker writes
+    the slug onto the claims row and deletes the matching preview row in
+    the same transaction, so this URL keeps working through the transition
+    with zero redirect — only the underlying data changes (and ``is_preview``
+    flips to ``false``). That gives the showcase ticker permanent links
+    that survive a card being minted.
     """
     normalized_slug = str(slug or "").strip()
     if not normalized_slug:
         raise HTTPException(status_code=400, detail="Card slug is required")
 
     row = _fetch_card_detail_row(_MINTED_CARD_DETAIL_SQL, normalized_slug, "minted card")
-    if not row:
-        raise HTTPException(status_code=404, detail="Card not found")
-    return _build_card_detail_response(row, request)
+    if row:
+        response = _build_card_detail_response(row, request)
+        response["card"]["is_preview"] = False
+        return response
+
+    row = _fetch_card_detail_row(_PREVIEW_CARD_DETAIL_SQL, normalized_slug, "preview card")
+    if row:
+        response = _build_card_detail_response(row, request)
+        response["card"]["is_preview"] = True
+        return response
+
+    raise HTTPException(status_code=404, detail="Card not found")
 
 
 @app.get("/api/master-collection")
@@ -2493,19 +2529,22 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
     if not Web3.is_address(wallet):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
 
-    # Strict server-side gate: only wallets that are registered on Polymarket
-    # (i.e. have a real Polymarket proxy wallet) may mint. The trader rank
-    # itself is irrelevant — registered users with no trades yet must also be
-    # allowed to mint. Frontend mirrors this check, but we MUST also enforce
-    # it here so the API cannot be bypassed.
+    # Strict server-side gate, two checks:
+    #   1. Wallet must be registered on Polymarket (has a real proxy wallet,
+    #      not the sentinel ``PM_NOT_REGISTERED_VALUE``).
+    #   2. Wallet must have a real Polymarket leaderboard rank. Sentinels
+    #      ("Not registered in PM" / "No trades yet") fail this check —
+    #      registered-but-never-traded wallets cannot mint.
+    # The frontend mirrors both checks, but we MUST also enforce them here
+    # so the API cannot be bypassed.
     #
-    # We do a *live* lookup against Polymarket's public profile API so the
+    # Both checks do a *live* lookup against Polymarket's public APIs so the
     # gate does not depend on whatever was cached in ``user_wallet_signins``
-    # at sign-in time (which can be stale or empty if the profile API was
-    # temporarily unavailable then). If the live call fails, we fall back to
-    # the cached snapshot so a transient Polymarket outage does not lock
-    # legitimately-registered users out of minting.
-    cached_proxy_wallet, _cached_trader_rank = _load_wallet_signin_snapshot(wallet)
+    # at sign-in time (which can be stale or empty if the API was temporarily
+    # unavailable then). If a live call fails, we fall back to the cached
+    # snapshot so a transient Polymarket outage does not lock legitimate
+    # users out of minting.
+    cached_proxy_wallet, cached_trader_rank = _load_wallet_signin_snapshot(wallet)
     live_proxy_wallet: Optional[str] = None
     live_lookup_succeeded = False
     try:
@@ -2541,6 +2580,48 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
             detail="Wallet is not registered on Polymarket — minting is not allowed.",
         )
 
+    # Trader-rank gate. Mirrors the proxy-wallet gate above: live lookup with
+    # cached fallback. ``_fetch_polymarket_trader_rank`` returns ``(rank, api_available)``;
+    # we treat any non-exception result as a successful lookup so a wallet
+    # that genuinely has no rank yet ("No trades yet") is correctly rejected
+    # instead of falling back to a possibly-stale cache.
+    live_trader_rank: Optional[str] = None
+    trader_rank_lookup_succeeded = False
+    try:
+        live_trader_rank, _live_api_available = _fetch_polymarket_trader_rank(
+            effective_proxy_wallet or ""
+        )
+        trader_rank_lookup_succeeded = bool(_live_api_available)
+    except Exception as exc:
+        logger.warning(
+            "Live Polymarket trader-rank lookup failed for wallet=%s proxy=%s: %s; "
+            "falling back to cached trader_rank=%r",
+            wallet,
+            effective_proxy_wallet,
+            str(exc),
+            cached_trader_rank,
+        )
+
+    effective_trader_rank = (
+        live_trader_rank if trader_rank_lookup_succeeded else cached_trader_rank
+    )
+    has_rank = _has_valid_polymarket_rank(effective_trader_rank)
+    logger.info(
+        "Polymarket trader-rank mint gate: wallet=%s live_ok=%s live_rank=%r "
+        "cached_rank=%r effective_rank=%r has_rank=%s",
+        wallet,
+        trader_rank_lookup_succeeded,
+        live_trader_rank,
+        cached_trader_rank,
+        effective_trader_rank,
+        has_rank,
+    )
+    if not has_rank:
+        raise HTTPException(
+            status_code=403,
+            detail="Wallet has no Polymarket trader rank — minting is not allowed.",
+        )
+
     try:
         season_id = int(payload.season_id)
     except Exception:
@@ -2560,6 +2641,20 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
         return mint_service.run_queue_mint_request(mint_request)
     except HTTPException:
         raise
+    except ValueError as exc:
+        # ``run_queue_mint_request`` raises ValueError for predictable user-
+        # facing rejections: "Wallet is non-origin but phase='vault'", "user
+        # wallet already has an active claim in this season", "season pool
+        # exhausted", phase detection / enum errors, invalid recipient, etc.
+        # Surface the message verbatim so the dashboard can show the real
+        # reason instead of a generic "try again later".
+        logger.info(
+            "Mint rejected for wallet=%s season_id=%s: %s",
+            wallet,
+            season_id,
+            exc,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     except Exception:
         logger.exception(
             "Mint failed for wallet=%s season_id=%s",
@@ -2570,5 +2665,211 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
             status_code=503,
             detail="Mint could not be completed. Please try again later.",
         ) from None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /api/me/cards — owned-on-chain PolyStars NFTs for the signed-in wallet
+# ──────────────────────────────────────────────────────────────────────────────
+# Source of truth is on-chain ownership on the configured EVM contract
+# (Sepolia in test, Ethereum mainnet in prod). For each COMPLETED claim that
+# names this wallet (recipient_address with fallback to user_wallet for
+# legacy rows), we call ``ownerOf(tokenId)`` and only return claims whose
+# token is still held by the wallet. Transferred-away NFTs disappear; burnt
+# tokens disappear (ownerOf reverts → filtered out).
+#
+# Replaces a previous Solana/Metaplex DAS-based implementation removed in the
+# Solana-cleanup commit; the response shape matches the frontend's
+# ``MyMintedNftsResponse`` so the dashboard component is unchanged.
+
+# In-memory cache so dashboard refreshes don't hammer the RPC. TTL is
+# intentionally short (default 30s) — on-chain transfers are rare but when
+# they happen the user expects the panel to update quickly.
+_ME_CARDS_CACHE_TTL_SECONDS = max(0, int(os.environ.get("USER_WEB_ME_CARDS_TTL_SECONDS", "30") or 30))
+_ME_CARDS_LOOKUP_PARALLELISM = max(1, int(os.environ.get("USER_WEB_ME_CARDS_LOOKUP_PARALLELISM", "8") or 8))
+_ME_CARDS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_ME_CARDS_CACHE_LOCK = threading.Lock()
+
+
+def _me_cards_cache_get(wallet_lower: str) -> Optional[Dict[str, Any]]:
+    if _ME_CARDS_CACHE_TTL_SECONDS <= 0:
+        return None
+    now = monotonic()
+    with _ME_CARDS_CACHE_LOCK:
+        entry = _ME_CARDS_CACHE.get(wallet_lower)
+        if entry and entry[0] > now:
+            return entry[1]
+    return None
+
+
+def _me_cards_cache_set(wallet_lower: str, payload: Dict[str, Any]) -> None:
+    if _ME_CARDS_CACHE_TTL_SECONDS <= 0:
+        return
+    with _ME_CARDS_CACHE_LOCK:
+        _ME_CARDS_CACHE[wallet_lower] = (
+            monotonic() + _ME_CARDS_CACHE_TTL_SECONDS,
+            payload,
+        )
+
+
+# Selects all candidate claim rows that name the signed-in wallet, either as
+# the explicit recipient (queue-model rows) or — for legacy rows that don't
+# carry recipient_address — as the user_wallet. ``%s`` is the lowercased
+# wallet, bound twice. Only COMPLETED rows with a real asset_address are
+# considered; QUEUED/PROCESSING/FAILED rows have no on-chain identity.
+_ME_CARDS_CLAIMS_SQL = """
+SELECT
+    c.id                       AS claim_id,
+    c.asset_address            AS asset_address,
+    c.tx_hash                  AS tx_hash,
+    c.metadata_uri             AS metadata_uri,
+    c.season_id                AS season_id,
+    s.type                     AS season_type,
+    s.season_number            AS season_number,
+    c.phase_type               AS phase,
+    c.collection_mint_number   AS collection_mint_number,
+    c.card_title               AS name,
+    c.front_image_url          AS front_image_url,
+    c.back_image_url           AS back_image_url,
+    c.card_slug                AS card_slug,
+    c.timestamp                AS minted_at
+FROM claims c
+LEFT JOIN seasons s ON s.id = c.season_id
+WHERE c.status = 'COMPLETED'
+  AND c.asset_address IS NOT NULL
+  AND c.asset_address <> ''
+  AND (
+        LOWER(c.recipient_address) = %s
+     OR (c.recipient_address IS NULL AND LOWER(c.user_wallet) = %s)
+      )
+ORDER BY c.timestamp DESC NULLS LAST, c.id DESC
+"""
+
+
+def _serialize_minted_at(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    return str(value)
+
+
+@app.get("/api/me/cards")
+def me_cards(request: Request) -> Dict[str, Any]:
+    """Return PolyStars NFTs currently owned on-chain by the signed-in wallet.
+
+    See module-level comment above for the full contract: source of truth is
+    ``ownerOf(tokenId)`` on the configured EVM contract; the local
+    ``claims`` table provides only candidate claims and denormalized card
+    metadata. Cached briefly per wallet to spare the RPC.
+    """
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+
+    cached = _me_cards_cache_get(wallet)
+    if cached is not None:
+        return {**cached, "cached": True}
+
+    # Lazy import: avoids pulling web3/evm_service into modules that don't
+    # need it and keeps test conftest stubs simpler.
+    try:
+        from scripts.evm_service import (
+            EvmReader,
+            etherscan_nft_url,
+            etherscan_tx_url,
+            parse_asset_address,
+        )
+    except Exception:
+        logger.exception("Failed to import evm_service for /api/me/cards")
+        raise HTTPException(status_code=503, detail="On-chain verification unavailable") from None
+
+    try:
+        reader = EvmReader()
+    except Exception as exc:
+        logger.exception("EvmReader init failed for /api/me/cards: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="On-chain verification unavailable — EVM contract not configured.",
+        ) from None
+
+    contract_address_lower = reader.contract_address.lower()
+    chain_id = reader.chain_id
+
+    conn = _get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(_ME_CARDS_CLAIMS_SQL, (wallet, wallet))
+            db_rows = [dict(row) for row in cursor.fetchall()]
+    except Exception:
+        logger.exception("Failed to load minted claims for wallet=%s", wallet)
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable") from None
+    finally:
+        conn.close()
+
+    # Pre-filter: keep only rows that point to the configured contract and
+    # have a parseable token_id. Skipping legacy rows whose asset_address
+    # references a different contract is a defense-in-depth check — it
+    # prevents a renamed/migrated contract address from falsely showing
+    # someone else's tokens that happen to share the same id space.
+    candidates: List[Tuple[Dict[str, Any], int]] = []
+    for row in db_rows:
+        asset_address = str(row.get("asset_address") or "").strip()
+        contract_part, token_id = parse_asset_address(asset_address)
+        if token_id is None:
+            continue
+        if contract_part:
+            try:
+                contract_part_norm = Web3.to_checksum_address(contract_part).lower()
+            except Exception:
+                continue
+            if contract_part_norm != contract_address_lower:
+                continue
+        candidates.append((row, token_id))
+
+    if candidates:
+        max_workers = min(_ME_CARDS_LOOKUP_PARALLELISM, len(candidates))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            owners = list(pool.map(reader.owner_of, [tid for _, tid in candidates]))
+    else:
+        owners = []
+
+    items: List[Dict[str, Any]] = []
+    for (row, token_id), on_chain_owner in zip(candidates, owners):
+        if not on_chain_owner or on_chain_owner.lower() != wallet:
+            continue
+        tx_hash = str(row.get("tx_hash") or "").strip() or None
+        items.append({
+            "claim_id": int(row["claim_id"]),
+            "asset_address": str(row.get("asset_address") or "").strip(),
+            "tx_hash": tx_hash,
+            "metadata_uri": (str(row["metadata_uri"]).strip() or None) if row.get("metadata_uri") else None,
+            "season_id": row.get("season_id"),
+            "season_type": (str(row["season_type"]).strip() or None) if row.get("season_type") else None,
+            "season_number": row.get("season_number"),
+            "phase": (str(row["phase"]).strip() or None) if row.get("phase") else None,
+            "collection_mint_number": row.get("collection_mint_number"),
+            "name": (str(row["name"]).strip() or None) if row.get("name") else None,
+            "front_image_url": (str(row["front_image_url"]).strip() or None) if row.get("front_image_url") else None,
+            "back_image_url": (str(row["back_image_url"]).strip() or None) if row.get("back_image_url") else None,
+            "card_slug": (str(row["card_slug"]).strip() or None) if row.get("card_slug") else None,
+            "explorer_asset_url": etherscan_nft_url(reader.contract_address, token_id, chain_id),
+            "explorer_tx_url": etherscan_tx_url(tx_hash, chain_id) if tx_hash else None,
+            "minted_at": _serialize_minted_at(row.get("minted_at")),
+        })
+
+    payload = {
+        "wallet_address": wallet,
+        "contract_address": reader.contract_address,
+        "chain_id": chain_id,
+        "items": items,
+        "total": len(items),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "source": "onchain",
+    }
+    _me_cards_cache_set(wallet, payload)
+    return payload
 
 
