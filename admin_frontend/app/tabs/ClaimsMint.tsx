@@ -21,6 +21,52 @@ type ClaimsMintableSummary = {
   };
 };
 
+type GasTracker =
+  | {
+      ok: true;
+      fetched_at: string;
+      cache_ttl_seconds: number;
+      api_key_present: boolean;
+      gas_estimate: number;
+      base_fee_gwei: number;
+      safe_gwei: number;
+      propose_gwei: number;
+      rapid_gwei: number;
+      eth_usd: number;
+      safe_eth: number;
+      safe_usd: number;
+      propose_eth: number;
+      propose_usd: number;
+      rapid_eth: number;
+      rapid_usd: number;
+    }
+  | { ok: false; error: string; fetched_at: string };
+
+function fmtGwei(n: number): string {
+  if (n >= 100) return n.toFixed(0);
+  if (n >= 10) return n.toFixed(1);
+  if (n >= 1) return n.toFixed(2);
+  return n.toFixed(3);
+}
+
+function fmtEthSmall(n: number): string {
+  if (n >= 0.01) return n.toFixed(4);
+  if (n >= 0.0001) return n.toFixed(6);
+  return n.toExponential(2);
+}
+
+function fmtUsd(n: number): string {
+  if (n >= 100) return `$${n.toFixed(0)}`;
+  if (n >= 1) return `$${n.toFixed(2)}`;
+  return `$${n.toFixed(3)}`;
+}
+
+function gwei_class(gwei: number): string {
+  if (gwei >= 50) return "supply-meter-red";
+  if (gwei >= 15) return "supply-meter-yellow";
+  return "supply-meter-green";
+}
+
 function pctClass(numerator: number, denominator: number | null | undefined): string {
   if (!denominator || denominator <= 0) return "supply-meter-zero";
   const pct = (numerator / denominator) * 100;
@@ -116,6 +162,21 @@ const [claimRecipient, setClaimRecipient] = useState("");
   const [serverNowBaseMs, setServerNowBaseMs] = useState<number | null>(null);
   const [clientNowAtSyncMs, setClientNowAtSyncMs] = useState<number | null>(null);
   const [syncedNowMs, setSyncedNowMs] = useState<number | null>(null);
+  const [gasTracker, setGasTracker] = useState<GasTracker | null>(null);
+  const [gasTrackerLoading, setGasTrackerLoading] = useState(false);
+
+  const refreshGasTracker = async () => {
+    setGasTrackerLoading(true);
+    try {
+      const data = await fetchJSON<GasTracker>("/api/gas-tracker/eth-mint");
+      setGasTracker(data);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setGasTracker({ ok: false, error: message, fetched_at: new Date().toISOString() });
+    } finally {
+      setGasTrackerLoading(false);
+    }
+  };
 
   const claimSeasonInfoLines = useMemo(() => claimSeasonInfo.split("\n"), [claimSeasonInfo]);
 
@@ -212,6 +273,14 @@ const [claimRecipient, setClaimRecipient] = useState("");
     return () => window.clearInterval(timer);
   }, [serverNowBaseMs, clientNowAtSyncMs]);
 
+  useEffect(() => {
+    void refreshGasTracker();
+    const timer = window.setInterval(() => {
+      void refreshGasTracker();
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   return (
     <section className="panel">
       <div className="row">
@@ -247,6 +316,63 @@ const [claimRecipient, setClaimRecipient] = useState("");
         </select>
         <label>Recipient</label>
         <input value={claimRecipient} onChange={(e) => setClaimRecipient(e.target.value)} style={{ minWidth: 420 }} />
+      </div>
+      <div className="mint-summary" style={{ marginTop: 8 }}>
+        <div className="mint-summary-row">
+          <div
+            className="mint-summary-label"
+            title="Live Ethereum mainnet gas prices from Etherscan, multiplied by the configured gas estimate for one mintTo() call. Set EVM_MINT_GAS_ESTIMATE to override the default 165 000 units. Cached server-side for 15 s."
+          >
+            Mainnet mint cost (rapid)
+          </div>
+          {gasTracker == null ? (
+            <div className="mint-summary-value muted">
+              {gasTrackerLoading ? "Loading gas tracker..." : "—"}
+            </div>
+          ) : !gasTracker.ok ? (
+            <div className="mint-summary-value">
+              <span className="supply-meter-red mint-summary-pct">tracker unavailable</span>
+              <span className="muted" style={{ marginLeft: 8 }}>{gasTracker.error}</span>
+              <button
+                style={{ marginLeft: 8 }}
+                disabled={gasTrackerLoading}
+                onClick={() => void refreshGasTracker()}
+              >
+                {gasTrackerLoading ? "..." : "Retry"}
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="mint-summary-value">
+                <strong>{fmtEthSmall(gasTracker.rapid_eth)} ETH</strong>
+                <span className={`mint-summary-pct ${gwei_class(gasTracker.rapid_gwei)}`}>
+                  {fmtUsd(gasTracker.rapid_usd)}
+                </span>
+              </div>
+              <div className="mint-summary-detail muted">
+                <span className={gwei_class(gasTracker.rapid_gwei).replace("supply-meter-", "")}>
+                  rapid {fmtGwei(gasTracker.rapid_gwei)} gwei
+                </span>
+                {" · "}
+                propose {fmtGwei(gasTracker.propose_gwei)} gwei
+                {" · "}
+                safe {fmtGwei(gasTracker.safe_gwei)} gwei
+                {" · "}
+                base {fmtGwei(gasTracker.base_fee_gwei)} gwei
+                {" · "}
+                ETH ${gasTracker.eth_usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                {" · "}
+                gas units {gasTracker.gas_estimate.toLocaleString("en-US")}
+                {" · "}
+                <span title={`Last fetched ${gasTracker.fetched_at}`}>
+                  refreshes every 15s
+                  {gasTracker.api_key_present ? "" : " (no ETHERSCAN_API_KEY)"}
+                </span>
+                {gasTrackerLoading ? <span style={{ marginLeft: 6 }}>↻</span> : null}
+              </div>
+            </>
+          )}
+        </div>
       </div>
       {claimMintableSummary ? (
         <div className="mint-summary">

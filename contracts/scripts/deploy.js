@@ -12,7 +12,7 @@ async function main() {
   const TREASURY = process.env.TREASURY_ADDRESS || deployer.address;
   const MINTER   = process.env.MINTER_ADDRESS   || deployer.address;
 
-  const ROYALTY_BPS  = Number(process.env.ROYALTY_BPS || 500); // 5%
+  const ROYALTY_BPS  = Number(process.env.ROYALTY_BPS || 400); // 4%
   const CONTRACT_URI = process.env.CONTRACT_METADATA_URI || "https://gateway.pinata.cloud/ipfs/REPLACE_ME";
 
   const Factory  = await ethers.getContractFactory("SLOPNFT");

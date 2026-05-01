@@ -74,7 +74,12 @@
       "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_IS_GENESIS=false POLYSTARS_START_DATE=2024-07-06 POLYSTARS_END_DATE=2026-01-05 POLYSTARS_MIN_VOLUME=100000000 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)",
       "Bash(PYTHONIOENCODING=utf-8 POLYSTARS_IS_GENESIS=true POLYSTARS_START_DATE=2024-06-01 POLYSTARS_END_DATE=2026-03-20 POLYSTARS_MIN_VOLUME=100000000 venv/Scripts/python.exe scripts/fetch/fetch_events_parallel_optimized.py)",
       "Bash(bash -n scripts/cron/docker-entrypoint-scheduler.sh)",
-      "Bash(awk '/def.*me.*card|def.*my.*card|@app\\\\.get.*me.*card/,/^def / {print NR\": \"$0}' user_web_backend/main.py)"
+      "Bash(awk '/def.*me.*card|def.*my.*card|@app\\\\.get.*me.*card/,/^def / {print NR\": \"$0}' user_web_backend/main.py)",
+      "WebFetch(domain:etherscan.io)",
+      "PowerShell(venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('admin_backend/main.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "PowerShell(python -c \"import ast; ast.parse\\(open\\('admin_backend/main.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('scripts/daily_scheduler_simple.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('scripts/gas_tracker.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "PowerShell($root=\"C:\\\\Users\\\\AgvanD\\\\Desktop\\\\University\\\\QM\\\\PolyStars\"; python -c \"import ast,sys; [ast.parse\\(open\\(p,encoding='utf-8'\\).read\\(\\)\\) for p in [r'$root\\\\admin_backend\\\\main.py', r'$root\\\\scripts\\\\daily_scheduler_simple.py', r'$root\\\\scripts\\\\gas_tracker.py']]; print\\('OK'\\)\")",
+      "Bash(./venv/Scripts/python.exe -m pytest tests/ --tb=short -q)"
     ]
   },
   "enabledMcpjsonServers": [

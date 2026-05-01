@@ -164,6 +164,23 @@ MINT_QUEUE_STALE_PROCESSING_MINUTES = _env_int(
     30,
 )
 
+# Price gate: skip pickup whenever the estimated rapid-tier cost of one mintTo()
+# call exceeds this USD threshold. The cron now ticks every 5 minutes, so a
+# pause here just means the next tick re-checks Etherscan. Within a single
+# invocation the gate is re-evaluated on every iteration — after a successful
+# mint the loop immediately re-fetches the tracker and either proceeds with
+# the next QUEUED row or breaks out, so a cheap window drains as many claims
+# as the batch size allows without waiting for cron.
+def _mint_queue_max_usd_per_mint() -> float:
+    raw = (os.getenv("MINT_QUEUE_MAX_USD_PER_MINT") or "").strip()
+    if not raw:
+        return 0.5
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0.5
+    return value if value > 0 else 0.5
+
 
 # ==========================================
 # LOGGING SETUP
@@ -2454,7 +2471,51 @@ class SimplifiedScheduler:
             processed = completed = failed = 0
             per_claim_results: List[Dict[str, Any]] = []
 
+            from scripts.gas_tracker import (
+                fetch_eth_mint_gas_tracker,
+                GasTrackerSnapshot,
+            )
+
+            price_gate_threshold_usd = _mint_queue_max_usd_per_mint()
+            price_gate_enabled = _env_bool("MINT_QUEUE_PRICE_GATE_ENABLED", True)
+            price_gate_skipped = False
+            price_gate_reason: Optional[str] = None
+            print(
+                f"💰 Price gate: enabled={price_gate_enabled} "
+                f"max_usd_per_mint=${price_gate_threshold_usd:.4f}"
+            )
+
             for _ in range(max_claims):
+                # Price gate — re-checked on every iteration so a successful mint
+                # is followed by another fresh check before the next pickup.
+                if price_gate_enabled:
+                    try:
+                        snap: GasTrackerSnapshot = fetch_eth_mint_gas_tracker()
+                    except Exception as gate_exc:
+                        price_gate_skipped = True
+                        price_gate_reason = f"gas tracker unavailable: {gate_exc}"
+                        print(
+                            f"⏸️  Price gate: skipping batch — {price_gate_reason}"
+                        )
+                        break
+                    rapid_usd = snap.rapid_usd
+                    if rapid_usd > price_gate_threshold_usd:
+                        price_gate_skipped = True
+                        price_gate_reason = (
+                            f"rapid mint cost ${rapid_usd:.4f} "
+                            f"> threshold ${price_gate_threshold_usd:.4f} "
+                            f"(rapid={snap.rapid_gwei:.3f} gwei, "
+                            f"ETH=${snap.eth_usd:.2f}, "
+                            f"gas_units={snap.gas_estimate})"
+                        )
+                        print(f"⏸️  Price gate: {price_gate_reason} — waiting for next cron tick")
+                        break
+                    print(
+                        f"   ✅ Price gate: rapid mint cost ${rapid_usd:.4f} "
+                        f"≤ ${price_gate_threshold_usd:.4f} "
+                        f"(rapid={snap.rapid_gwei:.3f} gwei, ETH=${snap.eth_usd:.2f})"
+                    )
+
                 # Atomic claim pickup: FOR UPDATE SKIP LOCKED + transition to PROCESSING.
                 conn = self.manager.get_connection()
                 row: Optional[Dict[str, Any]] = None
@@ -2733,6 +2794,7 @@ class SimplifiedScheduler:
             print(
                 f"\n✅ Mint queue worker done in {duration:.1f}s — "
                 f"processed={processed} completed={completed} failed={failed}"
+                + (f" (price gate: {price_gate_reason})" if price_gate_skipped else "")
             )
             return {
                 'success': True,
@@ -2741,6 +2803,12 @@ class SimplifiedScheduler:
                 'completed': completed,
                 'failed': failed,
                 'per_claim': per_claim_results,
+                'price_gate': {
+                    'enabled': price_gate_enabled,
+                    'threshold_usd': price_gate_threshold_usd,
+                    'short_circuited': price_gate_skipped,
+                    'reason': price_gate_reason,
+                },
             }
         finally:
             try:

@@ -1,1 +1,8 @@
-почему 329 из 333, если всего было 2 минта
+            elif status in ("QUEUED", "PENDING"):
+                ineligible_reason = (
+                    f"Mint queued (claim #{claim_id})"
+                    if claim_id is not None
+                    else "Mint queued"
+                )
+
+                решить этот вопрос

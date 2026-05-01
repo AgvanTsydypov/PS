@@ -85,9 +85,14 @@ CLEANUP_SCHEDULE="0 3 * * 0"
 CLEANUP_SCRIPT="$PROJECT_DIR/scripts/utils/cleanup_old_logs.py"
 CLEANUP_LOG="$PROJECT_DIR/logs/cleanup.log"
 
-# Job 5: Mint queue worker (hourly, on the hour). Decoupled from the
-# daily pipeline so claims queued mid-day get minted within ~1h.
-MINT_QUEUE_SCHEDULE="0 * * * *"
+# Job 5: Mint queue worker (every 5 minutes). Decoupled from the daily
+# pipeline so claims queued mid-day get minted within ~5 min. The worker
+# itself enforces a USD price gate on every iteration (see
+# MINT_QUEUE_MAX_USD_PER_MINT, default $0.50): if mainnet rapid gas pushes
+# the per-mint cost above the threshold the batch short-circuits and the
+# next 5-min tick re-checks. The advisory lock inside the worker prevents
+# overlapping ticks if a batch runs longer than the cadence.
+MINT_QUEUE_SCHEDULE="*/5 * * * *"
 MINT_QUEUE_BATCH_SIZE="${MINT_QUEUE_HOURLY_BATCH_SIZE:-100}"
 MINT_QUEUE_LOG="$PROJECT_DIR/logs/mint_queue.log"
 
@@ -109,7 +114,7 @@ crontab -r 2>/dev/null || true
   echo "# Weekly log cleanup - keep 14 days (3:00 AM UTC every Sunday)"
   echo "$CLEANUP_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $CLEANUP_SCRIPT --keep-days 14 2>&1 | tee -a $CLEANUP_LOG"
   echo ""
-  echo "# Mint queue worker (every hour at :00)"
+  echo "# Mint queue worker (every 5 minutes; price-gated by MINT_QUEUE_MAX_USD_PER_MINT)"
   echo "$MINT_QUEUE_SCHEDULE . /app/cron_env.sh 2>/dev/null; cd $PROJECT_DIR && $PYTHON_BIN $SCHEDULER_SCRIPT --process-mint-queue --mint-queue-batch-size $MINT_QUEUE_BATCH_SIZE 2>&1 | tee -a $MINT_QUEUE_LOG"
 ) | crontab -
 
@@ -118,7 +123,7 @@ echo "   Season update: $SEASON_UPDATE_SCHEDULE (00:00 AM UTC)"
 echo "   Preflight low-volume cleanup: $PREFLIGHT_SCHEDULE (1:30 AM UTC)"
 echo "   Daily pipeline: $DAILY_SCHEDULE (2:00 AM UTC)"
 echo "   Weekly cleanup: $CLEANUP_SCHEDULE (3:00 AM UTC every Sunday)"
-echo "   Mint queue worker: $MINT_QUEUE_SCHEDULE (every hour, batch=$MINT_QUEUE_BATCH_SIZE)"
+echo "   Mint queue worker: $MINT_QUEUE_SCHEDULE (every 5 min, batch=$MINT_QUEUE_BATCH_SIZE, USD price-gated)"
 echo ""
 crontab -l
 
@@ -135,7 +140,7 @@ echo "   • Season update: 00:00 AM UTC"
 echo "   • Preflight low-volume cleanup: 01:30 AM UTC"
 echo "   • Daily pipeline: 2:00 AM UTC"
 echo "   • Log cleanup: 3:00 AM UTC (Sundays)"
-echo "   • Mint queue worker: every hour at :00"
+echo "   • Mint queue worker: every 5 minutes (price-gated; MINT_QUEUE_MAX_USD_PER_MINT default \$0.50)"
 echo ""
 echo "📝 Logs:"
 echo "   • Season update: /app/logs/season_update.log"
