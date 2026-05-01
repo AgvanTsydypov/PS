@@ -986,7 +986,7 @@ export default function UserDashboard() {
       let pillLabel = "";
       let pillClass = "season-mint-pill";
       if (status === "QUEUED" || status === "PENDING") {
-        pillLabel = `Mint queued${claimSuffix} — awaiting next worker run`;
+        pillLabel = `Mint queued${claimSuffix}`;
         pillClass += " season-mint-pill-queued";
       } else if (status === "PROCESSING") {
         pillLabel = `Mint in progress${claimSuffix} — on-chain transaction pending`;

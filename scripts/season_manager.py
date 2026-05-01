@@ -506,9 +506,9 @@ class SeasonManager:
                 )
             elif status in ("QUEUED", "PENDING"):
                 ineligible_reason = (
-                    f"Mint queued (claim #{claim_id}) — awaiting next worker run"
+                    f"Mint queued (claim #{claim_id})"
                     if claim_id is not None
-                    else "Mint queued — awaiting next worker run"
+                    else "Mint queued"
                 )
             else:
                 ineligible_reason = "User already claimed (or has active claim) in current season"

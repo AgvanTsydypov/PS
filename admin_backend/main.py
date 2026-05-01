@@ -2338,6 +2338,57 @@ def master_collection() -> Dict[str, str]:
     return {"address": address, "explorer_url": explorer_url}
 
 
+_GAS_TRACKER_CACHE: Dict[str, Any] = {"value": None, "expires_at": 0.0}
+_GAS_TRACKER_LOCK = threading.Lock()
+_GAS_TRACKER_TTL_SECONDS = 15.0
+
+
+@app.get("/api/gas-tracker/eth-mint")
+def gas_tracker_eth_mint() -> Dict[str, Any]:
+    """
+    Mainnet gas + ETH price + estimated cost of one mintTo() call.
+    Cached server-side for ~15s. Requires ETHERSCAN_API_KEY (Etherscan API V2);
+    override gas units via EVM_MINT_GAS_ESTIMATE (default 165000).
+    """
+    from scripts.gas_tracker import fetch_eth_mint_gas_tracker
+
+    now = monotonic()
+    with _GAS_TRACKER_LOCK:
+        cached = _GAS_TRACKER_CACHE.get("value")
+        if cached is not None and _GAS_TRACKER_CACHE.get("expires_at", 0.0) > now:
+            return cached
+    try:
+        snap = fetch_eth_mint_gas_tracker()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+    payload = {
+        "ok": True,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "cache_ttl_seconds": int(_GAS_TRACKER_TTL_SECONDS),
+        "api_key_present": True,
+        "gas_estimate": snap.gas_estimate,
+        "base_fee_gwei": snap.base_fee_gwei,
+        "safe_gwei": snap.safe_gwei,
+        "propose_gwei": snap.propose_gwei,
+        "rapid_gwei": snap.rapid_gwei,
+        "eth_usd": snap.eth_usd,
+        "safe_eth": snap.safe_eth,
+        "safe_usd": snap.safe_usd,
+        "propose_eth": snap.propose_eth,
+        "propose_usd": snap.propose_usd,
+        "rapid_eth": snap.rapid_eth,
+        "rapid_usd": snap.rapid_usd,
+    }
+    with _GAS_TRACKER_LOCK:
+        _GAS_TRACKER_CACHE["value"] = payload
+        _GAS_TRACKER_CACHE["expires_at"] = monotonic() + _GAS_TRACKER_TTL_SECONDS
+    return payload
+
+
 @app.get("/api/event-cards")
 def get_event_cards(
     limit: int = 500,
