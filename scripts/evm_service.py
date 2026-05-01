@@ -32,7 +32,7 @@ PINATA_API_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
 PINATA_UNPIN_API_URL = "https://api.pinata.cloud/pinning/unpin"
 PINATA_GATEWAY_PREFIX = "https://gateway.pinata.cloud/ipfs/"
 
-# ── contract ABI (mintTo + batchMintTo + Transfer event) ──────────────────────
+# ── contract ABI (PolyStarsNFT: mintTo + Transfer event + ownerOf) ────────────
 _MINT_ABI: list[dict] = [
     {
         "inputs": [
@@ -45,16 +45,6 @@ _MINT_ABI: list[dict] = [
         "type": "function",
     },
     {
-        "inputs": [
-            {"internalType": "address[]", "name": "recipients", "type": "address[]"},
-            {"internalType": "string[]",  "name": "uris",       "type": "string[]"},
-        ],
-        "name": "batchMintTo",
-        "outputs": [{"internalType": "uint256", "name": "firstTokenId", "type": "uint256"}],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    },
-    {
         "anonymous": False,
         "inputs": [
             {"indexed": True, "internalType": "address",  "name": "from",    "type": "address"},
@@ -62,15 +52,6 @@ _MINT_ABI: list[dict] = [
             {"indexed": True, "internalType": "uint256",  "name": "tokenId", "type": "uint256"},
         ],
         "name": "Transfer",
-        "type": "event",
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True,  "internalType": "uint256", "name": "firstTokenId", "type": "uint256"},
-            {"indexed": False, "internalType": "uint256", "name": "count",        "type": "uint256"},
-        ],
-        "name": "BatchMinted",
         "type": "event",
     },
     {
@@ -134,7 +115,7 @@ class MintedNftResult:
 
 
 class EvmClient:
-    """Mint ERC-721A NFTs on Ethereum via a contract with mintTo(address, string)."""
+    """Mint ERC-721 NFTs on Ethereum via SLOPNFT.mintTo(address, string)."""
 
     DEFAULT_RPC_URL = "https://rpc.sepolia.org"
     GAS_MULTIPLIER = 1.3
@@ -194,7 +175,7 @@ class EvmClient:
         winner_context: dict[str, Any] | None = None,
         polystars_card: dict[str, Any] | None = None,
     ) -> MintedNftResult:
-        """Mint one ERC-721A NFT to user_wallet_address and return on-chain artefacts."""
+        """Mint one ERC-721 NFT to user_wallet_address and return on-chain artefacts."""
         recipient = Web3.to_checksum_address(user_wallet_address.strip())
         self.validate_contract()
 
@@ -231,81 +212,6 @@ class EvmClient:
             explorer_asset_url=self._etherscan_nft_url(token_id, chain_id),
         )
 
-    def batch_mint_nfts(
-        self,
-        items: list[dict[str, Any]],
-    ) -> list[MintedNftResult]:
-        """
-        Mint up to 100 NFTs in one transaction via batchMintTo().
-        Each item in `items` must have keys:
-            recipient_address : str   — EVM wallet to receive the NFT
-            season_name       : str
-            claim_id          : int
-            collection_mint_number : int
-            winner_context    : dict | None
-            polystars_card    : dict | None
-
-        Returns one MintedNftResult per item, all sharing the same tx_hash.
-        """
-        if not items:
-            raise ValueError("items list is empty")
-        if len(items) > 100:
-            raise ValueError("batch_mint_nfts: max 100 items per call")
-
-        self.validate_contract()
-
-        recipients: list[str] = []
-        metadata_uris: list[str] = []
-        nft_names: list[str] = []
-        resolved_claim_ids: list[int] = []
-
-        for item in items:
-            recipient = Web3.to_checksum_address(str(item["recipient_address"]).strip())
-            resolved_claim_id = int(item.get("claim_id") or time.time())
-            nft_number = int(
-                item["collection_mint_number"]
-                if item.get("collection_mint_number") is not None
-                else resolved_claim_id
-            )
-            nft_name = f"SLOP TEST {item['season_name']} #{nft_number}"
-
-            metadata_uri = self._build_metadata_uri(
-                nft_name=nft_name,
-                season_name=str(item["season_name"]),
-                winner_context=item.get("winner_context"),
-                polystars_card=item.get("polystars_card"),
-            )
-            recipients.append(recipient)
-            metadata_uris.append(metadata_uri)
-            nft_names.append(nft_name)
-            resolved_claim_ids.append(resolved_claim_id)
-
-        try:
-            first_token_id, tx_hash = self._send_batch_mint_tx(
-                recipients=recipients,
-                metadata_uris=metadata_uris,
-            )
-        except Exception:
-            for uri in metadata_uris:
-                self._unpin_pinata_url(uri)
-            raise
-
-        chain_id = self._chain_id or self.w3.eth.chain_id
-        results: list[MintedNftResult] = []
-        for i, item in enumerate(items):
-            token_id = first_token_id + i
-            asset_address = f"{self._contract_address}/{token_id}"
-            results.append(MintedNftResult(
-                claim_id=resolved_claim_ids[i],
-                asset_address=asset_address,
-                tx_hash=tx_hash,
-                nft_name=nft_names[i],
-                metadata_uri=metadata_uris[i],
-                explorer_tx_url=self._etherscan_tx_url(tx_hash, chain_id),
-                explorer_asset_url=self._etherscan_nft_url(token_id, chain_id),
-            ))
-        return results
-
     # ── transaction ────────────────────────────────────────────────────────────
 
     def _send_mint_tx(self, recipient: str, metadata_uri: str) -> tuple[int, str]:
@@ -339,58 +245,6 @@ class EvmClient:
         token_id = self._extract_token_id(receipt)
         tx_hash_hex = receipt["transactionHash"].hex()
         return token_id, tx_hash_hex if tx_hash_hex.startswith("0x") else f"0x{tx_hash_hex}"
-
-    def _send_batch_mint_tx(
-        self,
-        recipients: list[str],
-        metadata_uris: list[str],
-    ) -> tuple[int, str]:
-        """Call batchMintTo(recipients, uris). Returns (firstTokenId, tx_hash)."""
-        chain_id = self._chain_id or self.w3.eth.chain_id
-        nonce = self.w3.eth.get_transaction_count(self._account.address, "pending")
-        fn = self._contract.functions.batchMintTo(recipients, metadata_uris)
-
-        try:
-            gas_estimate = fn.estimate_gas({"from": self._account.address})
-        except ContractLogicError as exc:
-            raise RuntimeError(f"batchMintTo call would revert: {exc}") from exc
-
-        gas_limit = int(gas_estimate * self.GAS_MULTIPLIER)
-        tx = self._build_tx(fn=fn, nonce=nonce, gas_limit=gas_limit, chain_id=chain_id)
-        signed = self._account.sign_transaction(tx)
-
-        for attempt in range(self.max_retries):
-            try:
-                tx_hash_bytes = self.w3.eth.send_raw_transaction(signed.raw_transaction)
-                break
-            except Exception as exc:
-                if attempt >= self.max_retries - 1 or not self._is_timeout_error(exc):
-                    raise
-                time.sleep(self.retry_delay_seconds * (2 ** attempt))
-
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash_bytes, timeout=180)
-        if receipt["status"] != 1:
-            raise RuntimeError(f"batchMintTo reverted. tx={receipt['transactionHash'].hex()}")
-
-        first_token_id = self._extract_first_token_id_from_batch(receipt)
-        tx_hash_hex = receipt["transactionHash"].hex()
-        return first_token_id, tx_hash_hex if tx_hash_hex.startswith("0x") else f"0x{tx_hash_hex}"
-
-    def _extract_first_token_id_from_batch(self, receipt: Any) -> int:
-        """Read firstTokenId from BatchMinted event."""
-        events = self._contract.events.BatchMinted().process_receipt(receipt)
-        if events:
-            return int(events[0]["args"]["firstTokenId"])
-        # Fallback: find the smallest tokenId among all Transfer(from=0x0) events
-        zero = "0x" + "0" * 40
-        token_ids = [
-            int(e["args"]["tokenId"])
-            for e in self._contract.events.Transfer().process_receipt(receipt)
-            if e["args"]["from"].lower() == zero
-        ]
-        if token_ids:
-            return min(token_ids)
-        raise RuntimeError("Could not determine firstTokenId from batch receipt")
 
     def _build_tx(self, *, fn: Any, nonce: int, gas_limit: int, chain_id: int) -> dict:
         """EIP-1559 preferred; falls back to legacy gasPrice."""
