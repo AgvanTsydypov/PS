@@ -389,9 +389,20 @@ class ClaimsMintMixin:
         conn = self.manager.get_connection()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                # ``is_renumbered`` flags the rare-but-permanent state where
+                # the recovery pass had to renumber a stuck PROCESSING row
+                # because its original cmn collided with a sibling COMPLETED.
+                # The DB row now carries the new cmn, but the on-chain NFT
+                # and the IPFS-pinned card image still reference the old
+                # number — the admin UI surfaces this divergence with a
+                # badge so operators don't think the row is fully consistent.
                 cursor.execute(
                     """
-                    SELECT id, user_wallet, phase_type, status, tx_hash, asset_address, timestamp, created_at
+                    SELECT id, user_wallet, phase_type, status, tx_hash, asset_address,
+                           timestamp, created_at, collection_mint_number,
+                           error_message,
+                           (error_message ILIKE '%[auto-renumbered by recovery%')
+                               AS is_renumbered
                     FROM claims
                     WHERE season_id = %s
                     ORDER BY created_at DESC, id DESC

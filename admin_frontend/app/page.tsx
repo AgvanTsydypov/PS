@@ -39,6 +39,13 @@ type ClaimRow = {
   asset_address?: string;
   timestamp?: string;
   created_at?: string;
+  collection_mint_number?: number | null;
+  // True when the recovery pass had to renumber this row's cmn because
+  // the original number collided with a sibling COMPLETED. The on-chain
+  // NFT and the IPFS-pinned card image still reference the original
+  // (immutable) number — the badge in the UI surfaces this divergence.
+  is_renumbered?: boolean;
+  error_message?: string | null;
 };
 
 type WinnerWalletRow = {
@@ -1655,14 +1662,45 @@ export default function HomePage() {
           <table>
             <thead>
               <tr>
-                <th>id</th><th>wallet</th><th>recipient</th><th>phase</th><th>status</th><th>tx_hash</th><th>asset_address</th><th>timestamp</th><th>created_at</th>
+                <th>id</th><th>wallet</th><th>phase</th><th>status</th><th>cmn</th><th>tx_hash</th><th>asset_address</th><th>timestamp</th><th>created_at</th>
               </tr>
             </thead>
             <tbody>
               {seasonClaimsRows.map((r) => (
                 <tr key={r.id}>
-                  <td>{r.id}</td><td>{r.user_wallet}</td><td>{r.phase_type}</td>
-                  <td>{r.status}</td><td>{r.tx_hash}</td><td>{r.asset_address}</td><td>{r.timestamp}</td><td>{r.created_at}</td>
+                  <td>{r.id}</td>
+                  <td>{r.user_wallet}</td>
+                  <td>{r.phase_type}</td>
+                  <td>{r.status}</td>
+                  <td>
+                    {r.collection_mint_number ?? ""}
+                    {r.is_renumbered ? (
+                      <span
+                        title={
+                          "Recovery renumbered this row's collection_mint_number after a duplicate-key conflict. " +
+                          "The on-chain NFT and the IPFS-pinned card image still reference the ORIGINAL number — " +
+                          "the DB cmn shown here is the corrected one. " +
+                          (r.error_message ?? "")
+                        }
+                        style={{
+                          marginLeft: 6,
+                          padding: "1px 6px",
+                          borderRadius: 4,
+                          background: "#fde68a",
+                          color: "#78350f",
+                          fontSize: "0.75em",
+                          fontWeight: 600,
+                          cursor: "help",
+                        }}
+                      >
+                        renumbered
+                      </span>
+                    ) : null}
+                  </td>
+                  <td>{r.tx_hash}</td>
+                  <td>{r.asset_address}</td>
+                  <td>{r.timestamp}</td>
+                  <td>{r.created_at}</td>
                 </tr>
               ))}
             </tbody>
