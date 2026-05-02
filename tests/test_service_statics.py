@@ -470,24 +470,37 @@ class TestEvmServiceExplorerUrls:
 
 
 # ---------------------------------------------------------------------------
-# collection_mint_number — allocated post-pickup, MAX over COMPLETED.
+# collection_mint_number — allocated post-pickup,
+# MAX over PROCESSING ∪ COMPLETED (with non-null cmn).
 #
-# Old behaviour: a BEFORE-INSERT trigger assigned the next number on every
-# claims INSERT (including QUEUED rows that may never mint). Result: the
-# user-facing "mint #N" inflated past the actual on-chain mint count, so a
-# user could see "you got mint #42" while only 30 NFTs had ever landed.
+# Original behaviour: a BEFORE-INSERT trigger assigned the next number on
+# every claims INSERT (including QUEUED rows that may never mint). Result:
+# the user-facing "mint #N" inflated past the actual on-chain mint count,
+# so a user could see "you got mint #42" while only 30 NFTs had ever
+# landed.
 #
-# New behaviour: the cron worker allocates the number under
+# Intermediate behaviour: the cron worker allocated the number under
 # pg_advisory_xact_lock(season_id) right after pickup using
-# MAX(collection_mint_number) + 1 over COMPLETED rows only. On pre-mint
-# failure the number is cleared back to NULL so the next attempt reuses
-# it cleanly. The card is rendered AFTER allocation, guaranteeing the
-# number printed on the card image and the number in the database row
-# always match.
+# MAX(collection_mint_number) + 1 over COMPLETED rows only. This fixed
+# the inflation bug but introduced a blind-spot race: a claim sitting in
+# PROCESSING (rendered, sometimes already on-chain, but not yet flipped
+# to COMPLETED) was invisible to the next allocator, so two claims could
+# each receive the same cmn baked into their card PNG. Recovery later
+# patched the DB row by renumbering, but the IPFS / on-chain image is
+# immutable — the visual divergence could not be undone.
+#
+# Current behaviour: the worker allocates over PROCESSING ∪ COMPLETED
+# (filtered to rows with collection_mint_number IS NOT NULL — pre-mint
+# FAILED rows are released by NULLing their cmn). This eliminates the
+# blind spot at the cost of leaving gaps when a stuck PROCESSING row is
+# requeued back to QUEUED and its cmn freed. Gaps in numbering are
+# strictly cheaper than two NFTs sharing the same on-chain number on
+# their card image.
 #
 # These tests guard the static SQL strings — a future refactor that
-# accidentally restored the trigger or computed MAX over all rows would
-# silently re-introduce the inflation bug.
+# accidentally restored the trigger, narrowed the predicate back to
+# COMPLETED-only, or widened it to all rows would re-introduce a known
+# bug.
 # ---------------------------------------------------------------------------
 
 
@@ -543,14 +556,22 @@ class TestCollectionMintNumberAllocationPolicy:
         src = self.worker_source
         assert "pg_advisory_xact_lock(9283742, %s)" in src
 
-    def test_worker_allocation_reads_max_over_completed_only(self):
-        """The whole point of the new policy: the next number is
-        ``MAX(collection_mint_number) + 1`` over COMPLETED claims, not over
-        all rows. Computing MAX over QUEUED/PROCESSING/FAILED would re-
-        introduce the inflation bug the change was meant to fix."""
+    def test_worker_allocation_reads_max_over_processing_and_completed(self):
+        """The current policy: the next number is
+        ``MAX(collection_mint_number) + 1`` over PROCESSING ∪ COMPLETED
+        claims (with non-null cmn). Including PROCESSING closes the
+        blind-spot race that let two claims bake the same number onto
+        their card PNG. The non-null filter excludes pre-mint FAILED
+        rows, whose cmn is NULL by the failure path. Widening to all
+        rows would re-introduce the original inflation bug; narrowing
+        back to COMPLETED only would re-introduce the blind-spot race."""
         src = self.worker_source
         assert "FROM   claims" in src or "FROM claims" in src
-        assert "status    = 'COMPLETED'" in src or "status = 'COMPLETED'" in src
+        assert (
+            "status    IN ('PROCESSING', 'COMPLETED')" in src
+            or "status IN ('PROCESSING', 'COMPLETED')" in src
+        )
+        assert "collection_mint_number IS NOT NULL" in src
         assert "COALESCE(MAX(collection_mint_number), 0) + 1" in src
 
     def test_worker_allocation_is_idempotent(self):

@@ -49,6 +49,7 @@ from collections import defaultdict
 from datetime import datetime, date, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from pathlib import Path
+import psycopg2.errors
 import psycopg2.extras
 
 # Add project root to path
@@ -179,7 +180,9 @@ def _mint_queue_max_usd_per_mint() -> float:
         value = float(raw)
     except ValueError:
         return 0.5
-    return value if value > 0 else 0.5
+    # Allow 0 explicitly: treat it as "block every mint" (useful for testing
+    # the gate and for emergency freezes). Only negative values are invalid.
+    return value if value >= 0 else 0.5
 
 
 # ==========================================
@@ -2324,21 +2327,41 @@ class SimplifiedScheduler:
     def _recover_stale_processing(self) -> Dict[str, int]:
         """Heal claims left in PROCESSING by a crashed prior worker run.
 
-        Two cases:
+        Three cases:
 
         * ``tx_hash IS NULL`` — EVM mint never went out, the row never
           touched the chain. Safe to flip back to ``QUEUED`` so the next
           pickup re-attempts it from scratch.
 
-        * ``tx_hash IS NOT NULL`` — EVM mint already happened (the durable
-          tx_hash write committed), only the final ``COMPLETED`` flip
-          didn't land. Re-minting this would be a double-spend; instead
-          finalize it to ``COMPLETED`` with the existing artifacts.
+        * ``tx_hash IS NOT NULL`` and the COMPLETED flip lands cleanly —
+          EVM mint already happened (the durable tx_hash write committed),
+          only the final ``COMPLETED`` flip didn't land. Re-minting this
+          would be a double-spend; finalize it to ``COMPLETED`` with the
+          existing artifacts.
 
-        Both cases gate on ``updated_at < NOW() - INTERVAL 'N minutes'``
+        * ``tx_hash IS NOT NULL`` but the COMPLETED flip violates
+          ``ux_claims_season_collection_mint`` — a sibling claim already
+          finalized with the same ``collection_mint_number``. With the
+          current allocator (``MAX over PROCESSING ∪ COMPLETED``) this
+          should be unreachable for fresh allocations, but it can still
+          fire on legacy rows allocated under the old ``MAX over
+          COMPLETED`` policy or on rows whose cmn was set by a now-
+          removed BEFORE-INSERT trigger. Recovery resolves it by
+          allocating the next free ``MAX(cmn) + 1`` over PROCESSING ∪
+          COMPLETED for the season under ``pg_advisory_xact_lock`` and
+          flipping with the new number. The on-chain NFT keeps its
+          original number — the audit trail of the divergence lives in
+          ``error_message`` and is surfaced by the admin UI as a
+          divergence badge.
+
+        All cases gate on ``updated_at < NOW() - INTERVAL 'N minutes'``
         so an in-flight claim from a sibling worker is never touched.
         """
         threshold_minutes = max(1, int(MINT_QUEUE_STALE_PROCESSING_MINUTES))
+
+        # ── Branch 1: requeue stale PROCESSING rows that never went on-chain.
+        # Bulk UPDATE is safe — no unique-index conflict possible because we
+        # null out collection_mint_number in the same statement.
         conn = self.manager.get_connection()
         try:
             with conn.cursor() as cursor:
@@ -2356,25 +2379,165 @@ class SimplifiedScheduler:
                     """
                 )
                 requeued = cursor.rowcount or 0
-
-                cursor.execute(
-                    f"""
-                    UPDATE claims
-                    SET    status        = 'COMPLETED',
-                           timestamp     = COALESCE(timestamp, NOW()),
-                           error_message = '[auto-completed: tx_hash present on stuck PROCESSING at '
-                                           || NOW()::text || ']',
-                           updated_at    = NOW()
-                    WHERE  status = 'PROCESSING'
-                      AND  tx_hash IS NOT NULL
-                      AND  updated_at < NOW() - INTERVAL '{threshold_minutes} minutes'
-                    """
-                )
-                auto_completed = cursor.rowcount or 0
             conn.commit()
-            return {'requeued': requeued, 'auto_completed': auto_completed}
         finally:
             conn.close()
+
+        # ── Branch 2: auto-finalize stale PROCESSING rows that already
+        # broadcast on-chain. Done per-row so a single conflict on the
+        # unique index doesn't roll back the whole batch (the prior
+        # bulk-UPDATE design left every conflicting row stuck forever).
+        auto_completed = 0
+        renumbered = 0
+        # Hard ceiling so a pathological loop (e.g. constraint we don't
+        # know how to recover from) can never spin forever.
+        max_iterations = 500
+
+        for _ in range(max_iterations):
+            # Pick the next stale-on-chain claim. Re-running this query
+            # each iteration also picks up rows freshly aged past the
+            # threshold during a long recovery pass.
+            conn = self.manager.get_connection()
+            picked: Optional[Dict[str, Any]] = None
+            try:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                    cursor.execute(
+                        f"""
+                        SELECT id, season_id, collection_mint_number
+                        FROM   claims
+                        WHERE  status = 'PROCESSING'
+                          AND  tx_hash IS NOT NULL
+                          AND  updated_at < NOW() - INTERVAL '{threshold_minutes} minutes'
+                        ORDER  BY id
+                        LIMIT  1
+                        """
+                    )
+                    picked = cursor.fetchone()
+            finally:
+                conn.close()
+
+            if not picked:
+                break
+
+            claim_id = int(picked["id"])
+            season_id = int(picked["season_id"])
+            original_cmn = picked.get("collection_mint_number")
+
+            conn = self.manager.get_connection()
+            try:
+                with conn.cursor() as cursor:
+                    # Try the simple flip first. SAVEPOINT lets us recover
+                    # from the unique-violation without aborting the whole
+                    # transaction.
+                    cursor.execute("SAVEPOINT recover_flip")
+                    try:
+                        cursor.execute(
+                            """
+                            UPDATE claims
+                            SET    status        = 'COMPLETED',
+                                   timestamp     = COALESCE(timestamp, NOW()),
+                                   error_message = '[auto-completed: tx_hash present on stuck PROCESSING at '
+                                                   || NOW()::text || ']',
+                                   updated_at    = NOW()
+                            WHERE  id = %s
+                              AND  status = 'PROCESSING'
+                              AND  tx_hash IS NOT NULL
+                            """,
+                            (claim_id,),
+                        )
+                        cursor.execute("RELEASE SAVEPOINT recover_flip")
+                        flip_rowcount = cursor.rowcount or 0
+                        if flip_rowcount == 0:
+                            # Lost the row to a concurrent change (e.g. another
+                            # process flipped it). Skip silently.
+                            conn.commit()
+                            continue
+                        auto_completed += 1
+                        conn.commit()
+                        print(
+                            f"   ✅ Recovery: claim {claim_id} auto-completed "
+                            f"(season {season_id}, cmn={original_cmn})"
+                        )
+                        continue
+                    except psycopg2.errors.UniqueViolation as conflict:
+                        constraint = (
+                            getattr(conflict.diag, "constraint_name", "") or ""
+                        )
+                        if constraint != "ux_claims_season_collection_mint":
+                            # Different unique violation — not ours to fix.
+                            cursor.execute("ROLLBACK TO SAVEPOINT recover_flip")
+                            conn.commit()
+                            print(
+                                f"   ⚠️  Recovery: claim {claim_id} flip hit "
+                                f"unexpected unique violation on '{constraint}' — leaving in PROCESSING"
+                            )
+                            break
+                        cursor.execute("ROLLBACK TO SAVEPOINT recover_flip")
+
+                    # Renumber path: another claim already owns
+                    # ``original_cmn`` in COMPLETED. Allocate the next free
+                    # number under the per-season advisory xact lock so we
+                    # don't race against the regular allocator.
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(9283742, %s)",
+                        (season_id,),
+                    )
+                    cursor.execute(
+                        """
+                        SELECT COALESCE(MAX(collection_mint_number), 0) + 1
+                        FROM   claims
+                        WHERE  season_id = %s
+                          AND  status IN ('PROCESSING', 'COMPLETED')
+                          AND  collection_mint_number IS NOT NULL
+                        """,
+                        (season_id,),
+                    )
+                    new_cmn = int(cursor.fetchone()[0])
+                    cursor.execute(
+                        """
+                        UPDATE claims
+                        SET    collection_mint_number = %s,
+                               status                 = 'COMPLETED',
+                               timestamp              = COALESCE(timestamp, NOW()),
+                               error_message          = '[auto-renumbered by recovery at ' || NOW()::text
+                                                        || ': cmn ' || %s || ' -> ' || %s
+                                                        || ' (on-chain metadata still references the original number)]',
+                               updated_at             = NOW()
+                        WHERE  id = %s
+                          AND  status = 'PROCESSING'
+                          AND  tx_hash IS NOT NULL
+                        """,
+                        (new_cmn, original_cmn, new_cmn, claim_id),
+                    )
+                    rowcount = cursor.rowcount or 0
+                conn.commit()
+                if rowcount > 0:
+                    auto_completed += 1
+                    renumbered += 1
+                    print(
+                        f"   🔁 Recovery: claim {claim_id} renumbered "
+                        f"cmn {original_cmn} → {new_cmn} (season {season_id}, "
+                        f"on-chain metadata unchanged)"
+                    )
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                print(
+                    f"   ⚠️  Recovery: claim {claim_id} renumber path failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                # Bail out of recovery rather than spinning on a broken row.
+                break
+            finally:
+                conn.close()
+
+        return {
+            'requeued': requeued,
+            'auto_completed': auto_completed,
+            'renumbered': renumbered,
+        }
 
     def _get_season_name_for_claim(self, cursor, season_id: int) -> str:
         cursor.execute(
@@ -2448,10 +2611,15 @@ class SimplifiedScheduler:
             # behind a corpse blocking the queue.
             try:
                 recovery = self._recover_stale_processing()
-                if recovery['requeued'] or recovery['auto_completed']:
+                if (
+                    recovery['requeued']
+                    or recovery['auto_completed']
+                    or recovery.get('renumbered')
+                ):
                     print(
                         f"🔧 Recovery: requeued={recovery['requeued']} "
                         f"auto_completed={recovery['auto_completed']} "
+                        f"renumbered={recovery.get('renumbered', 0)} "
                         f"(threshold={MINT_QUEUE_STALE_PROCESSING_MINUTES}min)"
                     )
             except Exception as recovery_exc:
@@ -2553,18 +2721,29 @@ class SimplifiedScheduler:
                 print(f"   🪙 claim {claim_id} (season {season_id}, {row.get('claim_type')}): start")
 
                 # Allocate collection_mint_number now (post-pickup, pre-card-
-                # render). Reads MAX(...) over COMPLETED claims for this
-                # season, advances by 1, persists onto the PROCESSING row.
+                # render). Reads MAX(...) over PROCESSING ∪ COMPLETED claims
+                # (with non-null cmn) for this season, advances by 1,
+                # persists onto the PROCESSING row.
                 # ``pg_advisory_xact_lock(season_id)`` serializes allocators
                 # at the season level even if the global advisory_lock above
                 # were somehow bypassed. ``WHERE collection_mint_number IS NULL``
                 # makes this idempotent for stuck-PROCESSING retries.
                 #
-                # The ``MAX over COMPLETED`` rule (not ``MAX over all rows``)
-                # is what gives the user-facing guarantee: the on-chain mint
-                # count and the rendered card number are both equal to "how
-                # many NFTs have actually landed on chain in this season",
-                # never inflated by FAILED/QUEUED rows that never minted.
+                # Why MAX over PROCESSING ∪ COMPLETED (not COMPLETED only):
+                # the prior policy had a blind spot — a claim sitting in
+                # PROCESSING (rendered, sometimes already on-chain, but not
+                # yet flipped to COMPLETED) was invisible to the next
+                # allocator, so two claims could each get the same number
+                # baked into their card PNG. Recovery later fixed the DB
+                # row by renumbering, but the IPFS/on-chain PNG is immutable
+                # — the visual divergence ("1/333" on two different cards)
+                # could not be undone. By including PROCESSING (and FAILED
+                # rows are excluded only because pre-mint failure NULLs
+                # their cmn), the next number always reflects every slot
+                # that has ever been baked onto a card image. The cost is
+                # gaps in the sequence when a PROCESSING row is requeued
+                # back to QUEUED and its cmn freed — accepted as cheaper
+                # than a permanent on-chain visual conflict.
                 conn = self.manager.get_connection()
                 try:
                     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
@@ -2579,7 +2758,8 @@ class SimplifiedScheduler:
                                        SELECT COALESCE(MAX(collection_mint_number), 0) + 1
                                        FROM   claims
                                        WHERE  season_id = %s
-                                         AND  status    = 'COMPLETED'
+                                         AND  status    IN ('PROCESSING', 'COMPLETED')
+                                         AND  collection_mint_number IS NOT NULL
                                    ),
                                    updated_at = NOW()
                             WHERE  id = %s
