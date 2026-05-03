@@ -65,27 +65,30 @@ DO $$ BEGIN RAISE NOTICE '🎯 Creating seasons table...'; END $$;
 
 CREATE TABLE IF NOT EXISTS seasons (
     id SERIAL PRIMARY KEY,
-    
+
     -- Season identification
     type season_type NOT NULL,
     season_number INTEGER NOT NULL,
-    
+
     -- Date range
     start_date TIMESTAMPTZ NOT NULL,
     end_date TIMESTAMPTZ NOT NULL,
-    
+
     -- NFT supply management
     total_supply INTEGER NOT NULL,
     remaining_supply INTEGER NOT NULL,
-    
+    -- Max claims per (season, event_id). NULL = unlimited.
+    -- Auto-derived from total_supply (50%) by trigger seasons_default_caps when omitted.
+    per_event_cap INTEGER,
+
     -- Status flags
     is_active BOOLEAN DEFAULT FALSE,
     is_completed BOOLEAN DEFAULT FALSE,
-    
+
     -- Metadata
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
-    
+
     -- Constraints
     CONSTRAINT seasons_supply_check CHECK (remaining_supply >= 0 AND remaining_supply <= total_supply),
     CONSTRAINT seasons_dates_check CHECK (end_date > start_date),
@@ -116,37 +119,72 @@ DO $$ BEGIN RAISE NOTICE '🎫 Creating claims table...'; END $$;
 
 CREATE TABLE IF NOT EXISTS claims (
     id BIGSERIAL PRIMARY KEY,
-    
+
     -- User identification
     user_wallet VARCHAR(42) NOT NULL,
 
     -- Claim details
     season_id INTEGER NOT NULL,
     phase_type phase_type NOT NULL,
-    
+
+    -- Per-season collection mint # (1..N within each season_id), assigned by
+    -- trigger tr_claims_assign_season_mint at INSERT time.
+    collection_mint_number BIGINT,
+
     -- Transaction tracking
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     tx_hash VARCHAR(66),
-    
+
     -- NFT metadata
     token_id INTEGER,
     metadata_uri TEXT,
     asset_address TEXT,
-    
-    -- Status tracking
-    status VARCHAR(20) DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
+
+    -- Status tracking. 'QUEUED' = sitting in mint queue waiting for the
+    -- daily cron worker; 'PENDING' = legacy direct-mint path.
+    status VARCHAR(20) DEFAULT 'PENDING' CHECK (status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
     error_message TEXT,
-    
+
+    -- Participant snapshot (frozen at queue-insert time so the cron mint
+    -- worker has everything it needs without rejoining participants).
+    proxy_wallet          VARCHAR(42),
+    event_id              TEXT,
+    event_slug            TEXT,
+    snapshot_at           TIMESTAMPTZ,
+    entry_cwap            NUMERIC(20, 4),
+    total_volume          NUMERIC(20, 2),
+    total_pnl             NUMERIC(20, 2),
+    roi_percentage        NUMERIC(20, 2),
+    entry_bracket         TEXT,
+    edge                  TEXT,
+    yield                 TEXT,
+    gravity               TEXT,
+    archetype             TEXT,
+    archetype_description TEXT,
+    archetype_math        TEXT,
+    rarity_bracket        TEXT,
+    participant_rank      INTEGER,
+    claim_type            TEXT,
+    recipient_address     TEXT,
+
+    -- Denormalized card detail for the public /cards/{slug} permalink. Filled
+    -- by denormalize_card_onto_claim after a successful on-chain mint.
+    card_slug          TEXT,
+    card_title         TEXT,
+    front_image_url    TEXT,
+    back_image_url     TEXT,
+    primary_tag        TEXT,
+    secondary_tag      TEXT,
+    pattern            TEXT,
+    card_payload_json  JSONB,
+
     -- Metadata
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
-    
+
     -- Foreign key to seasons
     CONSTRAINT fk_season FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
-    
-    -- User can only claim once per season
-    CONSTRAINT unique_user_season_claim UNIQUE(user_wallet, season_id),
-    
+
     -- Wallet address validation
     CONSTRAINT claims_wallet_check CHECK (
         user_wallet ~* '^0x[a-f0-9]{40}$'
@@ -163,43 +201,30 @@ CREATE INDEX IF NOT EXISTS idx_claims_status ON claims(status);
 CREATE INDEX IF NOT EXISTS idx_claims_tx_hash ON claims(tx_hash) WHERE tx_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_claims_asset_address ON claims(asset_address) WHERE asset_address IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_claims_season_phase ON claims(season_id, phase_type);
+-- Active-set uniqueness for (season, user_wallet). Includes QUEUED so the
+-- queue path is also exclusive; FAILED is excluded so users can retry.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_active_season_user_wallet_lower
     ON claims(season_id, LOWER(user_wallet))
-    WHERE status IN ('PENDING', 'PROCESSING', 'COMPLETED');
+    WHERE status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_season_collection_mint
+    ON claims(season_id, collection_mint_number);
 
--- Per-season collection mint # on claims (1..N within each season_id), mirroring preview_cards.
-DO $$
-BEGIN
-    IF to_regclass('public.claims') IS NULL THEN
-        RETURN;
-    END IF;
-
-    ALTER TABLE claims
-        ADD COLUMN IF NOT EXISTS collection_mint_number BIGINT;
-
-    ALTER TABLE claims
-        ALTER COLUMN collection_mint_number DROP DEFAULT;
-
-    -- Backfill any existing rows that predate this column, numbering within each season
-    -- by chronological order so current production data keeps deterministic ordering.
-    WITH numbered AS (
-        SELECT
-            id,
-            ROW_NUMBER() OVER (
-                PARTITION BY season_id
-                ORDER BY COALESCE(timestamp, created_at) ASC, id ASC
-            ) AS rn
-        FROM claims
-        WHERE collection_mint_number IS NULL
-    )
-    UPDATE claims c
-    SET collection_mint_number = n.rn
-    FROM numbered n
-    WHERE c.id = n.id;
-
-    CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_season_collection_mint
-        ON claims(season_id, collection_mint_number);
-END $$;
+-- Backfill collection_mint_number for legacy rows that predate the column.
+-- No-op on fresh databases (claims table starts empty).
+WITH numbered AS (
+    SELECT
+        id,
+        ROW_NUMBER() OVER (
+            PARTITION BY season_id
+            ORDER BY COALESCE(timestamp, created_at) ASC, id ASC
+        ) AS rn
+    FROM claims
+    WHERE collection_mint_number IS NULL
+)
+UPDATE claims c
+SET collection_mint_number = n.rn
+FROM numbered n
+WHERE c.id = n.id;
 
 CREATE OR REPLACE FUNCTION claims_assign_season_mint_number()
 RETURNS TRIGGER AS $$
@@ -430,41 +455,30 @@ CREATE INDEX IF NOT EXISTS idx_preview_cards_owner_wallet_lower
     ON preview_cards(LOWER(owner_wallet), created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_preview_cards_created_at
     ON preview_cards(created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_preview_cards_season_collection_mint
+    ON preview_cards(season_id, collection_mint_number);
 
--- Per-season collection mint # (1..N within each season_id), not a global sequence.
-DO $$
-BEGIN
-    IF to_regclass('public.preview_cards') IS NULL THEN
-        RETURN;
-    END IF;
+-- Legacy cleanup: drop the old global mint sequence and its companion index
+-- from pre-rename deployments. No-op on fresh databases.
+DROP SEQUENCE IF EXISTS user_generated_cards_collection_mint_seq CASCADE;
+DROP INDEX IF EXISTS idx_generated_cards_collection_mint_number;
 
-    ALTER TABLE preview_cards
-        ADD COLUMN IF NOT EXISTS collection_mint_number BIGINT;
-
-    ALTER TABLE preview_cards
-        ALTER COLUMN collection_mint_number DROP DEFAULT;
-
-    DROP SEQUENCE IF EXISTS user_generated_cards_collection_mint_seq CASCADE;
-
-    DROP INDEX IF EXISTS idx_generated_cards_collection_mint_number;
-
-    WITH numbered AS (
-        SELECT
-            id,
-            ROW_NUMBER() OVER (
-                PARTITION BY season_id
-                ORDER BY created_at ASC, id ASC
-            ) AS rn
-        FROM preview_cards
-    )
-    UPDATE preview_cards u
-    SET collection_mint_number = n.rn
-    FROM numbered n
-    WHERE u.id = n.id;
-
-    CREATE UNIQUE INDEX IF NOT EXISTS ux_preview_cards_season_collection_mint
-        ON preview_cards(season_id, collection_mint_number);
-END $$;
+-- Backfill collection_mint_number for legacy rows that predate the column.
+-- No-op on fresh databases (preview_cards starts empty).
+WITH numbered AS (
+    SELECT
+        id,
+        ROW_NUMBER() OVER (
+            PARTITION BY season_id
+            ORDER BY created_at ASC, id ASC
+        ) AS rn
+    FROM preview_cards
+)
+UPDATE preview_cards u
+SET collection_mint_number = n.rn
+FROM numbered n
+WHERE u.id = n.id
+  AND u.collection_mint_number IS NULL;
 
 CREATE OR REPLACE FUNCTION preview_cards_assign_season_mint_number()
 RETURNS TRIGGER AS $$
@@ -510,22 +524,17 @@ END $$;
 -- ============================================================================
 -- 6b. CLAIMS DENORMALIZATION FOR PUBLIC /cards/{slug} PAGE
 -- ============================================================================
--- Adds denormalized card-detail columns to ``claims`` so the public permalink
--- for a minted STAR can be served from ``claims`` directly. The cron mint
--- worker (`process_mint_queue`) calls ``denormalize_card_onto_claim`` after a
--- successful on-chain mint to populate these and to drop the matching
+-- The denormalized card-detail columns (card_slug, card_title, front/back
+-- image URLs, primary/secondary tag, pattern, card_payload_json) now live on
+-- the canonical CREATE TABLE claims above. The cron mint worker
+-- (`process_mint_queue`) calls ``denormalize_card_onto_claim`` after a
+-- successful on-chain mint to populate them and drop the matching
 -- ``preview_cards`` row so minted STARs disappear from the showcase ticker.
+--
+-- This block keeps only the legacy cleanup (drop winner_row_id from old
+-- deployments) and the unique index for public permalinks.
 -- ============================================================================
-DO $$ BEGIN RAISE NOTICE '🎯 Adding claims denormalization columns for /cards/{slug}...'; END $$;
-
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS card_slug          TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS card_title         TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS front_image_url    TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS back_image_url     TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS primary_tag        TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS secondary_tag      TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS pattern            TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS card_payload_json  JSONB;
+DO $$ BEGIN RAISE NOTICE '🎯 Wiring claims denormalization for /cards/{slug}...'; END $$;
 
 -- Drop legacy FK + column from prior deployments. The queue model no longer
 -- uses winner_row_id; the snapshot lives directly on the claims row.
@@ -551,7 +560,7 @@ COMMENT ON COLUMN claims.front_image_url IS 'Pinata/IPFS URL for the front card 
 COMMENT ON COLUMN claims.back_image_url IS 'Pinata/IPFS URL for the back card image baked into the on-chain NFT';
 COMMENT ON COLUMN claims.card_payload_json IS 'Full polystars_card payload snapshot at mint time, mirroring preview_cards.card_payload_json';
 
-DO $$ BEGIN RAISE NOTICE '✅ Claims denormalization columns ready'; END $$;
+DO $$ BEGIN RAISE NOTICE '✅ Claims denormalization wiring ready'; END $$;
 
 -- ============================================================================
 -- 7. HELPER VIEWS FOR ANALYTICS
@@ -765,10 +774,9 @@ END $$;
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE '🧾 Extending claims for queue model...'; END $$;
 
--- 11.1 Per-season cap configuration columns on seasons.
-ALTER TABLE seasons ADD COLUMN IF NOT EXISTS per_event_cap INTEGER;
--- Drop the legacy per_tag_cap column (and any matching default trigger
--- output) — tag-level diversification is now intentionally not enforced.
+-- 11.1 Drop legacy per_tag_cap column on existing deployments.
+-- Tag-level diversification is intentionally not enforced; the canonical
+-- per_event_cap column now lives on seasons CREATE TABLE.
 ALTER TABLE seasons DROP COLUMN IF EXISTS per_tag_cap;
 
 COMMENT ON COLUMN seasons.per_event_cap IS 'Max claims per (season, event_id). NULL = unlimited.';
@@ -800,97 +808,29 @@ CREATE TRIGGER tr_seasons_default_caps
     FOR EACH ROW
     EXECUTE PROCEDURE seasons_default_caps();
 
--- 11.2 Snapshot columns on claims (frozen at queue-insert time).
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS proxy_wallet          VARCHAR(42);
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS event_id              TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS event_slug            TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS snapshot_at           TIMESTAMPTZ;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS entry_cwap            NUMERIC(20, 4);
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS total_volume          NUMERIC(20, 2);
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS total_pnl             NUMERIC(20, 2);
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS roi_percentage        NUMERIC(20, 2);
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS entry_bracket         TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS edge                  TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS yield                 TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS gravity               TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS archetype             TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS archetype_description TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS archetype_math        TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS rarity_bracket        TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS participant_rank      INTEGER;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS claim_type            TEXT;
-ALTER TABLE claims ADD COLUMN IF NOT EXISTS recipient_address     TEXT;
-
+-- 11.2 Snapshot column documentation. The columns themselves now live on the
+--      canonical CREATE TABLE claims (frozen at queue-insert time).
 COMMENT ON COLUMN claims.proxy_wallet      IS 'Polymarket proxy wallet of the trader represented on this card. Differs from user_wallet (claimer EOA).';
 COMMENT ON COLUMN claims.claim_type        IS 'origin = claimer minted their own card; looter = claimer minted someone else''s random card.';
 COMMENT ON COLUMN claims.snapshot_at       IS 'When the participant snapshot for this card was frozen onto this row.';
 COMMENT ON COLUMN claims.recipient_address IS 'On-chain recipient of the minted NFT. Frozen at queue-insert time. Defaults to user_wallet for self-mints; admin can specify a different EOA.';
 
--- 11.3 Extend status CHECK to allow 'QUEUED'. Inline CHECK constraints get
---      auto-generated names; drop any matching one before recreating.
-DO $$
-DECLARE
-    cons_name TEXT;
-BEGIN
-    FOR cons_name IN
-        SELECT c.conname
-        FROM   pg_constraint c
-        JOIN   pg_class      t ON t.oid = c.conrelid
-        WHERE  t.relname = 'claims'
-          AND  c.contype = 'c'
-          AND  pg_get_constraintdef(c.oid) ILIKE '%status%IN%'
-    LOOP
-        EXECUTE 'ALTER TABLE claims DROP CONSTRAINT ' || quote_ident(cons_name);
-    END LOOP;
-END $$;
-
-ALTER TABLE claims
-    ADD CONSTRAINT claims_status_check
-    CHECK (status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED', 'FAILED'));
-
--- 11.5 Replace the legacy strict UNIQUE(user_wallet, season_id) with a
---      partial index that also covers 'QUEUED'. The strict version blocked
---      retries after FAILED; the partial form scopes uniqueness to the
---      active set so a user can re-queue after a permanent failure.
-DO $$
-DECLARE
-    cons_name TEXT;
-BEGIN
-    FOR cons_name IN
-        SELECT c.conname
-        FROM   pg_constraint c
-        JOIN   pg_class      t ON t.oid = c.conrelid
-        WHERE  t.relname = 'claims'
-          AND  c.contype = 'u'
-          AND  pg_get_constraintdef(c.oid) ILIKE '%user_wallet%season_id%'
-    LOOP
-        EXECUTE 'ALTER TABLE claims DROP CONSTRAINT ' || quote_ident(cons_name);
-    END LOOP;
-END $$;
-
-DROP INDEX IF EXISTS ux_claims_active_season_user_wallet_lower;
-CREATE UNIQUE INDEX ux_claims_active_season_user_wallet_lower
-    ON claims (season_id, LOWER(user_wallet))
-    WHERE status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
-
-DROP INDEX IF EXISTS ux_claims_active_proxy_wallet;
-CREATE UNIQUE INDEX ux_claims_active_proxy_wallet
+-- 11.3 Active-set indexes for the queue model. Each is partial on
+--      status IN ('QUEUED','PENDING','PROCESSING','COMPLETED'), so FAILED
+--      retries do not collide. The (season_id, user_wallet) variant lives
+--      in the §4 indexes block above; the rest are queue-model-specific.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_active_proxy_wallet
     ON claims (season_id, LOWER(proxy_wallet))
     WHERE proxy_wallet IS NOT NULL
       AND status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
 
-DROP INDEX IF EXISTS idx_claims_active_season_event;
-CREATE INDEX idx_claims_active_season_event
+CREATE INDEX IF NOT EXISTS idx_claims_active_season_event
     ON claims (season_id, event_id)
     WHERE event_id IS NOT NULL
       AND status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
 
--- Per-tag index removed along with per_tag_cap.
-DROP INDEX IF EXISTS idx_claims_active_season_tag;
-
 -- Cron worker scan: ORDER BY (season_id, created_at) FOR UPDATE SKIP LOCKED.
-DROP INDEX IF EXISTS idx_claims_queued_pickup;
-CREATE INDEX idx_claims_queued_pickup
+CREATE INDEX IF NOT EXISTS idx_claims_queued_pickup
     ON claims (season_id, created_at)
     WHERE status = 'QUEUED';
 

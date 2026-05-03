@@ -8,71 +8,9 @@
 DO $$ BEGIN RAISE NOTICE '🚀 Starting PolyStars database initialization...'; END $$;
 
 -- ============================================================================
--- 1. EVENTS TABLE - Main events data
+-- 1. SERIES TABLE - Created before events so events.series_id can FK directly
 -- ============================================================================
-DO $$ BEGIN RAISE NOTICE '📊 Creating events table...'; END $$;
-
-CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    ticker TEXT,
-    slug TEXT,
-    title TEXT NOT NULL,
-    description TEXT,
-    
-    -- Date fields
-    start_date TIMESTAMPTZ,
-    creation_date TIMESTAMPTZ,
-    end_date TIMESTAMPTZ,
-    closed_time TIMESTAMPTZ,
-    created_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ,
-    
-    -- URLs
-    image TEXT,
-    icon TEXT,
-    
-    -- Boolean flags
-    active BOOLEAN DEFAULT false,
-    closed BOOLEAN DEFAULT false,
-    archived BOOLEAN DEFAULT false,
-    new BOOLEAN DEFAULT false,
-    featured BOOLEAN DEFAULT false,
-    restricted BOOLEAN DEFAULT false,
-    neg_risk BOOLEAN DEFAULT false,
-    enable_order_book BOOLEAN DEFAULT false,
-    
-    -- Volume metrics
-    volume NUMERIC(20, 6) DEFAULT 0,
-    volume24hr NUMERIC(20, 6) DEFAULT 0,
-    volume1wk NUMERIC(20, 6) DEFAULT 0,
-    volume1mo NUMERIC(20, 6) DEFAULT 0,
-    volume1yr NUMERIC(20, 6) DEFAULT 0,
-    
-    -- Liquidity metrics
-    liquidity NUMERIC(20, 6) DEFAULT 0,
-    open_interest NUMERIC(20, 6) DEFAULT 0,
-    liquidity_amm NUMERIC(20, 6) DEFAULT 0,
-    liquidity_clob NUMERIC(20, 6) DEFAULT 0,
-    
-    -- Other fields
-    competitive INTEGER DEFAULT 0,
-    comment_count INTEGER DEFAULT 0
-);
-
--- Events indexes
-CREATE INDEX IF NOT EXISTS idx_events_closed ON events(closed);
-CREATE INDEX IF NOT EXISTS idx_events_closed_time ON events(closed_time);
-CREATE INDEX IF NOT EXISTS idx_events_end_date ON events(end_date);
-CREATE INDEX IF NOT EXISTS idx_events_volume ON events(volume DESC);
-CREATE INDEX IF NOT EXISTS idx_events_active ON events(active);
-CREATE INDEX IF NOT EXISTS idx_events_ticker ON events(ticker);
-
-DO $$ BEGIN RAISE NOTICE '✅ Events table created'; END $$;
-
--- ============================================================================
--- 2. EVENT METADATA TABLES - Series and tags normalization
--- ============================================================================
-DO $$ BEGIN RAISE NOTICE '🏷️ Creating series/tags tables...'; END $$;
+DO $$ BEGIN RAISE NOTICE '🏷️ Creating series table...'; END $$;
 
 CREATE TABLE IF NOT EXISTS series (
     id TEXT PRIMARY KEY,
@@ -84,6 +22,80 @@ CREATE TABLE IF NOT EXISTS series (
     recurrence TEXT,
     description TEXT
 );
+
+DO $$ BEGIN RAISE NOTICE '✅ Series table created'; END $$;
+
+-- ============================================================================
+-- 2. EVENTS TABLE - Main events data
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '📊 Creating events table...'; END $$;
+
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    ticker TEXT,
+    slug TEXT,
+    title TEXT NOT NULL,
+    description TEXT,
+    series_id TEXT,
+
+    -- Date fields
+    start_date TIMESTAMPTZ,
+    creation_date TIMESTAMPTZ,
+    end_date TIMESTAMPTZ,
+    closed_time TIMESTAMPTZ,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ,
+
+    -- URLs
+    image TEXT,
+    icon TEXT,
+
+    -- Boolean flags
+    active BOOLEAN DEFAULT false,
+    closed BOOLEAN DEFAULT false,
+    archived BOOLEAN DEFAULT false,
+    new BOOLEAN DEFAULT false,
+    featured BOOLEAN DEFAULT false,
+    restricted BOOLEAN DEFAULT false,
+    neg_risk BOOLEAN DEFAULT false,
+    enable_order_book BOOLEAN DEFAULT false,
+
+    -- Volume metrics
+    volume NUMERIC(20, 6) DEFAULT 0,
+    volume24hr NUMERIC(20, 6) DEFAULT 0,
+    volume1wk NUMERIC(20, 6) DEFAULT 0,
+    volume1mo NUMERIC(20, 6) DEFAULT 0,
+    volume1yr NUMERIC(20, 6) DEFAULT 0,
+
+    -- Liquidity metrics
+    liquidity NUMERIC(20, 6) DEFAULT 0,
+    open_interest NUMERIC(20, 6) DEFAULT 0,
+    liquidity_amm NUMERIC(20, 6) DEFAULT 0,
+    liquidity_clob NUMERIC(20, 6) DEFAULT 0,
+
+    -- Other fields
+    competitive INTEGER DEFAULT 0,
+    comment_count INTEGER DEFAULT 0,
+
+    CONSTRAINT fk_events_series
+        FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE SET NULL
+);
+
+-- Events indexes
+CREATE INDEX IF NOT EXISTS idx_events_closed ON events(closed);
+CREATE INDEX IF NOT EXISTS idx_events_closed_time ON events(closed_time);
+CREATE INDEX IF NOT EXISTS idx_events_end_date ON events(end_date);
+CREATE INDEX IF NOT EXISTS idx_events_volume ON events(volume DESC);
+CREATE INDEX IF NOT EXISTS idx_events_active ON events(active);
+CREATE INDEX IF NOT EXISTS idx_events_ticker ON events(ticker);
+CREATE INDEX IF NOT EXISTS idx_events_series_id ON events(series_id);
+
+DO $$ BEGIN RAISE NOTICE '✅ Events table created'; END $$;
+
+-- ============================================================================
+-- 3. TAGS / EVENT_TAGS TABLES - Tag normalization (FK to events)
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '🏷️ Creating tags/event_tags tables...'; END $$;
 
 CREATE TABLE IF NOT EXISTS tags (
     id TEXT PRIMARY KEY,
@@ -104,50 +116,11 @@ CREATE TABLE IF NOT EXISTS event_tags (
         FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
 );
 
-ALTER TABLE tags
-    ADD COLUMN IF NOT EXISTS hex_color TEXT;
-
-ALTER TABLE tags
-    ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conname = 'tags_hex_color_format'
-          AND conrelid = 'tags'::regclass
-    ) THEN
-        ALTER TABLE tags
-            ADD CONSTRAINT tags_hex_color_format
-            CHECK (hex_color IS NULL OR hex_color ~* '^#[0-9a-f]{6}$');
-    END IF;
-END $$;
-
--- Ensure events table can reference series safely on existing databases.
-ALTER TABLE events
-    ADD COLUMN IF NOT EXISTS series_id TEXT;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conname = 'fk_events_series'
-          AND conrelid = 'events'::regclass
-    ) THEN
-        ALTER TABLE events
-            ADD CONSTRAINT fk_events_series
-            FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE SET NULL;
-    END IF;
-END $$;
-
-CREATE INDEX IF NOT EXISTS idx_events_series_id ON events(series_id);
 CREATE INDEX IF NOT EXISTS idx_event_tags_tag_id ON event_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_tags_hex_color ON tags(hex_color);
 CREATE INDEX IF NOT EXISTS idx_tags_is_primary ON tags(is_primary);
 
-DO $$ BEGIN RAISE NOTICE '✅ Series/tags tables created'; END $$;
+DO $$ BEGIN RAISE NOTICE '✅ Tags/event_tags tables created'; END $$;
 
 -- ============================================================================
 -- 3. MARKETS TABLE - Individual markets within events
@@ -298,7 +271,9 @@ CREATE TABLE IF NOT EXISTS redemptions (
     market_question TEXT,
     event_title TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    CONSTRAINT unique_redemption UNIQUE(transaction_hash, redeemer_address)
+    CONSTRAINT unique_redemption UNIQUE(transaction_hash, redeemer_address),
+    CONSTRAINT fk_redemptions_event
+        FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
 );
 
 -- Redemptions indexes
@@ -308,22 +283,6 @@ CREATE INDEX IF NOT EXISTS idx_redemptions_market_id ON redemptions(market_id);
 CREATE INDEX IF NOT EXISTS idx_redemptions_redeemer ON redemptions(redeemer_address);
 CREATE INDEX IF NOT EXISTS idx_redemptions_timestamp ON redemptions(timestamp_unix DESC);
 CREATE INDEX IF NOT EXISTS idx_redemptions_payout ON redemptions(payout_usdc DESC);
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM information_schema.table_constraints
-        WHERE constraint_name = 'fk_redemptions_event'
-          AND table_name = 'redemptions'
-    ) THEN
-        ALTER TABLE redemptions
-            ADD CONSTRAINT fk_redemptions_event
-            FOREIGN KEY (event_id) REFERENCES events(id)
-            ON DELETE CASCADE
-            NOT VALID;
-    END IF;
-END $$;
 
 DO $$ BEGIN RAISE NOTICE '✅ Redemptions table created'; END $$;
 
@@ -373,7 +332,9 @@ CREATE TABLE IF NOT EXISTS user_closed_positions (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     
     -- Ensure unique positions per user/condition
-    CONSTRAINT unique_user_position UNIQUE(proxy_wallet, condition_id, asset, timestamp_unix)
+    CONSTRAINT unique_user_position UNIQUE(proxy_wallet, condition_id, asset, timestamp_unix),
+    CONSTRAINT fk_user_closed_positions_event
+        FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
 );
 
 -- User closed positions indexes
@@ -385,22 +346,6 @@ CREATE INDEX IF NOT EXISTS idx_user_closed_positions_timestamp ON user_closed_po
 CREATE INDEX IF NOT EXISTS idx_user_closed_positions_realized_pnl ON user_closed_positions(realized_pnl DESC);
 CREATE INDEX IF NOT EXISTS idx_user_closed_positions_event_slug ON user_closed_positions(event_slug);
 CREATE INDEX IF NOT EXISTS idx_user_closed_positions_outcome ON user_closed_positions(outcome_index);
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM information_schema.table_constraints
-        WHERE constraint_name = 'fk_user_closed_positions_event'
-          AND table_name = 'user_closed_positions'
-    ) THEN
-        ALTER TABLE user_closed_positions
-            ADD CONSTRAINT fk_user_closed_positions_event
-            FOREIGN KEY (event_id) REFERENCES events(id)
-            ON DELETE CASCADE
-            NOT VALID;
-    END IF;
-END $$;
 
 DO $$ BEGIN RAISE NOTICE '✅ User_closed_positions table created'; END $$;
 
@@ -563,71 +508,10 @@ GROUP BY proxy_wallet;
 DO $$ BEGIN RAISE NOTICE '✅ Analytics views created'; END $$;
 
 -- ============================================================================
--- DATA LOADING TRACKING (closed_time pipeline)
--- ============================================================================
-DO $$ BEGIN RAISE NOTICE ''; END $$;
-DO $$ BEGIN RAISE NOTICE '📊 Creating data loading tracking table...'; END $$;
-
-CREATE TABLE IF NOT EXISTS data_loads (
-    id SERIAL PRIMARY KEY,
-    load_date DATE NOT NULL UNIQUE,
-
-    -- Ingest tracking (events/markets only)
-    events_loaded BOOLEAN DEFAULT FALSE,
-    events_loaded_at TIMESTAMPTZ,
-    events_count INTEGER DEFAULT 0,
-    markets_count INTEGER DEFAULT 0,
-
-    -- Type: 'genesis' (historical) or 'daily' (incremental)
-    load_type VARCHAR(20) DEFAULT 'daily' CHECK (load_type IN ('genesis', 'daily')),
-
-    -- Ingest error tracking
-    events_error TEXT,
-
-    -- Link to latest downstream processing run touching this load_date
-    last_downstream_run_id BIGINT,
-    downstream_last_run_at TIMESTAMPTZ,
-    downstream_ready_events_count INTEGER NOT NULL DEFAULT 0,
-
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_data_loads_date ON data_loads(load_date DESC);
-CREATE INDEX IF NOT EXISTS idx_data_loads_type ON data_loads(load_type);
-CREATE INDEX IF NOT EXISTS idx_data_loads_events_loaded ON data_loads(events_loaded);
-
--- Add markets_count column if it doesn't exist (for existing databases)
-ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS markets_count INTEGER DEFAULT 0;
-ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS events_error TEXT;
-ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS last_downstream_run_id BIGINT;
-ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS downstream_last_run_at TIMESTAMPTZ;
-ALTER TABLE data_loads ADD COLUMN IF NOT EXISTS downstream_ready_events_count INTEGER NOT NULL DEFAULT 0;
-
--- Old tracking views reference legacy downstream columns, drop before column cleanup.
-DROP VIEW IF EXISTS recent_loads;
-DROP VIEW IF EXISTS genesis_status;
-DROP VIEW IF EXISTS daily_loads_summary;
-DROP VIEW IF EXISTS recent_downstream_runs;
-
--- Drop legacy downstream columns from old date-based pipeline.
-ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_loaded;
-ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_loaded;
-ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_loaded;
-ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_loaded_at;
-ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_loaded_at;
-ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_loaded_at;
-ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_count;
-ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_count;
-ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_count;
-ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_error;
-ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_error;
-ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_error;
-
-DO $$ BEGIN RAISE NOTICE '✅ data_loads table created'; END $$;
-
--- ============================================================================
 -- DOWNSTREAM RUNS (closed_time batch observability)
+-- ============================================================================
+-- Created before data_loads so data_loads.last_downstream_run_id can FK
+-- directly without a separate ALTER step.
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE '🧾 Creating downstream_runs table...'; END $$;
 
@@ -667,28 +551,69 @@ CREATE INDEX IF NOT EXISTS idx_downstream_runs_status
     ON downstream_runs(status);
 CREATE INDEX IF NOT EXISTS idx_downstream_runs_events_load_date
     ON downstream_runs(events_load_date);
-ALTER TABLE downstream_runs ADD COLUMN IF NOT EXISTS tag_colors_generated INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE downstream_runs ADD COLUMN IF NOT EXISTS participants_status TEXT;
-ALTER TABLE downstream_runs ADD COLUMN IF NOT EXISTS participants_rows INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE downstream_runs ADD COLUMN IF NOT EXISTS participants_duration_ms INTEGER;
-ALTER TABLE downstream_runs ADD COLUMN IF NOT EXISTS participants_error TEXT;
 
 DO $$ BEGIN RAISE NOTICE '✅ downstream_runs table created'; END $$;
 
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM information_schema.table_constraints
-        WHERE constraint_name = 'fk_data_loads_last_downstream_run'
-          AND table_name = 'data_loads'
-    ) THEN
-        ALTER TABLE data_loads
-            ADD CONSTRAINT fk_data_loads_last_downstream_run
-            FOREIGN KEY (last_downstream_run_id) REFERENCES downstream_runs(id)
-            ON DELETE SET NULL;
-    END IF;
-END $$;
+-- ============================================================================
+-- DATA LOADING TRACKING (closed_time pipeline)
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE ''; END $$;
+DO $$ BEGIN RAISE NOTICE '📊 Creating data loading tracking table...'; END $$;
+
+CREATE TABLE IF NOT EXISTS data_loads (
+    id SERIAL PRIMARY KEY,
+    load_date DATE NOT NULL UNIQUE,
+
+    -- Ingest tracking (events/markets only)
+    events_loaded BOOLEAN DEFAULT FALSE,
+    events_loaded_at TIMESTAMPTZ,
+    events_count INTEGER DEFAULT 0,
+    markets_count INTEGER DEFAULT 0,
+
+    -- Type: 'genesis' (historical) or 'daily' (incremental)
+    load_type VARCHAR(20) DEFAULT 'daily' CHECK (load_type IN ('genesis', 'daily')),
+
+    -- Ingest error tracking
+    events_error TEXT,
+
+    -- Link to latest downstream processing run touching this load_date
+    last_downstream_run_id BIGINT,
+    downstream_last_run_at TIMESTAMPTZ,
+    downstream_ready_events_count INTEGER NOT NULL DEFAULT 0,
+
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+    CONSTRAINT fk_data_loads_last_downstream_run
+        FOREIGN KEY (last_downstream_run_id) REFERENCES downstream_runs(id)
+        ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_data_loads_date ON data_loads(load_date DESC);
+CREATE INDEX IF NOT EXISTS idx_data_loads_type ON data_loads(load_type);
+CREATE INDEX IF NOT EXISTS idx_data_loads_events_loaded ON data_loads(events_loaded);
+
+-- Old tracking views reference legacy downstream columns, drop before column cleanup.
+DROP VIEW IF EXISTS recent_loads;
+DROP VIEW IF EXISTS genesis_status;
+DROP VIEW IF EXISTS daily_loads_summary;
+DROP VIEW IF EXISTS recent_downstream_runs;
+
+-- Drop legacy downstream columns from old date-based pipeline.
+ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_loaded;
+ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_loaded;
+ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_loaded;
+ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_loaded_at;
+ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_loaded_at;
+ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_loaded_at;
+ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_count;
+ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_count;
+ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_count;
+ALTER TABLE data_loads DROP COLUMN IF EXISTS redemptions_error;
+ALTER TABLE data_loads DROP COLUMN IF EXISTS positions_error;
+ALTER TABLE data_loads DROP COLUMN IF EXISTS leaderboard_error;
+
+DO $$ BEGIN RAISE NOTICE '✅ data_loads table created'; END $$;
 
 -- ============================================================================
 -- EVENT RESOLUTION QUEUE (closed_time processing)
@@ -712,44 +637,12 @@ CREATE TABLE IF NOT EXISTS event_resolution_queue (
     downstream_error_text TEXT,
     processed_run_id BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_event_resolution_queue_event
+        FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+    CONSTRAINT fk_event_resolution_queue_processed_run
+        FOREIGN KEY (processed_run_id) REFERENCES downstream_runs(id) ON DELETE SET NULL
 );
-
-ALTER TABLE event_resolution_queue ADD COLUMN IF NOT EXISTS downstream_attempts INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE event_resolution_queue ADD COLUMN IF NOT EXISTS last_downstream_attempt_at TIMESTAMPTZ;
-ALTER TABLE event_resolution_queue ADD COLUMN IF NOT EXISTS downstream_error_text TEXT;
-ALTER TABLE event_resolution_queue ADD COLUMN IF NOT EXISTS processed_run_id BIGINT;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM information_schema.table_constraints
-        WHERE constraint_name = 'fk_event_resolution_queue_processed_run'
-          AND table_name = 'event_resolution_queue'
-    ) THEN
-        ALTER TABLE event_resolution_queue
-            ADD CONSTRAINT fk_event_resolution_queue_processed_run
-            FOREIGN KEY (processed_run_id) REFERENCES downstream_runs(id)
-            ON DELETE SET NULL;
-    END IF;
-END $$;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM information_schema.table_constraints
-        WHERE constraint_name = 'fk_event_resolution_queue_event'
-          AND table_name = 'event_resolution_queue'
-    ) THEN
-        ALTER TABLE event_resolution_queue
-            ADD CONSTRAINT fk_event_resolution_queue_event
-            FOREIGN KEY (event_id) REFERENCES events(id)
-            ON DELETE CASCADE
-            NOT VALID;
-    END IF;
-END $$;
 
 CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_status_ready
     ON event_resolution_queue(status, resolution_ready_at);
@@ -783,31 +676,10 @@ CREATE TABLE IF NOT EXISTS event_cards (
     generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT fk_event_cards_event
-        FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+        FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+    CONSTRAINT fk_event_cards_series
+        FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE SET NULL
 );
-
-ALTER TABLE event_cards
-    ADD COLUMN IF NOT EXISTS series_id TEXT;
-
-ALTER TABLE event_cards
-    ADD COLUMN IF NOT EXISTS reccurence TEXT NOT NULL DEFAULT 'unique';
-
-ALTER TABLE event_cards
-    ADD COLUMN IF NOT EXISTS manual_image_url TEXT;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conname = 'fk_event_cards_series'
-          AND conrelid = 'event_cards'::regclass
-    ) THEN
-        ALTER TABLE event_cards
-            ADD CONSTRAINT fk_event_cards_series
-            FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE SET NULL;
-    END IF;
-END $$;
 
 UPDATE event_cards ec
 SET
@@ -839,13 +711,6 @@ CREATE TABLE IF NOT EXISTS user_wallet_signins (
     trader_rank TEXT NOT NULL DEFAULT 'No trades yet',
     CONSTRAINT user_wallet_signins_wallet_check CHECK (wallet_address ~* '^0x[a-f0-9]{40}$')
 );
-
--- Ensure proxy_wallet exists for upgraded databases.
-ALTER TABLE user_wallet_signins
-    ADD COLUMN IF NOT EXISTS proxy_wallet TEXT NOT NULL DEFAULT 'Not registered in PM';
-
-ALTER TABLE user_wallet_signins
-    ADD COLUMN IF NOT EXISTS trader_rank TEXT NOT NULL DEFAULT 'No trades yet';
 
 -- Ensure uniqueness guard index for claims exists when claims table is present.
 DO $$
