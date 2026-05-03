@@ -6,6 +6,12 @@ tests never need a live database.  This sub-conftest undoes that mock at
 import time — before any integration test module is loaded — so that
 make_real_connection() and _DirectDBManager return genuine psycopg2 objects.
 
+Database source of truth for these tests is an ephemeral Postgres container
+spun up via testcontainers, with sql/schemas/init-db.sql and
+sql/schemas/create_seasons_system.sql applied at session start.  Set
+POLYSTARS_USE_LIVE_DB=1 to bypass the container and use LOCAL_DB_* / DB_*
+env vars instead (legacy path; expects a pre-provisioned DB).
+
 Scripts imported for integration tests (e.g. polystars_card_payload) are
 already cached in sys.modules from the unit-test run.  That is intentional:
 denormalize_card_onto_claim never calls psycopg2.connect() directly; it calls
@@ -13,6 +19,7 @@ manager.get_connection(), which we supply as _DirectDBManager below.  The
 cached module state therefore does not affect correctness.
 """
 
+import atexit
 import os
 import sys
 
@@ -34,6 +41,65 @@ import psycopg2          # noqa: E402  — must come after the mock is cleared
 import psycopg2.extras  # noqa: E402
 
 _real_psycopg2 = psycopg2  # stable reference used by season_manager patcher
+
+# ------------------------------------------------------------------
+# Ephemeral Postgres via testcontainers (default).
+# Schemas are applied once per pytest session.  Container is torn down at
+# interpreter exit.  Override env vars are populated *before* _DSN is built
+# below so make_real_connection() reaches the container transparently.
+# ------------------------------------------------------------------
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_SCHEMA_FILES = (
+    os.path.join(_REPO_ROOT, "sql", "schemas", "init-db.sql"),
+    os.path.join(_REPO_ROOT, "sql", "schemas", "create_seasons_system.sql"),
+)
+
+
+def _apply_schemas(dsn: dict) -> None:
+    for path in _SCHEMA_FILES:
+        with open(path, "r", encoding="utf-8") as fh:
+            sql_text = fh.read()
+        conn = psycopg2.connect(**dsn)
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(sql_text)
+        finally:
+            conn.close()
+
+
+def _start_ephemeral_postgres() -> None:
+    """Start a Postgres container, apply schemas, export LOCAL_DB_* env vars."""
+    from testcontainers.postgres import PostgresContainer
+
+    container = PostgresContainer("postgres:16-alpine")
+    container.start()
+    atexit.register(container.stop)
+
+    host = container.get_container_host_ip()
+    port = int(container.get_exposed_port(5432))
+    dbname = container.dbname
+    user = container.username
+    password = container.password
+
+    _apply_schemas(dict(host=host, port=port, dbname=dbname, user=user, password=password))
+
+    # Force every code path that reads env vars (DataLoadingManager, SeasonManager,
+    # etc.) onto the container, regardless of what was in .env.
+    os.environ["LOCAL_DB_HOST"] = host
+    os.environ["LOCAL_DB_PORT"] = str(port)
+    os.environ["LOCAL_DB_NAME"] = dbname
+    os.environ["LOCAL_DB_USER"] = user
+    os.environ["LOCAL_DB_PASSWORD"] = password
+    os.environ["DB_HOST"] = host
+    os.environ["DB_PORT"] = str(port)
+    os.environ["DB_NAME"] = dbname
+    os.environ["DB_USER"] = user
+    os.environ["DB_PASSWORD"] = password
+
+
+if os.getenv("POLYSTARS_USE_LIVE_DB") != "1":
+    _start_ephemeral_postgres()
 
 _DSN: dict = dict(
     host=os.getenv("LOCAL_DB_HOST", os.getenv("DB_HOST", "localhost")),
@@ -150,7 +216,7 @@ def workbench():
         svc.manager = _DirectDBManager()
         svc._wallets_cache = {}
         svc.ensure_claims_schema_for_mint()
-        svc.ensure_winners_schema_for_assignment()
+        svc.ensure_user_web_controls_schema()
         yield svc
 
 

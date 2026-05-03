@@ -374,7 +374,13 @@ class TestCheckUserEligibilityForSeason:
             assert result["is_claim_open"] is False
 
     def test_already_claimed_blocks_eligibility(self, breach_season, real_season_manager):
-        """A wallet with an existing PENDING claim must be marked ineligible."""
+        """A wallet with an existing PENDING claim must be marked ineligible.
+
+        ineligible_reason is status-aware (see season_manager.py:488-514): for
+        PENDING/QUEUED claims it surfaces "Mint queued (claim #N)" so the
+        dashboard can render an informative pill rather than a generic
+        "already claimed" rejection. COMPLETED claims yield "Already minted".
+        """
         conn = make_real_connection()
         cid = None
         try:
@@ -388,7 +394,9 @@ class TestCheckUserEligibilityForSeason:
             )
             assert result["eligible_now"] is False
             assert result["already_claimed"] is True
-            assert "already claimed" in result["ineligible_reason"].lower()
+            reason = result["ineligible_reason"].lower()
+            assert "queued" in reason
+            assert f"#{cid}" in result["ineligible_reason"]
         finally:
             _cleanup(conn, claim_ids=[cid] if cid else [])
             conn.close()
