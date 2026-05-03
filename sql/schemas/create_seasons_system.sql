@@ -909,6 +909,14 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    -- Serialize cap evaluation per-season. Without this, two concurrent
+    -- INSERTs in READ COMMITTED both observe COUNT(*) = N, both pass the
+    -- < total_supply check, and oversupply slips through. The lock is
+    -- released at COMMIT, so the next tx's COUNT sees the just-committed
+    -- INSERT. Distinct seed from cmn allocator (9283742) and preview_cards
+    -- (9283741) so cap-check doesn't queue behind unrelated per-season work.
+    PERFORM pg_advisory_xact_lock(9283740, NEW.season_id);
+
     SELECT total_supply, per_event_cap
     INTO   v_total_supply, v_event_cap
     FROM   seasons

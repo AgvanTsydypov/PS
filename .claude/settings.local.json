@@ -82,7 +82,10 @@
       "Bash(./venv/Scripts/python.exe -m pytest tests/ --tb=short -q)",
       "PowerShell($root=\"C:\\\\Users\\\\AgvanD\\\\Desktop\\\\University\\\\QM\\\\PolyStars\"; python -c \"import ast; ast.parse\\(open\\(r'$root\\\\scripts\\\\daily_scheduler_simple.py',encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(./venv/Scripts/python.exe -m pytest tests/ --ignore=tests/integration --tb=short -q)",
-      "Bash(./node_modules/.bin/tsc --noEmit)"
+      "Bash(./node_modules/.bin/tsc --noEmit)",
+      "Bash(docker --version)",
+      "Bash(rtk docker *)",
+      "Bash(xargs grep *)"
     ]
   },
   "enabledMcpjsonServers": [
