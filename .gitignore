@@ -84,3 +84,6 @@ user_web_backend/generated_cards/
 .worktrees/
 .playwright-mcp/
 .superpowers/
+
+text.txt
+TODO

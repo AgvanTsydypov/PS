@@ -701,10 +701,29 @@ class ClaimsMintMixin:
                         continue
                     except Exception as exc:
                         conn.rollback()
-                        # Cap-violation: looters retry with another random pick;
-                        # origins fail permanently because their slot is structurally unavailable.
+                        # Cap-violation. Two possible reasons (see
+                        # claims_check_caps trigger in
+                        # sql/schemas/create_seasons_system.sql):
+                        #   1. Total supply exhausted — the whole season is
+                        #      out of slots. Retrying with another random
+                        #      pick CANNOT help (every event in the season
+                        #      is over the cap by definition). Fail fast
+                        #      so we don't waste the remaining 5 retries
+                        #      on a guaranteed loss and inflate latency
+                        #      for the user under a season-end stampede.
+                        #   2. Per-event cap reached — only this specific
+                        #      event is full; another random pick can land
+                        #      on a still-available event. Retry as before.
+                        # Origins always fail on cap (their slot is
+                        # structurally tied to a specific event/wallet).
                         pgcode = getattr(exc, "pgcode", "") or ""
                         if pgcode == "23514" and not is_origin:
+                            err_text = str(exc).lower()
+                            if "total supply" in err_text and "exhausted" in err_text:
+                                raise ValueError(
+                                    f"Season {req.season_id} is out of supply "
+                                    f"(total_supply cap reached). No mint slots remain."
+                                ) from exc
                             last_error = exc
                             continue
                         raise

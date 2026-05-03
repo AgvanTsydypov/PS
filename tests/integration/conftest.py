@@ -54,6 +54,25 @@ _SCHEMA_FILES = (
     os.path.join(_REPO_ROOT, "sql", "schemas", "create_seasons_system.sql"),
 )
 
+# Mirrors admin_backend/claims_mint.py:ensure_claims_schema_for_mint, which
+# production runs on service startup. The base schema ships with a BEFORE-INSERT
+# trigger that auto-allocates collection_mint_number — the mint-queue worker
+# replaces it with an explicit per-PROCESSING allocation under
+# pg_advisory_xact_lock. Tests against the un-migrated schema would observe
+# trigger semantics that don't exist in prod, so we apply the migration here.
+_RUNTIME_MIGRATIONS_SQL = """
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS asset_address TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS mint_chain TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS collection_mint_number BIGINT;
+ALTER TABLE claims DROP CONSTRAINT IF EXISTS claims_wallet_check;
+DROP INDEX IF EXISTS ux_claims_season_collection_mint;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_season_collection_mint
+    ON claims(season_id, collection_mint_number)
+    WHERE status = 'COMPLETED' AND collection_mint_number IS NOT NULL;
+DROP TRIGGER IF EXISTS tr_claims_assign_season_mint ON claims;
+DROP FUNCTION IF EXISTS claims_assign_season_mint_number();
+"""
+
 
 def _apply_schemas(dsn: dict) -> None:
     for path in _SCHEMA_FILES:
@@ -66,6 +85,14 @@ def _apply_schemas(dsn: dict) -> None:
                 cur.execute(sql_text)
         finally:
             conn.close()
+
+    conn = psycopg2.connect(**dsn)
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(_RUNTIME_MIGRATIONS_SQL)
+    finally:
+        conn.close()
 
 
 def _start_ephemeral_postgres() -> None:
