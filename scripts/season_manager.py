@@ -486,30 +486,29 @@ class SeasonManager:
         )
 
         if already_claimed:
+            # Invariant: ``already_claimed`` is True iff ``active_claim`` is a
+            # dict produced by ``_get_active_claim_for_season``, which always
+            # stamps ``claim_id`` from ``claims.id`` (BIGSERIAL PRIMARY KEY,
+            # NOT NULL by schema). Dereference directly so a future refactor
+            # that drops the key fails loud here instead of silently rendering
+            # a degraded "Mint queued" pill without the claim number.
+            assert active_claim is not None
             eligible_now = False
             # Status-aware message so the dashboard can show what the user
             # is actually waiting for (queue → worker pickup → on-chain mint
             # → completed) instead of a generic "already claimed".
-            status = (active_claim or {}).get("status") or ""
-            claim_id = (active_claim or {}).get("claim_id")
-            mint_number = (active_claim or {}).get("collection_mint_number")
+            status = active_claim.get("status") or ""
+            claim_id = active_claim["claim_id"]
+            mint_number = active_claim.get("collection_mint_number")
             if status == "COMPLETED":
                 if mint_number is not None:
                     ineligible_reason = f"Already minted in current season (mint #{mint_number})"
                 else:
                     ineligible_reason = "Already minted in current season"
             elif status == "PROCESSING":
-                ineligible_reason = (
-                    f"Mint in progress (claim #{claim_id}) — please wait for the next worker tick"
-                    if claim_id is not None
-                    else "Mint in progress — please wait for the next worker tick"
-                )
+                ineligible_reason = f"Mint in progress (claim #{claim_id}) — please wait for the next worker tick"
             elif status in ("QUEUED", "PENDING"):
-                ineligible_reason = (
-                    f"Mint queued (claim #{claim_id})"
-                    if claim_id is not None
-                    else "Mint queued"
-                )
+                ineligible_reason = f"Mint queued (claim #{claim_id})"
             else:
                 ineligible_reason = "User already claimed (or has active claim) in current season"
         elif not phase_info["is_claim_open"]:
