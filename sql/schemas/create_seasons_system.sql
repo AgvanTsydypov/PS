@@ -168,6 +168,12 @@ CREATE TABLE IF NOT EXISTS claims (
     claim_type            TEXT,
     recipient_address     TEXT,
 
+    -- Structural signature (Polystars Section 4): the Star's permanent
+    -- operational fingerprint, computed from the snapshot above + season +
+    -- event_id at queue-insert time. Frozen forever once written so the
+    -- string remains valid even if the encoding logic changes later.
+    signature             TEXT,
+
     -- Denormalized card detail for the public /cards/{slug} permalink. Filled
     -- by denormalize_card_onto_claim after a successful on-chain mint.
     card_slug          TEXT,
@@ -210,6 +216,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_season_collection_mint
     ON claims(season_id, collection_mint_number)
     WHERE status = 'COMPLETED'
       AND collection_mint_number IS NOT NULL;
+
+-- Idempotent column add for upgrades from earlier schema versions.
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS signature TEXT;
+CREATE INDEX IF NOT EXISTS idx_claims_signature ON claims(signature)
+    WHERE signature IS NOT NULL;
 
 -- Drop the legacy BEFORE-INSERT trigger / function from older deployments.
 -- Under the queue model these double-allocated collection_mint_number — a

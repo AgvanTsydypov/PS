@@ -75,11 +75,8 @@ LEGACY_ENTRY_BRACKET_MAP: Dict[str, str] = {
     "PASSENGER": "[0.97 - 1.00]",
 }
 _PTIER_CSS_COLORS: Dict[str, str] = {
-    "P999": "#FFD700",
     "P99": "#FFD700",
-    "P95": "#FFBF00",
     "P90": "#FFBF00",
-    "P80": "#265DD2",
     "P70": "#265DD2",
     "P50": "#38BE50",
     "BASE": "#B6BBC8",
@@ -297,6 +294,8 @@ def _build_card_payload_from_source_row(
         "season_number": int(row.get("season_number") or 1),
         "recurrence": recurrence_out,
         "claim_type": str(claim_type or "looter").strip().lower() if str(claim_type or "").strip() else "looter",
+        "event_id": str(row.get("event_id") or "").strip(),
+        "signature": str(row.get("signature") or "").strip(),
         "image_url": image_url,
         "card_title": str(row.get("card_title") or row.get("event_title") or "").strip(),
         "card_lore": str(row.get("card_lore") or "").strip(),
@@ -380,6 +379,7 @@ SELECT
     c.gravity,
     c.participant_rank AS rank,
     c.claim_type,
+    c.signature,
     ec.reccurence,
     ec.manual_image_url,
     ec.card_title,

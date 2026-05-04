@@ -24,20 +24,11 @@ class TestBorderCssColor:
     def test_p99_returns_gold(self):
         assert _border_css_color("P99") == "#FFD700"
 
-    def test_p999_returns_gold(self):
-        assert _border_css_color("P999") == "#FFD700"
-
     def test_p90_returns_amber(self):
         assert _border_css_color("P90") == "#FFBF00"
 
-    def test_p95_returns_amber(self):
-        assert _border_css_color("P95") == "#FFBF00"
-
     def test_p70_returns_blue(self):
         assert _border_css_color("P70") == "#265DD2"
-
-    def test_p80_returns_blue(self):
-        assert _border_css_color("P80") == "#265DD2"
 
     def test_p50_returns_green(self):
         assert _border_css_color("P50") == "#38BE50"

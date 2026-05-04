@@ -325,10 +325,9 @@ Value:       [skill tier]      color: Tier Color Map    font-size: 20px    track
 
 | Percentile Rank | Display Value |
 |----------------|--------------|
-| ≥ 0.999 | P999 |
 | ≥ 0.99 | P99 |
-| ≥ 0.95 | P95 |
-| ≥ 0.80 | P80 |
+| ≥ 0.90 | P90 |
+| ≥ 0.70 | P70 |
 | ≥ 0.50 | P50 |
 | < 0.50 | Base |
 
