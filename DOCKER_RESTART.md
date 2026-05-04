@@ -5,6 +5,8 @@ http://localhost:5050	pgAdmin (UI для PostgreSQL)
 
 docker exec polystars_scheduler python /app/scripts/backfill_event_cards.py --retry-errors --limit 500 --batch-size 25
 
+docker exec --env-file .env.prod -d polystars_scheduler python scripts/daily_scheduler_simple.py --historical
+
 # Перезапуск Docker и работа с внешней БД
 
 ## 🔄 Быстрый перезапуск
