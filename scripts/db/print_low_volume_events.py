@@ -125,38 +125,6 @@ def _delete_event_by_id(conn: Any, event_id: str) -> bool:
     return deleted
 
 
-def _ensure_trash_log_table(conn: Any) -> None:
-    with conn.cursor() as cursor:
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS event_resolution_trash_log (
-                id BIGSERIAL PRIMARY KEY,
-                event_id TEXT NOT NULL,
-                queue_status TEXT,
-                resolution_ready_at TIMESTAMPTZ,
-                api_volume NUMERIC(20, 6),
-                api_title TEXT,
-                reason TEXT NOT NULL,
-                deleted_from_events BOOLEAN NOT NULL DEFAULT FALSE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            """,
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_event_resolution_trash_log_event_id
-            ON event_resolution_trash_log(event_id)
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_event_resolution_trash_log_created_at
-            ON event_resolution_trash_log(created_at DESC)
-            """
-        )
-    conn.commit()
-
-
 def _insert_trash_log(
     conn: Any,
     event_id: str,
@@ -294,8 +262,6 @@ def main() -> None:
     session = requests.Session()
     session.headers.update({"Content-Type": "application/json"})
     db_conn = psycopg2.connect(**_db_params(use_local_db=args.local)) if args.delete_matched else None
-    if db_conn is not None:
-        _ensure_trash_log_table(conn=db_conn)
 
     try:
         for index, event_id in enumerate(event_ids, start=1):

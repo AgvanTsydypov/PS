@@ -13,10 +13,10 @@ allocation.  Bypassing the high-level Python entry points
 concurrency contract from orchestration noise (Pinata uploads, EVM RPC,
 card rendering); the orchestration paths are tested elsewhere.
 
-Schema note: the test schema (init-db.sql + create_seasons_system.sql) only
-allows status IN ('PENDING','PROCESSING','COMPLETED','FAILED').  Production
-adds QUEUED at runtime via ``ensure_claims_schema_for_mint``, but the lock
-semantics are identical regardless of status name, so we use PENDING.
+Schema note: the canonical schema (create_seasons_system.sql) allows
+status IN ('QUEUED','PENDING','PROCESSING','COMPLETED','FAILED'). The lock
+semantics are identical regardless of status name, so these tests use
+PENDING — the production queue path uses QUEUED.
 """
 
 import threading

@@ -96,25 +96,6 @@ class DbUploader:
             self.tag_colors_model = self._tag_color_generator.model
         return self._tag_color_generator
 
-    @staticmethod
-    def _ensure_tags_color_schema(cursor) -> None:
-        cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS hex_color TEXT")
-        cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE")
-        cursor.execute(
-            """
-            ALTER TABLE tags
-            DROP CONSTRAINT IF EXISTS tags_hex_color_format
-            """
-        )
-        cursor.execute(
-            """
-            ALTER TABLE tags
-            ADD CONSTRAINT tags_hex_color_format
-            CHECK (hex_color IS NULL OR hex_color ~* '^#[0-9a-f]{6}$')
-            """
-        )
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_hex_color ON tags(hex_color)")
-
     def _assign_missing_tag_colors(self, cursor, candidate_tag_ids: List[str]) -> int:
         if not candidate_tag_ids:
             return 0
@@ -398,9 +379,6 @@ class DbUploader:
         conn = psycopg2.connect(**self.connection_params)
         cursor = conn.cursor()
         try:
-            self._ensure_tags_color_schema(cursor)
-            conn.commit()
-
             upsert_series_sql = f"""
                 INSERT INTO {self.TABLE_SERIES} (
                     id, ticker, slug, title, subtitle, series_type, recurrence, description

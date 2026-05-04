@@ -1168,104 +1168,6 @@ class SimplifiedScheduler:
             (event_id, normalized_primary),
         )
 
-    def _ensure_event_cards_schema(self) -> None:
-        """
-        Backward-compatible DDL for environments created before event_cards existed.
-        """
-        conn = self.manager.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS event_cards (
-                        event_id TEXT PRIMARY KEY,
-                        series_id TEXT,
-                        reccurence TEXT NOT NULL DEFAULT 'unique',
-                        card_title TEXT,
-                        card_lore TEXT,
-                        primary_tag TEXT,
-                        secondary_tag TEXT,
-                        manual_image_url TEXT,
-                        agent_name TEXT NOT NULL DEFAULT 'agent_1_quant',
-                        model_name TEXT NOT NULL DEFAULT 'gemini-2.5-flash',
-                        prompt_version TEXT NOT NULL DEFAULT 'v1',
-                        status TEXT NOT NULL DEFAULT 'ok'
-                            CHECK (status IN ('ok', 'error')),
-                        error_text TEXT,
-                        generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        CONSTRAINT fk_event_cards_event
-                            FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
-                    )
-                    """
-                )
-                cursor.execute("ALTER TABLE event_cards ALTER COLUMN card_title DROP NOT NULL")
-                cursor.execute("ALTER TABLE event_cards ALTER COLUMN card_lore DROP NOT NULL")
-                cursor.execute("ALTER TABLE event_cards ALTER COLUMN primary_tag DROP NOT NULL")
-                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS series_id TEXT")
-                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS reccurence TEXT NOT NULL DEFAULT 'unique'")
-                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS secondary_tag TEXT")
-                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS manual_image_url TEXT")
-                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS agent_name TEXT NOT NULL DEFAULT 'agent_1_quant'")
-                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS model_name TEXT NOT NULL DEFAULT 'gemini-2.5-flash'")
-                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS prompt_version TEXT NOT NULL DEFAULT 'v1'")
-                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ok'")
-                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS error_text TEXT")
-                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
-                cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
-                cursor.execute(
-                    """
-                    ALTER TABLE event_cards
-                    DROP CONSTRAINT IF EXISTS event_cards_status_check
-                    """
-                )
-                cursor.execute(
-                    """
-                    ALTER TABLE event_cards
-                    ADD CONSTRAINT event_cards_status_check
-                    CHECK (status IN ('ok', 'error'))
-                    """
-                )
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_status ON event_cards(status)")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_prompt_version ON event_cards(prompt_version)")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_generated_at ON event_cards(generated_at DESC)")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_series_id ON event_cards(series_id)")
-                cursor.execute(
-                    """
-                    UPDATE event_cards ec
-                    SET
-                        series_id = e.series_id,
-                        reccurence = COALESCE(NULLIF(BTRIM(s.recurrence), ''), 'unique')
-                    FROM events e
-                    LEFT JOIN series s ON s.id = e.series_id
-                    WHERE ec.event_id = e.id
-                    """
-                )
-                cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS hex_color TEXT")
-                cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE")
-                cursor.execute(
-                    """
-                    ALTER TABLE tags
-                    DROP CONSTRAINT IF EXISTS tags_hex_color_format
-                    """
-                )
-                cursor.execute(
-                    """
-                    ALTER TABLE tags
-                    ADD CONSTRAINT tags_hex_color_format
-                    CHECK (hex_color IS NULL OR hex_color ~* '^#[0-9a-f]{6}$')
-                    """
-                )
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_hex_color ON tags(hex_color)")
-                cursor.execute("DROP VIEW IF EXISTS event_cards_pending")
-                cursor.execute("DROP TABLE IF EXISTS event_card_jobs")
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
     def generate_event_cards_for_event_ids(self, event_ids: List[str]) -> Dict[str, int]:
         """
         Generate/update event cards for specific event ids.
@@ -1291,7 +1193,6 @@ class SimplifiedScheduler:
         if self.event_cards_max_per_run > 0:
             cleaned_ids = cleaned_ids[: self.event_cards_max_per_run]
 
-        self._ensure_event_cards_schema()
         generator = self._get_event_card_generator()
         conn = self.manager.get_connection()
         try:

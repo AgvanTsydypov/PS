@@ -507,13 +507,15 @@ class TestEvmServiceExplorerUrls:
 class TestCollectionMintNumberAllocationPolicy:
     @property
     def schema_migration_source(self) -> str:
-        """Read the schema-migration method body as plain source text. The
-        method runs ``cursor.execute(...)`` with several SQL strings; checking
-        the literal source is sufficient for the policy guards we want to lock
-        in."""
-        import inspect
-        from admin_backend.claims_mint import ClaimsMintMixin
-        return inspect.getsource(ClaimsMintMixin.ensure_claims_schema_for_mint)
+        """Read the canonical claims schema (sql/schemas/create_seasons_system.sql)
+        as plain text. The DDL is the single source of truth — checking the file
+        contents is sufficient for the policy guards we want to lock in."""
+        import os
+        path = os.path.join(
+            os.path.dirname(__file__), "..", "sql", "schemas", "create_seasons_system.sql"
+        )
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
 
     @property
     def worker_source(self) -> str:
@@ -537,7 +539,7 @@ class TestCollectionMintNumberAllocationPolicy:
         assert "DROP FUNCTION IF EXISTS claims_assign_season_mint_number" in sql
         # And the legacy CREATE TRIGGER / CREATE FUNCTION must NOT come back.
         assert "CREATE TRIGGER tr_claims_assign_season_mint" not in sql
-        assert "claims_assign_season_mint_number()" not in sql or "DROP" in sql
+        assert "CREATE OR REPLACE FUNCTION claims_assign_season_mint_number" not in sql
 
     def test_unique_index_is_partial_on_completed(self):
         """A non-partial unique on (season_id, collection_mint_number) would
@@ -545,9 +547,9 @@ class TestCollectionMintNumberAllocationPolicy:
         cleared). The partial predicate makes the unique apply only to rows
         the user actually sees — COMPLETED ones."""
         sql = self.schema_migration_source
-        assert "CREATE UNIQUE INDEX" in sql
-        assert "ux_claims_season_collection_mint" in sql
+        assert "CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_season_collection_mint" in sql
         assert "WHERE status = 'COMPLETED'" in sql
+        assert "AND collection_mint_number IS NOT NULL" in sql
 
     def test_worker_allocates_under_advisory_lock_per_season(self):
         """Without per-season locking, two workers (or two iterations

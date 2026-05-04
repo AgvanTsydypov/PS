@@ -50,91 +50,6 @@ def _db_params(use_local_db: bool) -> Dict[str, Any]:
         "sslmode": os.getenv("DB_SSLMODE", "require"),
     }
 
-def _ensure_event_cards_schema(conn: Any) -> None:
-    with conn.cursor() as cursor:
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS event_cards (
-                event_id TEXT PRIMARY KEY,
-                series_id TEXT,
-                reccurence TEXT NOT NULL DEFAULT 'unique',
-                card_title TEXT,
-                card_lore TEXT,
-                primary_tag TEXT,
-                secondary_tag TEXT,
-                manual_image_url TEXT,
-                agent_name TEXT NOT NULL DEFAULT 'agent_1_quant',
-                model_name TEXT NOT NULL DEFAULT 'gemini-2.5-flash',
-                prompt_version TEXT NOT NULL DEFAULT 'v1',
-                status TEXT NOT NULL DEFAULT 'ok'
-                    CHECK (status IN ('ok', 'error')),
-                error_text TEXT,
-                generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                CONSTRAINT fk_event_cards_event
-                    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
-            )
-            """
-        )
-        cursor.execute("ALTER TABLE event_cards ALTER COLUMN card_title DROP NOT NULL")
-        cursor.execute("ALTER TABLE event_cards ALTER COLUMN card_lore DROP NOT NULL")
-        cursor.execute("ALTER TABLE event_cards ALTER COLUMN primary_tag DROP NOT NULL")
-        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS series_id TEXT")
-        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS reccurence TEXT NOT NULL DEFAULT 'unique'")
-        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS secondary_tag TEXT")
-        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS manual_image_url TEXT")
-        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS agent_name TEXT NOT NULL DEFAULT 'agent_1_quant'")
-        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS model_name TEXT NOT NULL DEFAULT 'gemini-2.5-flash'")
-        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS prompt_version TEXT NOT NULL DEFAULT 'v1'")
-        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ok'")
-        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS error_text TEXT")
-        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
-        cursor.execute("ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
-        cursor.execute(
-            """
-            ALTER TABLE event_cards
-            DROP CONSTRAINT IF EXISTS event_cards_status_check
-            """
-        )
-        cursor.execute(
-            """
-            ALTER TABLE event_cards
-            ADD CONSTRAINT event_cards_status_check
-            CHECK (status IN ('ok', 'error'))
-            """
-        )
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_status ON event_cards(status)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_prompt_version ON event_cards(prompt_version)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_generated_at ON event_cards(generated_at DESC)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_cards_series_id ON event_cards(series_id)")
-        cursor.execute(
-            """
-            UPDATE event_cards ec
-            SET
-                series_id = e.series_id,
-                reccurence = COALESCE(NULLIF(BTRIM(s.recurrence), ''), 'unique')
-            FROM events e
-            LEFT JOIN series s ON s.id = e.series_id
-            WHERE ec.event_id = e.id
-            """
-        )
-        cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS hex_color TEXT")
-        cursor.execute(
-            """
-            ALTER TABLE tags
-            DROP CONSTRAINT IF EXISTS tags_hex_color_format
-            """
-        )
-        cursor.execute(
-            """
-            ALTER TABLE tags
-            ADD CONSTRAINT tags_hex_color_format
-            CHECK (hex_color IS NULL OR hex_color ~* '^#[0-9a-f]{6}$')
-            """
-        )
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_hex_color ON tags(hex_color)")
-
-
 def _sync_event_tag_primary_flags(conn: Any, event_id: str, primary_tag: Optional[str]) -> None:
     normalized_primary = (primary_tag or "").strip() or None
     if not normalized_primary:
@@ -422,7 +337,6 @@ def main() -> None:
 
     conn = psycopg2.connect(**_db_params(use_local_db=args.local))
     try:
-        _ensure_event_cards_schema(conn)
         if args.dry_run:
             sample = _select_candidate_event_ids(
                 conn,

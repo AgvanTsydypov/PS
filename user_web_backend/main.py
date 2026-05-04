@@ -522,38 +522,6 @@ def _warn_if_claims_uniqueness_index_missing() -> None:
         conn.close()
 
 
-def _ensure_wallet_siwe_challenges_table() -> None:
-    """Creates the SIWE challenge table when missing (multi-worker safe store)."""
-    conn = _get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS wallet_siwe_challenges (
-                    id TEXT PRIMARY KEY,
-                    wallet_address TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    expires_at TIMESTAMPTZ NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    CONSTRAINT wallet_siwe_challenges_wallet_check
-                        CHECK (wallet_address ~* '^0x[a-f0-9]{40}$')
-                )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_wallet_siwe_challenges_expires_at
-                    ON wallet_siwe_challenges(expires_at)
-                """
-            )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        logger.exception("Failed to ensure wallet_siwe_challenges table")
-    finally:
-        conn.close()
-
-
 def _purge_stale_siwe_challenges(cursor: Any) -> None:
     cursor.execute("DELETE FROM wallet_siwe_challenges WHERE expires_at < NOW()")
 
@@ -625,92 +593,6 @@ def _delete_siwe_challenge_by_id(challenge_id: str) -> None:
     except Exception:
         conn.rollback()
         logger.exception("Failed to delete SIWE challenge id=%s", challenge_id)
-    finally:
-        conn.close()
-
-
-def _ensure_preview_cards_schema() -> None:
-    """Safety-net schema bootstrap for the ``preview_cards`` buffer table.
-
-    Mirrors the canonical DDL in ``sql/schemas/create_seasons_system.sql``
-    (which is authoritative) so a backend starting against a fresh DB
-    without the migration having run still has a working preview buffer.
-    The idempotent rename at the top lets this also recover a DB that
-    still has the legacy ``user_generated_cards`` name.
-    """
-    conn = _get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                DO $$
-                BEGIN
-                    IF to_regclass('public.user_generated_cards') IS NOT NULL
-                       AND to_regclass('public.preview_cards') IS NULL THEN
-                        ALTER TABLE user_generated_cards RENAME TO preview_cards;
-                    END IF;
-
-                    -- Same safety pattern as the canonical schema: rename
-                    -- the legacy-named indexes, or drop them outright when
-                    -- the new-named index was already created alongside.
-                    IF to_regclass('public.idx_preview_cards_owner_wallet_lower') IS NOT NULL THEN
-                        DROP INDEX IF EXISTS idx_generated_cards_owner_wallet_lower;
-                    ELSIF to_regclass('public.idx_generated_cards_owner_wallet_lower') IS NOT NULL THEN
-                        ALTER INDEX idx_generated_cards_owner_wallet_lower
-                            RENAME TO idx_preview_cards_owner_wallet_lower;
-                    END IF;
-
-                    IF to_regclass('public.idx_preview_cards_created_at') IS NOT NULL THEN
-                        DROP INDEX IF EXISTS idx_generated_cards_created_at;
-                    ELSIF to_regclass('public.idx_generated_cards_created_at') IS NOT NULL THEN
-                        ALTER INDEX idx_generated_cards_created_at
-                            RENAME TO idx_preview_cards_created_at;
-                    END IF;
-                END $$;
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS preview_cards (
-                    id BIGSERIAL PRIMARY KEY,
-                    slug TEXT NOT NULL UNIQUE,
-                    owner_wallet VARCHAR(42) NOT NULL,
-                    owner_proxy_wallet TEXT,
-                    season_id INTEGER NOT NULL,
-                    event_id TEXT,
-                    event_slug TEXT,
-                    card_title TEXT,
-                    primary_tag TEXT,
-                    secondary_tag TEXT,
-                    pattern TEXT,
-                    front_image_path TEXT NOT NULL,
-                    back_image_path TEXT NOT NULL,
-                    card_payload_json JSONB NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    CONSTRAINT fk_preview_card_season
-                        FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
-                    CONSTRAINT preview_card_owner_wallet_format_check
-                        CHECK (owner_wallet ~* '^0x[a-f0-9]{40}$')
-                )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_preview_cards_owner_wallet_lower
-                ON preview_cards(LOWER(owner_wallet), created_at DESC)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_preview_cards_created_at
-                ON preview_cards(created_at DESC)
-                """
-            )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        logger.exception("Failed to ensure preview_cards schema")
-        raise
     finally:
         conn.close()
 
@@ -1763,8 +1645,6 @@ async def rate_limit_middleware(request: Request, call_next):
 def startup_checks() -> None:
     _configure_user_web_timing_logging()
     _warn_if_claims_uniqueness_index_missing()
-    _ensure_preview_cards_schema()
-    _ensure_wallet_siwe_challenges_table()
     _warm_rasterizer_pool_in_background()
     if os.getenv("NODE_ENV", "development") != "development" and not _allowed_origins():
         logger.warning(

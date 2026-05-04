@@ -76,33 +76,6 @@ class EventMetadataBackfiller:
             self.tag_colors_model = self._tag_color_generator.model
         return self._tag_color_generator
 
-    @staticmethod
-    def _ensure_tags_color_schema(conn) -> None:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS hex_color TEXT")
-            cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE")
-            cursor.execute(
-                """
-                ALTER TABLE tags
-                DROP CONSTRAINT IF EXISTS tags_hex_color_format
-                """
-            )
-            cursor.execute(
-                """
-                ALTER TABLE tags
-                ADD CONSTRAINT tags_hex_color_format
-                CHECK (hex_color IS NULL OR hex_color ~* '^#[0-9a-f]{6}$')
-                """
-            )
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_hex_color ON tags(hex_color)")
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            cursor.close()
-
     def _assign_missing_tag_colors(self, cursor, candidate_tag_ids: List[str]) -> int:
         if not candidate_tag_ids:
             return 0
@@ -367,7 +340,6 @@ class EventMetadataBackfiller:
 
         conn = self._get_conn()
         try:
-            self._ensure_tags_color_schema(conn)
             diag = self._read_db_diagnostics(conn)
             print(
                 "   Connected as: "

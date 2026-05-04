@@ -194,8 +194,6 @@ class SeasonWorkbenchService(ClaimsMintMixin):
         )
         self.origin_lookback_days_standard = int(os.getenv("POLYSTARS_ORIGIN_LOOKBACK_DAYS_STANDARD", "10"))
         self._wallets_cache: Dict[tuple[int, str, bool, int], tuple[float, List[str]]] = {}
-        self.ensure_claims_schema_for_mint()
-        self.ensure_user_web_controls_schema()
 
     def clear_wallets_cache(self) -> None:
         self._wallets_cache.clear()
@@ -238,35 +236,7 @@ class SeasonWorkbenchService(ClaimsMintMixin):
         parts.append(f"{seconds}s")
         return " ".join(parts)
 
-    def ensure_user_web_controls_schema(self) -> None:
-        conn = self.manager.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS polystars_user_web_controls (
-                        singleton_id SMALLINT PRIMARY KEY CHECK (singleton_id = 1),
-                        wallet_actions_disabled BOOLEAN NOT NULL DEFAULT FALSE,
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )
-                    """
-                )
-                cursor.execute(
-                    """
-                    INSERT INTO polystars_user_web_controls (singleton_id, wallet_actions_disabled)
-                    VALUES (1, FALSE)
-                    ON CONFLICT (singleton_id) DO NOTHING
-                    """
-                )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
     def get_user_web_wallet_actions_disabled_db(self) -> bool:
-        self.ensure_user_web_controls_schema()
         conn = self.manager.get_connection()
         try:
             with conn.cursor() as cursor:
@@ -279,7 +249,6 @@ class SeasonWorkbenchService(ClaimsMintMixin):
             conn.close()
 
     def set_user_web_wallet_actions_disabled(self, disabled: bool) -> None:
-        self.ensure_user_web_controls_schema()
         conn = self.manager.get_connection()
         try:
             with conn.cursor() as cursor:
