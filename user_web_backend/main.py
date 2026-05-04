@@ -787,11 +787,8 @@ def _load_signin_proxy_for_session_wallet(cursor: Any, session_wallet_eoa: str) 
 
 
 _PTIER_CSS_COLORS: Dict[str, str] = {
-    "P999": "#FFD700",
     "P99":  "#FFD700",
-    "P95":  "#FFBF00",
     "P90":  "#FFBF00",
-    "P80":  "#265DD2",
     "P70":  "#265DD2",
     "P50":  "#38BE50",
     "BASE": "#B6BBC8",

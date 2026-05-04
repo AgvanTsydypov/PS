@@ -25,6 +25,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from scripts.evm_service import EVM_CONTRACT_ADDRESS_ENV_KEY
+from scripts.cardgen.generate_card import compute_structural_signature
 
 logger = logging.getLogger(__name__)
 
@@ -425,36 +426,55 @@ class ClaimsMintMixin:
             )
         return _participant_row_to_allocation(dict(row), claim_type="looter")
 
-    def _resolve_primary_tag_for_event(
+    def _resolve_event_card_meta(
         self,
         cursor: Any,
         event_id: Optional[str],
         event_slug: Optional[str],
-    ) -> Optional[str]:
-        """Look up event_cards.primary_tag for the trigger's per-tag cap check."""
-        if event_id:
+    ) -> Dict[str, Optional[str]]:
+        """Look up event_cards.{primary_tag, reccurence} for the trigger's per-tag
+        cap check and the structural signature's INST segment.
+        """
+        for column, value in (("event_id", event_id), ("event_slug", event_slug)):
+            if not value:
+                continue
             cursor.execute(
-                "SELECT primary_tag FROM event_cards WHERE event_id = %s LIMIT 1",
-                (event_id,),
+                f"SELECT primary_tag, reccurence FROM event_cards WHERE {column} = %s LIMIT 1",
+                (value,),
             )
             row = cursor.fetchone()
-            if row:
-                value = row.get("primary_tag") if isinstance(row, dict) else row[0]
-                tag = str(value or "").strip()
-                if tag:
-                    return tag
-        if event_slug:
-            cursor.execute(
-                "SELECT primary_tag FROM event_cards WHERE event_slug = %s LIMIT 1",
-                (event_slug,),
-            )
-            row = cursor.fetchone()
-            if row:
-                value = row.get("primary_tag") if isinstance(row, dict) else row[0]
-                tag = str(value or "").strip()
-                if tag:
-                    return tag
-        return None
+            if not row:
+                continue
+            tag_raw = row.get("primary_tag") if isinstance(row, dict) else row[0]
+            rec_raw = row.get("reccurence")  if isinstance(row, dict) else row[1]
+            tag = str(tag_raw or "").strip() or None
+            rec = str(rec_raw or "").strip() or None
+            if tag or rec:
+                return {"primary_tag": tag, "recurrence": rec}
+        return {"primary_tag": None, "recurrence": None}
+
+    def _resolve_season_meta(
+        self,
+        cursor: Any,
+        season_id: int,
+    ) -> Dict[str, Any]:
+        """Fetch (type, season_number) for the structural signature's S[N] segment."""
+        cursor.execute(
+            "SELECT type AS season_type, season_number FROM seasons WHERE id = %s LIMIT 1",
+            (season_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return {"season_type": None, "season_number": None}
+        if isinstance(row, dict):
+            return {
+                "season_type": str(row.get("season_type") or "").strip() or None,
+                "season_number": row.get("season_number"),
+            }
+        return {
+            "season_type": str(row[0] or "").strip() or None,
+            "season_number": row[1],
+        }
 
     def _insert_queued_claim(
         self,
@@ -466,14 +486,35 @@ class ClaimsMintMixin:
         phase: str,
         allocation: ParticipantAllocation,
         primary_tag: Optional[str],
+        recurrence: Optional[str],
+        season_type: Optional[str],
+        season_number: Any,
     ) -> Dict[str, Any]:
         """Insert a QUEUED claim row carrying the full participant snapshot.
 
         Raises psycopg2.errors.UniqueViolation on collisions
         (active claim already exists for this user_wallet OR proxy_wallet),
         and check_violation when the cap trigger refuses the row.
+
+        The structural signature is computed here from the same snapshot that
+        is being persisted, so the value written to ``claims.signature`` is the
+        exact string that ``generate_card_back_svg`` will later render on the
+        physical card. Any future change to the encoding logic will only affect
+        new mints — existing rows keep the signature they were minted with.
         """
         snap = allocation.snapshot
+        signature = compute_structural_signature({
+            "archetype":     snap.get("archetype"),
+            "entry_bracket": snap.get("entry_bracket"),
+            "edge":          snap.get("edge"),
+            "yield":         snap.get("yield"),
+            "gravity":       snap.get("gravity"),
+            "claim_type":    allocation.claim_type,
+            "event_id":      allocation.event_id,
+            "recurrence":    recurrence,
+            "season_type":   season_type,
+            "season_number": season_number,
+        })
         cursor.execute(
             """
             INSERT INTO claims (
@@ -484,6 +525,7 @@ class ClaimsMintMixin:
                 entry_bracket, edge, yield, gravity,
                 archetype, archetype_description, archetype_math, rarity_bracket,
                 participant_rank, claim_type,
+                signature,
                 mint_chain,
                 created_at, updated_at
             )
@@ -495,6 +537,7 @@ class ClaimsMintMixin:
                 %s, %s, %s, %s,
                 %s, %s, %s, %s,
                 %s, %s,
+                %s,
                 %s,
                 NOW(), NOW()
             )
@@ -513,6 +556,7 @@ class ClaimsMintMixin:
                 snap.get("archetype"),     snap.get("archetype_description"),
                 snap.get("archetype_math"), snap.get("rarity_bracket"),
                 snap.get("rank"), allocation.claim_type,
+                signature,
                 BLOCKCHAIN_ETHEREUM,
             ),
         )
@@ -597,11 +641,13 @@ class ClaimsMintMixin:
                         if origin_alloc is not None
                         else self._allocate_for_looter(cursor, req.season_id)
                     )
-                    primary_tag = self._resolve_primary_tag_for_event(
+                    event_meta = self._resolve_event_card_meta(
                         cursor,
                         allocation.event_id,
                         allocation.event_slug,
                     )
+                    season_meta = self._resolve_season_meta(cursor, req.season_id)
+                    primary_tag = event_meta["primary_tag"]
                     try:
                         inserted = self._insert_queued_claim(
                             cursor,
@@ -611,6 +657,9 @@ class ClaimsMintMixin:
                             phase=phase,
                             allocation=allocation,
                             primary_tag=primary_tag,
+                            recurrence=event_meta["recurrence"],
+                            season_type=season_meta["season_type"],
+                            season_number=season_meta["season_number"],
                         )
                     except psycopg2.errors.UniqueViolation as exc:
                         conn.rollback()

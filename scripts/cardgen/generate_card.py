@@ -139,6 +139,11 @@ BACK_QR_SIZE = 100
 BACK_QR_MARGIN = 14.0
 BACK_QR_X = BACK_DZ_X + BACK_DZ_W - BACK_QR_SIZE - BACK_QR_MARGIN
 BACK_QR_Y = BACK_DZ_Y + BACK_DZ_H - BACK_QR_SIZE - BACK_QR_MARGIN
+
+# Vertical full-wallet text on the back (Figma: x=479 y=231, rotation 90°).
+# Aligned with the QR's right edge so the rotated baseline runs down that edge.
+BACK_WALLET_VERTICAL_X = 479
+BACK_WALLET_VERTICAL_Y = 231
 BACK_QR_INNER_PAD = 6.0
 # Text column: left pad 41px, right pad = half of left (asymmetric).
 BACK_TEXT_PAD_X = 41.0
@@ -332,18 +337,15 @@ ENTRY_BRACKET_COLORS: Dict[str, str] = {
 }
 
 PTIER_COLORS: Dict[str, str] = {
-    "P999": _GRAD,
     "P99":  _GRAD,
-    "P95":  "#FFBF00",
     "P90":  "#FFBF00",
-    "P80":  SOFT_TIER_BLUE,
     "P70":  SOFT_TIER_BLUE,
     "P50":  "#38BE50",
     "BASE": "#B6BBC8",
 }
 
 # Yield tiers whose outer glow must stay deep blue (all other uses of that hue are SOFT_TIER_BLUE).
-_YIELD_TIERS_DEEP_BORDER = frozenset({"P70", "P80"})
+_YIELD_TIERS_DEEP_BORDER = frozenset({"P70"})
 
 
 _LEGACY_TO_INTERVAL: Dict[str, str] = {
@@ -613,7 +615,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 
     # ── 3. Propagation (Section 9) ────────────────────────────────────
     wallet_color = edge_color           # EDGE → wallet
-    # YIELD → outer glow: P70/P80 use deep blue on the frame only; same hue elsewhere is SOFT_TIER_BLUE.
+    # YIELD → outer glow: P70 uses deep blue on the frame only; same hue elsewhere is SOFT_TIER_BLUE.
     border_color = DEEP_BLUE_CARD_BORDER if yld in _YIELD_TIERS_DEEP_BORDER else yield_color
     dotted_color = gravity_color        # GRAVITY → lower dotted line
 
@@ -1566,6 +1568,127 @@ def _back_clamp_line_count(lines: List[str], max_lines: int) -> List[str]:
     return result
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Structural Signature (Section 4 of the Polystars spec)
+# Format: [ARCH]-[P(E)]-[E][Y][G]-[INST]-[CLAIM]-S[N]-[PLATFORM][EVENT_ID]
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SIG_ARCH_CODES: Dict[str, str] = {
+    "ANOMALY":     "ANO",
+    "ICARUS":      "ICA",
+    "BOT":         "BOT",
+    "BURNER":      "BUR",
+    "EQUILIBRIUM": "EQU",
+    "GRAVITON":    "GRA",
+    "VECTOR":      "VEC",
+    "SIGNAL":      "SIG",
+    "EXTRACTOR":   "EXT",
+    "INSIDER":     "INS",
+    "PASSENGER":   "PAS",
+    "OPERATOR":    "OPR",
+    "SUBSTRATE":   "SUB",
+}
+
+_SIG_BRACKET_DIGITS: Dict[str, str] = {
+    "[0.00 - 0.20]": "0",
+    "[0.20 - 0.40]": "2",
+    "[0.40 - 0.60]": "4",
+    "[0.60 - 0.80]": "6",
+    "[0.80 - 0.97]": "8",
+    "[0.97 - 1.00]": "9",  # terminal-certainty bracket compressed to 9
+}
+
+_SIG_TIER_CHARS: Dict[str, str] = {
+    "BASE": "B",
+    "P50":  "5",
+    "P70":  "7",
+    "P90":  "9",
+    "P99":  "X",
+}
+
+_SIG_INST_CHARS: Dict[str, str] = {
+    "UNIQUE":  "U",
+    "DAILY":   "D",
+    "WEEKLY":  "W",
+    "MONTHLY": "M",
+}
+
+_SIG_CLAIM_CHARS: Dict[str, str] = {
+    "ORIGIN": "Ø",  # slashed Ø — distinct from digit 0 used in the bracket field
+    "LOOTER": "L",
+}
+
+
+def _sig_arch(archetype: str) -> str:
+    return _SIG_ARCH_CODES.get(_archetype_style_key(archetype), "OPR")
+
+
+def _sig_bracket_digit(bracket: Any) -> str:
+    return _SIG_BRACKET_DIGITS.get(normalize_entry_bracket(bracket), "8")
+
+
+def _sig_tier(tier: Any) -> str:
+    key = str(tier or "").strip().upper() or "BASE"
+    return _SIG_TIER_CHARS.get(key, "B")
+
+
+def _sig_inst(recurrence: Any) -> str:
+    key = str(recurrence or "").strip().upper() or "UNIQUE"
+    if key in _SIG_INST_CHARS:
+        return _SIG_INST_CHARS[key]
+    # Any other recurrence label collapses to recurring "R"; default unknown -> U.
+    return "R" if key and key != "UNIQUE" else "U"
+
+
+def _sig_claim(claim_type: Any) -> str:
+    key = str(claim_type or "").strip().upper()
+    return _SIG_CLAIM_CHARS.get(key, "L")
+
+
+def _sig_season(data: Dict[str, Any]) -> str:
+    if str(data.get("season_type", "") or "").strip().lower() == "genesis":
+        return "S0"  # S0 is permanently reserved for the Genesis Epoch
+    n = data.get("season_number", 1)
+    try:
+        n_int = int(str(n).strip())
+    except (TypeError, ValueError):
+        n_int = 1
+    if n_int < 1:
+        n_int = 1
+    return f"S{n_int}"
+
+
+def _sig_source_token(data: Dict[str, Any]) -> str:
+    raw = (
+        data.get("event_id")
+        or data.get("polymarket_event_id")
+        or data.get("event_slug")
+        or ""
+    )
+    eid = str(raw).strip()
+    return f"POL{eid}" if eid else "POL"
+
+
+def compute_structural_signature(data: Dict[str, Any]) -> str:
+    """Render the Star's structural signature per spec Section 4.2.
+
+    Returns the fixed-grammar identifier:
+        [ARCH]-[P(E)]-[E][Y][G]-[INST]-[CLAIM]-S[N]-[PLATFORM][EVENT_ID]
+    """
+    arch = _sig_arch(data.get("archetype", ""))
+    pe = _sig_bracket_digit(data.get("entry_bracket"))
+    eyg = (
+        _sig_tier(data.get("edge"))
+        + _sig_tier(data.get("yield"))
+        + _sig_tier(data.get("gravity"))
+    )
+    inst = _sig_inst(data.get("recurrence"))
+    claim = _sig_claim(data.get("claim_type"))
+    season = _sig_season(data)
+    src = _sig_source_token(data)
+    return f"{arch}-{pe}-{eyg}-{inst}-{claim}-{season}-{src}"
+
+
 def generate_card_back_svg(data: Dict[str, Any]) -> str:
     """Build back-of-card SVG."""
     lh = BACK_LINE_HEIGHT
@@ -1624,6 +1747,19 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
         f'fill="#B6BBC8" stroke="black" stroke-width="1"/>'
         f"{qr_modules}</g>"
     )
+
+    # Full wallet address rendered vertically along the right edge of the QR.
+    # Figma: x=479 y=231, rotation 90°, opacity 0.1, right-aligned to QR right edge.
+    wallet_full_raw = str(data.get("proxy_wallet") or "").strip()
+    if wallet_full_raw:
+        wallet_full_svg = (
+            f'<text x="{BACK_WALLET_VERTICAL_X}" y="{BACK_WALLET_VERTICAL_Y}" '
+            f'transform="rotate(90 {BACK_WALLET_VERTICAL_X} {BACK_WALLET_VERTICAL_Y})" '
+            f'text-anchor="start" font-size="10" fill="white" fill-opacity="0.1">'
+            f'{_esc(wallet_full_raw)}</text>'
+        )
+    else:
+        wallet_full_svg = ""
 
     font_b64 = _load_font_b64()
     if font_b64:
@@ -1713,14 +1849,22 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 
     season_card_raw = f"SEASON CARD NUMBER:\u00a0{mint_str}/{size_str}"
     season_dates_raw = f"SEASON DATES:\u00a0{d1}\u00a0-\u00a0{d2}"
+    # Prefer the signature persisted on the claims row (frozen at queue-insert
+    # time) so the on-card string matches what is queryable in the catalog.
+    # Fall back to recomputing for sample/preview payloads that have no DB row.
+    signature_raw = str(data.get("signature") or "").strip() or compute_structural_signature(data)
     sc_wrap = _wrap_text_by_width(season_card_raw, float(BACK_META_WRAP_W), 10.0)
     if not sc_wrap:
         sc_wrap = [season_card_raw]
     sd_wrap = _wrap_text_by_width(season_dates_raw, float(BACK_META_WRAP_W), 10.0)
     if not sd_wrap:
         sd_wrap = [season_dates_raw]
+    sig_wrap = _wrap_text_by_width(signature_raw, float(BACK_META_WRAP_W), 10.0)
+    if not sig_wrap:
+        sig_wrap = [signature_raw]
     sc_lines_esc = [_esc(s) for s in sc_wrap]
     sd_lines_esc = [_esc(s) for s in sd_wrap]
+    sig_lines_esc = [_esc(s) for s in sig_wrap]
 
     n_meta_lines = len(sc_lines_esc) + len(sd_lines_esc)
     inner_clear = 4.0
@@ -1738,6 +1882,13 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     dates_meta_svg = "".join(
         f'<tspan x="{BACK_TEXT_X}" dy="{0 if i == 0 else BACK_META_LH}">{line}</tspan>'
         for i, line in enumerate(sd_lines_esc)
+    )
+
+    # Structural signature: rendered one meta-line above SEASON CARD NUMBER at 70% opacity.
+    y_sig_block = meta_y1 - len(sig_lines_esc) * BACK_META_LH
+    sig_meta_svg = "".join(
+        f'<tspan x="{BACK_TEXT_X}" dy="{0 if i == 0 else BACK_META_LH}">{line}</tspan>'
+        for i, line in enumerate(sig_lines_esc)
     )
 
     return f'''<svg viewBox="0 0 {CANVAS_W} {CANVAS_H}"
@@ -1847,10 +1998,13 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 <text x="{BACK_TEXT_X}" y="{round(y_stat_header, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="black" style="{style_lh};{arch_ud}">{stat_header}</text>
 {metrics_svg}
 
+<text x="{BACK_TEXT_X}" y="{round(y_sig_block, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="10" fill="white" fill-opacity="0.3" style="line-height:{BACK_META_LH}px">{sig_meta_svg}</text>
 <text x="{BACK_TEXT_X}" y="{round(meta_y1, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="10" fill="white" style="line-height:{BACK_META_LH}px">{season_meta_svg}</text>
 <text x="{BACK_TEXT_X}" y="{round(y_dates_block, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="10" fill="white" style="line-height:{BACK_META_LH}px">{dates_meta_svg}</text>
 
 {qr_block}
+
+{wallet_full_svg}
 
 <rect x="1.5" y="1.5" width="513" height="799" stroke="#333333" stroke-width="3"/>
 </svg>'''
@@ -1877,11 +2031,11 @@ SAMPLE_DATA: Dict[str, Any] = {
     "primary_tag_color": "#51E147",
     "secondary_tag":     "MARCH MADNESS",
     "entry_bracket":     "[0.60 - 0.80]",
-    "proxy_wallet":      "0xBb8E703abc123def456",
+    "proxy_wallet":      "0xdd6cc149f40708eb91456bc80fb87719afe8c99e",
     "edge":              "BASE",
     "yield":             "P50",
     "gravity":           "BASE",
-    "archetype":         "ICARUS",
+    "archetype":         "INSIDER",
     "card_lore":         "Standard edition pricing breach at triple digits signals industry inflection. Historical AAA launch data suggests $69.99 baseline holds. Resolution hinges on store listings by Feb 2026 deadline.",
     "archetype_description": "Mechanical routing protocol detected. This entity operates with massive kinetic force but generates zero directional trajectory, executing purely on structural arbitrage and fractional spreads. Devoid of human psychology or predictive bias, they exist solely to bridge conditional markets, merge underlying tokens, and enforce absolute liquidity ceilings. They do not predict the future; they mathematically process the emotions of the swarm.",
     "archetype_math":    "(P(E) ≥ 0.97 & Vol < 50) ∪ Mid-Trend Lag",
@@ -1892,6 +2046,7 @@ SAMPLE_DATA: Dict[str, Any] = {
     "season_start_date": _SAMPLE_START,
     "season_end_date":   _SAMPLE_END,
     "qr_payload":        "https://polystars.app/cards/card-genesis-s1-595f047311a45c524f706f5d1153fdac-f429c3e4c1394d35bc047257fe913fdd",
+    "event_id":          "123123",
 }
 
 
