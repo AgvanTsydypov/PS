@@ -86,33 +86,6 @@ class TagColorBackfiller:
         return self._generator
 
     @staticmethod
-    def _ensure_tags_color_schema(conn) -> None:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS hex_color TEXT")
-            cursor.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE")
-            cursor.execute(
-                """
-                ALTER TABLE tags
-                DROP CONSTRAINT IF EXISTS tags_hex_color_format
-                """
-            )
-            cursor.execute(
-                """
-                ALTER TABLE tags
-                ADD CONSTRAINT tags_hex_color_format
-                CHECK (hex_color IS NULL OR hex_color ~* '^#[0-9a-f]{6}$')
-                """
-            )
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_hex_color ON tags(hex_color)")
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            cursor.close()
-
-    @staticmethod
     def _fetch_total_missing(conn) -> int:
         cursor = conn.cursor()
         try:
@@ -176,7 +149,6 @@ class TagColorBackfiller:
     ) -> None:
         conn = self._get_conn()
         try:
-            self._ensure_tags_color_schema(conn)
             total_missing = self._fetch_total_missing(conn)
             print(
                 f"Connected to db={self.connection_params['database']} "

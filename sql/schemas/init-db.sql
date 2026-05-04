@@ -654,6 +654,30 @@ CREATE INDEX IF NOT EXISTS idx_event_resolution_queue_processed_run_id
 DO $$ BEGIN RAISE NOTICE '✅ event_resolution_queue table created'; END $$;
 
 -- ============================================================================
+-- EVENT RESOLUTION TRASH LOG (low-volume / dropped events audit trail)
+-- ============================================================================
+DO $$ BEGIN RAISE NOTICE '🗑️  Creating event_resolution_trash_log table...'; END $$;
+
+CREATE TABLE IF NOT EXISTS event_resolution_trash_log (
+    id BIGSERIAL PRIMARY KEY,
+    event_id TEXT NOT NULL,
+    queue_status TEXT,
+    resolution_ready_at TIMESTAMPTZ,
+    api_volume NUMERIC(20, 6),
+    api_title TEXT,
+    reason TEXT NOT NULL,
+    deleted_from_events BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_resolution_trash_log_event_id
+    ON event_resolution_trash_log(event_id);
+CREATE INDEX IF NOT EXISTS idx_event_resolution_trash_log_created_at
+    ON event_resolution_trash_log(created_at DESC);
+
+DO $$ BEGIN RAISE NOTICE '✅ event_resolution_trash_log table created'; END $$;
+
+-- ============================================================================
 -- 8. EVENT CARDS TABLES - AI-generated trader card metadata
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE '🧠 Creating event_cards tables...'; END $$;

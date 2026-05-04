@@ -133,12 +133,13 @@ CREATE TABLE IF NOT EXISTS claims (
 
     -- Transaction tracking
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    tx_hash VARCHAR(66),
+    tx_hash TEXT,
 
     -- NFT metadata
     token_id INTEGER,
     metadata_uri TEXT,
     asset_address TEXT,
+    mint_chain TEXT,
 
     -- Status tracking. 'QUEUED' = sitting in mint queue waiting for the
     -- daily cron worker; 'PENDING' = legacy direct-mint path.
@@ -183,13 +184,7 @@ CREATE TABLE IF NOT EXISTS claims (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
 
     -- Foreign key to seasons
-    CONSTRAINT fk_season FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
-
-    -- Wallet address validation
-    CONSTRAINT claims_wallet_check CHECK (
-        user_wallet ~* '^0x[a-f0-9]{40}$'
-        OR user_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'
-    )
+    CONSTRAINT fk_season FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE
 );
 
 -- Claims indexes
@@ -206,47 +201,22 @@ CREATE INDEX IF NOT EXISTS idx_claims_season_phase ON claims(season_id, phase_ty
 CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_active_season_user_wallet_lower
     ON claims(season_id, LOWER(user_wallet))
     WHERE status IN ('QUEUED', 'PENDING', 'PROCESSING', 'COMPLETED');
+-- Partial uniqueness on (season_id, collection_mint_number): enforced only
+-- for COMPLETED rows so a pre-mint FAILED claim does not block reuse of its
+-- tentatively-allocated number. The mint-queue worker assigns the number
+-- atomically right before the EVM mint under pg_advisory_xact_lock(9283742),
+-- so there is no BEFORE-INSERT trigger on claims.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_season_collection_mint
-    ON claims(season_id, collection_mint_number);
+    ON claims(season_id, collection_mint_number)
+    WHERE status = 'COMPLETED'
+      AND collection_mint_number IS NOT NULL;
 
--- Backfill collection_mint_number for legacy rows that predate the column.
--- No-op on fresh databases (claims table starts empty).
-WITH numbered AS (
-    SELECT
-        id,
-        ROW_NUMBER() OVER (
-            PARTITION BY season_id
-            ORDER BY COALESCE(timestamp, created_at) ASC, id ASC
-        ) AS rn
-    FROM claims
-    WHERE collection_mint_number IS NULL
-)
-UPDATE claims c
-SET collection_mint_number = n.rn
-FROM numbered n
-WHERE c.id = n.id;
-
-CREATE OR REPLACE FUNCTION claims_assign_season_mint_number()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF NEW.collection_mint_number IS NOT NULL THEN
-        RETURN NEW;
-    END IF;
-    -- Distinct namespace from preview_cards (9283741) to avoid cross-lock contention.
-    PERFORM pg_advisory_xact_lock(9283742, NEW.season_id);
-    SELECT COALESCE(MAX(collection_mint_number), 0) + 1
-    INTO NEW.collection_mint_number
-    FROM claims
-    WHERE season_id = NEW.season_id;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
+-- Drop the legacy BEFORE-INSERT trigger / function from older deployments.
+-- Under the queue model these double-allocated collection_mint_number — a
+-- QUEUED row got a number, then the worker reused it, inflating the on-chain
+-- count. Both are now permanently removed; the worker is the only allocator.
 DROP TRIGGER IF EXISTS tr_claims_assign_season_mint ON claims;
-CREATE TRIGGER tr_claims_assign_season_mint
-    BEFORE INSERT ON claims
-    FOR EACH ROW
-    EXECUTE PROCEDURE claims_assign_season_mint_number();
+DROP FUNCTION IF EXISTS claims_assign_season_mint_number();
 
 -- Add comments
 COMMENT ON TABLE claims IS 'NFT claims for each season - tracks all mint requests';
@@ -377,9 +347,9 @@ END $$;
 --
 -- ``ALTER INDEX ... RENAME TO`` has no ``IF NOT EXISTS`` on the target, so
 -- a naive rename blows up when the new-name index has already been created
--- by a prior partial run (e.g. the backend's ``_ensure_preview_cards_schema``
--- bootstrap ran ``CREATE INDEX IF NOT EXISTS idx_preview_cards_...`` next
--- to the still-present legacy index). The DO-block below handles both
+-- by a prior partial run (e.g. an older backend bootstrap that ran
+-- ``CREATE INDEX IF NOT EXISTS idx_preview_cards_...`` next to the still-
+-- present legacy index). The DO-block below handles both
 -- orderings: if the target is free we rename, otherwise we just drop the
 -- legacy duplicate so only the canonical name survives.
 DO $$

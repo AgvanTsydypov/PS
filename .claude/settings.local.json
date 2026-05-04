@@ -85,7 +85,8 @@
       "Bash(./node_modules/.bin/tsc --noEmit)",
       "Bash(docker --version)",
       "Bash(rtk docker *)",
-      "Bash(xargs grep *)"
+      "Bash(xargs grep *)",
+      "Bash(rtk proxy *)"
     ]
   },
   "enabledMcpjsonServers": [
