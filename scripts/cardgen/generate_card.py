@@ -479,9 +479,9 @@ _DZ_ARCHETYPE_STYLES: Dict[str, Tuple[str, str, bool]] = {
     "SIGNAL":      ("url(#signal-gradient)",       "#000000", False),
     "EXTRACTOR":   ("url(#extractor-gradient)",    "#000000", False),
     "INSIDER":     ("#1C1B1B",                     "#000000", False),
-    "PASSENGER":   ("#B8BFCE",                     "#000000", False),
+    "PASSENGER":   ("#474332",                     "#000000", False),
     "OPERATOR":    ("#625F5F",                     "#000000", False),
-    "SUBSTRATE":   ("#474332",                     "#000000", False),
+    "SUBSTRATE":   ("#B8BFCE",                     "#000000", False),
 }
 
 
