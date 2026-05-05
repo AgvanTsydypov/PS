@@ -3269,15 +3269,16 @@ export default function HomePage() {
           </div>
           <div className="panel" style={{ marginTop: 16 }}>
             <div className="muted" style={{ marginBottom: 8 }}>
-              Simulate user &quot;generate card&quot; actions (same pipeline as POST /api/cards/get). Rows always come from{" "}
-              <span className="mono">winner_wallets_nft_to_claim</span>. With{" "}
-              <strong>Maximum diversity mode</strong>, the batch uses a showcase plan (distinct{" "}
-              <span className="mono">manual_image_url</span>, balanced archetypes, among ANOMALY rows balanced P99 / P90 /
-              P70 / P50 triples when edge=yield=gravity match, spread metric quads); planned rows may
-              fall back to a random eligible row if already claimed. Pool cap: env{" "}
-              <span className="mono">SIMULATE_SHOWCASE_MAX_CANDIDATES</span> (default 8000). With the mode off, each draw
-              uses the legacy random eligible pick (season-weighted, then <span className="mono">ORDER BY RANDOM()</span>
-              ). Set the chance (0–100%) that claimer proxy = winner proxy (ORIGIN); otherwise a decoy proxy (looter).
+              Populate <span className="mono">preview_cards</span> from the <span className="mono">participants</span>{" "}
+              partitions of all seasons (active or pre-start). Each draw renders the SVG/PNG via the shared cardgen
+              pipeline and uploads to R2. With <strong>Maximum diversity mode</strong>, the batch divides{" "}
+              <span className="mono">max_count</span> evenly across the archetypes that have available rows; if some
+              archetype is short, its slots spill round-robin into archetypes with surplus. Rows already present in{" "}
+              <span className="mono">preview_cards</span> for the same{" "}
+              <span className="mono">(season_id, event_slug, proxy_wallet)</span> slot are skipped, so re-running the
+              simulator never duplicates previews. Set the chance (0–100%) that{" "}
+              <span className="mono">payload.claim_type</span> is rendered as ORIGIN (rest are LOOTER); a real mint
+              landing on the same slot later inherits the preview's slug and re-renders with the actual claim_type.
             </div>
             <div className="row" style={{ marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
               <label className="inline-flex items-center gap-2 cursor-pointer">

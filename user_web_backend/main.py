@@ -241,30 +241,57 @@ USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS = float(
     os.getenv("USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS", "30")
 )
 
-# Home-page ticker feed: random sample of minted STARs.
+# Home-page ticker feed: random sample of minted STARs *plus* unminted
+# preview cards from the admin showcase simulator.
 #
-# Under the queue model the canonical store of any card the user can
-# interact with is ``claims`` (denormalized via ``denormalize_card_onto_claim``
-# right after the on-chain mint succeeds). We read straight from there and
-# alias to the ticker's historical column shape (``slug``, ``card_title``,
+# Two sources, same ticker column shape (``slug``, ``card_title``,
 # ``front_image_path``, ``back_image_path``, ``created_at``) so the
-# downstream cache and frontend code do not need to change.
+# downstream cache and frontend code don't need to know which side a row
+# came from:
 #
-# Only ``status = 'COMPLETED'`` rows with a non-empty ``card_slug`` are
-# eligible — QUEUED/PENDING/PROCESSING claims have no rendered card yet,
-# and FAILED claims have no on-chain artefact to point at.
+#   1. ``claims`` (minted): denormalized at mint time by
+#      ``denormalize_card_onto_claim``. Status filter excludes
+#      QUEUED/PENDING/PROCESSING (no rendered card yet) and FAILED
+#      (no on-chain artefact).
+#   2. ``preview_cards`` (showcase buffer): populated by the admin
+#      ``/api/scenarios/simulate-generated-cards-batch`` endpoint, drained
+#      slot-by-slot when a real user mints onto the same slot — at that
+#      point the preview is deleted by slug in the same transaction that
+#      writes ``claims.card_slug``. So a single slug is in claims XOR
+#      preview_cards, never both, and the UNION won't duplicate cards.
+#
+# Both branches require non-empty image paths because the simulator and
+# the mint worker both INSERT placeholder rows first and UPDATE the URLs
+# after R2/Pinata upload — without that filter we'd surface half-rendered
+# in-flight rows whose images aren't yet reachable.
 _CARDS_TICKER_SAMPLE_SQL = """
-SELECT c.card_slug                                AS slug,
-       c.card_title                               AS card_title,
-       c.front_image_url                          AS front_image_path,
-       c.back_image_url                           AS back_image_path,
-       COALESCE(c.timestamp, c.created_at)        AS created_at
-FROM claims c
-WHERE c.status = 'COMPLETED'
-  AND c.card_slug IS NOT NULL
-  AND BTRIM(c.card_slug) <> ''
-  AND c.front_image_url IS NOT NULL
-  AND c.back_image_url  IS NOT NULL
+SELECT slug, card_title, front_image_path, back_image_path, created_at
+FROM (
+    SELECT c.card_slug                          AS slug,
+           c.card_title                         AS card_title,
+           c.front_image_url                    AS front_image_path,
+           c.back_image_url                     AS back_image_path,
+           COALESCE(c.timestamp, c.created_at)  AS created_at
+    FROM claims c
+    WHERE c.status = 'COMPLETED'
+      AND c.card_slug IS NOT NULL
+      AND BTRIM(c.card_slug) <> ''
+      AND c.front_image_url IS NOT NULL
+      AND c.back_image_url  IS NOT NULL
+    UNION ALL
+    SELECT pc.slug                              AS slug,
+           pc.card_title                        AS card_title,
+           pc.front_image_path                  AS front_image_path,
+           pc.back_image_path                   AS back_image_path,
+           pc.created_at                        AS created_at
+    FROM preview_cards pc
+    WHERE pc.slug IS NOT NULL
+      AND BTRIM(pc.slug) <> ''
+      AND pc.front_image_path IS NOT NULL
+      AND BTRIM(pc.front_image_path) <> ''
+      AND pc.back_image_path  IS NOT NULL
+      AND BTRIM(pc.back_image_path)  <> ''
+) ticker
 ORDER BY RANDOM()
 LIMIT %s
 """

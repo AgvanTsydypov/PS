@@ -97,6 +97,13 @@ class AdvancedScenarioRequest(BaseModel):
     is_completed: bool
 
 
+class SimulateGeneratedCardsBatchRequest(BaseModel):
+    request_id: str
+    max_count: int = Field(ge=1, le=200)
+    origin_match_fraction: float = Field(ge=0.0, le=1.0)
+    maximum_diversity: bool = False
+
+
 class UserWebWalletActionsUpdate(BaseModel):
     disabled: bool
 
@@ -2281,6 +2288,31 @@ def apply_advanced(req: AdvancedScenarioRequest) -> Dict[str, str]:
         service.apply_advanced_scenario(req)
         return {"status": "ok", "message": f"Updated season {req.season_id} advanced params"}
     except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/scenarios/simulate-generated-cards-batch")
+def scenarios_simulate_generated_cards_batch(
+    req: SimulateGeneratedCardsBatchRequest,
+) -> Dict[str, Any]:
+    try:
+        from scripts.simulate_user_generated_cards_batch import (
+            run_admin_simulated_card_generations,
+        )
+
+        def broadcast(payload: Dict[str, Any]) -> None:
+            ws_hub.broadcast_threadsafe("simulate_generated_cards_batch", payload)
+
+        return run_admin_simulated_card_generations(
+            service.manager,
+            request_id=req.request_id,
+            max_count=req.max_count,
+            origin_match_fraction=req.origin_match_fraction,
+            maximum_diversity=req.maximum_diversity,
+            progress_callback=broadcast,
+        )
+    except Exception as exc:
+        logger.exception("simulate-generated-cards-batch failed")
         raise HTTPException(status_code=400, detail=str(exc))
 
 

@@ -439,6 +439,14 @@ CREATE INDEX IF NOT EXISTS idx_preview_cards_created_at
 CREATE UNIQUE INDEX IF NOT EXISTS ux_preview_cards_season_collection_mint
     ON preview_cards(season_id, collection_mint_number);
 
+-- Logical slot identity: at most one preview per (season, event, proxy_wallet)
+-- triple. This is the key the admin showcase simulator dedupes on, and it's
+-- also what build_polystars_card_from_claim joins on to reuse a preview's
+-- slug when a real mint lands on the same slot — preserving /cards/{slug}
+-- through the preview→minted transition.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_preview_cards_logical_slot
+    ON preview_cards(season_id, event_slug, LOWER(owner_proxy_wallet));
+
 -- Legacy cleanup: drop the old global mint sequence and its companion index
 -- from pre-rename deployments. No-op on fresh databases.
 DROP SEQUENCE IF EXISTS user_generated_cards_collection_mint_seq CASCADE;

@@ -201,7 +201,15 @@ def _user_web_module():
     return m
 
 
-class TestCardsTickerSqlPreviewOnly:
+class TestCardsTickerSqlClaimsAndPreviews:
+    """Ticker SQL must surface both minted claims and unminted preview
+    cards. The two branches share the ticker's column shape so the cache
+    and the frontend stay agnostic about which side a row came from. After
+    a successful mint, ``denormalize_card_onto_claim`` deletes the matching
+    preview row by slug — so UNION ALL won't duplicate a slug across both
+    branches under normal operation.
+    """
+
     @property
     def sql(self) -> str:
         return _user_web_module()._CARDS_TICKER_SAMPLE_SQL
@@ -213,6 +221,18 @@ class TestCardsTickerSqlPreviewOnly:
     def test_samples_from_claims_completed(self):
         assert "from claims" in self.normalized
         assert "status = 'completed'" in self.normalized
+
+    def test_also_samples_from_preview_cards(self):
+        """Showcase simulator populates ``preview_cards``; without this
+        branch, simulator output never reaches the home ticker."""
+        assert "from preview_cards" in self.normalized
+
+    def test_unions_minted_and_preview_branches(self):
+        """The two branches must be combined as UNION ALL — both already
+        carry distinct slugs (claims drops the matching preview row at
+        mint time), so deduplication via UNION (without ALL) would just
+        burn cycles."""
+        assert "union all" in self.normalized
 
     def test_does_not_join_legacy_winner_wallets(self):
         assert "winner_wallets_nft_to_claim" not in self.normalized
@@ -234,10 +254,25 @@ class TestCardsTickerSqlPreviewOnly:
 
     def test_filters_out_unrenderable_claims(self):
         """QUEUED/PENDING/PROCESSING rows have no card_slug yet; FAILED rows
-        have no on-chain artefact. Both must be excluded."""
+        have no on-chain artefact. Both must be excluded from the claims
+        branch."""
         assert "card_slug is not null" in self.normalized
         assert "front_image_url is not null" in self.normalized
         assert "back_image_url" in self.normalized
+
+    def test_filters_out_unrendered_previews(self):
+        """The simulator INSERTs a placeholder preview row first and
+        UPDATEs the image paths after the R2 upload completes. The ticker
+        must skip rows whose paths are still empty strings, otherwise it
+        would surface half-rendered in-flight previews whose images
+        haven't been published yet."""
+        # Both image-path columns checked for non-NULL and non-empty.
+        assert "front_image_path is not null" in self.normalized
+        assert "back_image_path  is not null" in self.normalized or (
+            "back_image_path is not null" in self.normalized
+        )
+        # BTRIM(...) <> '' filters fire on both image-path columns.
+        assert self.normalized.count("btrim(") >= 3  # card_slug + 2 paths
 
 
 # ---------------------------------------------------------------------------
