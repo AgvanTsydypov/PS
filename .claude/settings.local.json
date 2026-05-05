@@ -86,7 +86,13 @@
       "Bash(docker --version)",
       "Bash(rtk docker *)",
       "Bash(xargs grep *)",
-      "Bash(rtk proxy *)"
+      "Bash(rtk proxy *)",
+      "Bash(curl -s -w \"\\\\nHTTP %{http_code}\\\\n\" \"http://localhost:5049/api/claims/season-info?season_id=1&wallet=0x0000000000000000000000000000000000000000&auto_phase=true&manual_phase=breach\")",
+      "Bash(python -c ' *)",
+      "Bash(curl -s -w \"\\\\nHTTP %{http_code}\\\\n\" http://localhost:5048/api/cards/ticker)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code} for 5049\\\\n\" http://localhost:5049/api/seasons)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code} for 8089\\\\n\" http://localhost:8089/)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code} for 3001\\\\n\" http://localhost:3001/)"
     ]
   },
   "enabledMcpjsonServers": [

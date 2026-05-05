@@ -154,7 +154,7 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                   </span>
                 ) : (
                   <span className="card-detail-chip card-detail-chip-preview">
-                    Preview — not yet minted
+                    It's preview — possible to mint
                   </span>
                 )}
                 <span className="card-detail-chip">
@@ -175,10 +175,16 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
               <div className="card-detail-info">
                 <section className="card-detail-panel">
                   <dl className="card-detail-kv">
+                    {/* Preview cards carry a synthetic ``owner_wallet`` (random
+                        hex burner the simulator generated to satisfy the CHECK
+                        constraint) and an ``owner_proxy_wallet`` copied from
+                        the participant — both are stand-ins until a real user
+                        mints onto the slot. Showing the literal "preview"
+                        keeps the page honest about who hasn't claimed yet. */}
                     <dt>Claimer EOA wallet</dt>
-                    <dd>{card.owner_wallet}</dd>
+                    <dd>{card.is_preview ? "preview" : card.owner_wallet}</dd>
                     <dt>Claimer proxy wallet</dt>
-                    <dd>{card.owner_proxy_wallet ?? "Not found"}</dd>
+                    <dd>{card.is_preview ? "preview" : (card.owner_proxy_wallet ?? "Not found")}</dd>
                     <dt>Winner proxy wallet</dt>
                     <dd>{card.winner_proxy_wallet ?? "N/A"}</dd>
                     <dt>Event title</dt>

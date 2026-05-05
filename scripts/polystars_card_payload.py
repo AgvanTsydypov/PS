@@ -414,6 +414,47 @@ def _load_card_source_row_from_claim(
         conn.close()
 
 
+def _lookup_preview_slug_for_slot(
+    manager: DataLoadingManager,
+    *,
+    season_id: Optional[int],
+    event_slug: Optional[str],
+    proxy_wallet: Optional[str],
+) -> Optional[str]:
+    """If the simulator pre-rendered a preview for this exact slot, return
+    its slug so the mint reuses it. Slot identity is
+    ``(season_id, event_slug, LOWER(proxy_wallet))`` — same dedup key as the
+    UNIQUE index ``ux_preview_cards_logical_slot``.
+
+    Returning the existing slug means ``denormalize_card_onto_claim`` later
+    DELETEs the preview by that slug, swapping preview → minted under a
+    permalink that survives the transition.
+    """
+    if season_id is None or not event_slug or not proxy_wallet:
+        return None
+    conn = manager.get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT slug
+                FROM preview_cards
+                WHERE season_id  = %s
+                  AND event_slug = %s
+                  AND LOWER(owner_proxy_wallet) = LOWER(%s)
+                LIMIT 1
+                """,
+                (int(season_id), str(event_slug), str(proxy_wallet)),
+            )
+            row = cursor.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    raw = row[0] if not isinstance(row, dict) else row.get("slug")
+    return str(raw).strip() if raw else None
+
+
 def build_polystars_card_from_claim(
     manager: DataLoadingManager,
     *,
@@ -422,18 +463,30 @@ def build_polystars_card_from_claim(
     """Build the mint-ready card payload reading the snapshot directly from
     the claims row. Used by the daily cron worker to materialize card images
     for QUEUED claims, after the snapshot has been frozen at queue-insert time.
+
+    Slug continuity: if a simulator-generated preview exists for the same
+    slot (``season_id, event_slug, proxy_wallet``), the mint inherits its
+    slug, so ``/cards/{slug}`` keeps working through the preview→minted
+    transition. ``denormalize_card_onto_claim`` then deletes that preview
+    row by slug after the on-chain mint succeeds.
     """
     row = _load_card_source_row_from_claim(manager, claim_id)
     if not row:
         raise ValueError(f"claims id={claim_id} not found")
     claim_type = str(row.get("claim_type") or "looter").strip().lower() or "looter"
     collection_mint_number = row.get("collection_mint_number")
+    preview_slug = _lookup_preview_slug_for_slot(
+        manager,
+        season_id=row.get("season_id"),
+        event_slug=row.get("event_slug"),
+        proxy_wallet=row.get("proxy_wallet"),
+    )
     payload = _build_card_payload_from_source_row(
         row,
         claim_id=claim_id,
         claim_type=claim_type,
         collection_mint_number=int(collection_mint_number) if collection_mint_number is not None else None,
-        preview_slug=None,
+        preview_slug=preview_slug,
     )
     return _attach_generated_card_images(payload)
 

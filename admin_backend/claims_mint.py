@@ -336,7 +336,7 @@ class ClaimsMintMixin:
                     SELECT id, user_wallet, phase_type, status, tx_hash, asset_address,
                            timestamp, created_at, collection_mint_number,
                            error_message,
-                           (error_message ILIKE '%[auto-renumbered by recovery%')
+                           (error_message ILIKE '%%[auto-renumbered by recovery%%')
                                AS is_renumbered
                     FROM claims
                     WHERE season_id = %s
