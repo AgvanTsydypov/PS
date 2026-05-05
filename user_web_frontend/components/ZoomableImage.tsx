@@ -15,8 +15,35 @@ const ZOOM_STEP = 0.0015;
 
 type Props = ImgHTMLAttributes<HTMLImageElement>;
 
+function parseWidthDirective(title?: string): string | undefined {
+  if (!title) return undefined;
+  const t = title.trim();
+  let m = t.match(/^(\d+(?:\.\d+)?)\s*%$/);
+  if (m) return `${parseFloat(m[1])}%`;
+  m = t.match(/^(\d+(?:\.\d+)?)\s*x?$/i);
+  if (!m) return undefined;
+  const n = parseFloat(m[1]);
+  if (n <= 0) return undefined;
+  if (n <= 1) return `${n * 100}%`;
+  if (n <= 100) return `${n}%`;
+  return undefined;
+}
+
 export default function ZoomableImage(props: Props) {
-  const { onClick: _ignored, ...imgProps } = props;
+  const { onClick: _ignored, title, style: incomingStyle, ...rest } = props;
+  const widthOverride = parseWidthDirective(title);
+  const triggerTitle = widthOverride ? undefined : title;
+  const triggerStyle = widthOverride
+    ? {
+        ...incomingStyle,
+        width: widthOverride,
+        maxWidth: "100%",
+        marginLeft: "auto",
+        marginRight: "auto",
+      }
+    : incomingStyle;
+  const imgProps = { ...rest, title: triggerTitle, style: triggerStyle };
+  const lightboxImgProps = { ...rest, title: triggerTitle };
   const [open, setOpen] = useState(false);
   const [scale, setScale] = useState(MIN_SCALE);
   const [tx, setTx] = useState(0);
@@ -133,7 +160,7 @@ export default function ZoomableImage(props: Props) {
             </button>
           </div>
           <img
-            {...imgProps}
+            {...lightboxImgProps}
             className="sm-lightbox-img"
             style={{
               transform: `translate(${tx}px, ${ty}px) scale(${scale})`,

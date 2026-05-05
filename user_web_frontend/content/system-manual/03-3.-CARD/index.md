@@ -21,7 +21,7 @@ The Card has two distinct faces, each serving a unique informational purpose:
 
 The front is divided into two zones, vertically. The **Image Zone** occupies the upper half; the **Data Zone** occupies the lower half. A **Title Bridge** sits on the boundary between them.
 
-![alt](/system-manual/ASCII_CARD_FRONT.png)
+![alt](/system-manual/ASCII_CARD_FRONT.png "0.6")
 
 #### Image Zone
 
@@ -59,7 +59,7 @@ The Data Zone background is determined by the Archetype, with each of the thirte
 
 The back of the Card is structured as a **dossier**. To ensure visual unity, the background color matches the Archetype's Data Zone treatment from the front, and the frame color matches the Yield-driven outer border.
 
-![alt](/system-manual/ASCII_CARD_BACK.png)
+![alt](/system-manual/ASCII_CARD_BACK.png "0.6")
 
 #### Event Topology
 
