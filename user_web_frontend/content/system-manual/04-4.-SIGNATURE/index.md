@@ -43,7 +43,7 @@ The signature resolves to seven structural segments. Each segment carries one di
     
     > The event identifier is the canonical Polymarket event ID, preserved as-is from the source.
 
-![alt](/system-manual/ASCII_SIGNATURE.png)
+![alt](/system-manual/ASCII_SIGNATURE.png "0.6")
 
 ---
 
