@@ -2852,6 +2852,95 @@ a.season-mint-button {
   margin: 24px 0;
 }
 
+.sm-md .sm-md-img-trigger {
+  cursor: zoom-in;
+  transition: opacity 120ms ease;
+}
+
+.sm-md .sm-md-img-trigger:hover {
+  opacity: 0.9;
+}
+
+.sm-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+  animation: sm-lightbox-fade 140ms ease-out;
+}
+
+@keyframes sm-lightbox-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.sm-lightbox-img {
+  max-width: 92vw;
+  max-height: 92vh;
+  width: auto;
+  height: auto;
+  display: block;
+  transform-origin: center center;
+  transition: transform 60ms linear;
+  will-change: transform;
+  -webkit-user-drag: none;
+}
+
+.sm-lightbox-toolbar {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(20, 20, 20, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+}
+
+.sm-lightbox-btn {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  color: #fff;
+  font-family: var(--bd-font-ui);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.sm-lightbox-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.sm-lightbox-zoom {
+  min-width: 48px;
+  text-align: center;
+  color: #fff;
+  font-family: var(--bd-font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.sm-lightbox-close {
+  font-size: 20px;
+}
+
 .sm-md table {
   width: 100%;
   border-collapse: collapse;
