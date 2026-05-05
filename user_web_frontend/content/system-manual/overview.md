@@ -1,3 +1,0 @@
-The geopolitical landscape generates extreme volatility. Where uncertainty spikes, prediction markets materialize to aggressively quantify the wisdom of crowds. Polymarket’s highest-volume ledgers represent the exact intersection of peak human attention and financial speculation.
-
-However, once an event achieves 100% certainty, the speculation dies. Polystars acts as the permanent archival layer. In the same way that baseball cards or Pokémon cards captured the physical and cultural zeitgeists of past eras, Polystars crystallizes digital consensus into immutable artifacts. We forge an infinite thread between the historical imprint and the executing operator. We do not just record the event; we mathematically distill the actors who survived and succeeded in it. 
