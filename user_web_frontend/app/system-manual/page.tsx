@@ -1,12 +1,8 @@
-import MarkdownContent from "../../components/MarkdownContent";
-import { getManualContent } from "../../lib/systemManualContent";
+import { redirect } from "next/navigation";
 
-export default function SystemManualOverviewPage() {
-  const content = getManualContent("overview");
-  return (
-    <>
-      <h1 className="sm-page-title">Overview</h1>
-      {content ? <MarkdownContent content={content} /> : <div className="sm-placeholder" />}
-    </>
-  );
+import { getSections } from "../../lib/systemManualContent";
+
+export default function SystemManualIndexPage() {
+  const [first] = getSections();
+  redirect(first ? `/system-manual/${first}` : "/");
 }
