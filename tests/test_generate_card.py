@@ -13,6 +13,7 @@ from scripts.cardgen.generate_card import (
     _event_recurrence_is_fractal,
     _fmt_back_date,
     _instance,
+    _normalize_behavioral_frequency_label,
     _orbitron_width,
     _ownership,
     _season,
@@ -428,3 +429,56 @@ class TestOrbitronWidth:
         lines = _wrap_text_by_width(text, 100.0, 14.0)
         assert len(lines) >= 1
         assert " ".join(lines) == text
+
+
+# ---------------------------------------------------------------------------
+# _normalize_behavioral_frequency_label
+# ---------------------------------------------------------------------------
+
+class TestNormalizeBehavioralFrequencyLabel:
+    def test_empty_returns_dash_placeholder(self):
+        assert _normalize_behavioral_frequency_label("") == "BEHAVIORAL FREQUENCY: --"
+        assert _normalize_behavioral_frequency_label(None) == "BEHAVIORAL FREQUENCY: --"
+
+    def test_canonical_value_passes_through(self):
+        assert (
+            _normalize_behavioral_frequency_label("BEHAVIORAL FREQUENCY: ~ 2.0%")
+            == "BEHAVIORAL FREQUENCY: ~ 2.0%"
+        )
+
+    def test_strips_brackets_and_collapses_whitespace(self):
+        raw = "[BEHAVIORAL  FREQUENCY:   ~ 0.5%]"
+        assert (
+            _normalize_behavioral_frequency_label(raw)
+            == "BEHAVIORAL FREQUENCY: ~ 0.5%"
+        )
+
+    def test_bare_payload_gets_prefix(self):
+        assert (
+            _normalize_behavioral_frequency_label("~ 7.0%")
+            == "BEHAVIORAL FREQUENCY: ~ 7.0%"
+        )
+
+    def test_other_prefix_with_colon_is_replaced(self):
+        # Anything before the colon is treated as a stale prefix and dropped.
+        assert (
+            _normalize_behavioral_frequency_label("OCCURRENCE: ~ 1.0%")
+            == "BEHAVIORAL FREQUENCY: ~ 1.0%"
+        )
+        assert (
+            _normalize_behavioral_frequency_label("PROBABILITY COHORT: < 1.0%")
+            == "BEHAVIORAL FREQUENCY: < 1.0%"
+        )
+
+    def test_coerces_non_string(self):
+        assert (
+            _normalize_behavioral_frequency_label(42)
+            == "BEHAVIORAL FREQUENCY: 42"
+        )
+
+    def test_collapses_internal_newlines(self):
+        raw = "BEHAVIORAL FREQUENCY:\n~ 44.0%"
+        assert (
+            _normalize_behavioral_frequency_label(raw)
+            == "BEHAVIORAL FREQUENCY: ~ 44.0%"
+        )

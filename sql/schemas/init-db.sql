@@ -972,19 +972,19 @@ SELECT
         ELSE NULL::text
     END AS archetype_math,
     CASE at.archetype
-        WHEN 'INSIDER'::text THEN 'PROBABILITY COHORT: < 0.3%'::text
-        WHEN 'ANOMALY'::text THEN 'PROBABILITY COHORT: < 1.0%'::text
-        WHEN 'EXTRACTOR'::text THEN 'PROBABILITY COHORT: < 1.0%'::text
-        WHEN 'ICARUS'::text THEN 'PROBABILITY COHORT: < 1.0%'::text
-        WHEN 'SIGNAL'::text THEN 'PROBABILITY COHORT: 1.0% - 3.0%'::text
-        WHEN 'GRAVITON'::text THEN 'PROBABILITY COHORT: 1.0% - 3.0%'::text
-        WHEN 'VECTOR'::text THEN 'PROBABILITY COHORT: 1.0% - 3.0%'::text
-        WHEN 'BURNER'::text THEN 'PROBABILITY COHORT: 3.0% - 5.0%'::text
-        WHEN 'EQUILIBRIUM'::text THEN 'PROBABILITY COHORT: 3.0% - 5.0%'::text
-        WHEN 'BOT'::text THEN 'PROBABILITY COHORT: 5.0% - 10.0%'::text
-        WHEN 'PASSENGER'::text THEN 'PROBABILITY COHORT: 10.0% - 15.0%'::text
-        WHEN 'OPERATOR'::text THEN 'PROBABILITY COHORT: 20.0% - 30.0%'::text
-        WHEN 'SUBSTRATE'::text THEN 'PROBABILITY COHORT: 30.0% - 40.0%'::text
+        WHEN 'INSIDER'::text THEN 'BEHAVIORAL FREQUENCY: ~ 0.2%'::text
+        WHEN 'ANOMALY'::text THEN 'BEHAVIORAL FREQUENCY: ~ 0.5%'::text
+        WHEN 'EXTRACTOR'::text THEN 'BEHAVIORAL FREQUENCY: ~ 1.0%'::text
+        WHEN 'ICARUS'::text THEN 'BEHAVIORAL FREQUENCY: ~ 1.0%'::text
+        WHEN 'SIGNAL'::text THEN 'BEHAVIORAL FREQUENCY: ~ 2.0%'::text
+        WHEN 'GRAVITON'::text THEN 'BEHAVIORAL FREQUENCY: ~ 2.0%'::text
+        WHEN 'VECTOR'::text THEN 'BEHAVIORAL FREQUENCY: ~ 2.0%'::text
+        WHEN 'BURNER'::text THEN 'BEHAVIORAL FREQUENCY: ~ 3.0%'::text
+        WHEN 'EQUILIBRIUM'::text THEN 'BEHAVIORAL FREQUENCY: ~ 4.0%'::text
+        WHEN 'BOT'::text THEN 'BEHAVIORAL FREQUENCY: ~ 7.0%'::text
+        WHEN 'PASSENGER'::text THEN 'BEHAVIORAL FREQUENCY: ~ 14.0%'::text
+        WHEN 'OPERATOR'::text THEN 'BEHAVIORAL FREQUENCY: ~ 17.0%'::text
+        WHEN 'SUBSTRATE'::text THEN 'BEHAVIORAL FREQUENCY: ~ 44.0%'::text
         ELSE NULL::text
     END AS rarity_bracket,
     ll.rank
