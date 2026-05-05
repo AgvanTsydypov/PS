@@ -114,7 +114,7 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
   return (
     <main className="card-detail-page">
       <div className="card-detail-backlinks">
-        <SiteLogoLink className="card-detail-logo-link" />
+        <SiteLogoLink className="card-detail-logo-link" colorful />
         <Link href="/me" className="card-detail-backlink card-detail-backlink-secondary">
           My dashboard
         </Link>
