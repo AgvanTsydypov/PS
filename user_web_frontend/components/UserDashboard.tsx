@@ -313,23 +313,29 @@ const SCRAMBLE_CHARSET =
 function ScrambleText({
   text,
   triggerKey,
-  duration = 4000,
+  duration = 2750,
+  className,
 }: {
   text: string;
   triggerKey: number;
   duration?: number;
+  className?: string;
 }) {
   const [display, setDisplay] = useState(text);
   const [isScrambling, setIsScrambling] = useState(false);
+  const lastTriggerRef = useRef(triggerKey);
 
   useEffect(() => {
-    if (triggerKey <= 0) {
+    // Only animate when the user actually bumps triggerKey. On initial
+    // mount and on unrelated re-renders (e.g. `text` changes while
+    // eligibility loads), the ref already equals the current triggerKey,
+    // so we just sync the display and skip the scramble.
+    if (triggerKey === lastTriggerRef.current) {
       setDisplay(text);
       setIsScrambling(false);
       return;
     }
-    // Respect users who opted out of motion — just render the real text
-    // with no cycling animation.
+    lastTriggerRef.current = triggerKey;
     const prefersReducedMotion =
       typeof window !== "undefined" &&
       typeof window.matchMedia === "function" &&
@@ -377,11 +383,10 @@ function ScrambleText({
     };
   }, [triggerKey, text, duration]);
 
-  return (
-    <span className={isScrambling ? "bd-scramble-active" : undefined}>
-      {display}
-    </span>
-  );
+  const classes = [className, isScrambling ? "bd-scramble-active" : null]
+    .filter(Boolean)
+    .join(" ");
+  return <span className={classes || undefined}>{display}</span>;
 }
 
 export default function UserDashboard() {
@@ -405,6 +410,7 @@ export default function UserDashboard() {
   const [mintResultText, setMintResultText] = useState("");
   const [mintError, setMintError] = useState("");
   const [animatingCardSlugs, setAnimatingCardSlugs] = useState<Record<string, boolean>>({});
+  const [scrambleNonce, setScrambleNonce] = useState(0);
   const generatedCardFlipTimerRef = useRef<Record<string, number | null>>({});
   const didHydrateMyCardFlipsRef = useRef(false);
   const myCardFlipsWalletRef = useRef("");
@@ -954,6 +960,7 @@ export default function UserDashboard() {
   }
 
   function handleRefreshEligibilityClick() {
+    setScrambleNonce((n) => n + 1);
     void refreshEligibility();
   }
 
@@ -1003,9 +1010,11 @@ export default function UserDashboard() {
       }
       return (
         <div className="season-mint-action">
-          <span className={pillClass} role="status">
-            {pillLabel}
-          </span>
+          <ScrambleText
+            text={pillLabel}
+            triggerKey={scrambleNonce}
+            className={pillClass}
+          />
         </div>
       );
     }
@@ -1040,9 +1049,17 @@ export default function UserDashboard() {
           {isThisMinting ? "Minting..." : "Mint STAR"}
         </button>
         {blockedReason ? (
-          <span className="season-mint-reason">{blockedReason}</span>
+          <ScrambleText
+            text={blockedReason}
+            triggerKey={scrambleNonce}
+            className="season-mint-reason"
+          />
         ) : (
-          <span className="season-mint-reason ok">Eligible to mint now</span>
+          <ScrambleText
+            text="Eligible to mint now"
+            triggerKey={scrambleNonce}
+            className="season-mint-reason ok"
+          />
         )}
       </div>
     );
