@@ -13,7 +13,7 @@ export default function SystemManualSidebar({ nav }: { nav: NavItem[] }) {
 
   return (
     <nav className="sm-sidebar" aria-label="System Manual navigation">
-      <SiteLogoLink className="sm-sidebar-logo" />
+      <SiteLogoLink className="sm-sidebar-logo" colorful />
       {nav.map((item) => {
         const hasChildren = item.children.length > 0;
         const isActive = pathname === item.href;

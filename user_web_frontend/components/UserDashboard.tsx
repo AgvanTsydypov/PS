@@ -1052,7 +1052,7 @@ export default function UserDashboard() {
     return (
       <>
         <nav className="site-nav" aria-label="Site">
-          <SiteLogoLink />
+          <SiteLogoLink colorful />
           <span className="site-nav-title">My dashboard</span>
         </nav>
         <main className="card-detail-page" style={{ padding: "2rem", maxWidth: 480 }}>
@@ -1066,7 +1066,7 @@ export default function UserDashboard() {
     return (
       <>
         <nav className="site-nav" aria-label="Site">
-          <SiteLogoLink />
+          <SiteLogoLink colorful />
           <span className="site-nav-title">My dashboard</span>
         </nav>
         <main className="card-detail-page" style={{ padding: "2rem", maxWidth: 520 }}>
@@ -1085,7 +1085,7 @@ export default function UserDashboard() {
   return (
     <>
       <nav className="site-nav" aria-label="Site">
-        <SiteLogoLink />
+        <SiteLogoLink colorful />
         <span className="site-nav-title">My dashboard</span>
       </nav>
       {/* ── Wallet picker modal ── */}

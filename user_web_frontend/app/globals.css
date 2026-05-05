@@ -314,6 +314,20 @@ body::after {
   transition: color 160ms ease;
 }
 
+.site-logo-wordmark-colorful {
+  color: inherit;
+  display: inline-flex;
+  gap: 0;
+}
+
+.site-logo-wordmark-letter {
+  transition: color 520ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.site-logo-link:hover .site-logo-wordmark-colorful .site-logo-wordmark-letter {
+  color: var(--bd-brand) !important;
+}
+
 .site-logo-wordmark-hero {
   font-family: "Orbitron", "OrbitronLogo", sans-serif;
   font-size: clamp(40px, 11vw, 96px);
