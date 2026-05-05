@@ -154,7 +154,7 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                   </span>
                 ) : (
                   <span className="card-detail-chip card-detail-chip-preview">
-                    It's preview — possible to mint
+                    It&apos;s preview — possible to mint
                   </span>
                 )}
                 <span className="card-detail-chip">
