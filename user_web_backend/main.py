@@ -14,7 +14,6 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2589,7 +2588,6 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
 # intentionally short (default 30s) — on-chain transfers are rare but when
 # they happen the user expects the panel to update quickly.
 _ME_CARDS_CACHE_TTL_SECONDS = max(0, int(os.environ.get("USER_WEB_ME_CARDS_TTL_SECONDS", "30") or 30))
-_ME_CARDS_LOOKUP_PARALLELISM = max(1, int(os.environ.get("USER_WEB_ME_CARDS_LOOKUP_PARALLELISM", "8") or 8))
 _ME_CARDS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _ME_CARDS_CACHE_LOCK = threading.Lock()
 
@@ -2615,11 +2613,17 @@ def _me_cards_cache_set(wallet_lower: str, payload: Dict[str, Any]) -> None:
         )
 
 
-# Selects all candidate claim rows that name the signed-in wallet, either as
-# the explicit recipient (queue-model rows) or — for legacy rows that don't
-# carry recipient_address — as the user_wallet. ``%s`` is the lowercased
-# wallet, bound twice. Only COMPLETED rows with a real asset_address are
-# considered; QUEUED/PROCESSING/FAILED rows have no on-chain identity.
+# Loads denormalized card metadata for any tokenId currently owned on-chain
+# by the signed-in wallet. The wallet itself is NOT in the WHERE clause —
+# that's by design: a STAR transferred from another wallet still belongs to
+# whoever holds it on-chain right now, but the claims row was written
+# against the original recipient. We match purely by tokenId on the
+# configured contract and let on-chain ownerOf() be the authority.
+#
+# ``%(contract)s`` is the lowercased contract address (asset_address is
+# stored as ``"<contract>/<tokenId>"`` and we LOWER both sides for a
+# case-insensitive match). ``%(token_ids)s`` is a tuple of integer tokenIds
+# rendered to text for the ``LIKE`` join.
 _ME_CARDS_CLAIMS_SQL = """
 SELECT
     c.id                       AS claim_id,
@@ -2640,12 +2644,7 @@ FROM claims c
 LEFT JOIN seasons s ON s.id = c.season_id
 WHERE c.status = 'COMPLETED'
   AND c.asset_address IS NOT NULL
-  AND c.asset_address <> ''
-  AND (
-        LOWER(c.recipient_address) = %s
-     OR (c.recipient_address IS NULL AND LOWER(c.user_wallet) = %s)
-      )
-ORDER BY c.timestamp DESC NULLS LAST, c.id DESC
+  AND LOWER(c.asset_address) = ANY(%(asset_keys)s)
 """
 
 
@@ -2663,10 +2662,13 @@ def _serialize_minted_at(value: Any) -> Optional[str]:
 def me_cards(request: Request) -> Dict[str, Any]:
     """Return PolyStars NFTs currently owned on-chain by the signed-in wallet.
 
-    See module-level comment above for the full contract: source of truth is
-    ``ownerOf(tokenId)`` on the configured EVM contract; the local
-    ``claims`` table provides only candidate claims and denormalized card
-    metadata. Cached briefly per wallet to spare the RPC.
+    The on-chain collection is the source of truth: we enumerate every
+    tokenId the wallet currently owns on the configured contract (via
+    Transfer-log scan + ``ownerOf`` confirmation), then enrich each tokenId
+    with denormalized metadata from the ``claims`` table when available.
+    NFTs received from another wallet (sale, transfer) appear automatically;
+    NFTs the wallet has transferred away disappear automatically. Cached
+    briefly per wallet to spare the RPC.
     """
     _require_wallet_actions_enabled()
     wallet = _extract_wallet_from_request(request).lower()
@@ -2684,7 +2686,6 @@ def me_cards(request: Request) -> Dict[str, Any]:
             EvmReader,
             etherscan_nft_url,
             etherscan_tx_url,
-            parse_asset_address,
         )
     except Exception:
         logger.exception("Failed to import evm_service for /api/me/cards")
@@ -2699,74 +2700,70 @@ def me_cards(request: Request) -> Dict[str, Any]:
             detail="On-chain verification unavailable — EVM contract not configured.",
         ) from None
 
-    contract_address_lower = reader.contract_address.lower()
+    contract_address = reader.contract_address
+    contract_address_lower = contract_address.lower()
     chain_id = reader.chain_id
 
-    conn = _get_connection()
     try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-            cursor.execute(_ME_CARDS_CLAIMS_SQL, (wallet, wallet))
-            db_rows = [dict(row) for row in cursor.fetchall()]
-    except Exception:
-        logger.exception("Failed to load minted claims for wallet=%s", wallet)
-        raise HTTPException(status_code=503, detail="Service temporarily unavailable") from None
-    finally:
-        conn.close()
+        owned_token_ids = reader.tokens_owned_by(wallet)
+    except Exception as exc:
+        logger.exception("tokens_owned_by failed for wallet=%s", wallet)
+        raise HTTPException(
+            status_code=503,
+            detail=f"On-chain verification unavailable: {exc}",
+        ) from None
 
-    # Pre-filter: keep only rows that point to the configured contract and
-    # have a parseable token_id. Skipping legacy rows whose asset_address
-    # references a different contract is a defense-in-depth check — it
-    # prevents a renamed/migrated contract address from falsely showing
-    # someone else's tokens that happen to share the same id space.
-    candidates: List[Tuple[Dict[str, Any], int]] = []
-    for row in db_rows:
-        asset_address = str(row.get("asset_address") or "").strip()
-        contract_part, token_id = parse_asset_address(asset_address)
-        if token_id is None:
-            continue
-        if contract_part:
-            try:
-                contract_part_norm = Web3.to_checksum_address(contract_part).lower()
-            except Exception:
-                continue
-            if contract_part_norm != contract_address_lower:
-                continue
-        candidates.append((row, token_id))
-
-    if candidates:
-        max_workers = min(_ME_CARDS_LOOKUP_PARALLELISM, len(candidates))
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            owners = list(pool.map(reader.owner_of, [tid for _, tid in candidates]))
-    else:
-        owners = []
+    # Build the asset_address keys we'll look up in claims. Stored format is
+    # "<contract>/<tokenId>"; matching is done lowercased to absorb any
+    # casing mismatch between checksum-cased mint-time writes and lowercase
+    # wallet input.
+    asset_keys = [f"{contract_address_lower}/{tid}" for tid in owned_token_ids]
+    rows_by_asset: Dict[str, Dict[str, Any]] = {}
+    if asset_keys:
+        conn = _get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(_ME_CARDS_CLAIMS_SQL, {"asset_keys": asset_keys})
+                for row in cursor.fetchall():
+                    asset = str(row.get("asset_address") or "").strip().lower()
+                    if asset and asset not in rows_by_asset:
+                        rows_by_asset[asset] = dict(row)
+        except Exception:
+            logger.exception("Failed to load claim metadata for wallet=%s", wallet)
+            raise HTTPException(status_code=503, detail="Service temporarily unavailable") from None
+        finally:
+            conn.close()
 
     items: List[Dict[str, Any]] = []
-    for (row, token_id), on_chain_owner in zip(candidates, owners):
-        if not on_chain_owner or on_chain_owner.lower() != wallet:
-            continue
-        tx_hash = str(row.get("tx_hash") or "").strip() or None
+    for token_id in owned_token_ids:
+        asset_key = f"{contract_address_lower}/{token_id}"
+        row = rows_by_asset.get(asset_key)
+        tx_hash = (str(row.get("tx_hash") or "").strip() or None) if row else None
+        # Display asset_address uses checksum-cased contract for consistency
+        # with what we write at mint time.
+        asset_address_display = f"{contract_address}/{token_id}"
         items.append({
-            "claim_id": int(row["claim_id"]),
-            "asset_address": str(row.get("asset_address") or "").strip(),
+            "claim_id": int(row["claim_id"]) if row and row.get("claim_id") is not None else None,
+            "asset_address": asset_address_display,
             "tx_hash": tx_hash,
-            "metadata_uri": (str(row["metadata_uri"]).strip() or None) if row.get("metadata_uri") else None,
-            "season_id": row.get("season_id"),
-            "season_type": (str(row["season_type"]).strip() or None) if row.get("season_type") else None,
-            "season_number": row.get("season_number"),
-            "phase": (str(row["phase"]).strip() or None) if row.get("phase") else None,
-            "collection_mint_number": row.get("collection_mint_number"),
-            "name": (str(row["name"]).strip() or None) if row.get("name") else None,
-            "front_image_url": (str(row["front_image_url"]).strip() or None) if row.get("front_image_url") else None,
-            "back_image_url": (str(row["back_image_url"]).strip() or None) if row.get("back_image_url") else None,
-            "card_slug": (str(row["card_slug"]).strip() or None) if row.get("card_slug") else None,
-            "explorer_asset_url": etherscan_nft_url(reader.contract_address, token_id, chain_id),
+            "metadata_uri": (str(row["metadata_uri"]).strip() or None) if row and row.get("metadata_uri") else None,
+            "season_id": row.get("season_id") if row else None,
+            "season_type": (str(row["season_type"]).strip() or None) if row and row.get("season_type") else None,
+            "season_number": row.get("season_number") if row else None,
+            "phase": (str(row["phase"]).strip() or None) if row and row.get("phase") else None,
+            "collection_mint_number": row.get("collection_mint_number") if row else None,
+            "name": (str(row["name"]).strip() or None) if row and row.get("name") else None,
+            "front_image_url": (str(row["front_image_url"]).strip() or None) if row and row.get("front_image_url") else None,
+            "back_image_url": (str(row["back_image_url"]).strip() or None) if row and row.get("back_image_url") else None,
+            "card_slug": (str(row["card_slug"]).strip() or None) if row and row.get("card_slug") else None,
+            "explorer_asset_url": etherscan_nft_url(contract_address, token_id, chain_id),
             "explorer_tx_url": etherscan_tx_url(tx_hash, chain_id) if tx_hash else None,
-            "minted_at": _serialize_minted_at(row.get("minted_at")),
+            "minted_at": _serialize_minted_at(row.get("minted_at")) if row else None,
         })
 
     payload = {
         "wallet_address": wallet,
-        "contract_address": reader.contract_address,
+        "contract_address": contract_address,
         "chain_id": chain_id,
         "items": items,
         "total": len(items),

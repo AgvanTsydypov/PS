@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass
@@ -27,6 +28,13 @@ EVM_RPC_URL_ENV_KEY = "EVM_RPC_URL"
 EVM_PRIVATE_KEY_ENV_KEY = "EVM_PRIVATE_KEY"
 EVM_CONTRACT_ADDRESS_ENV_KEY = "EVM_CONTRACT_ADDRESS"
 EVM_CHAIN_ID_ENV_KEY = "EVM_CHAIN_ID"
+
+# Alchemy's NFT API lives at ``/nft/v3/<KEY>`` on the same hostname as the
+# JSON-RPC endpoint at ``/v2/<KEY>``. Extracting the key from EVM_RPC_URL
+# avoids requiring a second secret in env. ``ALCHEMY_NFT_API_BASE_URL`` is
+# an explicit override for non-standard deployments.
+ALCHEMY_NFT_API_BASE_URL_ENV_KEY = "ALCHEMY_NFT_API_BASE_URL"
+_ALCHEMY_RPC_PATH_RE = re.compile(r"^(?P<scheme>https?://)(?P<host>[^/]+)/v2/(?P<key>[^/?#]+)/?$")
 PINATA_JWT_ENV_KEY = "PINATA_JWT"
 PINATA_API_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
 PINATA_UNPIN_API_URL = "https://api.pinata.cloud/pinning/unpin"
@@ -603,3 +611,87 @@ class EvmReader:
             return Web3.to_checksum_address(str(addr))
         except Exception:
             return None
+
+    def _alchemy_nft_base_url(self) -> str:
+        """Return the Alchemy NFT API base URL (``.../nft/v3/<KEY>``).
+
+        Prefers the explicit ``ALCHEMY_NFT_API_BASE_URL`` override; otherwise
+        derives it from ``EVM_RPC_URL`` by replacing the ``/v2/<KEY>`` path
+        with ``/nft/v3/<KEY>`` on the same Alchemy hostname.
+        """
+        override = os.environ.get(ALCHEMY_NFT_API_BASE_URL_ENV_KEY, "").strip()
+        if override:
+            return override.rstrip("/")
+        match = _ALCHEMY_RPC_PATH_RE.match(self.rpc_url.strip())
+        if not match:
+            raise RuntimeError(
+                f"Cannot derive Alchemy NFT API base URL from {EVM_RPC_URL_ENV_KEY!r}. "
+                f"Expected ``https://<host>/v2/<KEY>``; set {ALCHEMY_NFT_API_BASE_URL_ENV_KEY!r} "
+                f"explicitly if your provider uses a non-standard URL."
+            )
+        return f"{match.group('scheme')}{match.group('host')}/nft/v3/{match.group('key')}"
+
+    def tokens_owned_by(self, wallet: str) -> list[int]:
+        """Return all tokenIds in this collection currently owned by ``wallet``.
+
+        Uses Alchemy's NFT API (``getNFTsForOwner``) as the indexer of
+        record. Alchemy resolves "what does this wallet currently hold on
+        contract X" in one paginated call — we don't have to scan
+        ``Transfer`` logs or call ``ownerOf`` per-token.
+
+        The endpoint is reached on the same Alchemy hostname / API key as
+        ``EVM_RPC_URL`` (path ``/nft/v3/<KEY>``); see
+        ``_alchemy_nft_base_url`` for derivation.
+        """
+        try:
+            wallet_checksum = Web3.to_checksum_address(wallet)
+        except Exception:
+            return []
+
+        base_url = self._alchemy_nft_base_url()
+        url = f"{base_url}/getNFTsForOwner"
+
+        token_ids: list[int] = []
+        seen: set[int] = set()
+        page_key: str | None = None
+        # Hard cap on pagination loops as a defense against an indexer bug
+        # returning the same pageKey forever. 100 pages × 100 tokens = 10k
+        # held NFTs is well above any realistic dashboard scenario.
+        max_pages = 100
+        for _ in range(max_pages):
+            params: list[tuple[str, str]] = [
+                ("owner", wallet_checksum),
+                ("contractAddresses[]", self.contract_address),
+                ("withMetadata", "false"),
+                ("pageSize", "100"),
+            ]
+            if page_key:
+                params.append(("pageKey", page_key))
+            try:
+                response = httpx.get(url, params=params, timeout=15.0)
+                response.raise_for_status()
+                payload = response.json()
+            except Exception as exc:
+                raise RuntimeError(f"Alchemy NFT API request failed: {exc}") from exc
+
+            for nft in payload.get("ownedNfts", []) or []:
+                raw_token_id = nft.get("tokenId")
+                if raw_token_id is None:
+                    continue
+                try:
+                    # Alchemy returns tokenId as a decimal string for ERC-721;
+                    # historical responses occasionally used hex ("0x..."), so
+                    # accept both via base=0.
+                    tid = int(str(raw_token_id), 0) if str(raw_token_id).startswith("0x") else int(raw_token_id)
+                except (TypeError, ValueError):
+                    continue
+                if tid in seen:
+                    continue
+                seen.add(tid)
+                token_ids.append(tid)
+
+            page_key = payload.get("pageKey") or None
+            if not page_key:
+                break
+
+        return token_ids

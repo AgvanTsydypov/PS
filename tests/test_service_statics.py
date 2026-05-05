@@ -372,13 +372,13 @@ class TestCardDetailEndpoint:
 # ---------------------------------------------------------------------------
 # /api/me/cards — owned-on-chain PolyStars NFTs
 #
-# Replaces a previously deleted Solana/Metaplex DAS implementation. The
-# endpoint MUST query claims (the new queue model writes the on-chain
-# artefacts there) and MUST filter to COMPLETED rows with an asset_address.
-# Pre-merge guards on the SQL shape make sure a future refactor doesn't
-# silently break the dashboard panel by selecting QUEUED/PROCESSING rows
-# (no asset_address yet) or losing the season-name JOIN that surfaces
-# "Genesis #1" / "Standard #2" labels.
+# Source of truth is on-chain ownership of the configured collection
+# contract: the endpoint enumerates tokenIds the wallet currently owns and
+# joins ``claims`` purely for denormalized card metadata (title, image,
+# season). The SQL therefore must NOT bind to the wallet — a STAR bought
+# from another user lives under a different ``recipient_address``/``user_wallet``,
+# but we still need to surface its metadata. Match is by tokenId
+# (``asset_address`` LIKE ``"<contract>/<tokenId>"``) only.
 # ---------------------------------------------------------------------------
 
 
@@ -394,16 +394,15 @@ class TestMeCardsSql:
     def test_filters_to_completed_with_asset_address(self):
         assert "c.status = 'completed'" in self.sql
         assert "c.asset_address is not null" in self.sql
-        assert "c.asset_address <> ''" in self.sql
 
-    def test_matches_recipient_with_legacy_user_wallet_fallback(self):
-        """Queue-model rows store the NFT recipient on ``recipient_address``;
-        legacy rows from before the column existed instead carry the recipient
-        on ``user_wallet``. The endpoint must accept both so old claims still
-        appear on the dashboard after the migration."""
-        assert "lower(c.recipient_address) = %s" in self.sql
-        assert "c.recipient_address is null" in self.sql
-        assert "lower(c.user_wallet) = %s" in self.sql
+    def test_matches_by_asset_address_not_wallet(self):
+        """The endpoint is wallet-agnostic at the SQL layer: ownership is
+        proven on-chain, and claims rows are joined back purely for
+        metadata. Re-introducing a ``user_wallet`` / ``recipient_address``
+        filter here would hide STARs the wallet bought from someone else."""
+        assert "lower(c.asset_address) = any(%(asset_keys)s)" in self.sql
+        assert "lower(c.recipient_address)" not in self.sql
+        assert "lower(c.user_wallet)" not in self.sql
 
     def test_joins_seasons_for_label(self):
         """``season_type`` and ``season_number`` come from ``seasons``, not
