@@ -173,7 +173,7 @@ BACK_LORE_Y = float(FIGMA_BACK_LORE_Y) - 3.0   # 82
 BACK_LORE_BOTTOM_LIMIT = BACK_SEP_LINE_Y - 4.0
 BACK_ARCH_HEADER_Y = 217.0          # 220 - 3
 BACK_ARCH_Y = 254.0                 # 257 - 3
-# Order: ARCHETYPE → body desc → PROBABILITY COHORT (same font size as body).
+# Order: ARCHETYPE → body desc → BEHAVIORAL FREQUENCY (same font size as body).
 BACK_DESC_Y = float(BACK_ARCH_Y) + 25.0   # desc starts 25px below archetype (+3 gap)
 # Line-height for font-size=10 meta footer rows (SEASON CARD / DATES).
 BACK_META_LH = 14
@@ -1493,26 +1493,20 @@ def _fmt_back_date(raw: Any) -> str:
     return s
 
 
-def _normalize_probability_cohort_label(raw: Any) -> str:
-    """Normalize legacy occurrence labels to the new Probability Cohort copy."""
+def _normalize_behavioral_frequency_label(raw: Any) -> str:
+    """Normalize a rarity_bracket value into the canonical BEHAVIORAL FREQUENCY copy."""
     value = " ".join(str(raw or "").replace("\n", " ").split())
     if not value:
-        return "PROBABILITY COHORT: --"
+        return "BEHAVIORAL FREQUENCY: --"
     value = value.replace("[", "").replace("]", "").strip()
     upper = value.upper()
-    if "OCCURENCE" in upper:
-        value = value.replace("Occurence", "Probability Cohort")
-        value = value.replace("OCCURENCE", "PROBABILITY COHORT")
-        upper = value.upper()
-    if "OCCURRENCE" in upper:
-        value = value.replace("Occurrence", "Probability Cohort")
-        value = value.replace("OCCURRENCE", "PROBABILITY COHORT")
-        upper = value.upper()
-    if upper.startswith("PROBABILITY COHORT:"):
+    if upper.startswith("BEHAVIORAL FREQUENCY:"):
         payload = value.split(":", 1)[1].strip() if ":" in value else value
+    elif ":" in value:
+        payload = value.split(":", 1)[1].strip()
     else:
         payload = value
-    return f"PROBABILITY COHORT: {payload}"
+    return f"BEHAVIORAL FREQUENCY: {payload}"
 
 
 def _qr_modules_svg(payload: str, ox: float, oy: float, draw_size: float) -> str:
@@ -1716,7 +1710,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
         archetype_math = "No statistical pattern."
 
     rarity_raw = str(data.get("rarity_bracket", "") or "").strip()
-    rarity_esc = _esc(_normalize_probability_cohort_label(rarity_raw))
+    rarity_esc = _esc(_normalize_behavioral_frequency_label(rarity_raw))
 
     mint = data.get("collection_mint_number")
     mint_str = str(mint).strip() if mint is not None and str(mint).strip() != "" else "—"
@@ -2039,7 +2033,7 @@ SAMPLE_DATA: Dict[str, Any] = {
     "card_lore":         "Standard edition pricing breach at triple digits signals industry inflection. Historical AAA launch data suggests $69.99 baseline holds. Resolution hinges on store listings by Feb 2026 deadline.",
     "archetype_description": "Mechanical routing protocol detected. This entity operates with massive kinetic force but generates zero directional trajectory, executing purely on structural arbitrage and fractional spreads. Devoid of human psychology or predictive bias, they exist solely to bridge conditional markets, merge underlying tokens, and enforce absolute liquidity ceilings. They do not predict the future; they mathematically process the emotions of the swarm.",
     "archetype_math":    "(P(E) ≥ 0.97 & Vol < 50) ∪ Mid-Trend Lag",
-    "rarity_bracket":    "PROBABILITY COHORT: 1.0% - 2.0%",
+    "rarity_bracket":    "BEHAVIORAL FREQUENCY: ~ 2.0%",
     "leaderboard_rank":  63564,
     "collection_mint_number": 7,
     "season_size":       333,

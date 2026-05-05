@@ -128,7 +128,7 @@ def signature_test_setup():
                      archetype_description, archetype_math, rarity_bracket,
                      entry_cwap, total_volume, total_pnl, roi_percentage, rank)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        'desc', 'math', 'PROBABILITY COHORT: 1.0%% - 2.0%%',
+                        'desc', 'math', 'BEHAVIORAL FREQUENCY: ~ 2.0%%',
                         100.0, 1000.0, 50.0, 5.0, 1)
                 """,
                 (
