@@ -198,8 +198,17 @@ function isRegisteredOnPolymarket(proxyWallet: string | null | undefined): boole
  */
 function formatBlockedReason(stream: EligibilityStream, supplyEmpty: boolean): string {
   const ineligibleRaw = String(stream?.ineligible_reason || "");
+  const phaseReasonRaw = String(stream?.phase_reason || "");
   const phase = String(stream?.phase || "").toLowerCase();
   const isOrigin = Boolean(stream?.is_origin_wallet);
+
+  // Season not yet started — backend reports phase=transmission with the
+  // phase_reason "Season has not started yet". Must come BEFORE the
+  // supply-exhausted matrix because both states surface as "Claims closed
+  // in current phase: transmission" via ``ineligible_reason``.
+  if (/has not started yet/i.test(phaseReasonRaw)) {
+    return "SEASON HAS NOT STARTED YET. CHECK BACK LATER.";
+  }
 
   if (/Origin allocation already minted/i.test(ineligibleRaw)) {
     return "YOUR CARD WAS LOOTED. HURRY UP NEXT SEASON";
