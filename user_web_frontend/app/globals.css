@@ -1080,15 +1080,24 @@ main {
   overflow: visible;
 }
 
-/* Re-apply a bit of inline breathing room to the textual children (title,
-   actions, messages) so they don't sit flush against the page edge. The
-   card grid deliberately extends further via its negative inline margin. */
+/* Align the MY STARS header / actions / status copy with the OUTER left
+   border of the seasons block above (``.season-board-standalone``,
+   ``max-width: 680px; margin: 0 auto``). The visible left edge of the
+   seasons block is its border line — these direct children are sized to
+   the same 680px box and centered, with no inner padding, so their text
+   starts flush with that black border line.
+
+   The card grid below stays at the wider ``.nft-board-horizontal``
+   max-width so cards continue to scroll horizontally edge-to-edge. */
 .nft-board-horizontal > .season-board-title,
 .nft-board-horizontal > .season-board-muted,
 .nft-board-horizontal > .nft-actions,
 .nft-board-horizontal > .eligibility-output {
-  padding-left: 24px;
-  padding-right: 24px;
+  max-width: 680px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

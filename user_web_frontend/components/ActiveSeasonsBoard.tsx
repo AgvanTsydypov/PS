@@ -18,6 +18,17 @@ import {
 
 const SEASONS_RETRY_DELAYS_MS = [3000, 8000, 15000, 30000];
 
+const SEASON_TOOLTIP_TEXT_GENESIS =
+  "GENESIS SEASON IS HISTORICAL INITIATION. LASTS UNTIL SUPPLY DEPLETION. CHECK SYSTEM MANUAL FOR DETAILS.";
+const SEASON_TOOLTIP_TEXT_STANDARD =
+  "STANDARD SEASON IS REGULAR ENGAGEMENT. LASTS 9 DAYS STRICT. UNCLAIMED SUPPLY IS DELETED. CHECK SYSTEM MANUAL FOR DETAILS.";
+
+function seasonTooltipText(seasonType: string): string {
+  return seasonType === "genesis"
+    ? SEASON_TOOLTIP_TEXT_GENESIS
+    : SEASON_TOOLTIP_TEXT_STANDARD;
+}
+
 export type ActiveSeasonsBoardHandle = {
   refresh: () => Promise<void>;
 };
@@ -242,10 +253,7 @@ export const ActiveSeasonsBoard = forwardRef<
               {renderSeasonAction ? (
                 <div className="season-card-action">{renderSeasonAction(season)}</div>
               ) : null}
-              <div className="season-tooltip">
-                {season.description}
-                {season.phaseReason ? ` ${season.phaseReason}` : ""}
-              </div>
+              <div className="season-tooltip">{seasonTooltipText(season.type)}</div>
             </article>
           ))}
         </div>
