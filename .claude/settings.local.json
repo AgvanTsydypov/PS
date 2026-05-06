@@ -102,7 +102,12 @@
       "Bash(npm audit *)",
       "PowerShell(venv\\\\Scripts\\\\python.exe -m pytest tests/test_season_archetype_stats.py --tb=short -q 2>&1 | Select-Object -Last 25)",
       "PowerShell(.\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/test_season_archetype_stats.py --tb=short -q 2>&1 | Select-Object -Last 30)",
-      "Bash(/c/Python314/python *)"
+      "Bash(/c/Python314/python *)",
+      "Bash(/c/Users/AgvanD/Desktop/University/QM/PolyStars/venv/Scripts/python.exe /tmp/gen.py)",
+      "Bash(py -3 /tmp/gen.py)",
+      "Bash(mkdir -p /tmp/polystars-nginx)",
+      "Bash(cat)",
+      "Read(//tmp/polystars-nginx/**)"
     ]
   },
   "enabledMcpjsonServers": [

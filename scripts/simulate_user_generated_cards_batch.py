@@ -141,12 +141,16 @@ def _allocate_diversity_slots(
     n_target: int, available: Dict[str, int]
 ) -> Dict[str, int]:
     """Spread ``n_target`` across archetypes evenly. If an archetype's pool
-    is short, the leftover spills into the next archetype with surplus,
-    round-robin, until either ``n_target`` is hit or no surplus remains.
+    is short, the leftover spills round-robin into archetypes with surplus
+    until either ``n_target`` is hit or no surplus remains.
 
-    Archetype iteration order follows ``CARD_ARCHETYPE_OPTIONS`` first
-    (canonical UI order), then any unknown archetype labels alphabetically —
-    so the same input pool always produces the same allocation.
+    The leftover-distribution order is **shuffled** rather than canonical:
+    the admin UI submits in 10-card chunks, and ``CARD_ARCHETYPE_OPTIONS``
+    has 13 entries. With a deterministic prefix order every chunk always
+    skipped the trailing canonical entries (GRAVITON / SUBSTRATE / OPERATOR
+    were never sampled while the first 10 saturated). Shuffling per call
+    means the missed three rotate randomly, so over multiple chunks every
+    archetype gets coverage proportional to pool size.
     """
     present = [a for a in CARD_ARCHETYPE_OPTIONS if available.get(a, 0) > 0]
     extras = sorted(a for a, c in available.items() if c > 0 and a not in present)
@@ -162,6 +166,7 @@ def _allocate_diversity_slots(
         gainers = [a for a in ordered if available[a] > slots[a]]
         if not gainers:
             break
+        random.shuffle(gainers)
         for a in gainers:
             if leftover <= 0:
                 break
