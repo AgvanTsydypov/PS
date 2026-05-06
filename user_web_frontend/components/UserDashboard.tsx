@@ -1331,7 +1331,7 @@ export default function UserDashboard() {
       <section className="season-board season-board-standalone nft-board-horizontal">
         <div className="season-board-title">My STARs</div>
         {!isSignedIn ? (
-          <div className="season-board-muted">Sign in to view your minted STARs.</div>
+          <div className="season-board-muted">YOUR STARS WILL BE DISPLAYED HERE.</div>
         ) : (
           <>
             <div className="nft-actions">
@@ -1348,7 +1348,7 @@ export default function UserDashboard() {
               <pre className="eligibility-output">NFT load failed: {myCardsError}</pre>
             ) : null}
             {!myCardsLoading && !myCardsError && myCards.length === 0 ? (
-              <div className="season-board-muted">No minted STARs for this wallet yet.</div>
+              <div className="season-board-muted">NO STARS YET.</div>
             ) : null}
             <div className="nft-grid-wrap">
               <div
