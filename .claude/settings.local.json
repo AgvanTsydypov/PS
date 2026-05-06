@@ -97,7 +97,12 @@
       "mcp__designlang__get_component",
       "PowerShell(venv\\\\Scripts\\\\python.exe -m pytest tests/ --tb=short -q)",
       "PowerShell(& venv\\\\Scripts\\\\python.exe -m pytest tests/ --tb=short -q)",
-      "PowerShell(& \".\\\\venv\\\\Scripts\\\\python.exe\" -m pytest tests/ --tb=short -q)"
+      "PowerShell(& \".\\\\venv\\\\Scripts\\\\python.exe\" -m pytest tests/ --tb=short -q)",
+      "Bash(npm ls *)",
+      "Bash(npm audit *)",
+      "PowerShell(venv\\\\Scripts\\\\python.exe -m pytest tests/test_season_archetype_stats.py --tb=short -q 2>&1 | Select-Object -Last 25)",
+      "PowerShell(.\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/test_season_archetype_stats.py --tb=short -q 2>&1 | Select-Object -Last 30)",
+      "Bash(/c/Python314/python *)"
     ]
   },
   "enabledMcpjsonServers": [
