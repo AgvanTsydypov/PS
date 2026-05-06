@@ -30,9 +30,20 @@ _mock_psycopg2.extras = MagicMock()
 _mock_psycopg2.extras.RealDictCursor = MagicMock()
 _mock_psycopg2.errors = MagicMock()
 
+# ``psycopg2.pool.ThreadedConnectionPool`` is used by user_web_backend's
+# connection pool. Tests don't exercise the pool directly, but the lazy
+# init path imports ``psycopg2.pool`` — we stub it so the import resolves
+# and any incidental ``pool.getconn()`` returns the same mock connection
+# that ``psycopg2.connect()`` does.
+_mock_pool_instance = MagicMock()
+_mock_pool_instance.getconn.return_value = _mock_conn
+_mock_psycopg2.pool = MagicMock()
+_mock_psycopg2.pool.ThreadedConnectionPool = MagicMock(return_value=_mock_pool_instance)
+
 sys.modules.setdefault("psycopg2", _mock_psycopg2)
 sys.modules.setdefault("psycopg2.extras", _mock_psycopg2.extras)
 sys.modules.setdefault("psycopg2.errors", _mock_psycopg2.errors)
+sys.modules.setdefault("psycopg2.pool", _mock_psycopg2.pool)
 
 # ---------------------------------------------------------------------------
 # Stub scripts.cardgen.assets so polystars_card_payload can be imported

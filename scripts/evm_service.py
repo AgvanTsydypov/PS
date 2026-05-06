@@ -111,6 +111,78 @@ def etherscan_nft_url(contract_address: str, token_id: int, chain_id: int) -> st
     return f"{etherscan_base_url(chain_id)}/nft/{contract_address}/{token_id}"
 
 
+# ── Alchemy NFT response parsers ──────────────────────────────────────────────
+# Alchemy NFT API v3 returns metadata in a layered shape. We prefer the most
+# CDN-friendly URL (``image.cachedUrl``), then less-processed variants, and
+# finally fall back to the original ``raw.metadata.image`` so a wallet can
+# render *something* even for tokens whose metadata Alchemy didn't fully
+# normalize.
+
+def _first_nonempty_str(*candidates: Any) -> str | None:
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        s = str(candidate).strip()
+        if s:
+            return s
+    return None
+
+
+def _extract_alchemy_image_url(nft: dict[str, Any]) -> str | None:
+    image = nft.get("image") or {}
+    if isinstance(image, dict):
+        cached = _first_nonempty_str(
+            image.get("cachedUrl"),
+            image.get("pngUrl"),
+            image.get("thumbnailUrl"),
+            image.get("originalUrl"),
+        )
+        if cached:
+            return cached
+    raw_metadata = (nft.get("raw") or {}).get("metadata") if isinstance(nft.get("raw"), dict) else None
+    if isinstance(raw_metadata, dict):
+        return _first_nonempty_str(raw_metadata.get("image"), raw_metadata.get("image_url"))
+    return None
+
+
+def _extract_alchemy_back_image_url(nft: dict[str, Any], front_url: str | None) -> str | None:
+    """Read the back-side image from on-chain metadata's ``properties.files``.
+
+    Our :class:`EvmClient` writes ``files[0]`` = front, ``files[1]`` = back.
+    To be tolerant of file-order variation, we pick the first ``files[].uri``
+    that differs from the front image rather than blindly indexing ``[1]``.
+    """
+    raw = nft.get("raw") if isinstance(nft.get("raw"), dict) else None
+    metadata = raw.get("metadata") if isinstance(raw, dict) else None
+    properties = metadata.get("properties") if isinstance(metadata, dict) else None
+    files = properties.get("files") if isinstance(properties, dict) else None
+    if not isinstance(files, list):
+        return None
+    front_norm = (front_url or "").strip()
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        candidate = _first_nonempty_str(entry.get("uri"))
+        if candidate and candidate != front_norm:
+            return candidate
+    return None
+
+
+def _extract_alchemy_name(nft: dict[str, Any]) -> str | None:
+    raw_metadata = (nft.get("raw") or {}).get("metadata") if isinstance(nft.get("raw"), dict) else None
+    raw_name = raw_metadata.get("name") if isinstance(raw_metadata, dict) else None
+    return _first_nonempty_str(nft.get("name"), raw_name)
+
+
+def _extract_alchemy_token_uri(nft: dict[str, Any]) -> str | None:
+    token_uri = nft.get("tokenUri")
+    if isinstance(token_uri, dict):
+        gateway = _first_nonempty_str(token_uri.get("gateway"), token_uri.get("raw"))
+        if gateway:
+            return gateway
+    return _first_nonempty_str(token_uri) if not isinstance(token_uri, dict) else None
+
+
 @dataclass(frozen=True)
 class MintedNftResult:
     claim_id: int
@@ -120,6 +192,27 @@ class MintedNftResult:
     metadata_uri: str
     explorer_tx_url: str
     explorer_asset_url: str
+
+
+@dataclass(frozen=True)
+class OwnedNft:
+    """A single ERC-721 owned by a wallet, enriched with indexer metadata.
+
+    ``image_url`` prefers Alchemy's CDN-cached URL (``image.cachedUrl``) and
+    falls back to the original URI; this URL is what the user-web frontend
+    renders when no local ``claims`` row carries a ``front_image_url``.
+
+    ``back_image_url`` is read from the on-chain metadata's
+    ``properties.files`` array — our :class:`EvmClient` writes the front as
+    ``files[0]`` and the back as ``files[1]`` at mint time
+    (see :meth:`EvmClient._metadata_image_properties`). Tokens minted by
+    other tools without this convention will have ``None``.
+    """
+    token_id: int
+    name: str | None
+    image_url: str | None
+    back_image_url: str | None
+    metadata_uri: str | None
 
 
 class EvmClient:
@@ -631,13 +724,18 @@ class EvmReader:
             )
         return f"{match.group('scheme')}{match.group('host')}/nft/v3/{match.group('key')}"
 
-    def tokens_owned_by(self, wallet: str) -> list[int]:
-        """Return all tokenIds in this collection currently owned by ``wallet``.
+    def tokens_owned_by(self, wallet: str) -> list[OwnedNft]:
+        """Return all NFTs in this collection currently owned by ``wallet``.
 
         Uses Alchemy's NFT API (``getNFTsForOwner``) as the indexer of
         record. Alchemy resolves "what does this wallet currently hold on
         contract X" in one paginated call — we don't have to scan
         ``Transfer`` logs or call ``ownerOf`` per-token.
+
+        ``withMetadata=true`` makes Alchemy return the parsed metadata
+        (name, image, tokenUri) in the same response, which the user-web
+        backend uses as a fallback when no local ``claims`` row carries the
+        denormalized image URL (e.g. NFTs received via secondary transfer).
 
         The endpoint is reached on the same Alchemy hostname / API key as
         ``EVM_RPC_URL`` (path ``/nft/v3/<KEY>``); see
@@ -651,7 +749,7 @@ class EvmReader:
         base_url = self._alchemy_nft_base_url()
         url = f"{base_url}/getNFTsForOwner"
 
-        token_ids: list[int] = []
+        items: list[OwnedNft] = []
         seen: set[int] = set()
         page_key: str | None = None
         # Hard cap on pagination loops as a defense against an indexer bug
@@ -662,7 +760,7 @@ class EvmReader:
             params: list[tuple[str, str]] = [
                 ("owner", wallet_checksum),
                 ("contractAddresses[]", self.contract_address),
-                ("withMetadata", "false"),
+                ("withMetadata", "true"),
                 ("pageSize", "100"),
             ]
             if page_key:
@@ -688,10 +786,17 @@ class EvmReader:
                 if tid in seen:
                     continue
                 seen.add(tid)
-                token_ids.append(tid)
+                front_url = _extract_alchemy_image_url(nft)
+                items.append(OwnedNft(
+                    token_id=tid,
+                    name=_extract_alchemy_name(nft),
+                    image_url=front_url,
+                    back_image_url=_extract_alchemy_back_image_url(nft, front_url),
+                    metadata_uri=_extract_alchemy_token_uri(nft),
+                ))
 
             page_key = payload.get("pageKey") or None
             if not page_key:
                 break
 
-        return token_ids
+        return items
