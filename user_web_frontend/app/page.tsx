@@ -13,11 +13,10 @@ export default function HomePage() {
             <img src="/polystars-long.svg" alt="PolyStars" className="home-hero-wordmark" />
           </div>
           <ActiveSeasonsBoard
-            title="Seasons activity"
+            title="ACTIVE SEASONS"
             footer={
               <p className="season-board-note">
-                <Link href="/me">Open your dashboard</Link> to connect a wallet, check mint
-                eligibility, and generate stars.
+                <Link href="/me">OPEN DASHBOARD</Link>, CONNECT YOUR WALLET, CHECK ELIGIBILITY, GET YOUR <strong>STARS</strong>.
               </p>
             }
           />

@@ -172,7 +172,7 @@ export const ActiveSeasonsBoard = forwardRef<
       const total = Number(season.total_supply) || 0;
       const remaining = Number(season.remaining_supply) || 0;
 
-      let timeLeft = "No end date";
+      let timeLeft = "NO SCHEDULED END DATE";
       if (season.type !== "genesis" && season.end_date) {
         const endMs = Date.parse(season.end_date);
         if (!Number.isNaN(endMs)) {
@@ -230,11 +230,11 @@ export const ActiveSeasonsBoard = forwardRef<
                 <span>{season.timeLeft}</span>
               </div>
               <div className="season-card-phase">
-                <span>Phase</span>
+                <span>CURRENT PHASE</span>
                 <strong>{season.phase}</strong>
               </div>
               <div className="season-card-bottom">
-                <span>STARs left</span>
+                <span>STARS AVAILABLE</span>
                 <strong>
                   {season.remaining} / {season.total}
                 </strong>
