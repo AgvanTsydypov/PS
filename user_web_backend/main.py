@@ -29,6 +29,7 @@ from eth_account.messages import encode_defunct
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 from web3 import Web3
 
@@ -206,6 +207,28 @@ def _allowed_origins() -> List[str]:
         return ["http://localhost:3001", "http://127.0.0.1:3001"]
     return []
 
+
+def _trusted_hosts() -> List[str]:
+    """Hostnames allowed in the ``Host`` header. Anything else gets 400.
+
+    Defends against virtual-host confusion: without this, the server happily
+    answers requests directed at the raw IP, at internal hostnames, or at
+    spoofed ``Host`` headers used for cache poisoning / password-reset link
+    forgery. ``USER_WEB_TRUSTED_HOSTS`` must be set in production; supports
+    leading ``*.`` wildcards (Starlette semantics). The dev fallback covers
+    only loopback so a misconfigured prod doesn't silently inherit it.
+    """
+    raw = os.getenv("USER_WEB_TRUSTED_HOSTS", "").strip()
+    if raw:
+        return [host.strip() for host in raw.split(",") if host.strip()]
+    if os.getenv("NODE_ENV", "development") == "development":
+        return ["localhost", "127.0.0.1", "testserver"]
+    return []
+
+
+_trusted_hosts_initial = _trusted_hosts()
+if _trusted_hosts_initial:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_hosts_initial)
 
 app.add_middleware(
     CORSMiddleware,
@@ -465,13 +488,65 @@ def _normalize_evm_address(value: str) -> str:
     return Web3.to_checksum_address(value)
 
 
-def _build_challenge_message(wallet_address: str, nonce: str) -> str:
-    issued_at = datetime.now(timezone.utc).isoformat()
+def _siwe_uri() -> str:
+    """Canonical URI bound into the SIWE message (EIP-4361 ``URI`` field)."""
+    explicit = os.getenv("USER_WEB_SIWE_URI", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    return CARD_BASE_URL
+
+
+def _siwe_domain() -> str:
+    """RFC 3986 authority bound into the SIWE message (EIP-4361 ``domain`` field).
+
+    Wallets compare this against ``window.location.host`` and warn the user when
+    they don't match, which is the actual phishing protection. Defaults to the
+    host of ``USER_WEB_SIWE_URI`` so the two stay in sync; override with
+    ``USER_WEB_SIWE_DOMAIN`` only if the public host differs from the URI host
+    (e.g. when proxied behind a different external hostname).
+    """
+    explicit = os.getenv("USER_WEB_SIWE_DOMAIN", "").strip()
+    if explicit:
+        return explicit
+    parsed = urllib.parse.urlparse(_siwe_uri())
+    host = parsed.netloc or parsed.path
+    return host.strip("/")
+
+
+def _siwe_chain_id() -> int:
+    raw = os.getenv("USER_WEB_SIWE_CHAIN_ID", "").strip() or os.getenv("EVM_CHAIN_ID", "").strip()
+    if not raw:
+        return 1
+    try:
+        return int(raw)
+    except ValueError:
+        return 1
+
+
+def _build_challenge_message(wallet_address: str, nonce: str, expires_at: datetime) -> str:
+    """Build a canonical EIP-4361 ``Sign-In with Ethereum`` message.
+
+    Spec: https://eips.ethereum.org/EIPS/eip-4361. The address must be EIP-55
+    checksummed (callers normalize via ``_normalize_evm_address``). The
+    ``Domain``, ``URI``, ``Chain ID`` and ``Expiration Time`` lines are what
+    let wallets like MetaMask / Rabby render the enhanced sign-in UI and warn
+    the user if the message domain doesn't match the calling page's origin —
+    that's the cross-site signature-reuse defence we previously lacked.
+    """
+    issued_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    expiration_time = expires_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return (
-        "Sign in to PolyStars user site\n"
-        f"Wallet: {wallet_address}\n"
+        f"{_siwe_domain()} wants you to sign in with your Ethereum account:\n"
+        f"{wallet_address}\n"
+        "\n"
+        "Sign in to PolyStars\n"
+        "\n"
+        f"URI: {_siwe_uri()}\n"
+        "Version: 1\n"
+        f"Chain ID: {_siwe_chain_id()}\n"
         f"Nonce: {nonce}\n"
-        f"Issued At: {issued_at}"
+        f"Issued At: {issued_at}\n"
+        f"Expiration Time: {expiration_time}"
     )
 
 
@@ -1734,16 +1809,62 @@ async def rate_limit_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+def _enforce_production_security_invariants() -> None:
+    """Hard-fail startup when production-critical secrets/CORS are misconfigured.
+
+    A silent ``[]`` allowlist or a 4-byte JWT secret is the kind of misconfig
+    that boots successfully and only fails open in production. We refuse to
+    start under those conditions in non-development modes.
+    """
+    if os.getenv("NODE_ENV", "development") == "development":
+        return
+
+    origins = _allowed_origins()
+    if not origins:
+        raise RuntimeError(
+            "USER_WEB_CORS_ORIGINS must be set to a comma-separated list of "
+            "https origins in production (e.g. 'https://polystars.app'). "
+            "Empty allow-list with credentialed CORS is a misconfiguration."
+        )
+    bad = [o for o in origins if o in ("*", "null") or "*" in o]
+    if bad:
+        raise RuntimeError(
+            f"USER_WEB_CORS_ORIGINS contains wildcard/null entries which are "
+            f"incompatible with allow_credentials=True: {bad!r}"
+        )
+
+    secret = os.getenv("USER_WEB_JWT_SECRET", "").strip()
+    if len(secret) < 32:
+        raise RuntimeError(
+            "USER_WEB_JWT_SECRET must be at least 32 characters in production "
+            "(generate one with `python -c \"import secrets; print(secrets.token_urlsafe(48))\"`). "
+            "Short HS256 secrets are brute-forceable offline."
+        )
+
+    if not _trusted_hosts():
+        raise RuntimeError(
+            "USER_WEB_TRUSTED_HOSTS must be set in production (e.g. "
+            "'polystars.app,www.polystars.app'). Without an allowlist the "
+            "server answers requests directed at the raw IP or arbitrary "
+            "Host headers, enabling cache-poisoning and link-forgery attacks."
+        )
+
+    if not os.getenv("USER_WEB_SIWE_DOMAIN", "").strip() and not os.getenv("USER_WEB_SIWE_URI", "").strip():
+        # Defaults derive from CARD_BASE_URL; only refuse to boot if that's also unset.
+        if not os.getenv("CARD_BASE_URL", "").strip() and not os.getenv("NEXT_PUBLIC_APP_URL", "").strip():
+            raise RuntimeError(
+                "SIWE binding requires USER_WEB_SIWE_URI (or CARD_BASE_URL / "
+                "NEXT_PUBLIC_APP_URL) so the signed message embeds the public "
+                "domain. Set it to your user-facing https origin."
+            )
+
+
 @app.on_event("startup")
 def startup_checks() -> None:
+    _enforce_production_security_invariants()
     _configure_user_web_timing_logging()
     _warn_if_claims_uniqueness_index_missing()
     _warm_rasterizer_pool_in_background()
-    if os.getenv("NODE_ENV", "development") != "development" and not _allowed_origins():
-        logger.warning(
-            "USER_WEB_CORS_ORIGINS is empty: set it to your user web origins (e.g. https://app.example.com) "
-            "so browsers can send the session cookie."
-        )
 
 
 def _warm_rasterizer_pool_in_background() -> None:
@@ -1936,8 +2057,8 @@ def wallet_challenge(payload: ChallengeRequest):
     wallet_address = _normalize_evm_address(payload.wallet_address)
     nonce = secrets.token_hex(16)
     challenge_id = str(uuid.uuid4())
-    message = _build_challenge_message(wallet_address, nonce)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=CHALLENGE_TTL_SECONDS)
+    message = _build_challenge_message(wallet_address, nonce, expires_at)
 
     _insert_siwe_challenge_record(
         challenge_id,
