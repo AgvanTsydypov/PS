@@ -83,9 +83,79 @@ def _db_params() -> Dict[str, object]:
     }
 
 
+# ── DB connection pool ────────────────────────────────────────────────────────
+# Per-request ``psycopg2.connect()`` was the root cause of intermittent 503s on
+# /me: every eligibility request opened ~10 fresh TLS connections to Postgres
+# (one per SeasonManager method × multiple methods). Under any concurrency this
+# saturated ``max_connections``; hung requests then blew past nginx's
+# upstream timeout and the user saw nginx's static 503 page.
+#
+# A ThreadedConnectionPool keeps a small set of connections open and reuses
+# them across requests. Pool is initialized lazily on first call so module
+# import (and the test suite, which stubs psycopg2) does not require a live
+# database. Returned connections are wrapped in ``_PooledConnection`` so
+# existing ``conn.close()`` patterns return-to-pool instead of actually
+# closing — no call-site changes needed.
+_db_pool = None
+_db_pool_lock = threading.Lock()
+
+
+def _ensure_db_pool():
+    """Lazy-init a process-wide connection pool. Idempotent and thread-safe."""
+    global _db_pool
+    if _db_pool is not None:
+        return _db_pool
+    with _db_pool_lock:
+        if _db_pool is None:
+            from psycopg2.pool import ThreadedConnectionPool
+            minconn = max(1, int(os.getenv("USER_WEB_DB_POOL_MIN", "1") or 1))
+            maxconn = max(minconn, int(os.getenv("USER_WEB_DB_POOL_MAX", "10") or 10))
+            _db_pool = ThreadedConnectionPool(minconn, maxconn, **_db_params())
+    return _db_pool
+
+
+class _PooledConnection:
+    """Thin proxy over a pooled psycopg2 connection.
+
+    Delegates everything to the wrapped connection except ``close()``, which
+    returns the connection to the pool instead of really closing it. Allows
+    ``try / finally: conn.close()`` call sites to keep working unmodified.
+    """
+
+    __slots__ = ("_conn", "_released")
+
+    def __init__(self, conn):
+        self._conn = conn
+        self._released = False
+
+    def close(self):
+        if self._released:
+            return
+        self._released = True
+        try:
+            _ensure_db_pool().putconn(self._conn)
+        except Exception:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+    # ``with conn:`` — psycopg2 connections support transaction context. The
+    # underlying ``__enter__`` returns the real connection and commits/rolls
+    # back on ``__exit__``. We forward both so callers using ``with conn:``
+    # behave exactly like before; close() is still our responsibility.
+    def __enter__(self):
+        return self._conn.__enter__()
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._conn.__exit__(exc_type, exc, tb)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 def _get_connection():
-    params = _db_params()
-    return psycopg2.connect(**params)
+    return _PooledConnection(_ensure_db_pool().getconn())
 
 
 @dataclass(frozen=True)
@@ -154,7 +224,7 @@ app.add_middleware(
 )
 
 CHALLENGE_TTL_SECONDS = int(os.getenv("USER_WEB_CHALLENGE_TTL_SECONDS", "300"))
-season_manager = SeasonManager(use_local_db=True)
+season_manager = SeasonManager(use_local_db=True, connection_factory=_get_connection)
 mint_service = SeasonWorkbenchService()
 JWT_ALG = "HS256"
 JWT_TTL_SECONDS = int(os.getenv("USER_WEB_JWT_TTL_SECONDS", "3600"))
@@ -2705,7 +2775,7 @@ def me_cards(request: Request) -> Dict[str, Any]:
     chain_id = reader.chain_id
 
     try:
-        owned_token_ids = reader.tokens_owned_by(wallet)
+        owned_nfts = reader.tokens_owned_by(wallet)
     except Exception as exc:
         logger.exception("tokens_owned_by failed for wallet=%s", wallet)
         raise HTTPException(
@@ -2717,7 +2787,7 @@ def me_cards(request: Request) -> Dict[str, Any]:
     # "<contract>/<tokenId>"; matching is done lowercased to absorb any
     # casing mismatch between checksum-cased mint-time writes and lowercase
     # wallet input.
-    asset_keys = [f"{contract_address_lower}/{tid}" for tid in owned_token_ids]
+    asset_keys = [f"{contract_address_lower}/{nft.token_id}" for nft in owned_nfts]
     rows_by_asset: Dict[str, Dict[str, Any]] = {}
     if asset_keys:
         conn = _get_connection()
@@ -2735,26 +2805,39 @@ def me_cards(request: Request) -> Dict[str, Any]:
             conn.close()
 
     items: List[Dict[str, Any]] = []
-    for token_id in owned_token_ids:
+    for nft in owned_nfts:
+        token_id = nft.token_id
         asset_key = f"{contract_address_lower}/{token_id}"
         row = rows_by_asset.get(asset_key)
         tx_hash = (str(row.get("tx_hash") or "").strip() or None) if row else None
         # Display asset_address uses checksum-cased contract for consistency
         # with what we write at mint time.
         asset_address_display = f"{contract_address}/{token_id}"
+        # Claims is the richer source (carries our own card_slug, season,
+        # phase, polished labels). Fall back to Alchemy-indexed metadata
+        # only when we don't have a local row — that covers NFTs received
+        # via secondary transfer or minted from another instance.
+        claim_front = (str(row["front_image_url"]).strip() or None) if row and row.get("front_image_url") else None
+        claim_back = (str(row["back_image_url"]).strip() or None) if row and row.get("back_image_url") else None
+        claim_name = (str(row["name"]).strip() or None) if row and row.get("name") else None
+        claim_metadata_uri = (str(row["metadata_uri"]).strip() or None) if row and row.get("metadata_uri") else None
         items.append({
             "claim_id": int(row["claim_id"]) if row and row.get("claim_id") is not None else None,
             "asset_address": asset_address_display,
             "tx_hash": tx_hash,
-            "metadata_uri": (str(row["metadata_uri"]).strip() or None) if row and row.get("metadata_uri") else None,
+            "metadata_uri": claim_metadata_uri or nft.metadata_uri,
             "season_id": row.get("season_id") if row else None,
             "season_type": (str(row["season_type"]).strip() or None) if row and row.get("season_type") else None,
             "season_number": row.get("season_number") if row else None,
             "phase": (str(row["phase"]).strip() or None) if row and row.get("phase") else None,
             "collection_mint_number": row.get("collection_mint_number") if row else None,
-            "name": (str(row["name"]).strip() or None) if row and row.get("name") else None,
-            "front_image_url": (str(row["front_image_url"]).strip() or None) if row and row.get("front_image_url") else None,
-            "back_image_url": (str(row["back_image_url"]).strip() or None) if row and row.get("back_image_url") else None,
+            "name": claim_name or nft.name,
+            "front_image_url": claim_front or nft.image_url,
+            # Back falls back to ``properties.files[]`` from the on-chain
+            # metadata (our minter writes [front, back] there). Null only
+            # when neither claims row nor on-chain metadata carry it — the
+            # UI shows "No back preview" in that case.
+            "back_image_url": claim_back or nft.back_image_url,
             "card_slug": (str(row["card_slug"]).strip() or None) if row and row.get("card_slug") else None,
             "explorer_asset_url": etherscan_nft_url(contract_address, token_id, chain_id),
             "explorer_tx_url": etherscan_tx_url(tx_hash, chain_id) if tx_hash else None,

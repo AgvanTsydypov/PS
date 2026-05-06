@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 import os
 
 import psycopg2
@@ -53,9 +53,24 @@ class SeasonManager:
 
     BREACH_CAP_PERCENT = 0.20
 
-    def __init__(self, use_local_db: bool = True) -> None:
+    def __init__(
+        self,
+        use_local_db: bool = True,
+        connection_factory: Optional[Callable[[], Any]] = None,
+    ) -> None:
+        """``connection_factory`` lets callers (e.g. the user-web backend)
+        inject a pooled-connection provider so each method doesn't pay the
+        cost of a fresh TLS handshake to Postgres. Default keeps the legacy
+        per-call ``psycopg2.connect`` behaviour for batch scripts that don't
+        need pooling.
+        """
         self.use_local_db = use_local_db
         self.connection_params = self._get_db_params()
+        self._connection_factory: Callable[[], Any] = (
+            connection_factory
+            if connection_factory is not None
+            else (lambda: psycopg2.connect(**self.connection_params))
+        )
 
     def _get_db_params(self) -> Dict[str, Any]:
         """Load DB connection params in the same style as existing scripts."""
@@ -73,7 +88,7 @@ class SeasonManager:
 
     def _fetch_season(self, season_id: int) -> Dict[str, Any]:
         """Load a single season row."""
-        conn = psycopg2.connect(**self.connection_params)
+        conn = self._connection_factory()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 cursor.execute(
@@ -93,7 +108,7 @@ class SeasonManager:
 
     def _get_current_season_by_type(self, season_type: str) -> Optional[Dict[str, Any]]:
         """Get current active season by type."""
-        conn = psycopg2.connect(**self.connection_params)
+        conn = self._connection_factory()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 cursor.execute(
@@ -136,7 +151,7 @@ class SeasonManager:
         "already claimed" rejection — the latter was misleading because it
         didn't say *which* state the claim is in.
         """
-        conn = psycopg2.connect(**self.connection_params)
+        conn = self._connection_factory()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
@@ -178,7 +193,7 @@ class SeasonManager:
         An "origin" is any wallet that has at least one row in the season's
         ``participants`` partition. Looters (non-origins) have no rows there.
         """
-        conn = psycopg2.connect(**self.connection_params)
+        conn = self._connection_factory()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
@@ -207,7 +222,7 @@ class SeasonManager:
         on this season for the same proxy_wallet, regardless of who the
         claimer (user_wallet) is. Returns None when no such claim exists.
         """
-        conn = psycopg2.connect(**self.connection_params)
+        conn = self._connection_factory()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 cursor.execute(
@@ -242,7 +257,7 @@ class SeasonManager:
         checks Origins membership for the currently active standard season.
         Reads from the participants partition for that season.
         """
-        conn = psycopg2.connect(**self.connection_params)
+        conn = self._connection_factory()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
