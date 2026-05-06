@@ -2308,6 +2308,38 @@ button:disabled {
   color: var(--bd-brand);
 }
 
+.card-detail-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  margin: 0 0 10px;
+  font-family: var(--bd-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--bd-ink-mute);
+  white-space: nowrap;
+}
+
+.card-detail-section-heading::before,
+.card-detail-section-heading::after {
+  content: "";
+  height: 1px;
+  background: #e63946;
+  opacity: 1;
+}
+
+.card-detail-section-heading::before {
+  flex: 0 0 24px;
+}
+
+.card-detail-section-heading::after {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
 .card-detail-kv {
   display: grid;
   grid-template-columns: 140px 1fr;
