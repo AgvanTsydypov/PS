@@ -185,6 +185,61 @@ function isRegisteredOnPolymarket(proxyWallet: string | null | undefined): boole
   if (!value) return false;
   return value.toLowerCase() !== PM_NOT_REGISTERED_VALUE.toLowerCase();
 }
+
+/**
+ * Map an ineligible eligibility-stream into the user-facing copy on /me.
+ *
+ * The backend returns a free-form ``ineligible_reason`` plus structured
+ * fields (``phase``, ``is_origin_wallet``); this helper translates that
+ * into the curated UX strings without duplicating per-call branching at the
+ * call site. ``supplyEmpty`` is passed in because remaining-supply is
+ * tracked at the season level (in ``ActiveSeasonView``), not on the
+ * eligibility stream.
+ */
+function formatBlockedReason(stream: EligibilityStream, supplyEmpty: boolean): string {
+  const ineligibleRaw = String(stream?.ineligible_reason || "");
+  const phase = String(stream?.phase || "").toLowerCase();
+  const isOrigin = Boolean(stream?.is_origin_wallet);
+
+  if (/Origin allocation already minted/i.test(ineligibleRaw)) {
+    return "YOUR CARD WAS LOOTED. HURRY UP NEXT SEASON";
+  }
+
+  // Looter trying to mint while phase is Vault — Vault is Origins-only.
+  if (/Current phase requires Origin wallet/i.test(ineligibleRaw)) {
+    return "VAULT IN PROGRESS. WAIT TILL SCAVENGE.";
+  }
+
+  // "No slots" matrix — fires when supply is drained or the phase reports
+  // claims closed (which the backend collapses to "Claims closed in current
+  // phase: transmission" once supply hits zero).
+  const supplyExhausted =
+    supplyEmpty ||
+    /supply exhausted/i.test(ineligibleRaw) ||
+    /Claims closed in current phase/i.test(ineligibleRaw);
+
+  if (supplyExhausted) {
+    if (phase === "breach") {
+      return isOrigin
+        ? "BREACH SUPPLY EXHAUSTED. WAIT TILL VAULT PHASE"
+        : "BREACH SUPPLY EXHAUSTED. WAIT TILL SCAVENGE PHASE";
+    }
+    if (phase === "vault") {
+      // Looter at vault is the "phase requires origin" path above; if we get
+      // here as a looter the supply is the actual block.
+      return isOrigin
+        ? "VAULT SUPPLY EXHAUSTED. WAIT TILL NEXT SEASON"
+        : "VAULT IN PROGRESS. WAIT TILL SCAVENGE.";
+    }
+    if (phase === "scavenge") {
+      return "SCAVENGE SUPPLY EXHAUSTED. WAIT TILL NEXT SEASON";
+    }
+    // ``transmission`` or unknown phase — generic fallback.
+    return "SEASON SUPPLY EXHAUSTED. WAIT TILL NEXT SEASON";
+  }
+
+  return ineligibleRaw || "Wallet not eligible for this season right now.";
+}
 /** Legacy localStorage JWT (removed); cleared on load for one-time migration. */
 const LEGACY_JWT_LOCAL_STORAGE_KEY = "polystars_user_access_token";
 const AUTH_SESSION_META_STORAGE_KEY = "polystars_user_session_meta";
@@ -898,16 +953,16 @@ export default function UserDashboard() {
       return;
     }
     if (!isRegisteredOnPolymarket(proxyWallet)) {
-      setMintError("Wallet is not registered on Polymarket — minting is not allowed.");
+      setMintError("WALLET IS NOT REGISTERED ON POLYMARKET.");
       return;
     }
     if (!hasPolymarketRank(traderRank)) {
-      setMintError("Wallet has no Polymarket trader rank — minting is not allowed.");
+      setMintError("WALLET HAS NO POLYMARKET TRADING HISTORY.");
       return;
     }
     setMintingSeasonId(seasonId);
     setMintError("");
-    setMintResultText(`[${new Date().toISOString()}] Mint request started for season ${seasonId}...`);
+    setMintResultText(`[${new Date().toISOString()}] MINT REQUEST STARTED FOR SEASON ${seasonId}...`);
     try {
       const res = await fetch(buildApiUrl("/api/me/mint"), {
         method: "POST",
@@ -929,26 +984,26 @@ export default function UserDashboard() {
         throw new Error(detail || text || "Mint failed");
       }
       const summaryLines: string[] = [];
-      if (parsed?.status) summaryLines.push(`status: ${parsed.status}`);
-      if (parsed?.claim_id != null) summaryLines.push(`claim_id: ${parsed.claim_id}`);
+      if (parsed?.status) summaryLines.push(`STATUS: ${parsed.status}`);
+      if (parsed?.claim_id != null) summaryLines.push(`CLAIM ID: ${parsed.claim_id}`);
       if (parsed?.collection_mint_number != null) {
-        summaryLines.push(`mint #: ${parsed.collection_mint_number}`);
+        summaryLines.push(`STAR #: ${parsed.collection_mint_number}`);
       }
-      if (parsed?.phase) summaryLines.push(`phase: ${parsed.phase}`);
+      if (parsed?.phase) summaryLines.push(`PHASE: ${parsed.phase}`);
       if (parsed?.recipient_address) {
-        summaryLines.push(`recipient: ${parsed.recipient_address}`);
+        summaryLines.push(`RECIPIENT: ${parsed.recipient_address}`);
       }
       if (parsed?.mint_result?.asset_address) {
-        summaryLines.push(`asset: ${parsed.mint_result.asset_address}`);
+        summaryLines.push(`ASSET: ${parsed.mint_result.asset_address}`);
       }
       if (parsed?.mint_result?.tx_hash) {
-        summaryLines.push(`tx: ${parsed.mint_result.tx_hash}`);
+        summaryLines.push(`TX: ${parsed.mint_result.tx_hash}`);
       }
       if (parsed?.warnings && parsed.warnings.length > 0) {
-        summaryLines.push(`warnings: ${parsed.warnings.join("; ")}`);
+        summaryLines.push(`WARNINGS: ${parsed.warnings.join("; ")}`);
       }
       setMintResultText(
-        [`[${new Date().toISOString()}] Mint completed for season ${seasonId}.`, ...summaryLines].join("\n"),
+        [`[${new Date().toISOString()}] CLAIM QUEUED FOR SEASON ${seasonId}.`, ...summaryLines].join("\n"),
       );
       await Promise.all([refreshEligibility(), refreshMyCards()]);
     } catch (error) {
@@ -988,24 +1043,28 @@ export default function UserDashboard() {
     const pending = stream?.pending_claim ?? null;
     if (pending) {
       const status = String(pending.status || "").toUpperCase();
-      const claimSuffix =
-        pending.claim_id != null ? ` (claim #${pending.claim_id})` : "";
+      // QUEUED/PENDING/PROCESSING all show the same in-progress copy: from the
+      // user's perspective the claim is being processed and they'll get a
+      // STAR shortly. The cron worker stamps ``collection_mint_number`` when
+      // it finalizes; until then we surface ``claim_id`` so the user has
+      // *some* identifier to reference.
+      const inProgressNumber = pending.collection_mint_number ?? pending.claim_id;
+      const inProgressSuffix = inProgressNumber != null ? ` STAR #${inProgressNumber}.` : "";
       let pillLabel = "";
       let pillClass = "season-mint-pill";
-      if (status === "QUEUED" || status === "PENDING") {
-        pillLabel = `Mint queued${claimSuffix}`;
-        pillClass += " season-mint-pill-queued";
-      } else if (status === "PROCESSING") {
-        pillLabel = `Mint in progress${claimSuffix} — on-chain transaction pending`;
-        pillClass += " season-mint-pill-processing";
+      if (status === "QUEUED" || status === "PENDING" || status === "PROCESSING") {
+        pillLabel = `CLAIM IN PROGRESS${inProgressSuffix} YOU'LL RECEIVE A STAR SHORTLY.`;
+        pillClass +=
+          status === "PROCESSING" ? " season-mint-pill-processing" : " season-mint-pill-queued";
       } else if (status === "COMPLETED") {
         const mintNo = pending.collection_mint_number;
         pillLabel =
           mintNo != null
-            ? `Already minted in this season — STAR #${mintNo}`
-            : "Already minted in this season";
+            ? `WALLET HAS ALREADY CLAIMED A STAR THIS SEASON — STAR #${mintNo}`
+            : "WALLET HAS ALREADY CLAIMED A STAR THIS SEASON.";
         pillClass += " season-mint-pill-completed";
       } else {
+        const claimSuffix = pending.claim_id != null ? ` (claim #${pending.claim_id})` : "";
         pillLabel = `Active claim${claimSuffix} (${status || "unknown"})`;
       }
       return (
@@ -1019,21 +1078,28 @@ export default function UserDashboard() {
       );
     }
 
+    // Resolve the visible block-reason copy. Priorities (top → bottom):
+    //   1. Polymarket gating (no PM profile / no rank) — unchanged copy.
+    //   2. Loading / transport-error placeholders — unchanged copy.
+    //   3. "Looted" (origin's allocation taken by another wallet).
+    //   4. Phase × wallet × supply matrix for "no slots" cases.
+    //   5. Fallback to the backend's raw ``ineligible_reason``.
     let blockedReason = "";
     if (!isPmRegistered) {
-      blockedReason = "Wallet is not registered on Polymarket — minting is not allowed.";
+      blockedReason = "WALLET IS NOT REGISTERED ON POLYMARKET.";
     } else if (!hasRank) {
-      blockedReason = "Wallet has no Polymarket trader rank — minting is not allowed.";
-    } else if (supplyEmpty) {
-      blockedReason = "No supply remaining for this season.";
+      blockedReason = "WALLET HAS NO POLYMARKET TRADING HISTORY.";
     } else if (eligibilityLoading && !stream) {
-      blockedReason = "Checking eligibility...";
+      blockedReason = "CHECKING ELIGIBILITY...";
     } else if (eligibilityError) {
-      blockedReason = `Eligibility unavailable: ${eligibilityError}`;
-    } else if (stream && !stream.eligible_now) {
-      blockedReason = stream.ineligible_reason || "Wallet not eligible for this season right now.";
+      blockedReason = `ELIGIBILITY UNAVAILABLE: ${eligibilityError}`;
     } else if (!stream) {
-      blockedReason = "Eligibility for this season is not available.";
+      blockedReason = "ELIGIBILITY FOR THIS SEASON IS NOT AVAILABLE.";
+    } else if (stream && !stream.eligible_now) {
+      blockedReason = formatBlockedReason(stream, supplyEmpty);
+    } else if (supplyEmpty) {
+      // Defensive: backend says eligible but supply already drained.
+      blockedReason = formatBlockedReason(stream, true);
     }
 
     const canMint = !blockedReason && !isAnyMinting;
@@ -1056,7 +1122,7 @@ export default function UserDashboard() {
           />
         ) : (
           <ScrambleText
-            text="Eligible to mint now"
+            text="WALLET ELIGIBLE. GET YOUR STAR."
             triggerKey={scrambleNonce}
             className="season-mint-reason ok"
           />
@@ -1249,10 +1315,10 @@ export default function UserDashboard() {
                 ) : null}
               </div>
               {eligibilityError ? (
-                <pre className="eligibility-output">Eligibility load failed: {eligibilityError}</pre>
+                <pre className="eligibility-output">ELIGIBILITY LOAD FAILED: {eligibilityError}</pre>
               ) : null}
               {mintError ? (
-                <pre className="eligibility-output">Mint failed: {mintError}</pre>
+                <pre className="eligibility-output">MINT FAILED: {mintError}</pre>
               ) : null}
               {mintResultText ? (
                 <pre className="eligibility-output">{mintResultText}</pre>

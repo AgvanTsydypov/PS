@@ -94,7 +94,10 @@
       "Bash(curl -s -o /dev/null -w \"HTTP %{http_code} for 8089\\\\n\" http://localhost:8089/)",
       "Bash(curl -s -o /dev/null -w \"HTTP %{http_code} for 3001\\\\n\" http://localhost:3001/)",
       "WebFetch(domain:byld.dev)",
-      "mcp__designlang__get_component"
+      "mcp__designlang__get_component",
+      "PowerShell(venv\\\\Scripts\\\\python.exe -m pytest tests/ --tb=short -q)",
+      "PowerShell(& venv\\\\Scripts\\\\python.exe -m pytest tests/ --tb=short -q)",
+      "PowerShell(& \".\\\\venv\\\\Scripts\\\\python.exe\" -m pytest tests/ --tb=short -q)"
     ]
   },
   "enabledMcpjsonServers": [
