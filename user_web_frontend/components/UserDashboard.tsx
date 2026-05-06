@@ -1044,9 +1044,9 @@ export default function UserDashboard() {
           className="season-mint-button"
           onClick={() => void mintForSeason(season.id)}
           disabled={!canMint}
-          title={blockedReason || "Mint STAR for this season"}
+          title={blockedReason || "GET STAR for this season"}
         >
-          {isThisMinting ? "Minting..." : "Mint STAR"}
+          {isThisMinting ? "Getting..." : "GET STAR"}
         </button>
         {blockedReason ? (
           <ScrambleText
@@ -1233,7 +1233,7 @@ export default function UserDashboard() {
         footer={
           !isSignedIn ? (
             <p className="season-board-note">
-              Connect your wallet to use wallet-linked actions.
+              <strong>CONNECT YOUR WALLET</strong> TO USE WALLET-LINKED ACTIONS.
             </p>
           ) : (
             <div className="season-board-actions">
@@ -1242,7 +1242,7 @@ export default function UserDashboard() {
                   onClick={handleRefreshEligibilityClick}
                   disabled={eligibilityLoading}
                 >
-                  {eligibilityLoading ? "Refreshing eligibility..." : "Refresh eligibility"}
+                  {eligibilityLoading ? "CHECKING ELIGIBILITY..." : "CHECK ELIGIBILITY"}
                 </button>
                 {eligibility?.is_origin_wallet ? (
                   <span className="nft-fetched-at">Origin wallet</span>

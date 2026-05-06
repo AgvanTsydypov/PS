@@ -1861,106 +1861,23 @@ def active_seasons() -> List[Dict[str, Any]]:
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
 
+# ── "Community achievements" board — frozen ──────────────────────────────────
+# Both endpoints below power the homepage "Community achievements" widget,
+# which is currently UNDER CONSTRUCTION. They are disabled at the route layer
+# so no DB load is incurred even if a stale frontend client tries to call
+# them. Restore the previous bodies (see git history) when re-enabling.
+
+_COMMUNITY_ACHIEVEMENTS_DISABLED_DETAIL = "Community achievements feature is under construction."
+
+
 @app.get("/api/seasons/catalog")
 def seasons_catalog() -> Dict[str, Any]:
-    """All seasons (active and past) for public selectors (e.g. home archetype stats)."""
-    try:
-        conn = _get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT id, type, season_number, is_active
-                    FROM seasons
-                    ORDER BY
-                        CASE WHEN type = 'genesis' THEN 0 ELSE 1 END,
-                        season_number DESC NULLS LAST,
-                        id DESC
-                    """
-                )
-                rows = cursor.fetchall()
-        finally:
-            conn.close()
-
-        seasons_out: List[Dict[str, Any]] = []
-        for row in rows:
-            season_type = str(row[1])
-            season_number = int(row[2])
-            if season_type == "genesis":
-                title = "Genesis"
-            else:
-                title = f"{season_type.capitalize()} #{season_number}"
-            seasons_out.append(
-                {
-                    "id": int(row[0]),
-                    "type": season_type,
-                    "season_number": season_number,
-                    "title": title,
-                    "is_active": bool(row[3]),
-                }
-            )
-        return {"seasons": seasons_out}
-    except Exception:
-        logger.exception("Failed to load seasons catalog")
-        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    raise HTTPException(status_code=503, detail=_COMMUNITY_ACHIEVEMENTS_DISABLED_DETAIL)
 
 
 @app.get("/api/seasons/{season_id}/opened-archetypes")
 def season_opened_archetype_counts(season_id: int) -> Dict[str, Any]:
-    """Counts of minted (COMPLETED) claims per canonical archetype for one season."""
-    if season_id < 1:
-        raise HTTPException(status_code=400, detail="Invalid season id")
-
-    try:
-        conn = _get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT 1 FROM seasons WHERE id = %s LIMIT 1", (season_id,))
-                if cursor.fetchone() is None:
-                    raise HTTPException(status_code=404, detail="Season not found")
-
-                cursor.execute(
-                    """
-                    SELECT
-                        COALESCE(
-                            NULLIF(BTRIM(UPPER(c.card_payload_json->>'archetype')), ''),
-                            NULLIF(BTRIM(UPPER(c.archetype)), ''),
-                            ''
-                        ) AS raw_label,
-                        COUNT(*)::bigint AS cnt
-                    FROM claims c
-                    WHERE c.season_id = %s
-                      AND c.status = 'COMPLETED'
-                    GROUP BY 1
-                    """,
-                    (season_id,),
-                )
-                raw_rows = cursor.fetchall()
-        finally:
-            conn.close()
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception("Failed archetype stats for season_id=%s", season_id)
-        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
-
-    tallies: Dict[str, int] = defaultdict(int)
-    for raw_label, cnt in raw_rows:
-        label = _normalize_archetype_for_stats(str(raw_label) if raw_label is not None else "")
-        tallies[label] += int(cnt)
-
-    unknown = int(tallies.pop("UNKNOWN", 0))
-    by_archetype: Dict[str, int] = {
-        opt: int(tallies.get(opt, 0)) for opt in CARD_ARCHETYPE_OPTIONS
-    }
-    total = sum(by_archetype.values()) + unknown
-
-    return {
-        "season_id": season_id,
-        "total_opened": total,
-        "by_archetype": by_archetype,
-        "unknown": unknown,
-    }
+    raise HTTPException(status_code=503, detail=_COMMUNITY_ACHIEVEMENTS_DISABLED_DETAIL)
 
 
 def _mask_hex_address_for_public_ticker(addr: str) -> str:
@@ -2592,7 +2509,7 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
     if not has_rank:
         raise HTTPException(
             status_code=403,
-            detail="Wallet has no Polymarket trader rank — minting is not allowed.",
+            detail="WALLET HAS NO POLYMARKET TRADING HISTORY.",
         )
 
     try:

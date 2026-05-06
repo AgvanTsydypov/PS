@@ -462,6 +462,17 @@ body::after {
   line-height: 1.5;
 }
 
+.season-archetype-opens-under-construction {
+  padding: 32px 12px;
+  text-align: center;
+  font-family: var(--bd-font-display);
+  font-size: 14px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--bd-text-muted, #9ca3af);
+  opacity: 0.85;
+}
+
 .season-archetype-opens-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -1433,7 +1444,7 @@ main {
   margin: 10px 0 0;
   white-space: pre-wrap;
   font-family: var(--bd-font-mono);
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.5;
   color: var(--bd-ink);
   background: var(--bd-bg-elev);
