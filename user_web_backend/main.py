@@ -2383,7 +2383,8 @@ SELECT
     e.end_date AS event_end_date,
     e.closed_time AS event_closed_time,
     c.proxy_wallet AS winner_proxy_wallet,
-    c.asset_address AS minted_asset_address
+    c.asset_address AS minted_asset_address,
+    c.metadata_uri AS minted_metadata_uri
 FROM claims c
 LEFT JOIN events e ON e.id = c.event_id
 LEFT JOIN user_wallet_signins uws ON LOWER(uws.wallet_address) = LOWER(COALESCE(NULLIF(c.recipient_address, ''), c.user_wallet))
@@ -2447,6 +2448,9 @@ def _build_card_detail_response(row_dict: Dict[str, Any], request: Request) -> D
         except Exception:
             explorer_url = None
     card["explorer_asset_url"] = explorer_url
+
+    raw_metadata_uri = str(row_dict.get("minted_metadata_uri") or "").strip() or None
+    card["metadata_uri"] = _normalize_ipfs_gateway_url(raw_metadata_uri) if raw_metadata_uri else None
 
     return {"card": card}
 

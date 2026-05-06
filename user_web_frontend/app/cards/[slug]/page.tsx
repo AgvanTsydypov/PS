@@ -60,6 +60,10 @@ type GeneratedCardItem = {
   /** Etherscan / L2 block-explorer URL — backend computes it from
    *  ``asset_address`` ("<contract>/<tokenId>") + ``EVM_CHAIN_ID``. */
   explorer_asset_url?: string | null;
+  /** Public Pinata gateway URL for the on-chain metadata JSON, normalized
+   *  from ``claims.metadata_uri`` (handles ``ipfs://`` and dedicated
+   *  gateways). Null on preview rows. */
+  metadata_uri?: string | null;
   /** Backend flag: ``true`` when the slug was found in the preview buffer
    *  rather than the minted ``claims`` table. Drives the conditional render
    *  for minted-only chips (mint number, explorer links). */
@@ -111,6 +115,22 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
   const title =
     String(card?.card_title ?? payload.card_title ?? "").trim() || "Generated card";
 
+  const claimerWallet = card?.is_preview ? "preview" : (card?.owner_wallet ?? "N/A");
+  const starWallet = card?.winner_proxy_wallet ?? null;
+  const claimTypeRaw = String(
+    (payload as { claim_type?: string }).claim_type ?? "",
+  ).trim().toUpperCase();
+  const claimType = claimTypeRaw || "—";
+
+  const eventTitle = event.title ?? null;
+  const eventId = card?.event_id ?? null;
+  const eventSlug = event.slug ?? card?.event_slug ?? null;
+  const polymarketUrl = eventSlug ? `https://polymarket.com/event/${encodeURIComponent(eventSlug)}` : null;
+
+  const polygonscanStarUrl = starWallet ? `https://polygonscan.com/address/${starWallet}` : null;
+  const explorerUrl = card?.explorer_asset_url ?? null;
+  const ipfsUrl = card?.metadata_uri ?? null;
+
   return (
     <main className="card-detail-page">
       <div className="card-detail-backlinks">
@@ -150,11 +170,11 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                     number. Preview rows have no slot allocated yet. */}
                 {!card.is_preview ? (
                   <span className="card-detail-chip">
-                    Collection mint #{card.collection_mint_number ?? "N/A"}
+                    Mint #{card.collection_mint_number ?? "N/A"}
                   </span>
                 ) : (
                   <span className="card-detail-chip card-detail-chip-preview">
-                    It&apos;s preview — possible to mint
+                    CARD PREVIEW. CAN BE ROLLED TO CLAIM.
                   </span>
                 )}
                 <span className="card-detail-chip">
@@ -174,49 +194,83 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
 
               <div className="card-detail-info">
                 <section className="card-detail-panel">
+                  <h2 className="card-detail-section-heading">IDENTITY</h2>
                   <dl className="card-detail-kv">
                     {/* Preview cards carry a synthetic ``owner_wallet`` (random
                         hex burner the simulator generated to satisfy the CHECK
-                        constraint) and an ``owner_proxy_wallet`` copied from
-                        the participant — both are stand-ins until a real user
-                        mints onto the slot. Showing the literal "preview"
-                        keeps the page honest about who hasn't claimed yet. */}
-                    <dt>Claimer EOA wallet</dt>
-                    <dd>{card.is_preview ? "preview" : card.owner_wallet}</dd>
-                    <dt>Claimer proxy wallet</dt>
-                    <dd>{card.is_preview ? "preview" : (card.owner_proxy_wallet ?? "Not found")}</dd>
-                    <dt>Winner proxy wallet</dt>
-                    <dd>{card.winner_proxy_wallet ?? "N/A"}</dd>
-                    <dt>Event title</dt>
-                    <dd>{event.title ?? "N/A"}</dd>
-                    <dt>Event ID</dt>
-                    <dd>{card.event_id ?? "N/A"}</dd>
-                    <dt>Event slug</dt>
-                    <dd>{event.slug ?? card.event_slug ?? "N/A"}</dd>
-                    {/* Explorer row references an on-chain asset; preview
-                        cards have no on-chain identity yet, so suppress
-                        entirely. Magic Eden was Solana-era and is gone —
-                        the EVM equivalent is the Etherscan NFT page. */}
-                    {!card.is_preview ? (
-                      <>
-                        <dt>Explorer</dt>
-                        <dd>
-                          {isSafeExternalUrl(card.explorer_asset_url) ? (
-                            <a
-                              href={card.explorer_asset_url!}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              {card.asset_address ?? "Open on Explorer"}
-                            </a>
-                          ) : (
-                            "N/A"
-                          )}
-                        </dd>
-                      </>
-                    ) : null}
+                        constraint). Showing "preview" keeps the page honest
+                        about who hasn't claimed yet. */}
+                    <dt>Claimer wallet</dt>
+                    <dd>{claimerWallet}</dd>
+                    <dt>Star wallet</dt>
+                    <dd>{starWallet ?? "N/A"}</dd>
+                    <dt>Claim type</dt>
+                    <dd>{claimType}</dd>
                   </dl>
                 </section>
+
+                <section className="card-detail-panel">
+                  <h2 className="card-detail-section-heading">POLYMARKET EVENT</h2>
+                  <dl className="card-detail-kv">
+                    <dt>Title</dt>
+                    <dd>{eventTitle ?? "N/A"}</dd>
+                    <dt>ID</dt>
+                    <dd>{eventId ?? "N/A"}</dd>
+                    <dt>Slug</dt>
+                    <dd>{eventSlug ?? "N/A"}</dd>
+                    <dt>View on Polymarket</dt>
+                    <dd>
+                      {isSafeExternalUrl(polymarketUrl) ? (
+                        <a href={polymarketUrl!} target="_blank" rel="noopener noreferrer">
+                          Open ↗
+                        </a>
+                      ) : (
+                        "N/A"
+                      )}
+                    </dd>
+                  </dl>
+                </section>
+
+                {/* Onchain links exist only after the cron worker promotes
+                    the preview row to a minted claim. Preview cards have no
+                    on-chain identity yet. */}
+                {!card.is_preview ? (
+                  <section className="card-detail-panel">
+                    <h2 className="card-detail-section-heading">ONCHAIN RECORD</h2>
+                    <dl className="card-detail-kv">
+                      <dt>View Star wallet</dt>
+                      <dd>
+                        {isSafeExternalUrl(polygonscanStarUrl) ? (
+                          <a href={polygonscanStarUrl!} target="_blank" rel="noopener noreferrer">
+                            Polygonscan ↗
+                          </a>
+                        ) : (
+                          "N/A"
+                        )}
+                      </dd>
+                      <dt>View mint</dt>
+                      <dd>
+                        {isSafeExternalUrl(explorerUrl) ? (
+                          <a href={explorerUrl!} target="_blank" rel="noopener noreferrer">
+                            Etherscan ↗
+                          </a>
+                        ) : (
+                          "N/A"
+                        )}
+                      </dd>
+                      <dt>View IPFS</dt>
+                      <dd>
+                        {isSafeExternalUrl(ipfsUrl) ? (
+                          <a href={ipfsUrl!} target="_blank" rel="noopener noreferrer">
+                            IPFS ↗
+                          </a>
+                        ) : (
+                          "N/A"
+                        )}
+                      </dd>
+                    </dl>
+                  </section>
+                ) : null}
               </div>
 
               <section
