@@ -38,6 +38,7 @@ from scripts.polystars_card_payload import (
     CARD_ARCHETYPE_OPTIONS,
     _build_card_payload_from_source_row,
     _build_render_payload,
+    _generated_card_slug,
 )
 
 logger = logging.getLogger(__name__)
@@ -264,17 +265,11 @@ def _insert_preview_row(
 
 
 def _generate_slug_hint(season_type: Optional[str], season_number: Any) -> str:
-    """Same shape as ``polystars_card_payload._generated_card_slug`` but
-    inlined to avoid importing a private helper. Slug must be unique per
-    INSERT — collision recovery is on the caller (regenerate + retry once).
+    """Delegate to the canonical mint-time generator so preview slugs share
+    one shape with mint-time slugs. Slug must be unique per INSERT —
+    collision recovery is on the caller (regenerate + retry once).
     """
-    prefix = (str(season_type or "standard").strip().lower() or "standard")[:8]
-    try:
-        num = int(season_number or 0)
-    except (TypeError, ValueError):
-        num = 0
-    rand = secrets.token_urlsafe(8)
-    return f"{prefix}-{num}-{rand}"
+    return _generated_card_slug(season_type, season_number)
 
 
 def _build_payload(
