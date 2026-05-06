@@ -849,12 +849,9 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
     <stop offset="84%" stop-color="#871919"/>
   </linearGradient>
   <linearGradient id="extractor-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
-    <stop offset="15%" stop-color="#7F8E3D"/>
-    <stop offset="30%" stop-color="#7A5CBE"/>
-    <stop offset="45%" stop-color="#9D653E"/>
-    <stop offset="60%" stop-color="#2E9F8C"/>
-    <stop offset="75%" stop-color="#2F7346"/>
-    <stop offset="90%" stop-color="#2E3160"/>
+    <stop offset="0%"   stop-color="#666049"/>
+    <stop offset="50%"  stop-color="#33240F"/>
+    <stop offset="100%" stop-color="#0A2A2A"/>
   </linearGradient>
   <linearGradient id="bot-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
     <stop offset="0%"  stop-color="#554467"/>
@@ -1924,12 +1921,9 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
     <stop offset="84%" stop-color="#871919"/>
   </linearGradient>
   <linearGradient id="extractor-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
-    <stop offset="15%" stop-color="#7F8E3D"/>
-    <stop offset="30%" stop-color="#7A5CBE"/>
-    <stop offset="45%" stop-color="#9D653E"/>
-    <stop offset="60%" stop-color="#2E9F8C"/>
-    <stop offset="75%" stop-color="#2F7346"/>
-    <stop offset="90%" stop-color="#2E3160"/>
+    <stop offset="0%"   stop-color="#666049"/>
+    <stop offset="50%"  stop-color="#33240F"/>
+    <stop offset="100%" stop-color="#0A2A2A"/>
   </linearGradient>
   <linearGradient id="bot-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
     <stop offset="0%" stop-color="#554467"/>
@@ -2029,7 +2023,7 @@ SAMPLE_DATA: Dict[str, Any] = {
     "edge":              "BASE",
     "yield":             "P50",
     "gravity":           "BASE",
-    "archetype":         "INSIDER",
+    "archetype":         "EXTRACTOR",
     "card_lore":         "Standard edition pricing breach at triple digits signals industry inflection. Historical AAA launch data suggests $69.99 baseline holds. Resolution hinges on store listings by Feb 2026 deadline.",
     "archetype_description": "Mechanical routing protocol detected. This entity operates with massive kinetic force but generates zero directional trajectory, executing purely on structural arbitrage and fractional spreads. Devoid of human psychology or predictive bias, they exist solely to bridge conditional markets, merge underlying tokens, and enforce absolute liquidity ceilings. They do not predict the future; they mathematically process the emotions of the swarm.",
     "archetype_math":    "(P(E) ≥ 0.97 & Vol < 50) ∪ Mid-Trend Lag",
