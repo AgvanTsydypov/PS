@@ -1598,10 +1598,7 @@ _SIG_TIER_CHARS: Dict[str, str] = {
 }
 
 _SIG_INST_CHARS: Dict[str, str] = {
-    "UNIQUE":  "U",
-    "DAILY":   "D",
-    "WEEKLY":  "W",
-    "MONTHLY": "M",
+    "UNIQUE": "S",  # Singular — one-off event
 }
 
 _SIG_CLAIM_CHARS: Dict[str, str] = {
@@ -1625,10 +1622,8 @@ def _sig_tier(tier: Any) -> str:
 
 def _sig_inst(recurrence: Any) -> str:
     key = str(recurrence or "").strip().upper() or "UNIQUE"
-    if key in _SIG_INST_CHARS:
-        return _SIG_INST_CHARS[key]
-    # Any other recurrence label collapses to recurring "R"; default unknown -> U.
-    return "R" if key and key != "UNIQUE" else "U"
+    # Two-state collapse: Singular (one-off) vs Fractal (any recurring cadence).
+    return "S" if key == "UNIQUE" else "F"
 
 
 def _sig_claim(claim_type: Any) -> str:
