@@ -567,7 +567,7 @@ class EvmClient:
             "season_type", "season_number", "recurrence", "claim_type",
             "card_title", "card_lore", "primary_tag", "secondary_tag",
             "entry_bracket", "archetype", "archetype_description", "archetype_math",
-            "rarity_bracket", "proxy_wallet", "edge", "yield", "gravity",
+            "proxy_wallet", "edge", "yield", "gravity",
             "leaderboard_rank", "season_start_date", "season_end_date",
             "season_size", "collection_mint_number", "front_image_url",
             "back_image_url", "qr_payload",

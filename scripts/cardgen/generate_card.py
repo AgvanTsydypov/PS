@@ -1976,7 +1976,7 @@ def generate_card_back_svg(data: Dict[str, Any]) -> str:
 <text x="{BACK_TEXT_X_HEAD}" y="{round(arch_header_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="20" fill="black" style="{style_lh}">[&#160;BEHAVIORAL&#160;SIGNATURE&#160;]</text>
 <text x="{BACK_TEXT_X}" y="{round(arch_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh};{arch_ud}">{archetype_line_text}</text>
 <text x="{BACK_TEXT_X}" y="{round(desc_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="white" style="{style_lh}">{desc_svg}</text>
-<text x="{BACK_TEXT_X}" y="{round(back_rarity_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="12" fill="white" style="{style_lh}">{rarity_esc}</text>
+<!-- <text x="{BACK_TEXT_X}" y="{round(back_rarity_y, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="12" fill="white" style="{style_lh}">{rarity_esc}</text> -->
 
 <text x="{BACK_TEXT_X}" y="{round(y_stat_header, 1)}" text-anchor="start" dominant-baseline="hanging" font-size="14" fill="black" style="{style_lh};{arch_ud}">{stat_header}</text>
 {metrics_svg}
