@@ -9,14 +9,6 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import {
-  clearFlipTimers,
-  handleCardGridMouseLeave,
-  handleCardGridMouseMove,
-  markCardPressStart,
-  navigateToCardIfCenterClick,
-  triggerCardFlip,
-} from "./cardInteractions";
 import { fetchCardTicker, type CardTickerItem } from "../lib/userApiBase";
 
 const TICKER_RETRY_DELAYS_MS = [3000, 8000, 15000, 30000];
@@ -33,8 +25,6 @@ const TICKER_MAX_CELLS_COARSE = 56;
 const TICKER_MAX_CELLS_FINE = 220;
 const TICKER_MAX_SEGMENTS_COARSE = 4;
 const CARD_TICKER_PX_PER_SEC = 2124 / 70;
-const PANEL_SECONDS_PER_CARD = 6.5;
-const PANEL_SECONDS_PER_CARD_LITE = 4.5;
 
 function clampTickerSegments(requested: number, itemCount: number, maxCells: number): number {
   if (itemCount <= 0) return 2;
@@ -58,26 +48,6 @@ function tickerSegmentCount(itemCount: number, viewportWidthPx: number): number 
   return Math.max(2, Math.min(needed, 24));
 }
 
-function splitPanelItems(items: CardTickerItem[]): {
-  leftPanelItems: CardTickerItem[];
-  rightPanelItems: CardTickerItem[];
-} {
-  if (items.length <= 1) {
-    return {
-      leftPanelItems: items,
-      rightPanelItems: items,
-    };
-  }
-
-  const leftPanelItems = items.filter((_, index) => index % 2 === 0);
-  const rightPanelItems = items.filter((_, index) => index % 2 === 1);
-
-  return {
-    leftPanelItems: leftPanelItems.length > 0 ? leftPanelItems : items,
-    rightPanelItems: rightPanelItems.length > 0 ? rightPanelItems : items,
-  };
-}
-
 type GeneratedCardsTickerProps = {
   initialItems?: CardTickerItem[];
   centerContent?: ReactNode;
@@ -93,9 +63,6 @@ export default function GeneratedCardsTicker({
   const [viewportWidth, setViewportWidth] = useState(1200);
   const [tickerMaxCells, setTickerMaxCells] = useState(TICKER_MAX_CELLS_FINE);
   const [tickerLiteTheme, setTickerLiteTheme] = useState(false);
-  const [flippedCards, setFlippedCards] = useState<Record<string, boolean>>({});
-  const [animatingCards, setAnimatingCards] = useState<Record<string, boolean>>({});
-  const flipTimerRef = useRef<Record<string, number | null>>({});
   const retryTimerRef = useRef<number | null>(null);
   const retryAttemptRef = useRef(0);
 
@@ -186,31 +153,12 @@ export default function GeneratedCardsTicker({
     };
   }, []);
 
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    const className = "home-page-lock-scroll";
-    if (tickerLiteTheme) {
-      document.body.classList.remove(className);
-      return;
-    }
-    document.body.classList.add(className);
-    return () => {
-      document.body.classList.remove(className);
-    };
-  }, [tickerLiteTheme]);
-
-  useEffect(() => {
-    return () => {
-      clearFlipTimers(flipTimerRef);
-    };
-  }, []);
-
   const visibleItems = useMemo(() => {
     if (!tickerLiteTheme) return items.slice(0, TICKER_MAX_ITEMS_DESKTOP);
     return items.slice(0, TICKER_MAX_ITEMS_COARSE);
   }, [items, tickerLiteTheme]);
 
-  const liteSegmentCount = useMemo(() => {
+  const tickerSegments = useMemo(() => {
     const raw = tickerSegmentCount(visibleItems.length, viewportWidth);
     if (tickerLiteTheme) {
       const clamped = clampTickerSegments(raw, visibleItems.length, tickerMaxCells);
@@ -219,7 +167,7 @@ export default function GeneratedCardsTicker({
     return clampTickerSegments(raw, visibleItems.length, tickerMaxCells);
   }, [visibleItems.length, viewportWidth, tickerMaxCells, tickerLiteTheme]);
 
-  const liteTickerDurationSec = useMemo(() => {
+  const tickerDurationSec = useMemo(() => {
     const widthPx = segmentWidthPx(visibleItems.length);
     if (widthPx <= 0) return tickerLiteTheme ? 28 : 70;
     if (tickerLiteTheme) {
@@ -228,252 +176,15 @@ export default function GeneratedCardsTicker({
     return Math.max(8, widthPx / CARD_TICKER_PX_PER_SEC);
   }, [visibleItems.length, tickerLiteTheme]);
 
-  const liteLoopItems = useMemo(() => {
+  const loopItems = useMemo(() => {
     const out: CardTickerItem[] = [];
-    for (let segmentIndex = 0; segmentIndex < liteSegmentCount; segmentIndex += 1) {
+    for (let segmentIndex = 0; segmentIndex < tickerSegments; segmentIndex += 1) {
       out.push(...visibleItems);
     }
     return out;
-  }, [visibleItems, liteSegmentCount]);
+  }, [visibleItems, tickerSegments]);
 
-  const { leftPanelItems, rightPanelItems } = useMemo(
-    () => splitPanelItems(visibleItems),
-    [visibleItems],
-  );
-
-  const panelDurationSec = useMemo(() => {
-    const secondsPerCard = tickerLiteTheme ? PANEL_SECONDS_PER_CARD_LITE : PANEL_SECONDS_PER_CARD;
-    return Math.max(tickerLiteTheme ? 18 : 28, visibleItems.length * secondsPerCard);
-  }, [visibleItems.length, tickerLiteTheme]);
-
-  function handlePanelCardFlip(
-    interactionId: string,
-    target: HTMLElement,
-  ) {
-    triggerCardFlip(
-      interactionId,
-      target,
-      flipTimerRef,
-      setAnimatingCards,
-      setFlippedCards,
-    );
-  }
-
-  function renderPanelItem(
-    item: CardTickerItem,
-    panelSide: "left" | "right",
-    itemIndex: number,
-    isClone: boolean,
-  ) {
-    const cardId = `${panelSide}-${isClone ? "clone" : "primary"}-${item.slug}-${itemIndex}`;
-    const interactionId = `${panelSide}-${item.slug}-${itemIndex}`;
-    const label = item.card_title.trim() || item.slug || "Card";
-    const isFlipped = Boolean(flippedCards[interactionId]);
-    const isAnimating = Boolean(animatingCards[interactionId]);
-    const backImageUrl = item.back_image_url || item.front_image_url;
-
-    if (tickerLiteTheme) {
-      const cardMarkup = (
-        <article className="nft-card card-ticker-card card-ticker-card-lite home-panel-card">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            className="generated-card-image card-ticker-thumb"
-            src={item.front_image_url}
-            alt=""
-            width={TICKER_THUMB_PX}
-            height={TICKER_THUMB_HEIGHT_PX}
-            loading="lazy"
-            decoding="async"
-          />
-        </article>
-      );
-
-      if (isClone) {
-        return (
-          <div key={cardId} className="card-ticker-item card-ticker-item-lite home-card-panel-item">
-            {cardMarkup}
-          </div>
-        );
-      }
-
-      return (
-        <Link
-          key={cardId}
-          href={`/cards/${encodeURIComponent(item.slug)}`}
-          className="card-ticker-item card-ticker-item-lite home-card-panel-item"
-          aria-label={`Open card: ${label}`}
-        >
-          {cardMarkup}
-        </Link>
-      );
-    }
-
-    return (
-      <div
-        key={cardId}
-        className="card-ticker-item home-card-panel-item"
-        aria-hidden={isClone || undefined}
-      >
-        <Link
-          href={`/cards/${encodeURIComponent(item.slug)}`}
-          className="card-center-hotspot"
-          tabIndex={-1}
-          aria-label={`Open card: ${label}`}
-        />
-        {(["top", "right", "bottom", "left"] as const).map((edge) => (
-          <div
-            key={`${cardId}-${edge}`}
-            className={`card-flip-hitbox card-flip-hitbox-${edge}`}
-            aria-hidden="true"
-            onPointerDown={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-            }}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              const card = event.currentTarget.parentElement?.querySelector<HTMLElement>(".home-panel-card");
-              if (!card) return;
-              handlePanelCardFlip(interactionId, card);
-            }}
-          />
-        ))}
-        <article
-          className={`nft-card nft-card-tilt theme-vivid card-ticker-card home-panel-card ${isAnimating ? "generated-card-preview-card-flipping" : ""}`}
-          data-center-navigate="1"
-          onPointerDown={(event) => {
-            markCardPressStart(event.currentTarget, event.clientX, event.clientY);
-          }}
-          onClick={(event) => {
-            // Unified URL: ticker items always link to /cards/{slug}. The
-            // backend serves preview rows from the same endpoint with
-            // ``is_preview: true``, so the slug stays stable across the
-            // preview → mint transition.
-            if (
-              navigateToCardIfCenterClick(
-                event.currentTarget,
-                item.slug,
-                event.clientX,
-                event.clientY,
-              )
-            ) {
-              return;
-            }
-            handlePanelCardFlip(interactionId, event.currentTarget);
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" && event.key !== " ") return;
-            event.preventDefault();
-            handlePanelCardFlip(interactionId, event.currentTarget);
-          }}
-          role="button"
-          tabIndex={isClone ? -1 : 0}
-          aria-label={`Open or flip card: ${label}`}
-        >
-          <div className={`generated-card-flip-inner ${isFlipped ? "is-flipped" : ""}`}>
-            <div className="generated-card-flip-face generated-card-flip-face-front">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                className="generated-card-image card-ticker-thumb"
-                src={item.front_image_url}
-                alt=""
-                width={TICKER_THUMB_PX}
-                height={TICKER_THUMB_HEIGHT_PX}
-                loading="lazy"
-                decoding="async"
-              />
-            </div>
-            <div className="generated-card-flip-face generated-card-flip-face-back">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                className="generated-card-image card-ticker-thumb"
-                src={backImageUrl}
-                alt=""
-                width={TICKER_THUMB_PX}
-                height={TICKER_THUMB_HEIGHT_PX}
-                loading="lazy"
-                decoding="async"
-              />
-            </div>
-          </div>
-        </article>
-      </div>
-    );
-  }
-
-  function renderPanelSegment(
-    panelItems: CardTickerItem[],
-    panelSide: "left" | "right",
-    segmentKey: string,
-    isClone: boolean,
-  ) {
-    return (
-      <div
-        key={segmentKey}
-        className={`home-card-panel-segment${isClone ? " is-clone" : ""}`}
-        aria-hidden={isClone}
-      >
-        {panelItems.map((item, index) => renderPanelItem(item, panelSide, index, isClone))}
-      </div>
-    );
-  }
-
-  function renderPanel(
-    panelSide: "left" | "right",
-    panelItems: CardTickerItem[],
-    direction: "up" | "down",
-  ) {
-    // Always render the side <aside> on desktop so the 3-column grid in
-    // .home-showcase-shell keeps its center column in the middle of the
-    // viewport. Without this, while ticker items are still loading (or if
-    // the API returned an empty list), the center block would be auto-
-    // placed into the first grid column and the whole hero would visibly
-    // jump from the top-left to the center once items arrive.
-    if (panelItems.length === 0) {
-      return (
-        <aside
-          className={`home-card-panel home-card-panel-${panelSide} home-card-panel-empty`}
-          aria-hidden="true"
-        />
-      );
-    }
-
-    return (
-      <aside className={`home-card-panel home-card-panel-${panelSide}`}>
-        <div
-          className={`home-card-panel-viewport${tickerLiteTheme ? " home-card-panel-viewport-lite" : ""}`}
-          onMouseMove={
-            tickerLiteTheme
-              ? undefined
-              : (event) =>
-                  handleCardGridMouseMove(event, {
-                    wrapperSelector: ".home-card-panel-item",
-                    cardSelector: ".home-panel-card",
-                  })
-          }
-          onMouseLeave={
-            tickerLiteTheme
-              ? undefined
-              : (event) => handleCardGridMouseLeave(event, ".home-panel-card")
-          }
-        >
-          <div
-            className={`home-card-panel-track home-card-panel-track-${direction}${tickerLiteTheme ? " home-card-panel-track-lite" : ""}`}
-            style={
-              {
-                "--home-panel-duration": `${panelDurationSec}s`,
-              } as CSSProperties
-            }
-          >
-            {renderPanelSegment(panelItems, panelSide, `${panelSide}-primary`, false)}
-            {renderPanelSegment(panelItems, panelSide, `${panelSide}-clone`, true)}
-          </div>
-        </div>
-      </aside>
-    );
-  }
-
-  function renderLiteTicker() {
+  function renderHorizontalTicker() {
     if (visibleItems.length === 0) {
       return null;
     }
@@ -485,12 +196,12 @@ export default function GeneratedCardsTicker({
             className="card-ticker-track card-ticker-track-lite"
             style={
               {
-                "--ticker-segments": liteSegmentCount,
-                "--ticker-duration": `${liteTickerDurationSec}s`,
+                "--ticker-segments": tickerSegments,
+                "--ticker-duration": `${tickerDurationSec}s`,
               } as CSSProperties
             }
           >
-            {liteLoopItems.map((item, index) => {
+            {loopItems.map((item, index) => {
               const cardId = `${item.slug}-${index}`;
               const label = item.card_title.trim() || item.slug || "Card";
               return (
@@ -521,32 +232,15 @@ export default function GeneratedCardsTicker({
     );
   }
 
-  if (tickerLiteTheme) {
-    return (
-      <section className="card-ticker-section card-ticker-section-home" aria-label="Home showcase">
-        <div className="home-showcase-center home-showcase-center-mobile">
-          {centerContent}
-          {loading && items.length === 0 ? (
-            <p className="home-showcase-status season-board-muted">Loading claimed cards...</p>
-          ) : null}
-        </div>
-        {renderLiteTicker()}
-      </section>
-    );
-  }
-
   return (
     <section className="card-ticker-section card-ticker-section-home" aria-label="Home showcase">
-      <div className="home-showcase-shell">
-        {renderPanel("left", leftPanelItems, "up")}
-        <div className="home-showcase-center">
-          {centerContent}
-          {loading && items.length === 0 ? (
-            <p className="home-showcase-status season-board-muted">Loading claimed cards...</p>
-          ) : null}
-        </div>
-        {renderPanel("right", rightPanelItems, "down")}
+      <div className="home-showcase-center home-showcase-center-mobile">
+        {centerContent}
+        {loading && items.length === 0 ? (
+          <p className="home-showcase-status season-board-muted">Loading claimed cards...</p>
+        ) : null}
       </div>
+      {renderHorizontalTicker()}
     </section>
   );
 }
