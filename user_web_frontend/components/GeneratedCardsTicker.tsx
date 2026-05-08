@@ -17,13 +17,14 @@ const TICKER_RETRY_DELAYS_MS = [3000, 8000, 15000, 30000];
 const HOME_TICKER_CARD_SCALE = 0.96 * 1.1;
 const TICKER_THUMB_PX = Math.round(249 * HOME_TICKER_CARD_SCALE);
 const TICKER_THUMB_HEIGHT_PX = Math.round(386 * HOME_TICKER_CARD_SCALE);
-const TICKER_GAP_PX = 28;
+const TICKER_GAP_PX = 84;
 const TICKER_LINK_BORDER_PX = 2;
 const TICKER_MAX_ITEMS_DESKTOP = 24;
 const TICKER_MAX_ITEMS_COARSE = 10;
 const TICKER_MAX_CELLS_COARSE = 56;
 const TICKER_MAX_CELLS_FINE = 220;
 const TICKER_MAX_SEGMENTS_COARSE = 4;
+const TICKER_SPEED_MULT = 1.5;
 const CARD_TICKER_PX_PER_SEC = 2124 / 70;
 
 function clampTickerSegments(requested: number, itemCount: number, maxCells: number): number {
@@ -169,11 +170,15 @@ export default function GeneratedCardsTicker({
 
   const tickerDurationSec = useMemo(() => {
     const widthPx = segmentWidthPx(visibleItems.length);
-    if (widthPx <= 0) return tickerLiteTheme ? 28 : 70;
-    if (tickerLiteTheme) {
-      return Math.max(14, widthPx / 44);
+    let durationSec: number;
+    if (widthPx <= 0) {
+      durationSec = tickerLiteTheme ? 28 : 70;
+    } else if (tickerLiteTheme) {
+      durationSec = Math.max(14, widthPx / 44);
+    } else {
+      durationSec = Math.max(8, widthPx / CARD_TICKER_PX_PER_SEC);
     }
-    return Math.max(8, widthPx / CARD_TICKER_PX_PER_SEC);
+    return durationSec / TICKER_SPEED_MULT;
   }, [visibleItems.length, tickerLiteTheme]);
 
   const loopItems = useMemo(() => {

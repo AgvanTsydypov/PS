@@ -1152,7 +1152,7 @@ main {
 .card-ticker-track {
   display: inline-flex;
   align-items: center;
-  gap: 28px;
+  gap: 84px;
   white-space: nowrap;
   width: max-content;
   will-change: transform;
@@ -1330,7 +1330,7 @@ main {
   }
 
   .card-ticker-track {
-    gap: 12px;
+    gap: 36px;
   }
 
   .card-ticker-card,
