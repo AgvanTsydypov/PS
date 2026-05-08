@@ -24,7 +24,7 @@ const TICKER_MAX_ITEMS_COARSE = 10;
 const TICKER_MAX_CELLS_COARSE = 56;
 const TICKER_MAX_CELLS_FINE = 220;
 const TICKER_MAX_SEGMENTS_COARSE = 4;
-const TICKER_SPEED_MULT = 1.5;
+const TICKER_SPEED_MULT = 2.0;
 const CARD_TICKER_PX_PER_SEC = 2124 / 70;
 
 function clampTickerSegments(requested: number, itemCount: number, maxCells: number): number {
