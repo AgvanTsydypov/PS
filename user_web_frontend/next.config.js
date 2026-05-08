@@ -108,6 +108,19 @@ const nextConfig = {
       },
     ];
   },
+  // Dev-time proxy so the frontend can be exposed via an HTTPS tunnel
+  // (cloudflared / ngrok) without browsers blocking mixed-content calls
+  // to ``http://localhost:8011``. In prod ``NEXT_PUBLIC_USER_API_BASE_URL``
+  // is set and the frontend issues absolute URLs straight to the backend,
+  // so this rewrite is dormant. Only kicks in when the frontend uses
+  // relative ``/api/*`` paths (i.e. when ``NEXT_PUBLIC_USER_API_BASE_URL``
+  // is empty).
+  async rewrites() {
+    const target = process.env.USER_WEB_BACKEND_DEV_PROXY_TARGET || "http://localhost:8011";
+    return [
+      { source: "/api/:path*", destination: `${target}/api/:path*` },
+    ];
+  },
 };
 
 module.exports = nextConfig;

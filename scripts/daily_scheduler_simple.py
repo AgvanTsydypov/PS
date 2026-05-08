@@ -2810,6 +2810,18 @@ class SimplifiedScheduler:
                         "tx_hash": mint_result.tx_hash,
                     })
                     print(f"   ✅ claim {claim_id}: minted {mint_result.tx_hash}")
+                    try:
+                        from scripts.telegram_notifier import notify_claim_minted
+                        notify_claim_minted(
+                            front_image_url=str(polystars_card.get("front_image_url") or "") if polystars_card else "",
+                            season_type=polystars_card.get("season_type") if polystars_card else None,
+                            collection_mint_number=collection_mint_number,
+                            season_capacity=polystars_card.get("season_size") if polystars_card else None,
+                            card_url=str(polystars_card.get("qr_payload") or "") if polystars_card else "",
+                            archetype=polystars_card.get("archetype") if polystars_card else None,
+                        )
+                    except Exception as notify_exc:
+                        print(f"   ⚠️  claim {claim_id}: telegram notify failed: {notify_exc}")
                 except Exception as exc:
                     err_text = str(exc)[:500]
                     if on_chain_completed:
