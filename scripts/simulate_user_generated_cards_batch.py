@@ -175,6 +175,73 @@ def _allocate_diversity_slots(
     return {a: c for a, c in slots.items() if c > 0}
 
 
+def _count_eligible_events_per_archetype(
+    cursor: Any, season_ids: List[int]
+) -> Dict[str, Dict[str, int]]:
+    """Per-(archetype, event_id) eligible-row counts. Same predicates as
+    ``_count_eligible_per_archetype`` but grouped on ``event_id`` as well —
+    used by maximum-diversity mode to spread picks across distinct events,
+    not just archetypes.
+    """
+    cursor.execute(
+        f"""
+        SELECT COALESCE(p.archetype, '') AS archetype,
+               p.event_id                AS event_id,
+               COUNT(*)                  AS cnt
+        FROM participants p
+        JOIN event_cards ec ON ec.event_id = p.event_id
+        {_ELIGIBLE_PREDICATES}
+          AND p.season_id = ANY(%s)
+        GROUP BY p.archetype, p.event_id
+        """,
+        (season_ids,),
+    )
+    out: Dict[str, Dict[str, int]] = {}
+    for row in cursor.fetchall():
+        archetype = (row["archetype"] if isinstance(row, dict) else row[0]) or ""
+        event_id = row["event_id"] if isinstance(row, dict) else row[1]
+        cnt = int(row["cnt"] if isinstance(row, dict) else row[2])
+        if event_id is None:
+            continue
+        out.setdefault(archetype, {})[event_id] = cnt
+    return out
+
+
+def _plan_diverse_event_pairs(
+    slots: Dict[str, int],
+    events_per_archetype: Dict[str, Dict[str, int]],
+) -> Dict[Tuple[str, str], int]:
+    """Convert per-archetype slot counts into a fetch plan keyed on
+    ``(archetype, event_id)``. For each archetype slot, picks the event from
+    that archetype's pool with the lowest pick-count *across the whole batch*
+    so far; ties broken randomly. Caps per ``(archetype, event_id)`` are
+    enforced by the available-row counts so we never plan more than the DB
+    has.
+
+    Result: each distinct event is exhausted once before any event is reused,
+    regardless of which archetype it belongs to.
+    """
+    plan: Dict[Tuple[str, str], int] = {}
+    used_global: Dict[str, int] = {}
+    for archetype, slot_count in slots.items():
+        events = events_per_archetype.get(archetype or "", {})
+        if not events or slot_count <= 0:
+            continue
+        for _ in range(slot_count):
+            available = [
+                ev for ev, cap in events.items()
+                if plan.get((archetype, ev), 0) < cap
+            ]
+            if not available:
+                break
+            min_used = min(used_global.get(ev, 0) for ev in available)
+            best = [ev for ev in available if used_global.get(ev, 0) == min_used]
+            chosen = random.choice(best)
+            plan[(archetype, chosen)] = plan.get((archetype, chosen), 0) + 1
+            used_global[chosen] = used_global.get(chosen, 0) + 1
+    return plan
+
+
 def _fetch_candidates(
     cursor: Any,
     season_ids: List[int],
@@ -209,6 +276,31 @@ def _fetch_candidates(
             """,
             (season_ids, archetype, limit),
         )
+    return [dict(r) for r in cursor.fetchall()]
+
+
+def _fetch_candidates_for_event(
+    cursor: Any,
+    season_ids: List[int],
+    archetype: str,
+    event_id: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    """Random sample of eligible participants for one ``(archetype, event_id)``
+    pair. Used by maximum-diversity mode where the planner has already pinned
+    which event each slot draws from."""
+    cursor.execute(
+        f"""
+        {_PARTICIPANT_CARD_SOURCE_SELECT}
+        {_ELIGIBLE_PREDICATES}
+          AND p.season_id = ANY(%s)
+          AND p.archetype = %s
+          AND p.event_id  = %s
+        ORDER BY RANDOM()
+        LIMIT %s
+        """,
+        (season_ids, archetype, event_id, limit),
+    )
     return [dict(r) for r in cursor.fetchall()]
 
 
@@ -361,11 +453,19 @@ def run_admin_simulated_card_generations(
                 return out
 
             n = min(n, total)
+            diversity_plan: Optional[Dict[Tuple[str, str], int]] = None
             if maximum_diversity:
                 slots = _allocate_diversity_slots(n, per_archetype)
+                events_per_archetype = _count_eligible_events_per_archetype(
+                    cur, season_ids
+                )
+                diversity_plan = _plan_diverse_event_pairs(
+                    slots, events_per_archetype
+                )
+                out["planned"] = sum(diversity_plan.values())
             else:
                 slots = {None: n}  # type: ignore[dict-item]
-            out["planned"] = sum(slots.values())
+                out["planned"] = sum(slots.values())
 
             # Track current ``seasons.remaining_supply`` snapshot just so the
             # response contract has values; previews don't decrement supply.
@@ -383,17 +483,28 @@ def run_admin_simulated_card_generations(
     emit("planned")
 
     # Pull all candidate rows up front so per-row work is a tight loop with
-    # no extra round-trips for the SELECT side. Each archetype is sampled
-    # independently so the planner can use the (season_id, archetype) index.
+    # no extra round-trips for the SELECT side. In maximum-diversity mode
+    # each (archetype, event_id) pair is sampled independently so the
+    # planner's per-event spread is preserved; otherwise we sample by
+    # archetype only (or the whole pool when archetype is None).
     candidates: List[Dict[str, Any]] = []
     fetch_conn = manager.get_connection()
     try:
         with fetch_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            for archetype, slot_count in slots.items():
-                if slot_count <= 0:
-                    continue
-                rows = _fetch_candidates(cur, season_ids, archetype, slot_count)
-                candidates.extend(rows)
+            if diversity_plan is not None:
+                for (archetype, event_id), pair_count in diversity_plan.items():
+                    if pair_count <= 0:
+                        continue
+                    rows = _fetch_candidates_for_event(
+                        cur, season_ids, archetype, event_id, pair_count
+                    )
+                    candidates.extend(rows)
+            else:
+                for archetype, slot_count in slots.items():
+                    if slot_count <= 0:
+                        continue
+                    rows = _fetch_candidates(cur, season_ids, archetype, slot_count)
+                    candidates.extend(rows)
     finally:
         fetch_conn.close()
 
