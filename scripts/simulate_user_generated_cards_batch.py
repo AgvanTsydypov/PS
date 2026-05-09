@@ -35,7 +35,6 @@ from scripts.cardgen.assets import (
 )
 from scripts.data_loading_manager import DataLoadingManager
 from scripts.polystars_card_payload import (
-    CARD_ARCHETYPE_OPTIONS,
     _build_card_payload_from_source_row,
     _build_render_payload,
     _generated_card_slug,
@@ -157,44 +156,6 @@ def _count_eligible_per_archetype(
     return total, counts
 
 
-def _allocate_diversity_slots(
-    n_target: int, available: Dict[str, int]
-) -> Dict[str, int]:
-    """Spread ``n_target`` across archetypes evenly. If an archetype's pool
-    is short, the leftover spills round-robin into archetypes with surplus
-    until either ``n_target`` is hit or no surplus remains.
-
-    The leftover-distribution order is **shuffled** rather than canonical:
-    the admin UI submits in 10-card chunks, and ``CARD_ARCHETYPE_OPTIONS``
-    has 13 entries. With a deterministic prefix order every chunk always
-    skipped the trailing canonical entries (GRAVITON / SUBSTRATE / OPERATOR
-    were never sampled while the first 10 saturated). Shuffling per call
-    means the missed three rotate randomly, so over multiple chunks every
-    archetype gets coverage proportional to pool size.
-    """
-    present = [a for a in CARD_ARCHETYPE_OPTIONS if available.get(a, 0) > 0]
-    extras = sorted(a for a, c in available.items() if c > 0 and a not in present)
-    ordered = present + extras
-    if not ordered or n_target <= 0:
-        return {}
-
-    base = n_target // len(ordered)
-    slots: Dict[str, int] = {a: min(base, available[a]) for a in ordered}
-    leftover = n_target - sum(slots.values())
-
-    while leftover > 0:
-        gainers = [a for a in ordered if available[a] > slots[a]]
-        if not gainers:
-            break
-        random.shuffle(gainers)
-        for a in gainers:
-            if leftover <= 0:
-                break
-            slots[a] += 1
-            leftover -= 1
-    return {a: c for a, c in slots.items() if c > 0}
-
-
 def _count_eligible_events_per_archetype(
     cursor: Any,
     season_ids: List[int],
@@ -234,38 +195,59 @@ def _count_eligible_events_per_archetype(
     return out
 
 
-def _plan_diverse_event_pairs(
-    slots: Dict[str, int],
+def _plan_balanced_archetype_event_pairs(
+    n_target: int,
     events_per_archetype: Dict[str, Dict[str, int]],
 ) -> Dict[Tuple[str, str], int]:
-    """Convert per-archetype slot counts into a fetch plan keyed on
-    ``(archetype, event_id)``. For each archetype slot, picks the event from
-    that archetype's pool with the lowest pick-count *across the whole batch*
-    so far; ties broken randomly. Caps per ``(archetype, event_id)`` are
-    enforced by the available-row counts so we never plan more than the DB
-    has.
+    """Joint balancing of ``n_target`` slots across both archetypes AND
+    distinct ``event_id``s. Greedy per-slot: pick the
+    ``(archetype, event_id)`` pair that minimises
+    ``used_arch[arch] + used_event[event]`` so far; ties broken randomly.
 
-    Result: each distinct event is exhausted once before any event is reused,
-    regardless of which archetype it belongs to.
+    Why a joint score: the previous planner allocated per-archetype quotas
+    first and only spread events *within* each archetype. That gave good
+    archetype balance but skewed the event distribution when archetypes
+    drew from very different event pools. Summing both counters drives
+    every iteration toward the underrepresented dimension regardless of
+    which side is currently behind, so the resulting plan is near-uniform
+    on archetypes AND on events whenever the eligible pool allows it.
+
+    Caps per ``(archetype, event_id)`` come from the eligible-row counts,
+    so we never plan more than the DB has. If the pool is exhausted before
+    ``n_target`` is hit, the loop returns whatever it could place and the
+    caller surfaces the shortfall via ``stopped_reason='completed_short'``.
     """
+    arch_event_caps: Dict[Tuple[str, str], int] = {
+        (archetype or "", event_id): cap
+        for archetype, events in events_per_archetype.items()
+        for event_id, cap in events.items()
+        if cap > 0 and event_id
+    }
+    if not arch_event_caps or n_target <= 0:
+        return {}
+
     plan: Dict[Tuple[str, str], int] = {}
-    used_global: Dict[str, int] = {}
-    for archetype, slot_count in slots.items():
-        events = events_per_archetype.get(archetype or "", {})
-        if not events or slot_count <= 0:
-            continue
-        for _ in range(slot_count):
-            available = [
-                ev for ev, cap in events.items()
-                if plan.get((archetype, ev), 0) < cap
-            ]
-            if not available:
-                break
-            min_used = min(used_global.get(ev, 0) for ev in available)
-            best = [ev for ev in available if used_global.get(ev, 0) == min_used]
-            chosen = random.choice(best)
-            plan[(archetype, chosen)] = plan.get((archetype, chosen), 0) + 1
-            used_global[chosen] = used_global.get(chosen, 0) + 1
+    used_arch: Dict[str, int] = {}
+    used_event: Dict[str, int] = {}
+
+    for _ in range(n_target):
+        available = [
+            pair for pair, cap in arch_event_caps.items()
+            if plan.get(pair, 0) < cap
+        ]
+        if not available:
+            break
+        min_score = min(
+            used_arch.get(a, 0) + used_event.get(e, 0) for (a, e) in available
+        )
+        best = [
+            pair for pair in available
+            if used_arch.get(pair[0], 0) + used_event.get(pair[1], 0) == min_score
+        ]
+        chosen = random.choice(best)
+        plan[chosen] = plan.get(chosen, 0) + 1
+        used_arch[chosen[0]] = used_arch.get(chosen[0], 0) + 1
+        used_event[chosen[1]] = used_event.get(chosen[1], 0) + 1
     return plan
 
 
@@ -502,14 +484,14 @@ def run_admin_simulated_card_generations(
             n = min(n, total)
             diversity_plan: Optional[Dict[Tuple[str, str], int]] = None
             if maximum_diversity:
-                slots = _allocate_diversity_slots(n, per_archetype)
                 events_per_archetype = _count_eligible_events_per_archetype(
                     cur, season_ids, events_filter
                 )
-                diversity_plan = _plan_diverse_event_pairs(
-                    slots, events_per_archetype
+                diversity_plan = _plan_balanced_archetype_event_pairs(
+                    n, events_per_archetype
                 )
                 out["planned"] = sum(diversity_plan.values())
+                slots = {}
             else:
                 slots = {None: n}  # type: ignore[dict-item]
                 out["planned"] = sum(slots.values())
