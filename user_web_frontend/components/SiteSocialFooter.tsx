@@ -57,7 +57,7 @@ const SOCIAL_ITEMS: SocialItem[] = [
   {
     key: "dexscreener",
     label: "DEXSCREENER",
-    href: "https://dexscreener.com/",
+    href: "https://dexscreener.com/ethereum/0x9e68096675578cccf6eb7ad01350f731dde633ed",
     icon: (
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 252 300" fill="currentColor" aria-hidden="true" focusable="false">
         <g transform="scale(0.85) translate(25,30)">
