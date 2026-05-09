@@ -7,10 +7,23 @@ import { fetchSiteStatus } from "../lib/userApiBase";
 const STRIP_ID = "site-maintenance-strip";
 const STRIP_RETRY_DELAYS_MS = [3000, 8000, 15000, 30000];
 const STRIP_REFRESH_MS = 30000;
+const RELEASE_TARGET_MS = Date.UTC(2026, 4, 15, 12, 0, 0);
+
+function formatReleaseCountdown(nowMs: number): string | null {
+  const diff = RELEASE_TARGET_MS - nowMs;
+  if (diff <= 0) return null;
+  const totalSeconds = Math.floor(diff / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+}
 
 export default function SiteMaintenanceStrip() {
   const [active, setActive] = useState(false);
   const [checked, setChecked] = useState(false);
+  const [countdown, setCountdown] = useState<string | null>(() => formatReleaseCountdown(Date.now()));
   const stripRef = useRef<HTMLDivElement>(null);
   const retryTimerRef = useRef<number | null>(null);
   const retryAttemptRef = useRef(0);
@@ -71,6 +84,14 @@ export default function SiteMaintenanceStrip() {
     };
   }, [loadSiteStatus]);
 
+  useEffect(() => {
+    if (!active) return;
+    const tick = () => setCountdown(formatReleaseCountdown(Date.now()));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [active]);
+
   useLayoutEffect(() => {
     if (!checked) {
       document.body.classList.remove("has-site-maintenance-strip");
@@ -99,10 +120,6 @@ export default function SiteMaintenanceStrip() {
 
   if (!checked) return null;
 
-  const message = active
-    ? "Maintenance in progress: some actions are disabled. Release: 15/05/2026."
-    : "WARNING! THIS IS A BETA VERSION. IT DOES NOT REPRESENT THE FINAL QUALITY OF THE PRODUCT.";
-
   return (
     <div
       ref={stripRef}
@@ -111,7 +128,18 @@ export default function SiteMaintenanceStrip() {
       role="status"
       aria-live="polite"
     >
-      {message}
+      {active ? (
+        countdown ? (
+          <span className="site-maintenance-strip-countdown">
+            <span className="site-maintenance-strip-countdown-label">GENESIS LAUNCH IN</span>
+            <span className="site-maintenance-strip-countdown-value">{countdown}</span>
+          </span>
+        ) : (
+          "Maintenance in progress: some actions are disabled."
+        )
+      ) : (
+        "WARNING! THIS IS A BETA VERSION. IT DOES NOT REPRESENT THE FINAL QUALITY OF THE PRODUCT."
+      )}
     </div>
   );
 }
