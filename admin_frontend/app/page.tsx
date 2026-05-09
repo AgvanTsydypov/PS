@@ -524,6 +524,11 @@ export default function HomePage() {
   const [scenarioSimulateOriginPercent, setScenarioSimulateOriginPercent] = useState("10");
   const [scenarioSimulateMaximumDiversity, setScenarioSimulateMaximumDiversity] = useState(true);
   const [scenarioSimulateBatchBusy, setScenarioSimulateBatchBusy] = useState(false);
+  const [scenarioSimulateEventOptions, setScenarioSimulateEventOptions] = useState<EventCardRow[]>([]);
+  const [scenarioSimulateEventOptionsLoading, setScenarioSimulateEventOptionsLoading] = useState(false);
+  const [scenarioSimulateEventOptionsError, setScenarioSimulateEventOptionsError] = useState("");
+  const [scenarioSimulateEventSelected, setScenarioSimulateEventSelected] = useState<string[]>([]);
+  const [scenarioSimulateEventSearch, setScenarioSimulateEventSearch] = useState("");
   const [scenarioSimulateProgress, setScenarioSimulateProgress] =
     useState<ScenarioSimulateProgress | null>(null);
   const scenarioSimulateActiveRequestRef = useRef<{
@@ -1015,6 +1020,35 @@ export default function HomePage() {
     setWinnerRows(data.rows);
   };
 
+  const refreshScenarioSimulateEventOptions = async () => {
+    setScenarioSimulateEventOptionsLoading(true);
+    setScenarioSimulateEventOptionsError("");
+    try {
+      const params = new URLSearchParams();
+      params.set("limit", "2000");
+      params.set("status", "ok");
+      const data = await fetchJSON<{ rows: EventCardRow[] }>(`/api/event-cards?${params.toString()}`);
+      const eligible = data.rows.filter(
+        (r) => typeof r.manual_image_url === "string" && r.manual_image_url.trim() !== "",
+      );
+      eligible.sort((a, b) => {
+        const left = (a.event_title || a.event_slug || a.event_id || "").toLowerCase();
+        const right = (b.event_title || b.event_slug || b.event_id || "").toLowerCase();
+        return left.localeCompare(right);
+      });
+      setScenarioSimulateEventOptions(eligible);
+      setScenarioSimulateEventSelected((prev) => {
+        const valid = new Set(eligible.map((r) => r.event_id));
+        return prev.filter((id) => valid.has(id));
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setScenarioSimulateEventOptionsError(message);
+    } finally {
+      setScenarioSimulateEventOptionsLoading(false);
+    }
+  };
+
   const refreshEventCardRows = async () => {
     const safeLimit = Math.max(1, Number(eventCardsLimit) || 500);
     const useFutureStandardFiltered = (
@@ -1280,6 +1314,13 @@ export default function HomePage() {
     if (eventCardsSnapshotScope === "next_window" || eventCardsSnapshotScope.startsWith("standard_season:")) return;
     setEventCardsSnapshotScope("next_window");
   }, [eventCardsSnapshotScope, eventCardsFutureStandardFiltered]);
+
+  useEffect(() => {
+    if (tab !== "scenarios") return;
+    if (scenarioSimulateEventOptions.length > 0 || scenarioSimulateEventOptionsLoading) return;
+    void refreshScenarioSimulateEventOptions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   useEffect(() => {
     if (tab !== "cardBuilder") return;
@@ -3291,6 +3332,157 @@ export default function HomePage() {
                 Maximum diversity mode
               </label>
             </div>
+            <div className="panel" style={{ marginBottom: 8, padding: 8 }}>
+              <div
+                className="row"
+                style={{ marginBottom: 6, alignItems: "center", flexWrap: "wrap", gap: 8 }}
+              >
+                <strong>Event filter</strong>
+                <span className="muted">
+                  {scenarioSimulateEventSelected.length > 0
+                    ? `${scenarioSimulateEventSelected.length} of ${scenarioSimulateEventOptions.length} events selected`
+                    : `No filter — all ${scenarioSimulateEventOptions.length} eligible events`}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void refreshScenarioSimulateEventOptions()}
+                  disabled={scenarioSimulateEventOptionsLoading || scenarioSimulateBatchBusy}
+                >
+                  {scenarioSimulateEventOptionsLoading ? (
+                    <span className="inline-flex items-center gap-2">
+                      <Loader2 size={14} className="animate-spin shrink-0" aria-hidden />
+                      Loading…
+                    </span>
+                  ) : (
+                    "Reload events"
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScenarioSimulateEventSelected([])}
+                  disabled={
+                    scenarioSimulateBatchBusy || scenarioSimulateEventSelected.length === 0
+                  }
+                >
+                  Clear selection
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const term = scenarioSimulateEventSearch.trim().toLowerCase();
+                    const visible = scenarioSimulateEventOptions.filter((row) => {
+                      if (!term) return true;
+                      const haystack = [
+                        row.event_title,
+                        row.event_slug,
+                        row.event_id,
+                        row.card_title,
+                        row.primary_tag,
+                        row.secondary_tag,
+                      ]
+                        .filter(Boolean)
+                        .join(" ")
+                        .toLowerCase();
+                      return haystack.includes(term);
+                    });
+                    setScenarioSimulateEventSelected(visible.map((row) => row.event_id));
+                  }}
+                  disabled={
+                    scenarioSimulateBatchBusy || scenarioSimulateEventOptions.length === 0
+                  }
+                >
+                  Select visible
+                </button>
+              </div>
+              {scenarioSimulateEventOptionsError ? (
+                <div className="error" style={{ marginBottom: 6 }}>
+                  Failed to load events: {scenarioSimulateEventOptionsError}
+                </div>
+              ) : null}
+              <div className="row" style={{ marginBottom: 6 }}>
+                <input
+                  type="text"
+                  placeholder="Filter by title, slug, id, or tag…"
+                  value={scenarioSimulateEventSearch}
+                  onChange={(e) => setScenarioSimulateEventSearch(e.target.value)}
+                  disabled={scenarioSimulateBatchBusy}
+                  style={{ flex: 1, minWidth: 240 }}
+                />
+              </div>
+              <div
+                style={{
+                  maxHeight: 220,
+                  overflowY: "auto",
+                  border: "1px solid #2a2a2a",
+                  borderRadius: 4,
+                  padding: 6,
+                }}
+              >
+                {scenarioSimulateEventOptions.length === 0 ? (
+                  <div className="muted">
+                    {scenarioSimulateEventOptionsLoading
+                      ? "Loading eligible events…"
+                      : "No eligible events found. Make sure event_cards have a manual_image_url set."}
+                  </div>
+                ) : (
+                  (() => {
+                    const term = scenarioSimulateEventSearch.trim().toLowerCase();
+                    const filtered = scenarioSimulateEventOptions.filter((row) => {
+                      if (!term) return true;
+                      const haystack = [
+                        row.event_title,
+                        row.event_slug,
+                        row.event_id,
+                        row.card_title,
+                        row.primary_tag,
+                        row.secondary_tag,
+                      ]
+                        .filter(Boolean)
+                        .join(" ")
+                        .toLowerCase();
+                      return haystack.includes(term);
+                    });
+                    if (filtered.length === 0) {
+                      return <div className="muted">No events match the search.</div>;
+                    }
+                    const selectedSet = new Set(scenarioSimulateEventSelected);
+                    return filtered.map((row) => {
+                      const checked = selectedSet.has(row.event_id);
+                      return (
+                        <label
+                          key={row.event_id}
+                          className="inline-flex items-center gap-2 cursor-pointer"
+                          style={{ display: "flex", padding: "2px 0" }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={scenarioSimulateBatchBusy}
+                            onChange={(e) => {
+                              setScenarioSimulateEventSelected((prev) => {
+                                if (e.target.checked) {
+                                  return prev.includes(row.event_id) ? prev : [...prev, row.event_id];
+                                }
+                                return prev.filter((id) => id !== row.event_id);
+                              });
+                            }}
+                          />
+                          <span style={{ flex: 1 }}>
+                            <span>{row.event_title || row.event_slug || row.event_id}</span>
+                            {row.card_title ? (
+                              <span className="muted"> — {row.card_title}</span>
+                            ) : null}
+                            <span className="muted mono" style={{ marginLeft: 6, fontSize: "0.85em" }}>
+                              {row.event_slug || row.event_id}
+                            </span>
+                          </span>
+                        </label>
+                      );
+                    });
+                  })()
+                )}
+              </div>
+            </div>
             <div className="row" style={{ marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
               <label>Max cards to generate</label>
               <input
@@ -3348,7 +3540,7 @@ export default function HomePage() {
                       const errors: string[] = [];
 
                       appendScenarioLog(
-                        `Simulate generate cards: started requested=${max_count} chunk_size=${simulateGeneratedCardsChunkSize} origin%=${originPct} max_diversity=${maximum_diversity ? "on" : "off"}`
+                        `Simulate generate cards: started requested=${max_count} chunk_size=${simulateGeneratedCardsChunkSize} origin%=${originPct} max_diversity=${maximum_diversity ? "on" : "off"} events=${scenarioSimulateEventSelected.length > 0 ? scenarioSimulateEventSelected.length : "all"}`
                       );
                       setScenarioSimulateProgress({
                         requestedTotal: max_count,
@@ -3399,6 +3591,10 @@ export default function HomePage() {
                               max_count: chunkSize,
                               origin_match_fraction,
                               maximum_diversity,
+                              event_ids:
+                                scenarioSimulateEventSelected.length > 0
+                                  ? scenarioSimulateEventSelected
+                                  : null,
                             }),
                           }
                         );
