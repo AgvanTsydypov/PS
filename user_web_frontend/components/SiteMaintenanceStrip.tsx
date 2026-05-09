@@ -100,7 +100,7 @@ export default function SiteMaintenanceStrip() {
   if (!checked) return null;
 
   const message = active
-    ? "Maintenance in progress: some actions are disabled."
+    ? "Maintenance in progress: some actions are disabled. Release: 15/05/2026."
     : "WARNING! THIS IS A BETA VERSION. IT DOES NOT REPRESENT THE FINAL QUALITY OF THE PRODUCT.";
 
   return (
