@@ -117,10 +117,13 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
 
   const claimerWallet = card?.is_preview ? "preview" : (card?.owner_wallet ?? "N/A");
   const starWallet = card?.winner_proxy_wallet ?? null;
+  // Preview rows carry a randomised origin/looter on the rendered SVG so the
+  // showcase looks varied, but the page row should advertise the row's actual
+  // status — there is no real claim behind it yet.
   const claimTypeRaw = String(
     (payload as { claim_type?: string }).claim_type ?? "",
   ).trim().toUpperCase();
-  const claimType = claimTypeRaw || "—";
+  const claimType = card?.is_preview ? "PREVIEW" : (claimTypeRaw || "—");
 
   const eventTitle = event.title ?? null;
   const eventId = card?.event_id ?? null;
