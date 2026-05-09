@@ -102,6 +102,7 @@ class SimulateGeneratedCardsBatchRequest(BaseModel):
     max_count: int = Field(ge=1, le=200)
     origin_match_fraction: float = Field(ge=0.0, le=1.0)
     maximum_diversity: bool = False
+    event_ids: Optional[List[str]] = None
 
 
 class UserWebWalletActionsUpdate(BaseModel):
@@ -2311,6 +2312,7 @@ def scenarios_simulate_generated_cards_batch(
             max_count=req.max_count,
             origin_match_fraction=req.origin_match_fraction,
             maximum_diversity=req.maximum_diversity,
+            event_ids=req.event_ids,
             progress_callback=broadcast,
         )
     except Exception as exc:

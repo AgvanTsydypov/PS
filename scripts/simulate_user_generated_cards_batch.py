@@ -23,7 +23,7 @@ import json
 import logging
 import random
 import secrets
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import psycopg2
 import psycopg2.extras
@@ -108,13 +108,33 @@ def _all_season_ids(cursor: Any) -> List[int]:
     return [int(r[0] if not isinstance(r, dict) else r["id"]) for r in cursor.fetchall()]
 
 
+def _normalize_event_ids(event_ids: Optional[Sequence[str]]) -> Optional[List[str]]:
+    """Sanitize the optional event-id allowlist. Returns ``None`` for "no
+    filter" (empty list / all-blank entries treated identically)."""
+    if not event_ids:
+        return None
+    cleaned = [str(e).strip() for e in event_ids if str(e or "").strip()]
+    return cleaned or None
+
+
 def _count_eligible_per_archetype(
-    cursor: Any, season_ids: List[int]
+    cursor: Any,
+    season_ids: List[int],
+    event_ids: Optional[Sequence[str]] = None,
 ) -> Tuple[int, Dict[str, int]]:
     """Return ``(total, per_archetype_counts)`` over the eligible pool.
     Single GROUP BY query — Postgres prunes participants partitions by
     ``season_id = ANY(...)`` and the NOT EXISTS anti-join is small.
+
+    When ``event_ids`` is provided, the count is restricted to those events
+    only — used by the admin Scenarios tab to scope a preview-generation
+    batch to a hand-picked subset.
     """
+    events = _normalize_event_ids(event_ids)
+    event_clause = " AND p.event_id = ANY(%s)" if events else ""
+    params: List[Any] = [season_ids]
+    if events:
+        params.append(events)
     cursor.execute(
         f"""
         SELECT COALESCE(p.archetype, '') AS archetype,
@@ -122,10 +142,10 @@ def _count_eligible_per_archetype(
         FROM participants p
         JOIN event_cards ec ON ec.event_id = p.event_id
         {_ELIGIBLE_PREDICATES}
-          AND p.season_id = ANY(%s)
+          AND p.season_id = ANY(%s){event_clause}
         GROUP BY p.archetype
         """,
-        (season_ids,),
+        tuple(params),
     )
     counts: Dict[str, int] = {}
     total = 0
@@ -176,13 +196,20 @@ def _allocate_diversity_slots(
 
 
 def _count_eligible_events_per_archetype(
-    cursor: Any, season_ids: List[int]
+    cursor: Any,
+    season_ids: List[int],
+    event_ids: Optional[Sequence[str]] = None,
 ) -> Dict[str, Dict[str, int]]:
     """Per-(archetype, event_id) eligible-row counts. Same predicates as
     ``_count_eligible_per_archetype`` but grouped on ``event_id`` as well —
     used by maximum-diversity mode to spread picks across distinct events,
     not just archetypes.
     """
+    events = _normalize_event_ids(event_ids)
+    event_clause = " AND p.event_id = ANY(%s)" if events else ""
+    params: List[Any] = [season_ids]
+    if events:
+        params.append(events)
     cursor.execute(
         f"""
         SELECT COALESCE(p.archetype, '') AS archetype,
@@ -191,10 +218,10 @@ def _count_eligible_events_per_archetype(
         FROM participants p
         JOIN event_cards ec ON ec.event_id = p.event_id
         {_ELIGIBLE_PREDICATES}
-          AND p.season_id = ANY(%s)
+          AND p.season_id = ANY(%s){event_clause}
         GROUP BY p.archetype, p.event_id
         """,
-        (season_ids,),
+        tuple(params),
     )
     out: Dict[str, Dict[str, int]] = {}
     for row in cursor.fetchall():
@@ -247,34 +274,45 @@ def _fetch_candidates(
     season_ids: List[int],
     archetype: Optional[str],
     limit: int,
+    event_ids: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Random sample of eligible participant rows. Dedup is enforced by the
     ``NOT EXISTS preview_cards`` predicate, but the unique index also catches
     races at INSERT time — so a row sampled here may still lose to a
     concurrent run; the per-row INSERT handles that gracefully.
     """
+    events = _normalize_event_ids(event_ids)
+    event_clause = " AND p.event_id = ANY(%s)" if events else ""
     if archetype is None:
+        params: List[Any] = [season_ids]
+        if events:
+            params.append(events)
+        params.append(limit)
         cursor.execute(
             f"""
             {_PARTICIPANT_CARD_SOURCE_SELECT}
             {_ELIGIBLE_PREDICATES}
-              AND p.season_id = ANY(%s)
+              AND p.season_id = ANY(%s){event_clause}
             ORDER BY RANDOM()
             LIMIT %s
             """,
-            (season_ids, limit),
+            tuple(params),
         )
     else:
+        params = [season_ids, archetype]
+        if events:
+            params.append(events)
+        params.append(limit)
         cursor.execute(
             f"""
             {_PARTICIPANT_CARD_SOURCE_SELECT}
             {_ELIGIBLE_PREDICATES}
               AND p.season_id = ANY(%s)
-              AND p.archetype = %s
+              AND p.archetype = %s{event_clause}
             ORDER BY RANDOM()
             LIMIT %s
             """,
-            (season_ids, archetype, limit),
+            tuple(params),
         )
     return [dict(r) for r in cursor.fetchall()]
 
@@ -397,13 +435,19 @@ def run_admin_simulated_card_generations(
     max_count: int,
     origin_match_fraction: float,
     maximum_diversity: bool,
+    event_ids: Optional[Sequence[str]] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """Generate up to ``max_count`` preview cards. Returns the response
     contract the admin frontend (``admin_frontend/app/page.tsx``) consumes
     chunk-by-chunk — every key in the legacy shape is preserved so the
     frontend doesn't need updating.
+
+    ``event_ids`` (optional) restricts the eligible pool to participants
+    whose ``event_id`` is in the list — used by the admin Scenarios tab to
+    target preview generation at a hand-picked subset of events.
     """
+    events_filter = _normalize_event_ids(event_ids)
     out: Dict[str, Any] = {
         "request_id": request_id,
         "requested": int(max_count),
@@ -419,6 +463,7 @@ def run_admin_simulated_card_generations(
         "errors": [],
         "stopped_reason": None,
         "maximum_diversity": bool(maximum_diversity),
+        "event_ids_filter": list(events_filter) if events_filter else [],
     }
     errors: List[str] = out["errors"]  # alias
 
@@ -445,7 +490,9 @@ def run_admin_simulated_card_generations(
                 emit("stopped")
                 return out
 
-            total, per_archetype = _count_eligible_per_archetype(cur, season_ids)
+            total, per_archetype = _count_eligible_per_archetype(
+                cur, season_ids, events_filter
+            )
             out["showcase_eligible_total"] = total
             if total == 0:
                 out["stopped_reason"] = "no_eligible_candidates"
@@ -457,7 +504,7 @@ def run_admin_simulated_card_generations(
             if maximum_diversity:
                 slots = _allocate_diversity_slots(n, per_archetype)
                 events_per_archetype = _count_eligible_events_per_archetype(
-                    cur, season_ids
+                    cur, season_ids, events_filter
                 )
                 diversity_plan = _plan_diverse_event_pairs(
                     slots, events_per_archetype
@@ -503,7 +550,9 @@ def run_admin_simulated_card_generations(
                 for archetype, slot_count in slots.items():
                     if slot_count <= 0:
                         continue
-                    rows = _fetch_candidates(cur, season_ids, archetype, slot_count)
+                    rows = _fetch_candidates(
+                        cur, season_ids, archetype, slot_count, events_filter
+                    )
                     candidates.extend(rows)
     finally:
         fetch_conn.close()
