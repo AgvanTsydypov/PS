@@ -261,9 +261,11 @@ class SeasonWorkbenchService(ClaimsMintMixin):
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    UPDATE polystars_user_web_controls
-                    SET wallet_actions_disabled = %s, updated_at = NOW()
-                    WHERE singleton_id = 1
+                    INSERT INTO polystars_user_web_controls (singleton_id, wallet_actions_disabled, updated_at)
+                    VALUES (1, %s, NOW())
+                    ON CONFLICT (singleton_id) DO UPDATE
+                    SET wallet_actions_disabled = EXCLUDED.wallet_actions_disabled,
+                        updated_at = NOW()
                     """,
                     (disabled,),
                 )
