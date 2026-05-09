@@ -1,6 +1,9 @@
 "use client";
 
+import { useCallback, useState } from "react";
 import type { ReactNode } from "react";
+
+const CONTRACT_ADDRESS = "0x9e68096675578CCcf6eb7AD01350f731DDe633eD";
 
 // Alphakek.ai's footer "Social" block recreated in PolyStars' brutalist
 // design language. Pinned to the viewport bottom as a near-transparent
@@ -67,6 +70,29 @@ const SOCIAL_ITEMS: SocialItem[] = [
 ];
 
 export default function SiteSocialFooter() {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopyContract = useCallback(async () => {
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(CONTRACT_ADDRESS);
+      } else if (typeof document !== "undefined") {
+        const ta = document.createElement("textarea");
+        ta.value = CONTRACT_ADDRESS;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      // ignore
+    }
+  }, []);
+
   return (
     <footer className="site-social-footer" aria-label="Social links">
       <nav className="site-social-footer-inner" aria-label="Social">
@@ -89,6 +115,29 @@ export default function SiteSocialFooter() {
             </li>
           ))}
         </ul>
+        <span className="site-social-footer-contract">
+          <span className="site-social-footer-contract-label" aria-hidden="true">
+            CA
+          </span>
+          <button
+            type="button"
+            className={`site-social-footer-contract-value${copied ? " is-copied" : ""}`}
+            onClick={handleCopyContract}
+            title="Click to copy contract address"
+            aria-label={`Copy contract address ${CONTRACT_ADDRESS}`}
+          >
+            <span className="site-social-footer-contract-text">
+              {CONTRACT_ADDRESS}
+            </span>
+            <span
+              className="site-social-footer-contract-toast"
+              aria-live="polite"
+              aria-hidden={!copied}
+            >
+              Copied!
+            </span>
+          </button>
+        </span>
       </nav>
     </footer>
   );
