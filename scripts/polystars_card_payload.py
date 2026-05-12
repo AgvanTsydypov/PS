@@ -328,6 +328,27 @@ def _build_card_payload_from_source_row(
     return payload
 
 
+def _dump_debug_artifact(name: str, data: "str | bytes") -> None:
+    """Best-effort dump of an intermediate card asset to ``scripts/cardgen/``.
+
+    Purely a local-dev convenience (lets you eyeball the last rendered SVG/PNG).
+    In containerized prod the app dir is mounted read-only, so this MUST never
+    raise — a failed debug write must not abort a mint. Set
+    ``POLYSTARS_DUMP_CARD_ARTIFACTS=0`` to skip it entirely.
+    """
+    if os.getenv("POLYSTARS_DUMP_CARD_ARTIFACTS", "1").strip().lower() in ("0", "false", "no", ""):
+        return
+    try:
+        path = _CARDGEN_DIR / name
+        if isinstance(data, bytes):
+            path.write_bytes(data)
+        else:
+            path.write_text(data, encoding="utf-8")
+    except OSError:
+        # Read-only fs / permissions / missing dir — irrelevant to the mint.
+        pass
+
+
 def _attach_generated_card_images(payload: Dict[str, Any]) -> Dict[str, Any]:
     render_payload = _build_render_payload(payload)
     # Canonical pipeline: SVG -> PNG -> Pinata. The raster step produces a plain
@@ -335,12 +356,12 @@ def _attach_generated_card_images(payload: Dict[str, Any]) -> Dict[str, Any]:
     # on remote @font-face resolution). The shared rasterizer reuses one
     # headless browser across calls, so sequential mints are cheap.
     front_svg, back_svg = render_card_svgs(render_payload)
-    (_CARDGEN_DIR / "output.svg").write_text(front_svg, encoding="utf-8")
-    (_CARDGEN_DIR / "output_back.svg").write_text(back_svg, encoding="utf-8")
+    _dump_debug_artifact("output.svg", front_svg)
+    _dump_debug_artifact("output_back.svg", back_svg)
 
     front_png, back_png = rasterize_card_svgs(front_svg, back_svg)
-    (_CARDGEN_DIR / "output.png").write_bytes(front_png)
-    (_CARDGEN_DIR / "output_back.png").write_bytes(back_png)
+    _dump_debug_artifact("output.png", front_png)
+    _dump_debug_artifact("output_back.png", back_png)
 
     slug = str(payload.get("qr_payload") or "").rstrip("/").rsplit("/", 1)[-1] or _generated_card_slug(
         payload.get("season_type"),
