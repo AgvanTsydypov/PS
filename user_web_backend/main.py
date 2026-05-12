@@ -2560,17 +2560,21 @@ def _build_card_detail_response(row_dict: Dict[str, Any], request: Request) -> D
     # Base Sepolia; falls back to mainnet for unknowns). Preview rows have
     # no asset_address yet → no link.
     explorer_url: Optional[str] = None
+    opensea_url: Optional[str] = None
     if minted_asset_address:
         try:
-            from scripts.evm_service import parse_asset_address, etherscan_nft_url
+            from scripts.evm_service import parse_asset_address, etherscan_nft_url, opensea_nft_url
             contract_part, token_id = parse_asset_address(minted_asset_address)
             if contract_part and token_id is not None:
                 chain_id_raw = os.environ.get("EVM_CHAIN_ID", "").strip()
                 chain_id = int(chain_id_raw) if chain_id_raw else 1
                 explorer_url = etherscan_nft_url(contract_part, token_id, chain_id)
+                opensea_url = opensea_nft_url(contract_part, token_id, chain_id)
         except Exception:
             explorer_url = None
+            opensea_url = None
     card["explorer_asset_url"] = explorer_url
+    card["opensea_asset_url"] = opensea_url
 
     raw_metadata_uri = str(row_dict.get("minted_metadata_uri") or "").strip() or None
     card["metadata_uri"] = _normalize_ipfs_gateway_url(raw_metadata_uri) if raw_metadata_uri else None

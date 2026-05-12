@@ -111,6 +111,26 @@ def etherscan_nft_url(contract_address: str, token_id: int, chain_id: int) -> st
     return f"{etherscan_base_url(chain_id)}/nft/{contract_address}/{token_id}"
 
 
+# OpenSea is the primary NFT marketplace for PolyStars STARs. Item URLs are
+# ``https://opensea.io/item/<chain-slug>/<contract>/<tokenId>`` on mainnets and
+# ``https://testnets.opensea.io/item/<chain-slug>/...`` on testnets.
+_OPENSEA_CHAIN: dict[int, tuple[str, str]] = {
+    1:        ("https://opensea.io",          "ethereum"),
+    8453:     ("https://opensea.io",          "base"),
+    11155111: ("https://testnets.opensea.io", "sepolia"),
+    84532:    ("https://testnets.opensea.io", "base-sepolia"),
+}
+
+
+def opensea_nft_url(contract_address: str, token_id: int, chain_id: int) -> str | None:
+    """OpenSea item page for a token, or ``None`` if the chain isn't on OpenSea."""
+    entry = _OPENSEA_CHAIN.get(int(chain_id))
+    if not entry:
+        return None
+    base, slug = entry
+    return f"{base}/item/{slug}/{contract_address}/{token_id}"
+
+
 # ── Alchemy NFT response parsers ──────────────────────────────────────────────
 # Alchemy NFT API v3 returns metadata in a layered shape. We prefer the most
 # CDN-friendly URL (``image.cachedUrl``), then less-processed variants, and
