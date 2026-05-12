@@ -7,18 +7,24 @@ import "@openzeppelin/contracts/token/common/ERC2981.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
 /**
- * @title  SLOPNFT
- * @notice ERC-721 collection with on-chain royalty enforcement via an
- *         operator allowlist. Owner-initiated transfers (P2P) are always
- *         allowed; secondary-market trades only succeed through marketplaces
- *         the admin has whitelisted (Seaport / OpenSea Conduit by default).
+ * @title  POLYSTARS
+ * @notice ERC-721 collection with ERC-2981 royalty signaling and
+ *         operator allowlist restrictions for approved marketplace transfers.
+ *
+ *         Direct owner-initiated transfers are always allowed.
+ *         Operator-mediated transfers only succeed while restrictions are
+ *         enabled if the operator is allowlisted.
+ *
+ *         The ERC-721 contract serves as the permanent collection layer.
+ *         Seasonal issuance rules are enforced by the authorized protocol
+ *         minter/orchestration layer, not by a fixed collection-wide cap.
  *
  *         Roles:
  *           DEFAULT_ADMIN_ROLE — manages royalties, operator allowlist,
  *                                contract URI, role grants/revocations.
- *           MINTER_ROLE        — may call mintTo. Held by the cron worker.
+ *           MINTER_ROLE        — may call mintTo.
  */
-contract SLOPNFT is ERC721URIStorage, ERC2981, AccessControl {
+contract POLYSTARS is ERC721URIStorage, ERC2981, AccessControl {
 
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
@@ -48,7 +54,7 @@ contract SLOPNFT is ERC721URIStorage, ERC2981, AccessControl {
         uint96  royaltyBps,
         string memory contractURI_
     )
-        ERC721("SLOP", "SLOP")
+        ERC721("POLYSTARS", "POLYSTARS")
     {
         require(admin    != address(0), "admin=0");
         require(treasury != address(0), "treasury=0");
@@ -152,6 +158,38 @@ contract SLOPNFT is ERC721URIStorage, ERC2981, AccessControl {
                 revert OperatorNotAllowed(_msgSender());
             }
         }
+    }
+
+    // ── Approval hooks: block approvals to non-allowlisted operators ──────────
+
+    function approve(address to, uint256 tokenId)
+        public
+        override(ERC721, IERC721)
+    {
+        if (
+            transferRestrictionsEnabled &&
+            to != address(0) &&
+            !allowedOperator[to]
+        ) {
+            revert OperatorNotAllowed(to);
+        }
+
+        super.approve(to, tokenId);
+    }
+
+    function setApprovalForAll(address operator, bool approved)
+        public
+        override(ERC721, IERC721)
+    {
+        if (
+            transferRestrictionsEnabled &&
+            approved &&
+            !allowedOperator[operator]
+        ) {
+            revert OperatorNotAllowed(operator);
+        }
+
+        super.setApprovalForAll(operator, approved);
     }
 
     // ── Required overrides for multi-inheritance ──────────────────────────────

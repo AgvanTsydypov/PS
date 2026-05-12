@@ -5,6 +5,8 @@ import { resolve, dirname } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: resolve(__dirname, "../.env") });
+// collection-specific overrides (mainnet deploy): take precedence over ../.env
+dotenv.config({ path: resolve(__dirname, ".env.collection"), override: true });
 
 export default {
   solidity: {

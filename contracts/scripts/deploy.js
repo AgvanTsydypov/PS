@@ -12,10 +12,10 @@ async function main() {
   const TREASURY = process.env.TREASURY_ADDRESS || deployer.address;
   const MINTER   = process.env.MINTER_ADDRESS   || deployer.address;
 
-  const ROYALTY_BPS  = Number(process.env.ROYALTY_BPS || 400); // 4%
-  const CONTRACT_URI = process.env.CONTRACT_METADATA_URI || "https://gateway.pinata.cloud/ipfs/REPLACE_ME";
+  const ROYALTY_BPS  = Number(process.env.ROYALTY_BPS || 100); // 1%
+  const CONTRACT_URI = process.env.CONTRACT_METADATA_URI || "ipfs://REPLACE_ME";
 
-  const Factory  = await ethers.getContractFactory("SLOPNFT");
+  const Factory  = await ethers.getContractFactory("POLYSTARS");
   const contract = await Factory.deploy(
     ADMIN,
     TREASURY,
@@ -27,7 +27,7 @@ async function main() {
   await contract.waitForDeployment();
   const address = await contract.getAddress();
 
-  console.log("\n✅ SLOPNFT deployed to:", address);
+  console.log("\n✅ POLYSTARS deployed to:", address);
   console.log("   Admin (DEFAULT_ADMIN_ROLE):", ADMIN);
   console.log("   Minter (MINTER_ROLE):      ", MINTER);
   console.log("   Treasury (royalty receiver):", TREASURY);

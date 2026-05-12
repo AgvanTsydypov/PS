@@ -1,8 +1,8 @@
 {
-  "name": "SLOP",
-  "description": "SLOP NFT trading cards.",
-  "image": "https://gateway.pinata.cloud/ipfs/bafybeiaknuidv34pzgcjqybchas5pvj6ioc3ckdgo7rpq3w5ye76y3dham",
-  "external_link": "https://google.com",
-  "seller_fee_basis_points": 400,
-  "fee_recipient": "0xdC65DFF7EED4c1C05511395Ccf19CF507066aCe1"
+  "name": "POLYSTARS",
+  "description": "POLYSTARS is a collectible NFT card collection that turns significant historical events and prediction-market trader performance into permanent on-chain memorabilia. Each Star captures a wallet’s behavioral record around a real event, preserving how traders positioned before outcomes became history.",
+  "image": "ipfs://bafkreida26zhkdkuoc4lyzrblyoda2gikklqnpuzlj5h5uxwle3qr3aexi",
+  "external_link": "https://polystars.app/",
+  "seller_fee_basis_points": 100,
+  "fee_recipient": "0xe8D0667d9c0Afaa0EE4eA071fA34c588c59E0bcd"
 }
