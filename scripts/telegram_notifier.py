@@ -123,19 +123,19 @@ def _stringify(value: Any) -> str:
 # 1..13 priority ranking in admin_backend/claims_mint.py:_ARCHETYPE_PRIORITY_CASE_SQL.
 # A miss returns "" so the "New claim!" line just omits the emoji tail.
 _ARCHETYPE_EMOJI: dict[str, str] = {
-    "SUBSTRATE":   "\U0001F9CA",                                  # 🧊
-    "OPERATOR":    "\U0001F9CA" * 2,                              # 🧊🧊
-    "PASSENGER":   "\U0001F9CA" * 3,                              # 🧊🧊🧊
-    "BOT":         "\U0001F9CA" + "✨",                       # 🧊✨
-    "BURNER":      "✨" * 2,                                  # ✨✨
-    "EQUILIBRIUM": "✨" * 3,                                  # ✨✨✨
-    "GRAVITON":    "✨" + "\U0001F525" * 2,                   # ✨🔥🔥
-    "VECTOR":      "\U0001F525" * 3,                              # 🔥🔥🔥
-    "SIGNAL":      "\U0001F525" * 5,                              # 🔥🔥🔥🔥🔥
-    "EXTRACTOR":   "\U0001F525" * 2 + "\U0001F4A5" * 3,           # 🔥🔥💥💥💥
-    "ICARUS":      "\U0001F4A5" * 6,                              # 💥💥💥💥💥💥
-    "ANOMALY":     "\U0001F4A5" * 8,                              # 💥💥💥💥💥💥💥💥
-    "INSIDER":     "\U0001F4A5" * 12,                             # 💥💥💥💥💥💥💥💥💥💥💥💥
+    "SUBSTRATE":   "💫" * 1,
+    "OPERATOR":    "💫" * 2,
+    "PASSENGER":   "💫" * 3,
+    "BOT":         "💫" * 4,
+    "BURNER":      "💫" * 5,
+    "EQUILIBRIUM": "💫" * 6,
+    "GRAVITON":    "💫" * 7,
+    "VECTOR":      "💫" * 8,
+    "SIGNAL":      "💫" * 9,
+    "EXTRACTOR":   "💫" * 10,
+    "ICARUS":      "💫" * 11,
+    "ANOMALY":     "💫" * 12,
+    "INSIDER":     "💫" * 13,
 }
 
 
