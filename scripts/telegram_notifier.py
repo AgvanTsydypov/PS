@@ -178,6 +178,31 @@ def _rewrite_card_url_for_telegram(card_url: str) -> str:
     return base + card_url[idx:]
 
 
+_TELEGRAM_PINATA_GATEWAY = "https://gateway.pinata.cloud/ipfs/"
+
+
+def _http_image_url(url: Optional[str]) -> str:
+    """Telegram ``sendPhoto`` fetches the URL itself, so it must be http(s).
+
+    Card images are stored as ``ipfs://<CID>`` — rewrite those to the public
+    Pinata gateway. http(s) URLs (legacy gateway URLs, R2, …) pass through.
+    Anything else (or empty) yields ``""`` so the caller falls back to a
+    plain-text announcement.
+    """
+    s = str(url or "").strip()
+    if not s:
+        return ""
+    if s.startswith(("http://", "https://")):
+        return s
+    if s.startswith("ipfs://"):
+        rest = s[len("ipfs://"):]
+        if rest.lower().startswith("ipfs/"):
+            rest = rest[len("ipfs/"):]
+        rest = rest.lstrip("/")
+        return f"{_TELEGRAM_PINATA_GATEWAY}{rest}" if rest else ""
+    return ""
+
+
 def notify_claim_minted(
     *,
     front_image_url: Optional[str],
@@ -223,7 +248,7 @@ def notify_claim_minted(
 
     link = _rewrite_card_url_for_telegram((card_url or "").strip())
     reply_markup = _build_view_card_keyboard(link)
-    photo_url = (front_image_url or "").strip()
+    photo_url = _http_image_url(front_image_url)
 
     def _run() -> None:
         if photo_url:

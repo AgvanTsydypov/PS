@@ -291,15 +291,37 @@ def upload_card_assets_to_pinata(
         return front_f.result(), back_f.result()
 
 
+def _pinata_cid_from_url(url: Any) -> str:
+    """Extract the bare CID from a card-asset URL in either supported form:
+    ``ipfs://<CID>`` (current) or ``https://<gateway>/ipfs/<CID>`` (legacy).
+    Returns ``""`` for anything that doesn't look like pinned IPFS content.
+    Any trailing ``/path`` is dropped — card PNGs are pinned as bare CIDs.
+    """
+    s = str(url or "").strip()
+    if not s:
+        return ""
+    if s.startswith("ipfs://"):
+        rest = s[len("ipfs://"):]
+        if rest.lower().startswith("ipfs/"):
+            rest = rest[len("ipfs/"):]
+        rest = rest.lstrip("/")
+    else:
+        marker = "/ipfs/"
+        idx = s.find(marker)
+        if idx == -1:
+            return ""
+        rest = s[idx + len(marker):].lstrip("/")
+    return rest.split("/", 1)[0].split("?", 1)[0]
+
+
 def unpin_pinata_urls(urls) -> None:
-    """Best-effort unpin a list of Pinata IPFS gateway URLs. Silently ignores all errors."""
+    """Best-effort unpin a list of Pinata card-asset URLs (``ipfs://<CID>`` or
+    legacy gateway URLs). Silently ignores all errors."""
     jwt = os.environ.get(PINATA_JWT_ENV_KEY, "").strip()
     if not jwt:
         return
     for url in urls or ():
-        if not url or not url.startswith(PINATA_GATEWAY_PREFIX):
-            continue
-        cid = url[len(PINATA_GATEWAY_PREFIX):]
+        cid = _pinata_cid_from_url(url)
         if not cid:
             continue
         try:

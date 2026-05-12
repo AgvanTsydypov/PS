@@ -1076,9 +1076,18 @@ def _log_card_get_phase(phase: str, phase_start: float) -> float:
 
 
 def _absolute_asset_url(request: Request, asset_path: str) -> str:
-    if asset_path.startswith("http://") or asset_path.startswith("https://"):
-        return asset_path
-    return urllib.parse.urljoin(str(request.base_url), asset_path.lstrip("/"))
+    raw = str(asset_path or "")
+    # ``ipfs://<CID>`` and private ``*.mypinata.cloud/ipfs/<CID>`` URLs aren't
+    # loadable by a browser as-is — rewrite them to the canonical public
+    # Pinata gateway. Plain http(s) URLs (R2 etc.) and relative R2 keys are
+    # left to the existing handling below.
+    if raw.strip().startswith("ipfs://") or "/ipfs/" in raw:
+        normalized = _normalize_ipfs_gateway_url(raw)
+        if normalized:
+            return normalized
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    return urllib.parse.urljoin(str(request.base_url), raw.lstrip("/"))
 
 
 def _clone_cards_ticker_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1177,6 +1186,12 @@ def _ensure_generated_card_assets_on_r2(row: Dict[str, Any]) -> Dict[str, Any]:
         current_front.startswith(("http://", "https://"))
         and current_back.startswith(("http://", "https://"))
     ):
+        return row
+    # ``ipfs://<CID>`` mint-time URLs are already publicly servable via the
+    # Pinata gateway (the read formatter rewrites them) — don't re-render the
+    # card through Chromium and re-host it on R2 just because the scheme isn't
+    # http(s).
+    if _extract_ipfs_cid_path(current_front) and _extract_ipfs_cid_path(current_back):
         return row
     base_url = r2_public_base_url()
     front_key = extract_r2_key_from_public_url(base_url, current_front)
@@ -1352,6 +1367,19 @@ def _normalize_ipfs_gateway_url(value: Any) -> Optional[str]:
     if not cid_and_path:
         return raw
     return f"{_CANONICAL_PINATA_GATEWAY}{cid_and_path}"
+
+
+def _public_image_url(value: Any) -> Optional[str]:
+    """Coerce a stored/indexed image URL into one a browser can load directly.
+
+    ``ipfs://<CID>`` and private ``*.mypinata.cloud`` gateway URLs become the
+    canonical public Pinata gateway URL; other http(s) URLs (R2 etc.) pass
+    through unchanged; empty / falsy inputs return ``None``.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    return _normalize_ipfs_gateway_url(raw) or raw
 
 
 def _extract_nft_visuals_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Optional[str]]:
@@ -2958,8 +2986,8 @@ def me_cards(request: Request) -> Dict[str, Any]:
         # phase, polished labels). Fall back to Alchemy-indexed metadata
         # only when we don't have a local row — that covers NFTs received
         # via secondary transfer or minted from another instance.
-        claim_front = (str(row["front_image_url"]).strip() or None) if row and row.get("front_image_url") else None
-        claim_back = (str(row["back_image_url"]).strip() or None) if row and row.get("back_image_url") else None
+        claim_front = _public_image_url(row.get("front_image_url")) if row else None
+        claim_back = _public_image_url(row.get("back_image_url")) if row else None
         claim_name = (str(row["name"]).strip() or None) if row and row.get("name") else None
         claim_metadata_uri = (str(row["metadata_uri"]).strip() or None) if row and row.get("metadata_uri") else None
         items.append({
@@ -2973,12 +3001,12 @@ def me_cards(request: Request) -> Dict[str, Any]:
             "phase": (str(row["phase"]).strip() or None) if row and row.get("phase") else None,
             "collection_mint_number": row.get("collection_mint_number") if row else None,
             "name": claim_name or nft.name,
-            "front_image_url": claim_front or nft.image_url,
+            "front_image_url": claim_front or _public_image_url(nft.image_url),
             # Back falls back to ``properties.files[]`` from the on-chain
-            # metadata (our minter writes [front, back] there). Null only
-            # when neither claims row nor on-chain metadata carry it — the
-            # UI shows "No back preview" in that case.
-            "back_image_url": claim_back or nft.back_image_url,
+            # metadata (our minter writes [front, back] there, as ``ipfs://``).
+            # Null only when neither claims row nor on-chain metadata carry it —
+            # the UI shows "No back preview" in that case.
+            "back_image_url": claim_back or _public_image_url(nft.back_image_url),
             "card_slug": (str(row["card_slug"]).strip() or None) if row and row.get("card_slug") else None,
             "explorer_asset_url": etherscan_nft_url(contract_address, token_id, chain_id),
             "explorer_tx_url": etherscan_tx_url(tx_hash, chain_id) if tx_hash else None,
