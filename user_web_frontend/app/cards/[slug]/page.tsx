@@ -60,6 +60,9 @@ type GeneratedCardItem = {
   /** Etherscan / L2 block-explorer URL — backend computes it from
    *  ``asset_address`` ("<contract>/<tokenId>") + ``EVM_CHAIN_ID``. */
   explorer_asset_url?: string | null;
+  /** OpenSea item page URL — same source as ``explorer_asset_url``; null
+   *  on preview rows or chains OpenSea doesn't index. */
+  opensea_asset_url?: string | null;
   /** Public Pinata gateway URL for the on-chain metadata JSON, normalized
    *  from ``claims.metadata_uri`` (handles ``ipfs://`` and dedicated
    *  gateways). Null on preview rows. */
@@ -132,6 +135,7 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
 
   const polygonscanStarUrl = starWallet ? `https://polygonscan.com/address/${starWallet}` : null;
   const explorerUrl = card?.explorer_asset_url ?? null;
+  const openseaUrl = card?.opensea_asset_url ?? null;
   const ipfsUrl = card?.metadata_uri ?? null;
 
   return (
@@ -256,6 +260,16 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                         {isSafeExternalUrl(explorerUrl) ? (
                           <a href={explorerUrl!} target="_blank" rel="noopener noreferrer">
                             Etherscan ↗
+                          </a>
+                        ) : (
+                          "N/A"
+                        )}
+                      </dd>
+                      <dt>View on OpenSea</dt>
+                      <dd>
+                        {isSafeExternalUrl(openseaUrl) ? (
+                          <a href={openseaUrl!} target="_blank" rel="noopener noreferrer">
+                            OpenSea ↗
                           </a>
                         ) : (
                           "N/A"
