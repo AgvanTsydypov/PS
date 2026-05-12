@@ -216,7 +216,7 @@ class OwnedNft:
 
 
 class EvmClient:
-    """Mint ERC-721 NFTs on Ethereum via SLOPNFT.mintTo(address, string)."""
+    """Mint ERC-721 NFTs on Ethereum via POLYSTARS.mintTo(address, string)."""
 
     DEFAULT_RPC_URL = "https://rpc.sepolia.org"
     GAS_MULTIPLIER = 1.3
@@ -286,7 +286,7 @@ class EvmClient:
             if collection_mint_number is not None
             else (int(claim_id) if claim_id is not None else resolved_claim_id)
         )
-        nft_name = f"SLOP TEST {season_name} #{nft_number}"
+        nft_name = f"STAR {season_name} #{nft_number}"
 
         metadata_uri = self._build_metadata_uri(
             nft_name=nft_name,
@@ -415,15 +415,15 @@ class EvmClient:
 
         metadata: dict[str, Any] = {
             "name": nft_name,
-            "symbol": "SLOP",
-            "description": f"SLOP TEST reward NFT for season {season_name}",
+            "symbol": "STAR",
+            "description": f"Collectible STAR of {season_name}",
             "attributes": attributes,
         }
         if front_image_url:
-            metadata["image"] = front_image_url
+            metadata["image"] = self._to_ipfs_uri(front_image_url)
             metadata["properties"] = self._metadata_image_properties(
-                front_url=front_image_url,
-                back_url=back_image_url,
+                front_url=self._to_ipfs_uri(front_image_url),
+                back_url=self._to_ipfs_uri(back_image_url),
                 front_mime=front_image_mime,
                 back_mime=back_image_mime,
             )
@@ -455,6 +455,27 @@ class EvmClient:
                 {"uri": back_url, "type": back_mime or EvmClient._guess_media_type(back_url)}
             )
         return {"category": "image", "files": files}
+
+    @staticmethod
+    def _to_ipfs_uri(url: str) -> str:
+        """Normalize a Pinata/IPFS gateway URL to a canonical ``ipfs://<CID>`` URI.
+
+        On-chain metadata (``image``, ``properties.files[].uri``, ``tokenURI``)
+        should reference content by CID, not a single gateway host, so it keeps
+        resolving even if a particular gateway goes away.
+        """
+        s = str(url or "").strip()
+        if not s or s.startswith("ipfs://"):
+            return s
+        if s.startswith(PINATA_GATEWAY_PREFIX):
+            cid = s[len(PINATA_GATEWAY_PREFIX):].lstrip("/")
+            return f"ipfs://{cid}" if cid else s
+        marker = "/ipfs/"
+        idx = s.find(marker)
+        if idx != -1:
+            cid = s[idx + len(marker):].lstrip("/")
+            return f"ipfs://{cid}" if cid else s
+        return s
 
     @staticmethod
     def _guess_media_type(url: str) -> str:
@@ -509,8 +530,11 @@ class EvmClient:
     @staticmethod
     def _build_card_attributes(card_payload: dict[str, Any]) -> list[dict[str, Any]]:
         season_type = EvmClient._format_trait_season_type(card_payload.get("season_type"))
-        season_num = card_payload.get("season_number")
-        season_number_str: str | None = str(season_num).strip() or None if season_num is not None else None
+        if season_type == "Genesis":
+            season_number_str: str | None = "0"
+        else:
+            season_num = card_payload.get("season_number")
+            season_number_str = str(season_num).strip() or None if season_num is not None else None
 
         instance_val = (
             "Fractal"
@@ -576,9 +600,14 @@ class EvmClient:
 
     @staticmethod
     def _unpin_pinata_url(url: str) -> None:
-        if not url or not url.startswith(PINATA_GATEWAY_PREFIX):
+        if not url:
             return
-        cid = url[len(PINATA_GATEWAY_PREFIX):]
+        if url.startswith("ipfs://"):
+            cid = url[len("ipfs://"):].lstrip("/")
+        elif url.startswith(PINATA_GATEWAY_PREFIX):
+            cid = url[len(PINATA_GATEWAY_PREFIX):]
+        else:
+            return
         if not cid:
             return
         jwt = os.environ.get(PINATA_JWT_ENV_KEY, "").strip()
@@ -613,7 +642,7 @@ class EvmClient:
                 response.raise_for_status()
                 ipfs_hash = response.json().get("IpfsHash")
                 if ipfs_hash:
-                    return f"https://gateway.pinata.cloud/ipfs/{ipfs_hash}"
+                    return f"ipfs://{ipfs_hash}"
             except Exception:
                 continue
         return None

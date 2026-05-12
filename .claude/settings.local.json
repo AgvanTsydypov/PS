@@ -109,7 +109,8 @@
       "Bash(cat)",
       "Read(//tmp/polystars-nginx/**)",
       "Bash(Select-String -Pattern \"\\\\.env|keypair\")",
-      "PowerShell(git log --all --oneline -- .env.prod my-keypair.json 2>&1 | Select-Object -First 5; \"---\"; git log --all --oneline --diff-filter=A -- \".env*\" 2>&1 | Select-Object -First 10)"
+      "PowerShell(git log --all --oneline -- .env.prod my-keypair.json 2>&1 | Select-Object -First 5; \"---\"; git log --all --oneline --diff-filter=A -- \".env*\" 2>&1 | Select-Object -First 10)",
+      "Bash(./node_modules/.bin/hardhat compile *)"
     ]
   },
   "enabledMcpjsonServers": [
