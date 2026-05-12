@@ -21,6 +21,20 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install the Chromium browser + its OS libraries used by the SVG->PNG card
+# rasterizer (Playwright). The mint-queue cron worker runs in THIS image and
+# renders the NFT card here, so without this the worker has no browser to
+# launch and svg_to_png times out -> claims fail with "Playwright worker is
+# dead". ``install-deps`` needs apt package lists, so it re-runs apt-get
+# update internally.
+RUN playwright install --with-deps chromium
+
+# Chromium refuses to start as root with the default sandbox, and small
+# /dev/shm in containers can crash it mid-screenshot. The rasterizer reads
+# both of these env vars (see scripts/cardgen/rasterize.py).
+ENV PLAYWRIGHT_NO_SANDBOX=1
+ENV PLAYWRIGHT_CHROMIUM_ARGS=--disable-dev-shm-usage
+
 # Copy application code
 COPY scripts/ /app/scripts/
 COPY sql/ /app/sql/
