@@ -81,6 +81,14 @@ class MintClaimRequest(BaseModel):
     phase: str = "breach"
     auto_phase: bool = True
     db_only: bool = False
+    # What gets written on the card:
+    #   "auto"   — origin if the wallet is in the season's participants
+    #              partition, otherwise a random looter row (legacy behaviour);
+    #   "origin" — force an Origin card from this wallet's own best-archetype
+    #              row; fails if the wallet is not an Origin in the season;
+    #   "looter" — force a looter card drawn from a random unclaimed
+    #              participant row, even if the wallet is an Origin.
+    claim_type: str = "auto"
 
 
 _PARTICIPANT_ALLOCATION_COLUMNS = """
@@ -610,12 +618,23 @@ class ClaimsMintMixin:
             supported = ", ".join(sorted(supported_phases)) if supported_phases else "(none)"
             raise ValueError(f"DB enum phase_type does not support '{phase}'. Supported: {supported}")
 
+        claim_type_pref = (req.claim_type or "auto").strip().lower()
+        if claim_type_pref not in {"auto", "origin", "looter"}:
+            raise ValueError(
+                f"Invalid claim_type '{req.claim_type}' (expected 'auto', 'origin' or 'looter')"
+            )
+        if claim_type_pref == "looter" and phase == "vault":
+            raise ValueError("Vault phase is Origins-only; a looter card cannot be minted in vault.")
+        # Operator forced an Origin card: never fall back to the looter pool.
+        require_origin = claim_type_pref == "origin"
+
         last_error: Optional[Exception] = None
-        # When True, this caller's own Origin slot is already taken — skip
-        # _allocate_for_origin on retries and route them through the looter
-        # pool. Survives across iterations so we don't keep re-fetching the
-        # same blocked row on every attempt.
-        force_looter_path = False
+        # When True, skip _allocate_for_origin and route through the looter
+        # pool. Starts True if the operator explicitly asked for a looter card;
+        # also gets flipped on if this caller's own Origin slot turns out to be
+        # already taken (auto mode only). Survives across iterations so we
+        # don't keep re-fetching the same blocked row on every attempt.
+        force_looter_path = claim_type_pref == "looter"
         for attempt in range(LOOTER_ALLOC_MAX_ATTEMPTS):
             conn = self.manager.get_connection()
             try:
@@ -626,6 +645,12 @@ class ClaimsMintMixin:
                         else self._allocate_for_origin(cursor, wallet, req.season_id)
                     )
                     is_origin = origin_alloc is not None
+                    if require_origin and not is_origin:
+                        raise ValueError(
+                            f"Wallet {wallet} is not an Origin in season {req.season_id} "
+                            f"(no row in its participants partition); cannot mint an Origin card. "
+                            f"Use claim_type='looter' to mint a looter card instead."
+                        )
                     if phase == "vault" and not is_origin:
                         # Vault is Origins-only. If the caller is non-Origin
                         # to begin with, OR their Origin slot was just shown
@@ -673,8 +698,15 @@ class ClaimsMintMixin:
                             ) from exc
                         if is_origin:
                             # Origin's own proxy_wallet is locked by an active
-                            # claim. Outside vault we transparently retry as
-                            # a looter. Inside vault we already raised above.
+                            # claim. If the operator forced an Origin card we
+                            # don't silently downgrade to a looter — fail loud.
+                            if require_origin:
+                                raise ValueError(
+                                    f"Origin wallet {wallet} already has an active claim "
+                                    f"in season {req.season_id}."
+                                ) from exc
+                            # Outside vault we transparently retry as a looter.
+                            # Inside vault we already raised above.
                             force_looter_path = True
                             last_error = exc
                             continue

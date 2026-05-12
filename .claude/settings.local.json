@@ -119,7 +119,12 @@
       "PowerShell(& .\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/ --ignore=tests/integration -q 2>&1 | Select-Object -Last 8)",
       "Bash(echo \"exit:$?\")",
       "Bash(echo \"lint-exit:$?\")",
-      "PowerShell(& .\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/ --ignore=tests/integration -q 2>&1 | Select-Object -Last 4)"
+      "PowerShell(& .\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/ --ignore=tests/integration -q 2>&1 | Select-Object -Last 4)",
+      "Bash(Get-Content -Path \"C:\\\\Users\\\\AgvanD\\\\Desktop\\\\University\\\\QM\\\\PolyStars\\\\sql\\\\schemas\\\\init-db.sql\")",
+      "Bash(Select-String -Pattern \"claims|CREATE TABLE\")",
+      "Bash(Select-Object -First 50)",
+      "Bash(venv/Scripts/python.exe -m pytest -q -x --no-header -p no:cacheprovider -c /dev/null --rootdir . tests/test_token_gate.py)",
+      "Bash(echo \"exit $?\")"
     ]
   },
   "enabledMcpjsonServers": [
