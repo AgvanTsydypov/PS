@@ -167,11 +167,6 @@ const POLYMARKET_RANK_SENTINEL_VALUES = new Set<string>([
   "not registered in pm",
   "no trades yet",
 ]);
-// Sentinel proxy_wallet value persisted by the backend when Polymarket has no
-// profile for the EVM wallet. Mirrors PM_NOT_REGISTERED_VALUE in
-// user_web_backend/main.py — keep in sync.
-const PM_NOT_REGISTERED_VALUE = "Not registered in PM";
-
 function hasPolymarketRank(traderRank: string | null | undefined): boolean {
   if (traderRank == null) return false;
   const value = String(traderRank).trim();
@@ -179,11 +174,55 @@ function hasPolymarketRank(traderRank: string | null | undefined): boolean {
   return !POLYMARKET_RANK_SENTINEL_VALUES.has(value.toLowerCase());
 }
 
-function isRegisteredOnPolymarket(proxyWallet: string | null | undefined): boolean {
-  if (proxyWallet == null) return false;
-  const value = String(proxyWallet).trim();
-  if (!value) return false;
-  return value.toLowerCase() !== PM_NOT_REGISTERED_VALUE.toLowerCase();
+// ── Token-holder mint gate ────────────────────────────────────────────────────
+// A wallet may mint if it has a real Polymarket trader rank *or* it holds at
+// least TOKEN_GATE_MIN_BALANCE of the PolyStars project ERC-20 token on
+// Ethereum mainnet. NOTE: this is the project *token* contract, not the NFT
+// collection contract. Mirrors the server-side gate in user_web_backend/main.py
+// (TOKEN_GATE_* env) — keep the contract address / threshold in sync.
+const TOKEN_GATE_CONTRACT = (
+  process.env.NEXT_PUBLIC_TOKEN_GATE_CONTRACT ?? "0x9e68096675578CCcf6eb7AD01350f731DDe633eD"
+)
+  .trim()
+  .toLowerCase();
+const TOKEN_GATE_RPC_URL =
+  process.env.NEXT_PUBLIC_TOKEN_GATE_RPC_URL ?? "https://cloudflare-eth.com";
+// 50,000 tokens × 10^18 (the token uses 18 decimals). Built via the BigInt()
+// constructor rather than a `123n` literal so it compiles under the ES2017
+// TS target.
+const TOKEN_GATE_MIN_BALANCE_WEI = BigInt(50000) * BigInt(10) ** BigInt(18);
+// balanceOf(address) — keccak256("balanceOf(address)")[:4]
+const ERC20_BALANCE_OF_SELECTOR = "0x70a08231";
+
+/**
+ * Best-effort on-chain check: does ``wallet`` hold >= the gate threshold of the
+ * project token on Ethereum mainnet? Queries a public JSON-RPC endpoint with a
+ * plain ``eth_call`` so it works regardless of which chain the connected wallet
+ * is currently on. Any failure (RPC down, bad address) resolves to ``false`` —
+ * the wallet then has to qualify via Polymarket trader rank instead.
+ */
+async function walletHoldsGateToken(wallet: string | null | undefined): Promise<boolean> {
+  if (!wallet || !/^0x[0-9a-fA-F]{40}$/.test(wallet.trim())) return false;
+  const data = ERC20_BALANCE_OF_SELECTOR + wallet.trim().toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  try {
+    const res = await fetch(TOKEN_GATE_RPC_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "eth_call",
+        params: [{ to: TOKEN_GATE_CONTRACT, data }, "latest"],
+      }),
+    });
+    if (!res.ok) return false;
+    const json = (await res.json()) as { result?: string };
+    const hex = json?.result;
+    if (!hex || hex === "0x") return false;
+    return BigInt(hex) >= TOKEN_GATE_MIN_BALANCE_WEI;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -462,6 +501,8 @@ export default function UserDashboard() {
   const [signInCount, setSignInCount] = useState<number | null>(null);
   const [proxyWallet, setProxyWallet] = useState<string | null>(null);
   const [traderRank, setTraderRank] = useState<string | null>(null);
+  // Token-holder gate: null = not checked yet, true/false = on-chain result.
+  const [gateTokenOk, setGateTokenOk] = useState<boolean | null>(null);
   const [myCards, setMyCards] = useState<MyMintedNftItem[]>([]);
   const [myCardsLoading, setMyCardsLoading] = useState(false);
   const [myCardsError, setMyCardsError] = useState("");
@@ -578,6 +619,22 @@ export default function UserDashboard() {
     void refreshMyCards();
     void refreshEligibility();
   }, [isSignedIn, walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // On-chain token-holder gate: re-check whenever the signed-in wallet changes.
+  useEffect(() => {
+    if (!isSignedIn || !walletAddress) {
+      setGateTokenOk(null);
+      return;
+    }
+    let cancelled = false;
+    setGateTokenOk(null);
+    void walletHoldsGateToken(walletAddress).then((ok) => {
+      if (!cancelled) setGateTokenOk(ok);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isSignedIn, walletAddress]);
 
   useEffect(() => {
     if (!isSignedIn || !walletAddress) {
@@ -961,12 +1018,12 @@ export default function UserDashboard() {
       setMintError("Please sign in again to mint.");
       return;
     }
-    if (!isRegisteredOnPolymarket(proxyWallet)) {
-      setMintError("WALLET IS NOT REGISTERED ON POLYMARKET.");
-      return;
-    }
-    if (!hasPolymarketRank(traderRank)) {
-      setMintError("WALLET HAS NO POLYMARKET TRADING HISTORY.");
+    // Mint requires either a real Polymarket trader rank OR holding enough of
+    // the project token. ``gateTokenOk === null`` means the on-chain check
+    // hasn't resolved yet — let the request through and rely on the server-side
+    // gate rather than blocking on a still-pending RPC read.
+    if (!hasPolymarketRank(traderRank) && gateTokenOk === false) {
+      setMintError("WALLET HAS NO POLYMARKET TRADING HISTORY AND IS NOT A PROJECT TOKEN HOLDER.");
       return;
     }
     setMintingSeasonId(seasonId);
@@ -1040,7 +1097,6 @@ export default function UserDashboard() {
     const isThisMinting = mintingSeasonId === season.id;
     const isAnyMinting = mintingSeasonId !== null;
     const supplyEmpty = season.remaining <= 0;
-    const isPmRegistered = isRegisteredOnPolymarket(proxyWallet);
     const hasRank = hasPolymarketRank(traderRank);
 
     // Pending-claim short-circuit: if the backend says this wallet has a
@@ -1088,16 +1144,18 @@ export default function UserDashboard() {
     }
 
     // Resolve the visible block-reason copy. Priorities (top → bottom):
-    //   1. Polymarket gating (no PM profile / no rank) — unchanged copy.
+    //   1. Access gating: needs a Polymarket trader rank OR enough project
+    //      token. While the on-chain token check is still pending (null) we
+    //      show a transient "checking" message instead of a hard block.
     //   2. Loading / transport-error placeholders — unchanged copy.
     //   3. "Looted" (origin's allocation taken by another wallet).
     //   4. Phase × wallet × supply matrix for "no slots" cases.
     //   5. Fallback to the backend's raw ``ineligible_reason``.
     let blockedReason = "";
-    if (!isPmRegistered) {
-      blockedReason = "WALLET IS NOT REGISTERED ON POLYMARKET.";
-    } else if (!hasRank) {
-      blockedReason = "WALLET HAS NO POLYMARKET TRADING HISTORY.";
+    if (!hasRank && gateTokenOk === false) {
+      blockedReason = "WALLET HAS NO POLYMARKET TRADING HISTORY AND IS NOT A PROJECT TOKEN HOLDER.";
+    } else if (!hasRank && gateTokenOk === null) {
+      blockedReason = "CHECKING ELIGIBILITY...";
     } else if (eligibilityLoading && !stream) {
       blockedReason = "CHECKING ELIGIBILITY...";
     } else if (eligibilityError) {
