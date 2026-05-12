@@ -1549,6 +1549,101 @@ def _is_registered_on_polymarket(proxy_wallet: Optional[str]) -> bool:
     return value.casefold() != PM_NOT_REGISTERED_VALUE.casefold()
 
 
+# ── Token-holder mint gate ───────────────────────────────────────────────────
+# A wallet may mint if it has a real Polymarket trader rank *or* it holds at
+# least ``TOKEN_GATE_MIN_BALANCE`` whole tokens of the PolyStars *project*
+# ERC-20 token on Ethereum mainnet. NOTE: this is the project token contract,
+# not the NFT collection contract (``EVM_CONTRACT_ADDRESS``).
+TOKEN_GATE_CONTRACT_ADDRESS = os.getenv(
+    "TOKEN_GATE_CONTRACT_ADDRESS", "0x9e68096675578CCcf6eb7AD01350f731DDe633eD"
+).strip()
+TOKEN_GATE_DECIMALS = int(os.getenv("TOKEN_GATE_DECIMALS", "18"))
+TOKEN_GATE_MIN_BALANCE_RAW = int(os.getenv("TOKEN_GATE_MIN_BALANCE", "50000")) * (
+    10 ** TOKEN_GATE_DECIMALS
+)
+# Mainnet JSON-RPC for the ``balanceOf`` read — reuses ``EVM_RPC_URL`` (in
+# prod this is the Alchemy Ethereum mainnet endpoint the NFT contract uses).
+TOKEN_GATE_RPC_URL = os.getenv("EVM_RPC_URL", "").strip()
+_TOKEN_GATE_BALANCE_TTL_SECONDS = max(0, int(os.getenv("TOKEN_GATE_BALANCE_TTL_SECONDS", "30") or 30))
+
+# Minimal ERC-20 ABI: just ``balanceOf(address) -> uint256``.
+_ERC20_BALANCE_ABI = [
+    {
+        "constant": True,
+        "inputs": [{"name": "owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+
+_token_gate_w3 = None  # lazily created Web3 instance
+_token_gate_w3_lock = threading.Lock()
+_token_gate_balance_cache: Dict[str, Tuple[float, bool]] = {}
+_token_gate_balance_cache_lock = threading.Lock()
+
+
+def _get_token_gate_contract():
+    """Return a read-only Web3 contract handle for the project token, or None.
+
+    None means the gate is not configured (no RPC / no contract address) or the
+    Web3 client could not be constructed — callers treat that as "wallet does
+    not qualify via the token path".
+    """
+    global _token_gate_w3
+    if not TOKEN_GATE_RPC_URL or not TOKEN_GATE_CONTRACT_ADDRESS:
+        return None
+    try:
+        with _token_gate_w3_lock:
+            if _token_gate_w3 is None:
+                _token_gate_w3 = Web3(
+                    Web3.HTTPProvider(TOKEN_GATE_RPC_URL, request_kwargs={"timeout": 10})
+                )
+        return _token_gate_w3.eth.contract(
+            address=Web3.to_checksum_address(TOKEN_GATE_CONTRACT_ADDRESS),
+            abi=_ERC20_BALANCE_ABI,
+        )
+    except Exception as exc:
+        logger.warning("Token-gate Web3 init failed: %s", exc)
+        return None
+
+
+def _wallet_holds_gate_token(wallet: str) -> bool:
+    """True if ``wallet`` holds >= ``TOKEN_GATE_MIN_BALANCE_RAW`` of the token.
+
+    Best-effort on-chain read against ``TOKEN_GATE_RPC_URL``. Any failure (RPC
+    down, contract not configured, bad address) returns False — the wallet then
+    has to qualify via Polymarket trader rank. Results are cached per wallet for
+    ``_TOKEN_GATE_BALANCE_TTL_SECONDS`` so a dashboard burst can't hammer the RPC.
+    """
+    if TOKEN_GATE_MIN_BALANCE_RAW <= 0:
+        return False
+    wallet_lower = wallet.strip().lower()
+    if _TOKEN_GATE_BALANCE_TTL_SECONDS > 0:
+        now = monotonic()
+        with _token_gate_balance_cache_lock:
+            entry = _token_gate_balance_cache.get(wallet_lower)
+            if entry and entry[0] > now:
+                return entry[1]
+    contract = _get_token_gate_contract()
+    if contract is None:
+        return False
+    try:
+        balance = int(contract.functions.balanceOf(Web3.to_checksum_address(wallet)).call())
+        result = balance >= TOKEN_GATE_MIN_BALANCE_RAW
+    except Exception as exc:
+        logger.warning("Token-gate balanceOf failed for wallet=%s: %s", wallet, exc)
+        result = False
+    if _TOKEN_GATE_BALANCE_TTL_SECONDS > 0:
+        with _token_gate_balance_cache_lock:
+            _token_gate_balance_cache[wallet_lower] = (
+                monotonic() + _TOKEN_GATE_BALANCE_TTL_SECONDS,
+                result,
+            )
+    return result
+
+
 def _maybe_refresh_polymarket_session_snapshot(
     wallet_address: str,
     cached_proxy_wallet: Optional[str],
@@ -2544,21 +2639,20 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
     if not Web3.is_address(wallet):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
 
-    # Strict server-side gate, two checks:
-    #   1. Wallet must be registered on Polymarket (has a real proxy wallet,
-    #      not the sentinel ``PM_NOT_REGISTERED_VALUE``).
-    #   2. Wallet must have a real Polymarket leaderboard rank. Sentinels
-    #      ("Not registered in PM" / "No trades yet") fail this check —
-    #      registered-but-never-traded wallets cannot mint.
-    # The frontend mirrors both checks, but we MUST also enforce them here
-    # so the API cannot be bypassed.
+    # Strict server-side gate: the wallet must EITHER have a real Polymarket
+    # leaderboard rank OR hold enough of the project token (see the token-gate
+    # check below). Rank sentinels ("Not registered in PM" / "No trades yet")
+    # fail the rank half — a registered-but-never-traded wallet only gets in
+    # via the token path. A valid rank also implies the wallet is registered on
+    # Polymarket, so we no longer enforce a separate registration check.
     #
-    # Both checks do a *live* lookup against Polymarket's public APIs so the
-    # gate does not depend on whatever was cached in ``user_wallet_signins``
-    # at sign-in time (which can be stale or empty if the API was temporarily
-    # unavailable then). If a live call fails, we fall back to the cached
-    # snapshot so a transient Polymarket outage does not lock legitimate
-    # users out of minting.
+    # We still resolve the proxy wallet because the trader-rank lookup is
+    # keyed by it. The lookup does a *live* call against Polymarket's public
+    # APIs so the gate does not depend on whatever was cached in
+    # ``user_wallet_signins`` at sign-in time (which can be stale or empty if
+    # the API was temporarily unavailable then). If a live call fails, we fall
+    # back to the cached snapshot so a transient Polymarket outage does not
+    # lock legitimate users out of minting.
     cached_proxy_wallet, cached_trader_rank = _load_wallet_signin_snapshot(wallet)
     live_proxy_wallet: Optional[str] = None
     live_lookup_succeeded = False
@@ -2589,14 +2683,8 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
         effective_proxy_wallet,
         is_registered,
     )
-    if not is_registered:
-        raise HTTPException(
-            status_code=403,
-            detail="Wallet is not registered on Polymarket — minting is not allowed.",
-        )
-
-    # Trader-rank gate. Mirrors the proxy-wallet gate above: live lookup with
-    # cached fallback. ``_fetch_polymarket_trader_rank`` returns ``(rank, api_available)``;
+    # Trader-rank gate: live lookup with cached fallback.
+    # ``_fetch_polymarket_trader_rank`` returns ``(rank, api_available)``;
     # we treat any non-exception result as a successful lookup so a wallet
     # that genuinely has no rank yet ("No trades yet") is correctly rejected
     # instead of falling back to a possibly-stale cache.
@@ -2632,10 +2720,21 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
         has_rank,
     )
     if not has_rank:
-        raise HTTPException(
-            status_code=403,
-            detail="WALLET HAS NO POLYMARKET TRADING HISTORY.",
+        # Fallback gate: a wallet with no Polymarket rank may still mint if it
+        # holds at least TOKEN_GATE_MIN_BALANCE of the project token on mainnet.
+        holds_gate_token = _wallet_holds_gate_token(wallet)
+        logger.info(
+            "Token-holder mint gate: wallet=%s holds_gate_token=%s (contract=%s threshold_raw=%s)",
+            wallet,
+            holds_gate_token,
+            TOKEN_GATE_CONTRACT_ADDRESS,
+            TOKEN_GATE_MIN_BALANCE_RAW,
         )
+        if not holds_gate_token:
+            raise HTTPException(
+                status_code=403,
+                detail="WALLET HAS NO POLYMARKET TRADING HISTORY AND IS NOT A POLYSTARS TOKEN HOLDER.",
+            )
 
     try:
         season_id = int(payload.season_id)

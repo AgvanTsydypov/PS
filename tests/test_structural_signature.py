@@ -177,28 +177,27 @@ class TestTierTripletSegment:
 # ---------------------------------------------------------------------------
 
 class TestEventInstanceSegment:
+    # Two-state collapse: Singular (one-off "unique" event) vs Fractal (any
+    # recurring cadence — daily/weekly/monthly/anything non-unique).
     @pytest.mark.parametrize("recurrence,expected", [
-        ("unique",  "U"),
-        ("UNIQUE",  "U"),
-        ("daily",   "D"),
-        ("weekly",  "W"),
-        ("monthly", "M"),
+        ("unique",   "S"),
+        ("UNIQUE",   "S"),
+        ("daily",    "F"),
+        ("weekly",   "F"),
+        ("monthly",  "F"),
+        ("biweekly", "F"),
     ])
     def test_known_recurrences(self, recurrence, expected):
         sig = compute_structural_signature(_data(recurrence=recurrence))
         assert sig.split("-")[3] == expected
 
-    def test_unknown_recurrence_collapses_to_recurring(self):
-        sig = compute_structural_signature(_data(recurrence="biweekly"))
-        assert sig.split("-")[3] == "R"
-
-    def test_empty_recurrence_defaults_to_unique(self):
+    def test_empty_recurrence_defaults_to_singular(self):
         sig = compute_structural_signature(_data(recurrence=""))
-        assert sig.split("-")[3] == "U"
+        assert sig.split("-")[3] == "S"
 
-    def test_none_recurrence_defaults_to_unique(self):
+    def test_none_recurrence_defaults_to_singular(self):
         sig = compute_structural_signature(_data(recurrence=None))
-        assert sig.split("-")[3] == "U"
+        assert sig.split("-")[3] == "S"
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +304,7 @@ class TestSignatureComposition:
         # If this test fails, every previously-minted Star with this exact
         # input would no longer match its persisted claims.signature.
         sig = compute_structural_signature(_data())
-        assert sig == "ICA-6-B5B-U-Ø-S0-POL12345"
+        assert sig == "ICA-6-B5B-S-Ø-S0-POL12345"
 
     def test_signature_has_seven_dash_separated_segments(self):
         sig = compute_structural_signature(_data())

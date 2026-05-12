@@ -110,7 +110,16 @@
       "Read(//tmp/polystars-nginx/**)",
       "Bash(Select-String -Pattern \"\\\\.env|keypair\")",
       "PowerShell(git log --all --oneline -- .env.prod my-keypair.json 2>&1 | Select-Object -First 5; \"---\"; git log --all --oneline --diff-filter=A -- \".env*\" 2>&1 | Select-Object -First 10)",
-      "Bash(./node_modules/.bin/hardhat compile *)"
+      "Bash(./node_modules/.bin/hardhat compile *)",
+      "PowerShell(venv\\\\Scripts\\\\python.exe -m pytest tests/ --tb=short -q 2>&1 | Select-Object -Last 20)",
+      "PowerShell(& .\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/ --tb=short -q 2>&1 | Select-Object -Last 20)",
+      "PowerShell(& .\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/ --ignore=tests/integration --tb=short -q 2>&1 | Select-Object -Last 15)",
+      "PowerShell(git stash *)",
+      "PowerShell(& .\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/test_structural_signature.py -q --tb=short 2>&1 | Select-Object -Last 10)",
+      "PowerShell(& .\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/ --ignore=tests/integration -q 2>&1 | Select-Object -Last 8)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(echo \"lint-exit:$?\")",
+      "PowerShell(& .\\\\venv\\\\Scripts\\\\python.exe -m pytest tests/ --ignore=tests/integration -q 2>&1 | Select-Object -Last 4)"
     ]
   },
   "enabledMcpjsonServers": [
