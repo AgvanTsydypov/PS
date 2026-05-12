@@ -149,6 +149,7 @@ export function ClaimsMint({
   refreshOverview,
 }: ClaimsMintProps) {
   const [claimPhase, setClaimPhase] = useState("breach");
+  const [claimType, setClaimType] = useState<"auto" | "origin" | "looter">("auto");
   const [claimAutoPhase, setClaimAutoPhase] = useState(true);
   const [claimDbOnly, setClaimDbOnly] = useState(false);
 const [claimRecipient, setClaimRecipient] = useState("");
@@ -314,6 +315,12 @@ const [claimRecipient, setClaimRecipient] = useState("");
           <option value="vault">vault</option>
           <option value="scavenge">scavenge</option>
         </select>
+        <label title="What gets written on the card. 'auto' = origin if the wallet is in the season participants partition, else a random looter row. 'origin' = force an Origin card from this wallet's own best-archetype row. 'looter' = force a looter card from a random unclaimed participant row.">Card type</label>
+        <select value={claimType} onChange={(e) => setClaimType(e.target.value as "auto" | "origin" | "looter")}>
+          <option value="auto">auto</option>
+          <option value="origin">origin</option>
+          <option value="looter">looter</option>
+        </select>
         <label>Recipient</label>
         <input value={claimRecipient} onChange={(e) => setClaimRecipient(e.target.value)} style={{ minWidth: 420 }} />
       </div>
@@ -462,6 +469,7 @@ const [claimRecipient, setClaimRecipient] = useState("");
                     phase: claimPhase,
                     auto_phase: claimAutoPhase,
                     db_only: claimDbOnly,
+                    claim_type: claimType,
                   }),
                 });
                 setClaimOutput((prev) => `${prev}${JSON.stringify(out, null, 2)}\n`);
