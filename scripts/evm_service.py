@@ -295,8 +295,14 @@ class EvmClient:
         collection_mint_number: int | None = None,
         winner_context: dict[str, Any] | None = None,
         polystars_card: dict[str, Any] | None = None,
+        gas_price_gwei: float | None = None,
     ) -> MintedNftResult:
-        """Mint one ERC-721 NFT to user_wallet_address and return on-chain artefacts."""
+        """Mint one ERC-721 NFT to user_wallet_address and return on-chain artefacts.
+
+        ``gas_price_gwei``: when provided, pin EIP-1559 ``maxFeePerGas`` to this
+        total (gwei). Used by the cron mint queue to pay the SafeGasPrice tier
+        once the rapid-tier price gate has confirmed the network is cheap.
+        """
         recipient = Web3.to_checksum_address(user_wallet_address.strip())
         self.validate_contract()
 
@@ -316,7 +322,11 @@ class EvmClient:
         )
 
         try:
-            token_id, tx_hash = self._send_mint_tx(recipient=recipient, metadata_uri=metadata_uri)
+            token_id, tx_hash = self._send_mint_tx(
+                recipient=recipient,
+                metadata_uri=metadata_uri,
+                gas_price_gwei=gas_price_gwei,
+            )
         except Exception:
             self._unpin_pinata_url(metadata_uri)
             raise
@@ -335,7 +345,12 @@ class EvmClient:
 
     # ── transaction ────────────────────────────────────────────────────────────
 
-    def _send_mint_tx(self, recipient: str, metadata_uri: str) -> tuple[int, str]:
+    def _send_mint_tx(
+        self,
+        recipient: str,
+        metadata_uri: str,
+        gas_price_gwei: float | None = None,
+    ) -> tuple[int, str]:
         """Build, sign, broadcast and confirm a mintTo tx. Returns (tokenId, tx_hash)."""
         chain_id = self._chain_id or self.w3.eth.chain_id
         nonce = self.w3.eth.get_transaction_count(self._account.address, "pending")
@@ -347,7 +362,13 @@ class EvmClient:
             raise RuntimeError(f"mintTo call would revert: {exc}") from exc
 
         gas_limit = int(gas_estimate * self.GAS_MULTIPLIER)
-        tx = self._build_tx(fn=fn, nonce=nonce, gas_limit=gas_limit, chain_id=chain_id)
+        tx = self._build_tx(
+            fn=fn,
+            nonce=nonce,
+            gas_limit=gas_limit,
+            chain_id=chain_id,
+            gas_price_gwei=gas_price_gwei,
+        )
         signed = self._account.sign_transaction(tx)
 
         for attempt in range(self.max_retries):
@@ -367,27 +388,55 @@ class EvmClient:
         tx_hash_hex = receipt["transactionHash"].hex()
         return token_id, tx_hash_hex if tx_hash_hex.startswith("0x") else f"0x{tx_hash_hex}"
 
-    def _build_tx(self, *, fn: Any, nonce: int, gas_limit: int, chain_id: int) -> dict:
-        """EIP-1559 preferred; falls back to legacy gasPrice."""
+    def _build_tx(
+        self,
+        *,
+        fn: Any,
+        nonce: int,
+        gas_limit: int,
+        chain_id: int,
+        gas_price_gwei: float | None = None,
+    ) -> dict:
+        """EIP-1559 preferred; falls back to legacy gasPrice.
+
+        When ``gas_price_gwei`` is set, ``maxFeePerGas`` is pinned to that
+        total (Etherscan SafeGasPrice already includes priority+base) and the
+        priority tip is clamped to never exceed the cap. The legacy fallback
+        uses the same value as the flat ``gasPrice``.
+        """
+        pinned_max_fee_wei = (
+            int(gas_price_gwei * 1e9) if gas_price_gwei is not None else None
+        )
         try:
             base_fee = self.w3.eth.get_block("latest").get("baseFeePerGas")
             if base_fee is None:
                 raise ValueError("baseFeePerGas absent")
-            max_priority = self.w3.to_wei(2, "gwei")
+            default_priority = self.w3.to_wei(2, "gwei")
+            if pinned_max_fee_wei is not None:
+                max_fee = pinned_max_fee_wei
+                max_priority = min(default_priority, max_fee)
+            else:
+                max_priority = default_priority
+                max_fee = base_fee * 2 + max_priority
             return fn.build_transaction({
                 "from": self._account.address,
                 "nonce": nonce,
                 "gas": gas_limit,
-                "maxFeePerGas": base_fee * 2 + max_priority,
+                "maxFeePerGas": max_fee,
                 "maxPriorityFeePerGas": max_priority,
                 "chainId": chain_id,
             })
         except Exception:
+            legacy_price = (
+                pinned_max_fee_wei
+                if pinned_max_fee_wei is not None
+                else self.w3.eth.gas_price
+            )
             return fn.build_transaction({
                 "from": self._account.address,
                 "nonce": nonce,
                 "gas": gas_limit,
-                "gasPrice": self.w3.eth.gas_price,
+                "gasPrice": legacy_price,
                 "chainId": chain_id,
             })
 

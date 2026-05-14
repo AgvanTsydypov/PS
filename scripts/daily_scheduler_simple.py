@@ -2554,6 +2554,12 @@ class SimplifiedScheduler:
                 f"max_usd_per_mint=${price_gate_threshold_usd:.4f}"
             )
 
+            # Tier the next mint pays. Stays None when the gate is disabled,
+            # which preserves the original "let the node pick" behaviour.
+            # The gate certifies affordability under the worst case (rapid),
+            # but the actual broadcast goes out at the safe tier — the network
+            # is cheap right now, no reason to overpay for inclusion.
+            mint_gas_price_gwei: float | None = None
             for _ in range(max_claims):
                 # Price gate — re-checked on every iteration so a successful mint
                 # is followed by another fresh check before the next pickup.
@@ -2579,10 +2585,13 @@ class SimplifiedScheduler:
                         )
                         print(f"⏸️  Price gate: {price_gate_reason} — waiting for next cron tick")
                         break
+                    mint_gas_price_gwei = snap.safe_gwei
                     print(
                         f"   ✅ Price gate: rapid mint cost ${rapid_usd:.4f} "
                         f"≤ ${price_gate_threshold_usd:.4f} "
-                        f"(rapid={snap.rapid_gwei:.3f} gwei, ETH=${snap.eth_usd:.2f})"
+                        f"(rapid={snap.rapid_gwei:.3f} gwei, ETH=${snap.eth_usd:.2f}); "
+                        f"will broadcast at safe={snap.safe_gwei:.3f} gwei "
+                        f"(~${snap.safe_usd:.4f})"
                     )
 
                 # Atomic claim pickup: FOR UPDATE SKIP LOCKED + transition to PROCESSING.
@@ -2743,6 +2752,7 @@ class SimplifiedScheduler:
                         collection_mint_number=collection_mint_number,
                         winner_context=winner_context,
                         polystars_card=polystars_card,
+                        gas_price_gwei=mint_gas_price_gwei,
                     )
                     on_chain_completed = True
 
