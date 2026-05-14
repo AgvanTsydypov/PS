@@ -36,7 +36,11 @@ EVM_CHAIN_ID_ENV_KEY = "EVM_CHAIN_ID"
 ALCHEMY_NFT_API_BASE_URL_ENV_KEY = "ALCHEMY_NFT_API_BASE_URL"
 _ALCHEMY_RPC_PATH_RE = re.compile(r"^(?P<scheme>https?://)(?P<host>[^/]+)/v2/(?P<key>[^/?#]+)/?$")
 PINATA_JWT_ENV_KEY = "PINATA_JWT"
-PINATA_API_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
+# Switched from pinJSONToIPFS to pinFileToIPFS so the JSON bytes that Pinata
+# hashes into a CID are bytes WE serialized, not bytes Pinata serialized from
+# a dict. That byte-equivalence is what makes the R2 disaster-recovery mirror
+# in scripts.cardgen.assets able to restore an identical CID elsewhere.
+PINATA_FILE_API_URL = "https://api.pinata.cloud/pinning/pinFileToIPFS"
 PINATA_UNPIN_API_URL = "https://api.pinata.cloud/pinning/unpin"
 PINATA_GATEWAY_PREFIX = "https://gateway.pinata.cloud/ipfs/"
 
@@ -331,15 +335,25 @@ class EvmClient:
             polystars_card=polystars_card,
         )
 
+        # Mutable single-cell flag flipped True inside ``_send_mint_tx`` right
+        # before ``send_raw_transaction``. While False, the signed bytes have
+        # never left this process, so the metadata pin is safe to drop on
+        # failure. Once True, the tx may already be in the mempool / on-chain
+        # and ``tokenURI`` may already reference this CID — unpinning then
+        # would permanently break the NFT, so we leave the pin alone and let
+        # the recovery pass own the row.
+        broadcast_started: dict[str, bool] = {"value": False}
         try:
             token_id, tx_hash = self._send_mint_tx(
                 recipient=recipient,
                 metadata_uri=metadata_uri,
                 gas_price_gwei=gas_price_gwei,
                 on_pre_broadcast=on_pre_broadcast,
+                broadcast_flag=broadcast_started,
             )
         except Exception:
-            self._unpin_pinata_url(metadata_uri)
+            if not broadcast_started["value"]:
+                self._unpin_pinata_url(metadata_uri)
             raise
 
         chain_id = self._chain_id or self.w3.eth.chain_id
@@ -362,6 +376,7 @@ class EvmClient:
         metadata_uri: str,
         gas_price_gwei: float | None = None,
         on_pre_broadcast: Callable[[str], None] | None = None,
+        broadcast_flag: dict[str, bool] | None = None,
     ) -> tuple[int, str]:
         """Build, sign, broadcast and confirm a mintTo tx. Returns (tokenId, tx_hash).
 
@@ -369,6 +384,11 @@ class EvmClient:
         BEFORE ``send_raw_transaction`` so the caller can persist it durably
         and own the recovery decision if the broadcast result is uncertain.
         See ``mint_user_nft`` docstring for the rationale.
+
+        ``broadcast_flag``: optional single-cell dict (``{"value": False}``)
+        that this method flips to ``True`` immediately before the first
+        ``send_raw_transaction`` attempt. The caller uses it to decide whether
+        a metadata-pin cleanup is safe on failure — see ``mint_user_nft``.
         """
         chain_id = self._chain_id or self.w3.eth.chain_id
         nonce = self.w3.eth.get_transaction_count(self._account.address, "pending")
@@ -401,6 +421,14 @@ class EvmClient:
             # broadcasting a tx whose hash isn't durably recorded is the very
             # thing this hook exists to prevent.
             on_pre_broadcast(expected_hash_hex)
+
+        # Point of no return for metadata-pin cleanup. After this line the
+        # next statement attempts ``send_raw_transaction``; even if it raises,
+        # we cannot rule out that the bytes reached a node and the tx will
+        # eventually mine. From here on the caller must NOT unpin the metadata
+        # CID — recovery (which checks the chain via tx_hash) owns the row.
+        if broadcast_flag is not None:
+            broadcast_flag["value"] = True
 
         for attempt in range(self.max_retries):
             try:
@@ -718,6 +746,10 @@ class EvmClient:
 
     @staticmethod
     def _unpin_pinata_url(url: str) -> None:
+        """Best-effort unpin one Pinata URL and remove the matching R2
+        disaster-recovery mirror. JSON-extension cleanup, since this method
+        is called by the metadata-upload failure path; PNG mirror cleanup
+        lives in ``scripts.cardgen.assets.unpin_pinata_urls``."""
         if not url:
             return
         if url.startswith("ipfs://"):
@@ -726,43 +758,96 @@ class EvmClient:
             cid = url[len(PINATA_GATEWAY_PREFIX):]
         else:
             return
+        cid = cid.split("/", 1)[0].split("?", 1)[0]
         if not cid:
             return
         jwt = os.environ.get(PINATA_JWT_ENV_KEY, "").strip()
-        if not jwt:
-            return
+        if jwt:
+            try:
+                httpx.delete(
+                    f"{PINATA_UNPIN_API_URL}/{cid}",
+                    headers={"Authorization": f"Bearer {jwt}"},
+                    timeout=10.0,
+                )
+            except Exception:
+                pass
         try:
-            httpx.delete(
-                f"{PINATA_UNPIN_API_URL}/{cid}",
-                headers={"Authorization": f"Bearer {jwt}"},
-                timeout=10.0,
-            )
+            from scripts.cardgen.assets import delete_ipfs_backup_for_cid
+            delete_ipfs_backup_for_cid(cid, "json")
         except Exception:
             pass
+
+    @staticmethod
+    def _serialize_metadata_for_pin(metadata: dict[str, Any]) -> bytes:
+        """Deterministic JSON serialization for IPFS pinning.
+
+        These exact bytes are both pushed to Pinata (via pinFileToIPFS) and
+        mirrored to R2. Because CID is a hash of the bytes, re-uploading the
+        R2 mirror to any standards-compliant IPFS service produces the same
+        CID — that round-trip equivalence is the whole point of controlling
+        serialization on our side instead of letting Pinata serialize for us.
+        """
+        safe = EvmClient._make_json_safe(metadata)
+        return json.dumps(
+            safe,
+            separators=(",", ":"),
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
 
     @staticmethod
     def _upload_metadata_to_pinata(metadata: dict[str, Any]) -> str | None:
         jwt = os.environ.get(PINATA_JWT_ENV_KEY, "").strip()
         if not jwt:
             return None
-        metadata = EvmClient._make_json_safe(metadata)
-        headers = {
-            "Authorization": f"Bearer {jwt}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "pinataContent": metadata,
-            "pinataMetadata": {"name": f"{metadata.get('name', 'ps-nft')}.json"},
-        }
+        json_bytes = EvmClient._serialize_metadata_for_pin(metadata)
+        name = str(metadata.get("name", "ps-nft"))
+        filename = f"{name}.json"
+        headers = {"Authorization": f"Bearer {jwt}"}
+        # Lazy import: assets module pulls heavy deps (boto3 etc.) and is not
+        # always installed on read-only consumers of this module.
+        from scripts.cardgen.assets import (
+            backup_ipfs_bytes_to_r2,
+        )
+
         for _attempt in range(2):
             try:
-                response = httpx.post(PINATA_API_URL, headers=headers, json=payload, timeout=20.0)
+                response = httpx.post(
+                    PINATA_FILE_API_URL,
+                    headers=headers,
+                    data={
+                        "pinataMetadata": json.dumps({"name": filename}),
+                        # ``wrapWithDirectory: false`` is also Pinata's current
+                        # default, but pin it explicitly so a future default
+                        # change can't silently turn this into a directory CID
+                        # (which would depend on filename and break the mirror).
+                        "pinataOptions": json.dumps(
+                            {"cidVersion": 1, "wrapWithDirectory": False},
+                        ),
+                    },
+                    files={"file": (filename, json_bytes, "application/json")},
+                    timeout=20.0,
+                )
                 response.raise_for_status()
                 ipfs_hash = response.json().get("IpfsHash")
-                if ipfs_hash:
-                    return f"ipfs://{ipfs_hash}"
             except Exception:
                 continue
+            if not ipfs_hash:
+                continue
+            try:
+                backup_ipfs_bytes_to_r2(
+                    ipfs_hash, json_bytes, "application/json", "json",
+                )
+            except Exception as exc:
+                # Roll back the Pinata pin so the next retry / caller starts
+                # clean. Re-raise as RuntimeError so ``_build_metadata_uri``
+                # can abort the mint with a clear error instead of silently
+                # falling through to "Pinata returned None".
+                EvmClient._unpin_pinata_url(f"ipfs://{ipfs_hash}")
+                raise RuntimeError(
+                    f"R2 mirror of pinned NFT metadata failed (cid={ipfs_hash}): {exc}"
+                )
+            return f"ipfs://{ipfs_hash}"
         return None
 
     @staticmethod

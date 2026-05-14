@@ -259,12 +259,36 @@ def _pinata_jwt() -> str:
     return jwt
 
 
-def _pin_bytes_to_pinata(filename: str, body: bytes, content_type: str) -> str:
+def _pin_bytes_to_pinata(
+    filename: str, body: bytes, content_type: str, *, ext: str = "bin",
+) -> str:
+    """Pin one byte blob to Pinata and mirror the same bytes to R2.
+
+    The R2 mirror lives under ``ipfs-backup/<cid>.<ext>`` and is hard-required
+    (failure aborts the call). The whole point of the mirror is disaster
+    recovery if Pinata ever drops these pins — silently skipping it on a bad
+    day would leave us thinking we're protected when we're not.
+
+    The Pinata pin is configured with ``cidVersion: 1`` (CIDv1, ``bafy…``)
+    for subdomain-gateway compatibility and ``wrapWithDirectory: false`` so
+    the CID is a pure function of ``body``. That same byte-equivalence is
+    what lets the R2 mirror restore an identical CID at any standards-
+    compliant IPFS service.
+    """
     jwt = _pinata_jwt()
     response = httpx.post(
         PINATA_FILE_API_URL,
         headers={"Authorization": f"Bearer {jwt}"},
-        data={"pinataMetadata": json.dumps({"name": filename})},
+        data={
+            "pinataMetadata": json.dumps({"name": filename}),
+            # ``wrapWithDirectory: false`` is also Pinata's current default,
+            # but we pin it explicitly so a future default change can't
+            # silently turn our file CIDs into directory CIDs (which would
+            # depend on filename and break the R2 mirror).
+            "pinataOptions": json.dumps(
+                {"cidVersion": 1, "wrapWithDirectory": False}
+            ),
+        },
         files={"file": (filename, body, content_type)},
         timeout=40.0,
     )
@@ -273,6 +297,18 @@ def _pin_bytes_to_pinata(filename: str, body: bytes, content_type: str) -> str:
     ipfs_hash = payload.get("IpfsHash")
     if not ipfs_hash:
         raise RuntimeError(f"Pinata file upload missing IpfsHash: {payload}")
+
+    try:
+        backup_ipfs_bytes_to_r2(ipfs_hash, body, content_type, ext)
+    except Exception as exc:
+        # Roll back the Pinata pin so the caller is back to a clean state —
+        # otherwise a half-mirror leaks a pin that no longer matches our
+        # disaster-recovery contract.
+        _unpin_pinata_cid_best_effort(ipfs_hash)
+        raise RuntimeError(
+            f"R2 mirror of pinned IPFS content failed (cid={ipfs_hash}): {exc}"
+        ) from exc
+
     return f"{PINATA_GATEWAY_PREFIX}{ipfs_hash}"
 
 
@@ -286,8 +322,12 @@ def upload_card_assets_to_pinata(
     front_name = f"{safe}-front.png"
     back_name = f"{safe}-back.png"
     with ThreadPoolExecutor(max_workers=2) as pool:
-        front_f = pool.submit(_pin_bytes_to_pinata, front_name, front_png, CARD_PNG_MIME)
-        back_f = pool.submit(_pin_bytes_to_pinata, back_name, back_png, CARD_PNG_MIME)
+        front_f = pool.submit(
+            _pin_bytes_to_pinata, front_name, front_png, CARD_PNG_MIME, ext="png",
+        )
+        back_f = pool.submit(
+            _pin_bytes_to_pinata, back_name, back_png, CARD_PNG_MIME, ext="png",
+        )
         return front_f.result(), back_f.result()
 
 
@@ -316,19 +356,110 @@ def _pinata_cid_from_url(url: Any) -> str:
 
 def unpin_pinata_urls(urls) -> None:
     """Best-effort unpin a list of Pinata card-asset URLs (``ipfs://<CID>`` or
-    legacy gateway URLs). Silently ignores all errors."""
+    legacy gateway URLs) and remove the matching R2 mirror copies.
+    Silently ignores all errors."""
     jwt = os.environ.get(PINATA_JWT_ENV_KEY, "").strip()
-    if not jwt:
-        return
     for url in urls or ():
         cid = _pinata_cid_from_url(url)
         if not cid:
             continue
-        try:
-            httpx.delete(
-                f"{PINATA_UNPIN_API_URL}/{cid}",
-                headers={"Authorization": f"Bearer {jwt}"},
-                timeout=10.0,
-            )
-        except Exception:
-            pass
+        if jwt:
+            try:
+                httpx.delete(
+                    f"{PINATA_UNPIN_API_URL}/{cid}",
+                    headers={"Authorization": f"Bearer {jwt}"},
+                    timeout=10.0,
+                )
+            except Exception:
+                pass
+        # All callers of this helper deal with PNG card uploads. JSON metadata
+        # mirror cleanup lives next to its own unpin in evm_service.
+        delete_ipfs_backup_for_cid(cid, "png")
+
+
+def _unpin_pinata_cid_best_effort(cid: str) -> None:
+    """Internal helper used by the upload path to roll back a Pinata pin
+    when the follow-on R2 mirror write fails. Silent on failure — the caller
+    is already raising and the pin will eventually fall out of scope."""
+    if not cid:
+        return
+    jwt = os.environ.get(PINATA_JWT_ENV_KEY, "").strip()
+    if not jwt:
+        return
+    try:
+        httpx.delete(
+            f"{PINATA_UNPIN_API_URL}/{cid}",
+            headers={"Authorization": f"Bearer {jwt}"},
+            timeout=10.0,
+        )
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R2 disaster-recovery mirror for pinned IPFS content
+# ─────────────────────────────────────────────────────────────────────────────
+# Mirrors every byte we pin to Pinata into R2 under ``ipfs-backup/<cid>.<ext>``.
+# If Pinata ever drops these pins, re-uploading the mirror bytes to any
+# standards-compliant IPFS service produces the same CID — so the on-chain
+# ``tokenURI = ipfs://<cid>`` keeps resolving without contract changes.
+#
+# Hard-required by design: failed mirror writes abort the pin (and roll back
+# the Pinata pin via ``_unpin_pinata_cid_best_effort``). The whole point of
+# this layer is to be the safety net when Pinata fails — silently degrading
+# to "no mirror" defeats the purpose.
+
+IPFS_BACKUP_R2_KEY_PREFIX = "ipfs-backup"
+
+
+def _ipfs_backup_r2_key(cid: str, ext: str) -> str:
+    """Canonical R2 object key for an IPFS-mirror copy.
+
+    Lives outside the showcase ``cards-images/`` namespace so disaster-recovery
+    tooling can list every backup with one prefix scan without colliding with
+    the (sometimes pruned) showcase objects.
+    """
+    safe_cid = "".join(ch for ch in str(cid or "").strip() if ch.isalnum())
+    if not safe_cid:
+        raise ValueError("ipfs backup key requires a non-empty CID")
+    safe_ext = (ext or "bin").strip().lstrip(".").lower() or "bin"
+    prefix = str(os.getenv("R2_PREFIX", "dev")).strip().strip("/")
+    key = f"{IPFS_BACKUP_R2_KEY_PREFIX}/{safe_cid}.{safe_ext}"
+    return f"{prefix}/{key}" if prefix else key
+
+
+def backup_ipfs_bytes_to_r2(
+    cid: str, body: bytes, content_type: str, ext: str,
+) -> str:
+    """Mirror pinned IPFS bytes to R2 keyed by CID. Returns the R2 object key.
+    Raises on any failure — the caller MUST treat a failed mirror as a failed
+    pin (and undo the Pinata pin), otherwise we silently lose DR coverage."""
+    cfg = _r2_required_env()
+    key = _ipfs_backup_r2_key(cid, ext)
+    client = _get_r2_client()
+    client.put_object(
+        Bucket=cfg["bucket"],
+        Key=key,
+        Body=body,
+        ContentType=content_type or "application/octet-stream",
+        CacheControl=CARD_PNG_CACHE_CONTROL,
+    )
+    return key
+
+
+def delete_ipfs_backup_for_cid(cid: str, ext: str) -> None:
+    """Best-effort delete of an IPFS-mirror copy. Used in cleanup paths that
+    mirror the Pinata unpin (e.g. mint failure before broadcast). Never raises
+    — a leftover mirror object is a tiny storage leak, not a correctness bug.
+    """
+    if not cid:
+        return
+    try:
+        cfg = _r2_required_env()
+        key = _ipfs_backup_r2_key(cid, ext)
+        _get_r2_client().delete_object(Bucket=cfg["bucket"], Key=key)
+    except Exception:
+        logger.warning(
+            "Could not delete ipfs mirror for cid=%s ext=%s",
+            cid, ext, exc_info=True,
+        )
