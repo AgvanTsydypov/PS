@@ -2225,6 +2225,17 @@ class SimplifiedScheduler:
                 cursor.close()
             conn.close()
 
+    def _make_mint_receipt_verifier(self) -> Any:
+        """Build the object recovery uses to ask the chain whether a recorded
+        ``tx_hash`` actually produced a mint. Tests override this to inject a
+        fake without needing live RPC / private-key env. The returned object
+        only needs ``.fetch_mint_receipt_status(tx_hash)`` returning the
+        ``(status, token_id, asset_address)`` triple documented on
+        :meth:`EvmClient.fetch_mint_receipt_status`.
+        """
+        from scripts.evm_service import EvmClient as _EvmClient
+        return _EvmClient()
+
     def _recover_stale_processing(self) -> Dict[str, int]:
         """Heal claims left in PROCESSING by a crashed prior worker run.
 
@@ -2284,15 +2295,39 @@ class SimplifiedScheduler:
         finally:
             conn.close()
 
-        # ── Branch 2: auto-finalize stale PROCESSING rows that already
-        # broadcast on-chain. Done per-row so a single conflict on the
-        # unique index doesn't roll back the whole batch (the prior
-        # bulk-UPDATE design left every conflicting row stuck forever).
+        # ── Branch 2: heal stale PROCESSING rows that have a recorded tx_hash.
+        # The hash is written by the cron worker's ``on_pre_broadcast`` hook
+        # *before* ``send_raw_transaction``, so its mere presence does NOT
+        # prove the tx ever reached the chain — it only proves we tried. We
+        # MUST consult the RPC before deciding what to do:
+        #
+        #   * receipt status==1 → the mint succeeded (existing auto-complete
+        #     flow, with renumber-on-cmn-conflict for legacy rows).
+        #   * receipt status==0 → the mint reverted on-chain. No NFT exists.
+        #     Mark FAILED and free the cmn so the next allocator can reuse it.
+        #   * receipt absent but tx still in the mempool → leave PROCESSING
+        #     and bump updated_at so we don't re-check on every cron tick.
+        #   * receipt absent and tx not in the mempool → likely dropped or
+        #     never reached the RPC. Wait at least
+        #     ``MINT_QUEUE_DROPPED_TX_REQUEUE_HOURS`` (default 6h) before
+        #     requeueing, since a low-tier safe-gas tx can legitimately sit
+        #     in the mempool that long; only after the dropped-tx threshold
+        #     is it safe to assume the broadcast genuinely went nowhere and
+        #     a fresh attempt will not double-mint.
         auto_completed = 0
         renumbered = 0
+        finalized_failed = 0
         # Hard ceiling so a pathological loop (e.g. constraint we don't
         # know how to recover from) can never spin forever.
         max_iterations = 500
+
+        # Lazy: only stand up the EVM client if we actually have a row to
+        # check. Recovery runs on every cron tick and we don't want to pay
+        # the RPC handshake when there's no work to do.
+        verifier: Optional[Any] = None
+        dropped_tx_requeue_hours = max(
+            1, _env_int("MINT_QUEUE_DROPPED_TX_REQUEUE_HOURS", 6),
+        )
 
         for _ in range(max_iterations):
             # Pick the next stale-on-chain claim. Re-running this query
@@ -2304,7 +2339,9 @@ class SimplifiedScheduler:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                     cursor.execute(
                         f"""
-                        SELECT id, season_id, collection_mint_number
+                        SELECT id, season_id, collection_mint_number,
+                               tx_hash, asset_address,
+                               EXTRACT(EPOCH FROM (NOW() - updated_at))::bigint AS stale_seconds
                         FROM   claims
                         WHERE  status = 'PROCESSING'
                           AND  tx_hash IS NOT NULL
@@ -2323,6 +2360,73 @@ class SimplifiedScheduler:
             claim_id = int(picked["id"])
             season_id = int(picked["season_id"])
             original_cmn = picked.get("collection_mint_number")
+            tx_hash = str(picked.get("tx_hash") or "").strip()
+            existing_asset_address = str(picked.get("asset_address") or "").strip() or None
+            stale_seconds = int(picked.get("stale_seconds") or 0)
+
+            if not tx_hash:
+                # Should be unreachable given the WHERE clause; defensive skip.
+                continue
+
+            # Verify on-chain status before deciding the row's fate.
+            if verifier is None:
+                try:
+                    verifier = self._make_mint_receipt_verifier()
+                except Exception as init_exc:
+                    print(
+                        f"   ⚠️  Recovery: cannot init EvmClient for tx verification "
+                        f"({type(init_exc).__name__}: {init_exc}); leaving stale rows for the next pass"
+                    )
+                    break
+
+            try:
+                onchain_status, _verified_token_id, verified_asset_address = (
+                    verifier.fetch_mint_receipt_status(tx_hash)
+                )
+            except Exception as verify_exc:
+                print(
+                    f"   ⚠️  Recovery: claim {claim_id} receipt lookup failed "
+                    f"({type(verify_exc).__name__}: {verify_exc}); leaving in PROCESSING"
+                )
+                # Bump updated_at so we back off until the next stale window.
+                self._touch_claim_updated_at(claim_id)
+                continue
+
+            if onchain_status == "pending":
+                print(
+                    f"   ⏳ Recovery: claim {claim_id} tx {tx_hash[:10]}… still pending in mempool "
+                    f"(stale {stale_seconds // 60}m); leaving in PROCESSING"
+                )
+                self._touch_claim_updated_at(claim_id)
+                continue
+
+            if onchain_status == "not_found":
+                # Tx never made it to the chain (or was dropped from the
+                # mempool). We need a long fuse here because a SafeGasPrice
+                # tx legitimately can sit pending for hours. Only after the
+                # dropped-tx window do we assume the broadcast is gone for
+                # good and that requeueing is safe.
+                if stale_seconds < dropped_tx_requeue_hours * 3600:
+                    print(
+                        f"   ⏳ Recovery: claim {claim_id} tx {tx_hash[:10]}… not on chain "
+                        f"and not in mempool (stale {stale_seconds // 60}m, "
+                        f"will requeue after {dropped_tx_requeue_hours}h); leaving in PROCESSING"
+                    )
+                    self._touch_claim_updated_at(claim_id)
+                    continue
+                self._requeue_dropped_claim(claim_id, tx_hash, dropped_tx_requeue_hours)
+                requeued += 1
+                continue
+
+            if onchain_status == "reverted":
+                self._fail_reverted_claim(claim_id, tx_hash)
+                finalized_failed += 1
+                continue
+
+            # onchain_status == "success" — proceed to the existing finalize /
+            # renumber flow, also backfilling asset_address if the pre-broadcast
+            # hook only persisted tx_hash.
+            asset_to_persist = existing_asset_address or verified_asset_address
 
             conn = self.manager.get_connection()
             try:
@@ -2336,15 +2440,16 @@ class SimplifiedScheduler:
                             """
                             UPDATE claims
                             SET    status        = 'COMPLETED',
+                                   asset_address = COALESCE(asset_address, %s),
                                    timestamp     = COALESCE(timestamp, NOW()),
-                                   error_message = '[auto-completed: tx_hash present on stuck PROCESSING at '
+                                   error_message = '[auto-completed: on-chain receipt confirmed at '
                                                    || NOW()::text || ']',
                                    updated_at    = NOW()
                             WHERE  id = %s
                               AND  status = 'PROCESSING'
                               AND  tx_hash IS NOT NULL
                             """,
-                            (claim_id,),
+                            (asset_to_persist, claim_id),
                         )
                         cursor.execute("RELEASE SAVEPOINT recover_flip")
                         flip_rowcount = cursor.rowcount or 0
@@ -2357,7 +2462,7 @@ class SimplifiedScheduler:
                         conn.commit()
                         print(
                             f"   ✅ Recovery: claim {claim_id} auto-completed "
-                            f"(season {season_id}, cmn={original_cmn})"
+                            f"(season {season_id}, cmn={original_cmn}, tx={tx_hash[:10]}…)"
                         )
                         continue
                     except psycopg2.errors.UniqueViolation as conflict:
@@ -2399,6 +2504,7 @@ class SimplifiedScheduler:
                         UPDATE claims
                         SET    collection_mint_number = %s,
                                status                 = 'COMPLETED',
+                               asset_address          = COALESCE(asset_address, %s),
                                timestamp              = COALESCE(timestamp, NOW()),
                                error_message          = '[auto-renumbered by recovery at ' || NOW()::text
                                                         || ': cmn ' || %s || ' -> ' || %s
@@ -2408,7 +2514,7 @@ class SimplifiedScheduler:
                           AND  status = 'PROCESSING'
                           AND  tx_hash IS NOT NULL
                         """,
-                        (new_cmn, original_cmn, new_cmn, claim_id),
+                        (new_cmn, asset_to_persist, original_cmn, new_cmn, claim_id),
                     )
                     rowcount = cursor.rowcount or 0
                 conn.commit()
@@ -2438,7 +2544,115 @@ class SimplifiedScheduler:
             'requeued': requeued,
             'auto_completed': auto_completed,
             'renumbered': renumbered,
+            'finalized_failed': finalized_failed,
         }
+
+    def _touch_claim_updated_at(self, claim_id: int) -> None:
+        """Bump ``updated_at`` so the stale-PROCESSING timer resets without
+        changing any other column. Used by the receipt-verification path to
+        avoid re-querying the RPC on every cron tick for txs that are
+        legitimately still pending."""
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE claims SET updated_at = NOW() WHERE id = %s",
+                    (claim_id,),
+                )
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        finally:
+            conn.close()
+
+    def _requeue_dropped_claim(
+        self, claim_id: int, tx_hash: str, dropped_tx_requeue_hours: int,
+    ) -> None:
+        """Recover a row whose recorded tx_hash is neither on-chain nor in
+        the mempool after the dropped-tx window. NULL out the hash and cmn
+        so the regular allocator + pickup loop can re-attempt the mint
+        cleanly. Pinata pins from the abandoned attempt are intentionally
+        left dangling (small leak; safer than racing a possible late-mining
+        tx that still references them)."""
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE claims
+                    SET    status                 = 'QUEUED',
+                           tx_hash                = NULL,
+                           collection_mint_number = NULL,
+                           error_message          = '[auto-requeue: tx ' || %s
+                                                    || ' not on chain after '
+                                                    || %s::text || 'h at '
+                                                    || NOW()::text || ']',
+                           updated_at             = NOW()
+                    WHERE  id = %s
+                      AND  status = 'PROCESSING'
+                      AND  tx_hash = %s
+                    """,
+                    (tx_hash, dropped_tx_requeue_hours, claim_id, tx_hash),
+                )
+            conn.commit()
+            print(
+                f"   ♻️  Recovery: claim {claim_id} requeued — tx {tx_hash[:10]}… "
+                f"not on chain after {dropped_tx_requeue_hours}h"
+            )
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(
+                f"   ⚠️  Recovery: claim {claim_id} requeue failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        finally:
+            conn.close()
+
+    def _fail_reverted_claim(self, claim_id: int, tx_hash: str) -> None:
+        """Finalize a row whose on-chain mint reverted (receipt status==0).
+        No NFT exists, so we mark FAILED and clear ``collection_mint_number``
+        to free the slot for the next allocator. ``tx_hash`` is preserved on
+        the row as audit trail of the failed attempt."""
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE claims
+                    SET    status                 = 'FAILED',
+                           collection_mint_number = NULL,
+                           error_message          = '[on-chain revert: tx ' || %s
+                                                    || ' status=0 at '
+                                                    || NOW()::text || ']',
+                           updated_at             = NOW()
+                    WHERE  id = %s
+                      AND  status = 'PROCESSING'
+                      AND  tx_hash = %s
+                    """,
+                    (tx_hash, claim_id, tx_hash),
+                )
+            conn.commit()
+            print(
+                f"   ❌ Recovery: claim {claim_id} marked FAILED — on-chain revert "
+                f"(tx {tx_hash[:10]}…)"
+            )
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(
+                f"   ⚠️  Recovery: claim {claim_id} fail-revert update failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        finally:
+            conn.close()
 
     def _get_season_name_for_claim(self, cursor, season_id: int) -> str:
         cursor.execute(
@@ -2516,11 +2730,13 @@ class SimplifiedScheduler:
                     recovery['requeued']
                     or recovery['auto_completed']
                     or recovery.get('renumbered')
+                    or recovery.get('finalized_failed')
                 ):
                     print(
                         f"🔧 Recovery: requeued={recovery['requeued']} "
                         f"auto_completed={recovery['auto_completed']} "
                         f"renumbered={recovery.get('renumbered', 0)} "
+                        f"finalized_failed={recovery.get('finalized_failed', 0)} "
                         f"(threshold={MINT_QUEUE_STALE_PROCESSING_MINUTES}min)"
                     )
             except Exception as recovery_exc:
@@ -2699,11 +2915,46 @@ class SimplifiedScheduler:
                     print(f"   🔢 claim {claim_id}: collection_mint_number = {collection_mint_number}")
 
                 polystars_card: Optional[Dict[str, Any]] = None
-                # Once True, the EVM mint has been broadcast and the row has
-                # an on-chain identity. A subsequent exception MUST NOT mark
-                # the row as FAILED — that would obscure a successful mint.
-                # The recovery pass will auto-finalize it on the next run.
+                # Once True, the EVM mint has been broadcast (or about to be —
+                # we record the deterministic tx hash *before* send via the
+                # pre_broadcast hook so even a crash mid-RPC leaves recovery
+                # the information it needs). A subsequent exception MUST NOT
+                # mark the row as FAILED or unpin Pinata assets, since the tx
+                # may already be on-chain and immutably reference those pins.
+                # Recovery owns the row from this point on; it verifies the
+                # hash via eth_getTransactionReceipt and decides COMPLETED /
+                # FAILED / requeue.
                 on_chain_completed = False
+
+                def _record_pre_broadcast_tx_hash(
+                    tx_hash: str, _claim_id: int = claim_id
+                ) -> None:
+                    """Persist the deterministic tx_hash BEFORE
+                    send_raw_transaction. Closes the double-mint window:
+                    after this commit lands, recovery sees ``tx_hash IS NOT
+                    NULL`` and looks up the on-chain status instead of
+                    requeueing. Bumps ``updated_at`` so the stale-PROCESSING
+                    timer resets for the upcoming receipt wait.
+                    """
+                    nonlocal on_chain_completed
+                    conn_pb = self.manager.get_connection()
+                    try:
+                        with conn_pb.cursor() as cur_pb:
+                            cur_pb.execute(
+                                """
+                                UPDATE claims
+                                SET    tx_hash    = %s,
+                                       mint_chain = %s,
+                                       updated_at = NOW()
+                                WHERE  id = %s
+                                """,
+                                (tx_hash, BLOCKCHAIN_ETHEREUM, _claim_id),
+                            )
+                        conn_pb.commit()
+                    finally:
+                        conn_pb.close()
+                    on_chain_completed = True
+
                 try:
                     # Recipient priority: ``claims.recipient_address`` (admin/UI
                     # may set it to a different EOA than the claimer), with
@@ -2753,7 +3004,11 @@ class SimplifiedScheduler:
                         winner_context=winner_context,
                         polystars_card=polystars_card,
                         gas_price_gwei=mint_gas_price_gwei,
+                        on_pre_broadcast=_record_pre_broadcast_tx_hash,
                     )
+                    # ``on_chain_completed`` was already flipped True inside
+                    # the pre_broadcast hook; reasserting here is a no-op but
+                    # keeps the post-condition explicit at the call site.
                     on_chain_completed = True
 
                     # Durability barrier: persist on-chain artifacts immediately

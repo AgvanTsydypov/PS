@@ -45,8 +45,9 @@ _EVENT_ID          = "evt-sig-99001"
 _EVENT_SLUG        = "polymarket-sig-test-99001"
 
 # Snapshot field values: chosen so each signature segment has a distinct
-# non-default character. ARCH=ICA, P(E)=6, EYG=X5B, INST=D, CLAIM=Ø, S0,
-# POL{event_id}.
+# non-default character. ARCH=ICA, P(E)=6, EYG=X5B, INST=F, CLAIM=Ø, S0,
+# POL{event_id}. INST collapses to two states (S=Singular for UNIQUE,
+# F=Fractal for any recurring cadence) — see _sig_inst in generate_card.py.
 _SNAPSHOT = {
     "archetype":     "ICARUS",
     "entry_bracket": "[0.60 - 0.80]",
@@ -54,7 +55,7 @@ _SNAPSHOT = {
     "yield":         "P50",
     "gravity":       "BASE",
 }
-_RECURRENCE  = "daily"          # → INST = D (not the U default)
+_RECURRENCE  = "daily"          # → INST = F (any non-UNIQUE recurrence)
 _SEASON_TYPE = "genesis"        # → S0 (permanent reservation)
 
 
@@ -216,7 +217,7 @@ class TestSignaturePersistence:
 
         expected = _expected_signature(claim_type="origin")
         # Sanity: the expected string actually exercises every segment.
-        assert expected == "ICA-6-X5B-D-Ø-S0-POLevt-sig-99001"
+        assert expected == "ICA-6-X5B-F-Ø-S0-POLevt-sig-99001"
 
         # ── Phase 2: signature actually landed in the row ───────────────────
         row = _read_claim(claim_id)

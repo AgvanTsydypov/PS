@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 from dotenv import load_dotenv
@@ -296,12 +296,22 @@ class EvmClient:
         winner_context: dict[str, Any] | None = None,
         polystars_card: dict[str, Any] | None = None,
         gas_price_gwei: float | None = None,
+        on_pre_broadcast: Callable[[str], None] | None = None,
     ) -> MintedNftResult:
         """Mint one ERC-721 NFT to user_wallet_address and return on-chain artefacts.
 
         ``gas_price_gwei``: when provided, pin EIP-1559 ``maxFeePerGas`` to this
         total (gwei). Used by the cron mint queue to pay the SafeGasPrice tier
         once the rapid-tier price gate has confirmed the network is cheap.
+
+        ``on_pre_broadcast``: invoked with the deterministic transaction hash
+        immediately *before* the raw tx is sent to the RPC, so the caller can
+        durably persist it. Closes the double-mint window: a crash between
+        broadcast and the caller's own DB write would otherwise leave the row
+        without a tx_hash, prompting a recovery requeue and a second mintTo
+        for an already-on-chain claim. The hash is derived from the signed
+        payload (``signed.hash``) and is identical to what
+        ``send_raw_transaction`` will return on success.
         """
         recipient = Web3.to_checksum_address(user_wallet_address.strip())
         self.validate_contract()
@@ -326,6 +336,7 @@ class EvmClient:
                 recipient=recipient,
                 metadata_uri=metadata_uri,
                 gas_price_gwei=gas_price_gwei,
+                on_pre_broadcast=on_pre_broadcast,
             )
         except Exception:
             self._unpin_pinata_url(metadata_uri)
@@ -350,8 +361,15 @@ class EvmClient:
         recipient: str,
         metadata_uri: str,
         gas_price_gwei: float | None = None,
+        on_pre_broadcast: Callable[[str], None] | None = None,
     ) -> tuple[int, str]:
-        """Build, sign, broadcast and confirm a mintTo tx. Returns (tokenId, tx_hash)."""
+        """Build, sign, broadcast and confirm a mintTo tx. Returns (tokenId, tx_hash).
+
+        ``on_pre_broadcast`` is fired with the deterministic ``signed.hash``
+        BEFORE ``send_raw_transaction`` so the caller can persist it durably
+        and own the recovery decision if the broadcast result is uncertain.
+        See ``mint_user_nft`` docstring for the rationale.
+        """
         chain_id = self._chain_id or self.w3.eth.chain_id
         nonce = self.w3.eth.get_transaction_count(self._account.address, "pending")
         fn = self._contract.functions.mintTo(recipient, metadata_uri)
@@ -371,6 +389,19 @@ class EvmClient:
         )
         signed = self._account.sign_transaction(tx)
 
+        # Deterministic tx hash, identical to what send_raw_transaction will
+        # return on success. Hand it to the caller now so a crash anywhere
+        # between here and the receipt-wait can still be reconciled by a
+        # recovery pass that calls eth_getTransactionReceipt(hash).
+        expected_hash_hex = signed.hash.hex()
+        if not expected_hash_hex.startswith("0x"):
+            expected_hash_hex = f"0x{expected_hash_hex}"
+        if on_pre_broadcast is not None:
+            # If the caller's persistence step itself fails we MUST abort —
+            # broadcasting a tx whose hash isn't durably recorded is the very
+            # thing this hook exists to prevent.
+            on_pre_broadcast(expected_hash_hex)
+
         for attempt in range(self.max_retries):
             try:
                 tx_hash_bytes = self.w3.eth.send_raw_transaction(signed.raw_transaction)
@@ -380,13 +411,31 @@ class EvmClient:
                     raise
                 time.sleep(self.retry_delay_seconds * (2 ** attempt))
 
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash_bytes, timeout=120)
+        # Receipt wait: extended for low-tier (SafeGasPrice) submissions, which
+        # routinely take 5-15 minutes on mainnet. ``EVM_MINT_RECEIPT_WAIT_SECONDS``
+        # tunes this without a code change. The previous 120s default would
+        # raise TimeExhausted long before a safe-tier tx confirmed; combined
+        # with the pre-broadcast hash recording above, recovery now owns any
+        # tx that is broadcast but not yet observed before this timeout fires.
+        wait_timeout = self._receipt_wait_seconds()
+        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash_bytes, timeout=wait_timeout)
         if receipt["status"] != 1:
             raise RuntimeError(f"Mint transaction reverted. tx={receipt['transactionHash'].hex()}")
 
         token_id = self._extract_token_id(receipt)
         tx_hash_hex = receipt["transactionHash"].hex()
         return token_id, tx_hash_hex if tx_hash_hex.startswith("0x") else f"0x{tx_hash_hex}"
+
+    @staticmethod
+    def _receipt_wait_seconds() -> int:
+        raw = (os.environ.get("EVM_MINT_RECEIPT_WAIT_SECONDS") or "").strip()
+        if not raw:
+            return 900
+        try:
+            value = int(raw)
+        except ValueError:
+            return 900
+        return value if value > 0 else 900
 
     def _build_tx(
         self,
@@ -742,6 +791,58 @@ class EvmClient:
         if isinstance(exc, timeout_types):
             return True
         return "timeout" in str(exc).lower() or "timed out" in str(exc).lower()
+
+    def fetch_mint_receipt_status(
+        self, tx_hash: str
+    ) -> tuple[str, int | None, str | None]:
+        """Look up a previously-broadcast mint tx by hash. Returns
+        ``(status, token_id, asset_address)`` where ``status`` is one of:
+
+        * ``"success"`` — receipt found, status==1, Transfer(mint) parsed.
+          ``token_id``/``asset_address`` are populated.
+        * ``"reverted"`` — receipt found, status==0. The on-chain mint failed;
+          no NFT exists. Caller should mark the row FAILED and free its cmn.
+        * ``"not_found"`` — neither receipt nor pending tx visible at the RPC.
+          The tx was either dropped from the mempool or never reached it.
+          Caller decides whether to wait longer or requeue.
+        * ``"pending"`` — receipt absent but the tx is still visible in the
+          mempool / has not yet been mined. Caller should keep waiting.
+        """
+        from web3.exceptions import TransactionNotFound  # local import: web3 lazy elsewhere
+
+        try:
+            receipt = self.w3.eth.get_transaction_receipt(tx_hash)
+        except TransactionNotFound:
+            receipt = None
+        except Exception:
+            # Treat RPC errors as "still pending" so we don't hastily requeue
+            # a tx that might just be behind a flaky node.
+            return ("pending", None, None)
+
+        if receipt is not None:
+            if int(receipt["status"]) != 1:
+                return ("reverted", None, None)
+            try:
+                token_id = self._extract_token_id(receipt)
+            except Exception:
+                # Receipt says success but no Transfer(mint) event — likely a
+                # different contract on this hash. Treat as not-our-tx so the
+                # caller doesn't claim a stranger's tokenId.
+                return ("not_found", None, None)
+            asset_address = f"{self._contract_address}/{token_id}"
+            return ("success", token_id, asset_address)
+
+        # No receipt — is the tx still known to the mempool?
+        try:
+            pending = self.w3.eth.get_transaction(tx_hash)
+        except TransactionNotFound:
+            pending = None
+        except Exception:
+            return ("pending", None, None)
+
+        if pending is not None:
+            return ("pending", None, None)
+        return ("not_found", None, None)
 
 
 class EvmReader:
