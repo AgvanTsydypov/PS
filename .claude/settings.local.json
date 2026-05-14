@@ -124,7 +124,13 @@
       "Bash(Select-String -Pattern \"claims|CREATE TABLE\")",
       "Bash(Select-Object -First 50)",
       "Bash(venv/Scripts/python.exe -m pytest -q -x --no-header -p no:cacheprovider -c /dev/null --rootdir . tests/test_token_gate.py)",
-      "Bash(echo \"exit $?\")"
+      "Bash(echo \"exit $?\")",
+      "WebFetch(domain:opensea.io)",
+      "mcp__designlang__search_tokens",
+      "mcp__designlang__get_region",
+      "Bash(cp \"C:\\\\Users\\\\AgvanD\\\\.claude\\\\projects\\\\C--Users-AgvanD-Desktop-University-QM-PolyStars\\\\54aaa453-852a-405e-b817-4d7a82841941\\\\tool-results\\\\webfetch-1778721411587-x5682a.bin\" /tmp/os.ico)",
+      "Read(//tmp/**)",
+      "Bash(python -c \"from PIL import Image; im=Image.open\\(r'C:\\\\Users\\\\AgvanD\\\\.claude\\\\projects\\\\C--Users-AgvanD-Desktop-University-QM-PolyStars\\\\54aaa453-852a-405e-b817-4d7a82841941\\\\tool-results\\\\webfetch-1778721411587-x5682a.bin'\\); print\\(im.size, im.mode\\); im.save\\(r'C:\\\\Users\\\\AgvanD\\\\Desktop\\\\University\\\\QM\\\\PolyStars\\\\opensea_favicon.png'\\)\")"
     ]
   },
   "enabledMcpjsonServers": [
