@@ -44,10 +44,11 @@ import subprocess
 import time
 import argparse
 import tempfile
+import json
 import requests
 from collections import defaultdict
 from datetime import datetime, date, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 import psycopg2.errors
 import psycopg2.extras
@@ -163,6 +164,36 @@ MINT_QUEUE_ADVISORY_LOCK_KEY = 727461
 MINT_QUEUE_STALE_PROCESSING_MINUTES = _env_int(
     "MINT_QUEUE_STALE_PROCESSING_MINUTES",
     30,
+)
+
+# RBF (Replace-By-Fee) tuning. Read at the start of each worker invocation.
+#
+# A PROCESSING row whose latest tx has been pending in the mempool longer
+# than this is considered "stuck" and the worker bumps it via RBF. The
+# threshold trades user-visible latency (lower → faster recovery from base
+# fee spikes, but more replacements during normal congestion) against
+# wallet costs (higher → fewer wasted bumps when the original would have
+# eventually mined). 20 min is the sweet spot for safe-tier sends on
+# mainnet — well above the median inclusion time but well below the 6h
+# fuse on the dropped-tx requeue path.
+MINT_QUEUE_REPLACE_AFTER_MINUTES = _env_int(
+    "MINT_QUEUE_REPLACE_AFTER_MINUTES", 20,
+)
+# Hard cap on RBF attempts per claim. Hitting this leaves the row in
+# PROCESSING with ``error_message='[stuck: max RBF attempts reached]'`` so
+# the admin UI can surface it without paging anyone (no Telegram alert per
+# user request). Operator inspects + chooses a manual remedy.
+MINT_QUEUE_MAX_RBF_ATTEMPTS = _env_int(
+    "MINT_QUEUE_MAX_RBF_ATTEMPTS", 5,
+)
+# Per-tx fee ceiling expressed as a multiple of the price-gate threshold.
+# Replacement cost (max_fee × gas_limit, converted to USD) must not exceed
+# this multiplier × MINT_QUEUE_MAX_USD_PER_MINT. With the default 5×, a
+# $0.50 gate allows up to $2.50 of bump headroom per claim — generous
+# enough for any realistic congestion spike, hard cap against runaway
+# bumping if the gas tracker is broken.
+MINT_QUEUE_RBF_FEE_CEILING_MULTIPLIER = float(
+    (os.getenv("MINT_QUEUE_RBF_FEE_CEILING_MULTIPLIER") or "").strip() or "5"
 )
 
 # Price gate: skip pickup whenever the estimated rapid-tier cost of one mintTo()
@@ -2340,7 +2371,7 @@ class SimplifiedScheduler:
                     cursor.execute(
                         f"""
                         SELECT id, season_id, collection_mint_number,
-                               tx_hash, asset_address,
+                               tx_hash, asset_address, tx_attempts,
                                EXTRACT(EPOCH FROM (NOW() - updated_at))::bigint AS stale_seconds
                         FROM   claims
                         WHERE  status = 'PROCESSING'
@@ -2401,22 +2432,100 @@ class SimplifiedScheduler:
                 continue
 
             if onchain_status == "not_found":
-                # Tx never made it to the chain (or was dropped from the
-                # mempool). We need a long fuse here because a SafeGasPrice
-                # tx legitimately can sit pending for hours. Only after the
-                # dropped-tx window do we assume the broadcast is gone for
-                # good and that requeueing is safe.
-                if stale_seconds < dropped_tx_requeue_hours * 3600:
-                    print(
-                        f"   ⏳ Recovery: claim {claim_id} tx {tx_hash[:10]}… not on chain "
-                        f"and not in mempool (stale {stale_seconds // 60}m, "
-                        f"will requeue after {dropped_tx_requeue_hours}h); leaving in PROCESSING"
-                    )
-                    self._touch_claim_updated_at(claim_id)
+                # Before deciding the latest tx is gone for good, walk the
+                # full tx_attempts audit in reverse to handle the RBF race:
+                # we sent a replacement, but the ORIGINAL tx mined first
+                # (it could have been picked up from a private mempool /
+                # MEV-Share / Flashbots). The latest hash returns not_found
+                # because nonce N is now consumed by the original; any older
+                # attempt for the same nonce, however, will return success.
+                #
+                # Without this fallback we'd requeue an already-on-chain
+                # claim and double-mint when the regular pickup loop
+                # re-broadcasts. With it, we finalize via the historical
+                # winning hash and free up the row cleanly.
+                attempts_audit = picked.get("tx_attempts") or []
+                if isinstance(attempts_audit, list) and len(attempts_audit) > 1:
+                    historical_winner: Optional[Tuple[str, str | None]] = None
+                    for prior in reversed(attempts_audit[:-1]):
+                        prior_hash = str(prior.get("hash") or "").strip()
+                        if not prior_hash or prior_hash == tx_hash:
+                            continue
+                        try:
+                            prior_status, _, prior_asset = (
+                                verifier.fetch_mint_receipt_status(prior_hash)
+                            )
+                        except Exception:
+                            continue
+                        if prior_status == "success":
+                            historical_winner = (prior_hash, prior_asset)
+                            break
+                    if historical_winner is not None:
+                        winning_hash, winning_asset = historical_winner
+                        print(
+                            f"   🔁 Recovery: claim {claim_id} latest tx "
+                            f"{tx_hash[:10]}… not_found, but historical attempt "
+                            f"{winning_hash[:10]}… succeeded — finalizing on the older hash"
+                        )
+                        # Promote the historical winner back to the live
+                        # tx_hash slot so /api/cards and explorer links
+                        # resolve to the actually-mined tx.
+                        conn_promote = self.manager.get_connection()
+                        try:
+                            with conn_promote.cursor() as cur_promote:
+                                cur_promote.execute(
+                                    """
+                                    UPDATE claims
+                                    SET    tx_hash       = %s,
+                                           asset_address = COALESCE(asset_address, %s),
+                                           updated_at    = NOW()
+                                    WHERE  id = %s
+                                      AND  status = 'PROCESSING'
+                                    """,
+                                    (winning_hash, winning_asset, claim_id),
+                                )
+                            conn_promote.commit()
+                        finally:
+                            conn_promote.close()
+                        # Re-enter the success branch by overwriting locals.
+                        tx_hash = winning_hash
+                        existing_asset_address = (
+                            existing_asset_address or winning_asset
+                        )
+                        asset_to_persist = existing_asset_address
+                        # Fall through to the normal success-completion code
+                        # path below (after the if/elif ladder for status).
+                        onchain_status = "success"
+                        # Continue down the function — handled by the
+                        # success branch that follows this block.
+                    else:
+                        # No historical winner — original eviction logic.
+                        if stale_seconds < dropped_tx_requeue_hours * 3600:
+                            print(
+                                f"   ⏳ Recovery: claim {claim_id} tx {tx_hash[:10]}… "
+                                f"not on chain and not in mempool (stale "
+                                f"{stale_seconds // 60}m, audit walked {len(attempts_audit)} "
+                                f"attempts, none mined); will requeue after "
+                                f"{dropped_tx_requeue_hours}h"
+                            )
+                            self._touch_claim_updated_at(claim_id)
+                            continue
+                        self._requeue_dropped_claim(claim_id, tx_hash, dropped_tx_requeue_hours)
+                        requeued += 1
+                        continue
+                else:
+                    # Single-attempt history (initial only): original behavior.
+                    if stale_seconds < dropped_tx_requeue_hours * 3600:
+                        print(
+                            f"   ⏳ Recovery: claim {claim_id} tx {tx_hash[:10]}… not on chain "
+                            f"and not in mempool (stale {stale_seconds // 60}m, "
+                            f"will requeue after {dropped_tx_requeue_hours}h); leaving in PROCESSING"
+                        )
+                        self._touch_claim_updated_at(claim_id)
+                        continue
+                    self._requeue_dropped_claim(claim_id, tx_hash, dropped_tx_requeue_hours)
+                    requeued += 1
                     continue
-                self._requeue_dropped_claim(claim_id, tx_hash, dropped_tx_requeue_hours)
-                requeued += 1
-                continue
 
             if onchain_status == "reverted":
                 self._fail_reverted_claim(claim_id, tx_hash)
@@ -2666,6 +2775,269 @@ class SimplifiedScheduler:
             return f"{row['type']}#{row['season_number']}"
         return f"{row[0]}#{row[1]}"
 
+    def _replace_stuck_transactions(
+        self,
+        *,
+        rapid_max_fee_wei: int,
+        eth_usd: float,
+    ) -> Dict[str, int]:
+        """Bump PROCESSING claims whose latest tx has been pending in the
+        mempool for longer than ``MINT_QUEUE_REPLACE_AFTER_MINUTES``.
+
+        Runs after recovery and before the QUEUED pickup loop so a stuck
+        nonce gets unblocked before the worker piles new mints behind it
+        (which would all inherit the stuck state).
+
+        Skip rules:
+          * ``len(tx_attempts) >= MINT_QUEUE_MAX_RBF_ATTEMPTS`` → mark
+            ``error_message='[stuck: max RBF attempts reached]'`` and stop
+            (no Telegram alert per design — admin UI surfaces the badge).
+          * Bumped fee × gas_limit > ceiling → same stuck path
+            (``ReplacementCapped``).
+          * ``ReplacementUnderpriced`` → log + same stuck path; the next
+            run will see the (still-stuck) row but won't try again because
+            the attempt cap takes precedence.
+          * ``ReplacementOriginalAlreadyMined`` → no-op; recovery on the
+            next tick will verify the previous hash and finalize.
+
+        Picks oldest stuck nonce first because Ethereum includes by nonce —
+        bumping the earliest stuck tx unblocks all later ones automatically.
+        """
+        from scripts.evm_service import (
+            EvmClient,
+            ReplacementCapped,
+            ReplacementUnderpriced,
+            ReplacementOriginalAlreadyMined,
+            ReplacementInsufficientFunds,
+        )
+
+        threshold_minutes = max(1, int(MINT_QUEUE_REPLACE_AFTER_MINUTES))
+        max_attempts = max(1, int(MINT_QUEUE_MAX_RBF_ATTEMPTS))
+        # Per-tx fee ceiling in wei. The price gate is in USD per mint, so
+        # we lift it to a wei ceiling here (5× by default).
+        threshold_usd = _mint_queue_max_usd_per_mint() * MINT_QUEUE_RBF_FEE_CEILING_MULTIPLIER
+        max_fee_wei_ceiling = (
+            int((threshold_usd / max(eth_usd, 1e-9)) * 1e18)
+            if eth_usd > 0 else None
+        )
+
+        replaced = 0
+        capped = 0
+        underpriced = 0
+        original_mined = 0
+
+        # Pull candidates: PROCESSING with non-empty tx_attempts older than
+        # threshold. We re-query each iteration because replacing the oldest
+        # stuck tx may surface another candidate that was hidden behind it
+        # in the ordering.
+        client: Optional[Any] = None
+        for _safety_iter in range(50):  # sanity cap on per-tick replacements
+            conn = self.manager.get_connection()
+            picked: Optional[Dict[str, Any]] = None
+            try:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                    cursor.execute(
+                        f"""
+                        SELECT id, season_id, tx_hash, tx_attempts,
+                               EXTRACT(EPOCH FROM (NOW() - updated_at))::bigint AS stale_seconds
+                        FROM   claims
+                        WHERE  status = 'PROCESSING'
+                          AND  tx_hash IS NOT NULL
+                          AND  jsonb_array_length(tx_attempts) > 0
+                          AND  jsonb_array_length(tx_attempts) < %s
+                          AND  updated_at < NOW() - INTERVAL '{threshold_minutes} minutes'
+                          AND  (error_message IS NULL OR error_message NOT LIKE '%%[stuck:%%')
+                        ORDER  BY updated_at ASC
+                        LIMIT  1
+                        """,
+                        (max_attempts,),
+                    )
+                    picked = cursor.fetchone()
+            finally:
+                conn.close()
+
+            if not picked:
+                break
+
+            claim_id = int(picked["id"])
+            attempts = picked.get("tx_attempts") or []
+            if not isinstance(attempts, list) or not attempts:
+                # Defensive — WHERE filter already excludes empty arrays.
+                continue
+            last_attempt = attempts[-1]
+            # Backfilled attempts have no fee data — we can't safely RBF
+            # them because we don't know what fee to bump above. Mark stuck.
+            if last_attempt.get("backfilled") or "max_fee_wei" not in last_attempt:
+                self._mark_claim_stuck(
+                    claim_id,
+                    "[stuck: legacy attempt without fee metadata; manual remedy required]",
+                )
+                capped += 1
+                continue
+            if not last_attempt.get("recipient") or not last_attempt.get("metadata_uri"):
+                # Same: can't rebuild calldata without these.
+                self._mark_claim_stuck(
+                    claim_id,
+                    "[stuck: legacy attempt missing calldata args; manual remedy required]",
+                )
+                capped += 1
+                continue
+
+            # Lazy: only stand up the client if we actually have work.
+            if client is None:
+                try:
+                    client = EvmClient()
+                except Exception as init_exc:
+                    print(
+                        f"   ⚠️  RBF: cannot init EvmClient ({type(init_exc).__name__}: "
+                        f"{init_exc}); skipping replacement pass"
+                    )
+                    break
+
+            stale_minutes = int(picked.get("stale_seconds") or 0) // 60
+            attempt_idx = len(attempts) + 1
+            print(
+                f"   ♻️  RBF: claim {claim_id} stuck {stale_minutes}m "
+                f"(attempt #{attempt_idx}/{max_attempts}); bumping fees"
+            )
+
+            def _persist_replacement(attempt: Dict[str, Any], _cid: int = claim_id) -> None:
+                # Same UPDATE shape as the initial pre_broadcast hook —
+                # latest tx_hash + appended attempt + bumped updated_at.
+                attempt_json = json.dumps(attempt)
+                conn_pb = self.manager.get_connection()
+                try:
+                    with conn_pb.cursor() as cur_pb:
+                        cur_pb.execute(
+                            """
+                            UPDATE claims
+                            SET    tx_hash     = %s,
+                                   tx_attempts = tx_attempts || %s::jsonb,
+                                   updated_at  = NOW()
+                            WHERE  id = %s
+                            """,
+                            (str(attempt["hash"]), attempt_json, _cid),
+                        )
+                    conn_pb.commit()
+                finally:
+                    conn_pb.close()
+
+            try:
+                client.replace_stuck_tx(
+                    previous_attempt=last_attempt,
+                    current_rapid_max_fee_wei=int(rapid_max_fee_wei),
+                    max_fee_wei_ceiling=max_fee_wei_ceiling,
+                    on_pre_broadcast=_persist_replacement,
+                )
+                replaced += 1
+                print(f"   ✅ RBF: claim {claim_id} replacement broadcast")
+            except ReplacementCapped as exc:
+                self._mark_claim_stuck(
+                    claim_id, f"[stuck: max RBF fee cap reached: {exc}]",
+                )
+                capped += 1
+                print(f"   🛑 RBF: claim {claim_id} fee cap hit — marked stuck")
+            except ReplacementUnderpriced as exc:
+                # Could be transient — but we still mark stuck so the next
+                # tick doesn't immediately retry. Operator can clear
+                # error_message manually to re-enable.
+                self._mark_claim_stuck(
+                    claim_id, f"[stuck: replacement underpriced: {exc}]",
+                )
+                underpriced += 1
+                print(f"   🛑 RBF: claim {claim_id} underpriced — marked stuck")
+            except ReplacementOriginalAlreadyMined:
+                # Original mined while we were preparing replacement.
+                # Don't mark stuck — recovery on next tick will verify.
+                original_mined += 1
+                print(
+                    f"   ℹ️  RBF: claim {claim_id} original already mined "
+                    f"(nonce too low); recovery will finalize"
+                )
+            except ReplacementInsufficientFunds as exc:
+                self._mark_claim_stuck(
+                    claim_id, f"[stuck: insufficient funds for RBF: {exc}]",
+                )
+                capped += 1
+                print(
+                    f"   🛑 RBF: claim {claim_id} insufficient funds — marked stuck. "
+                    "Refill the hot wallet to resume mints."
+                )
+                # Insufficient funds affects ALL pending replacements equally,
+                # no point continuing this pass.
+                break
+            except Exception as exc:
+                # Unknown error — log, mark stuck so we don't loop on it,
+                # continue trying other claims.
+                self._mark_claim_stuck(
+                    claim_id, f"[stuck: RBF error: {type(exc).__name__}: {exc}]",
+                )
+                capped += 1
+                print(
+                    f"   ⚠️  RBF: claim {claim_id} unexpected error "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        # Also handle claims that have already hit the attempt cap but
+        # haven't been marked yet (e.g. from a prior crashed worker).
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE claims
+                    SET    error_message = '[stuck: max RBF attempts reached at '
+                                           || NOW()::text || ']',
+                           updated_at = NOW()
+                    WHERE  status = 'PROCESSING'
+                      AND  jsonb_array_length(tx_attempts) >= %s
+                      AND  (error_message IS NULL OR error_message NOT LIKE '%%[stuck:%%')
+                    """,
+                    (max_attempts,),
+                )
+                cap_marked = cursor.rowcount or 0
+            conn.commit()
+        finally:
+            conn.close()
+
+        return {
+            "replaced": replaced,
+            "capped": capped + cap_marked,
+            "underpriced": underpriced,
+            "original_already_mined": original_mined,
+        }
+
+    def _mark_claim_stuck(self, claim_id: int, reason: str) -> None:
+        """Set ``error_message`` on a stuck claim so admin UI can flag it,
+        bump ``updated_at`` so the row drops out of the threshold window
+        until the message is cleared. Status stays PROCESSING — these claims
+        are NOT failed (the on-chain tx may still mine eventually); they
+        just need human attention."""
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE claims
+                    SET    error_message = %s,
+                           updated_at    = NOW()
+                    WHERE  id = %s
+                    """,
+                    (reason, claim_id),
+                )
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(
+                f"   ⚠️  RBF: claim {claim_id} mark-stuck failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        finally:
+            conn.close()
+
     def process_mint_queue(self, max_claims: int = 100) -> Dict:
         """Process QUEUED claims into on-chain mints. Picks up to ``max_claims``
         claims in FIFO order, atomically transitions each QUEUED → PROCESSING,
@@ -2769,6 +3141,33 @@ class SimplifiedScheduler:
                 f"💰 Price gate: enabled={price_gate_enabled} "
                 f"max_usd_per_mint=${price_gate_threshold_usd:.4f}"
             )
+
+            # RBF pass: bump any PROCESSING claims whose tx has been pending
+            # in the mempool too long. Runs BEFORE the pickup loop so a stuck
+            # nonce gets unblocked before the worker piles new mints behind
+            # it (which would otherwise inherit the stuck state). Needs one
+            # gas snapshot to know how much to bump above the previous fee.
+            try:
+                rbf_snap: GasTrackerSnapshot = fetch_eth_mint_gas_tracker()
+                rbf_rapid_max_fee_wei = int(rbf_snap.rapid_gwei * 1e9)
+                rbf_result = self._replace_stuck_transactions(
+                    rapid_max_fee_wei=rbf_rapid_max_fee_wei,
+                    eth_usd=rbf_snap.eth_usd,
+                )
+                if any(rbf_result.values()):
+                    print(
+                        f"♻️  RBF pass: replaced={rbf_result['replaced']} "
+                        f"capped={rbf_result['capped']} "
+                        f"underpriced={rbf_result['underpriced']} "
+                        f"original_already_mined={rbf_result['original_already_mined']} "
+                        f"(threshold={MINT_QUEUE_REPLACE_AFTER_MINUTES}min, "
+                        f"max_attempts={MINT_QUEUE_MAX_RBF_ATTEMPTS})"
+                    )
+            except Exception as rbf_exc:
+                # RBF is best-effort — a gas tracker outage or RPC flake
+                # must not block the rest of the worker (recovery + new
+                # claims still proceed; stuck rows will be retried next tick).
+                print(f"⚠️  RBF pass raised (continuing): {rbf_exc}")
 
             # Tier the next mint pays. Stays None when the gate is disabled,
             # which preserves the original "let the node pick" behaviour.
@@ -2927,28 +3326,52 @@ class SimplifiedScheduler:
                 on_chain_completed = False
 
                 def _record_pre_broadcast_tx_hash(
-                    tx_hash: str, _claim_id: int = claim_id
+                    attempt: Dict[str, Any], _claim_id: int = claim_id
                 ) -> None:
-                    """Persist the deterministic tx_hash BEFORE
-                    send_raw_transaction. Closes the double-mint window:
-                    after this commit lands, recovery sees ``tx_hash IS NOT
-                    NULL`` and looks up the on-chain status instead of
-                    requeueing. Bumps ``updated_at`` so the stale-PROCESSING
-                    timer resets for the upcoming receipt wait.
+                    """Persist the deterministic tx_hash AND the full attempt
+                    record BEFORE send_raw_transaction. Closes the double-mint
+                    window: after this commit lands, recovery sees ``tx_hash
+                    IS NOT NULL`` and looks up the on-chain status instead of
+                    requeueing.
+
+                    Also persists ``metadata_uri`` here (rather than after the
+                    receipt-wait, as before) so RBF can rebuild the same
+                    calldata for a replacement bump without re-pinning to
+                    Pinata. The metadata CID is committed-to the moment we
+                    broadcast — there is no scenario where the receipt-wait
+                    would invalidate it.
+
+                    Appends the attempt dict to ``tx_attempts`` so the audit
+                    trail starts from the very first send. RBF later appends
+                    additional 'replacement' entries; recovery walks this
+                    array in reverse if the live ``tx_hash`` returns
+                    not_found (handles the race where an older attempt mines
+                    even though we sent a replacement).
                     """
                     nonlocal on_chain_completed
+                    tx_hash = str(attempt["hash"])
+                    metadata_uri = str(attempt.get("metadata_uri") or "") or None
+                    attempt_json = json.dumps(attempt)
                     conn_pb = self.manager.get_connection()
                     try:
                         with conn_pb.cursor() as cur_pb:
                             cur_pb.execute(
                                 """
                                 UPDATE claims
-                                SET    tx_hash    = %s,
-                                       mint_chain = %s,
-                                       updated_at = NOW()
+                                SET    tx_hash      = %s,
+                                       mint_chain   = %s,
+                                       metadata_uri = COALESCE(metadata_uri, %s),
+                                       tx_attempts  = tx_attempts || %s::jsonb,
+                                       updated_at   = NOW()
                                 WHERE  id = %s
                                 """,
-                                (tx_hash, BLOCKCHAIN_ETHEREUM, _claim_id),
+                                (
+                                    tx_hash,
+                                    BLOCKCHAIN_ETHEREUM,
+                                    metadata_uri,
+                                    attempt_json,
+                                    _claim_id,
+                                ),
                             )
                         conn_pb.commit()
                     finally:

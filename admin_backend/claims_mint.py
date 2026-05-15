@@ -342,10 +342,20 @@ class ClaimsMintMixin:
                 cursor.execute(
                     """
                     SELECT id, user_wallet, phase_type, status, tx_hash, asset_address,
-                           timestamp, created_at, collection_mint_number,
+                           timestamp, created_at, updated_at, collection_mint_number,
                            error_message,
                            (error_message ILIKE '%%[auto-renumbered by recovery%%')
-                               AS is_renumbered
+                               AS is_renumbered,
+                           -- ── RBF-related fields for the Health column ────
+                           -- ``tx_attempts_count`` lets the UI show "RBF #2/5"
+                           -- without sending the full audit array (which can
+                           -- get heavy when a claim has been bumped repeatedly).
+                           jsonb_array_length(COALESCE(tx_attempts, '[]'::jsonb))
+                               AS tx_attempts_count,
+                           -- ``is_stuck`` surfaces the operator-attention badge
+                           -- written by _replace_stuck_transactions / wallet
+                           -- guards. UI colors the row red when true.
+                           (error_message LIKE '[stuck:%%') AS is_stuck
                     FROM claims
                     WHERE season_id = %s
                     ORDER BY created_at DESC, id DESC

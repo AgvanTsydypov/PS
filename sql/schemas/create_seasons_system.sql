@@ -222,6 +222,39 @@ ALTER TABLE claims ADD COLUMN IF NOT EXISTS signature TEXT;
 CREATE INDEX IF NOT EXISTS idx_claims_signature ON claims(signature)
     WHERE signature IS NOT NULL;
 
+-- ── tx_attempts: ordered audit of every broadcast attempt for this claim ──
+-- Each entry: {hash, nonce, max_fee_wei, max_priority_wei, kind, submitted_at}
+-- where ``kind`` is 'initial' (first send) or 'replacement' (RBF bump). The
+-- last element is the canonical "live" tx; older entries are kept so recovery
+-- can fall back to verifying historical hashes if the live one returns
+-- not_found (covers the race where an RBF replacement is sent but the
+-- original tx mines first — without the fallback we'd miss the on-chain
+-- mint and risk a double-mint via requeue).
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS tx_attempts JSONB
+    NOT NULL DEFAULT '[]'::jsonb;
+
+-- Backfill historical rows so the "always read latest from tx_attempts"
+-- invariant holds for both new and existing claims. Only touches rows with
+-- an actual tx_hash AND an empty attempts array, so this is idempotent and
+-- safe to re-run. The synthesized initial attempt has no fee details
+-- (we never recorded them at the time) — this is fine, RBF only ever reads
+-- fees from rows that came in under the new code path, not from backfilled
+-- historical ones.
+UPDATE claims
+SET    tx_attempts = jsonb_build_array(jsonb_build_object(
+           'hash',         tx_hash,
+           'kind',         'initial',
+           'submitted_at', COALESCE(timestamp, created_at)::text,
+           'backfilled',   true
+       ))
+WHERE  tx_hash IS NOT NULL
+  AND  (tx_attempts IS NULL OR tx_attempts = '[]'::jsonb);
+
+COMMENT ON COLUMN claims.tx_attempts IS
+    'Ordered audit of every broadcast attempt (initial + RBF replacements). '
+    'Last element is the live/canonical tx_hash; recovery falls back to '
+    'older entries if the live hash returns not_found.';
+
 -- Drop the legacy BEFORE-INSERT trigger / function from older deployments.
 -- Under the queue model these double-allocated collection_mint_number — a
 -- QUEUED row got a number, then the worker reused it, inflating the on-chain

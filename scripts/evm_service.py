@@ -12,7 +12,7 @@ import re
 import socket
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -239,6 +239,39 @@ class OwnedNft:
     metadata_uri: str | None
 
 
+# ── RBF exceptions ────────────────────────────────────────────────────────────
+# Distinct types per failure mode so the scheduler's ``_replace_stuck_transactions``
+# can dispatch cleanly: cap-hit means "stop trying this claim", underpriced means
+# "bump higher next time", original-mined means "ask recovery to verify the old
+# hash", insufficient-funds means "alert and stop".
+
+
+class ReplacementError(RuntimeError):
+    """Base for all RBF-specific failure modes from ``EvmClient.replace_stuck_tx``."""
+
+
+class ReplacementCapped(ReplacementError):
+    """Bumped fee × gas would exceed the per-tx ceiling. Caller should mark
+    the claim as stuck and stop attempting further replacements."""
+
+
+class ReplacementUnderpriced(ReplacementError):
+    """RPC rejected the replacement as underpriced (mempool has a higher
+    bid for this nonce, or the node enforces stricter rules than EIP-1559's
+    +12.5%). Caller can record the failure and try later with a larger bump."""
+
+
+class ReplacementOriginalAlreadyMined(ReplacementError):
+    """RPC rejected with 'nonce too low', meaning the original tx mined
+    while we were preparing the bump. Recovery should verify the prior
+    hash from ``tx_attempts`` to finalize the row as COMPLETED."""
+
+
+class ReplacementInsufficientFunds(ReplacementError):
+    """Wallet doesn't have ETH to cover the bumped tx. Operator alert
+    territory — no further claims will mint until the wallet is refilled."""
+
+
 class EvmClient:
     """Mint ERC-721 NFTs on Ethereum via POLYSTARS.mintTo(address, string)."""
 
@@ -300,7 +333,7 @@ class EvmClient:
         winner_context: dict[str, Any] | None = None,
         polystars_card: dict[str, Any] | None = None,
         gas_price_gwei: float | None = None,
-        on_pre_broadcast: Callable[[str], None] | None = None,
+        on_pre_broadcast: Callable[[dict[str, Any]], None] | None = None,
     ) -> MintedNftResult:
         """Mint one ERC-721 NFT to user_wallet_address and return on-chain artefacts.
 
@@ -308,14 +341,12 @@ class EvmClient:
         total (gwei). Used by the cron mint queue to pay the SafeGasPrice tier
         once the rapid-tier price gate has confirmed the network is cheap.
 
-        ``on_pre_broadcast``: invoked with the deterministic transaction hash
+        ``on_pre_broadcast``: invoked with the full attempt dict
+        (hash/nonce/max_fee_wei/max_priority_wei/kind/recipient/metadata_uri)
         immediately *before* the raw tx is sent to the RPC, so the caller can
-        durably persist it. Closes the double-mint window: a crash between
-        broadcast and the caller's own DB write would otherwise leave the row
-        without a tx_hash, prompting a recovery requeue and a second mintTo
-        for an already-on-chain claim. The hash is derived from the signed
-        payload (``signed.hash``) and is identical to what
-        ``send_raw_transaction`` will return on success.
+        durably persist it. Closes the double-mint window AND captures
+        everything RBF needs for a later bump. See ``_send_mint_tx`` and
+        ``replace_stuck_tx`` for how the dict is consumed.
         """
         recipient = Web3.to_checksum_address(user_wallet_address.strip())
         self.validate_contract()
@@ -375,15 +406,28 @@ class EvmClient:
         recipient: str,
         metadata_uri: str,
         gas_price_gwei: float | None = None,
-        on_pre_broadcast: Callable[[str], None] | None = None,
+        on_pre_broadcast: Callable[[dict[str, Any]], None] | None = None,
         broadcast_flag: dict[str, bool] | None = None,
     ) -> tuple[int, str]:
         """Build, sign, broadcast and confirm a mintTo tx. Returns (tokenId, tx_hash).
 
-        ``on_pre_broadcast`` is fired with the deterministic ``signed.hash``
-        BEFORE ``send_raw_transaction`` so the caller can persist it durably
-        and own the recovery decision if the broadcast result is uncertain.
-        See ``mint_user_nft`` docstring for the rationale.
+        ``on_pre_broadcast`` is fired with the full attempt dict BEFORE
+        ``send_raw_transaction`` so the caller can persist it durably and own
+        the recovery decision if the broadcast result is uncertain. The dict
+        carries everything RBF needs to bump the tx later (nonce, fees, kind);
+        see ``replace_stuck_tx`` for how those fields are consumed.
+
+        Attempt dict shape:
+            {
+                "hash":             "0x…",
+                "nonce":            int,
+                "max_fee_wei":      int,   # maxFeePerGas (or legacy gasPrice)
+                "max_priority_wei": int,   # maxPriorityFeePerGas (0 in legacy)
+                "kind":             "initial",
+                "submitted_at":     "2026-05-14T12:34:56+00:00",
+                "recipient":        "0x…",
+                "metadata_uri":     "ipfs://…",
+            }
 
         ``broadcast_flag``: optional single-cell dict (``{"value": False}``)
         that this method flips to ``True`` immediately before the first
@@ -416,11 +460,20 @@ class EvmClient:
         expected_hash_hex = signed.hash.hex()
         if not expected_hash_hex.startswith("0x"):
             expected_hash_hex = f"0x{expected_hash_hex}"
+
+        attempt = self._build_attempt_dict(
+            tx=tx,
+            tx_hash=expected_hash_hex,
+            nonce=nonce,
+            kind="initial",
+            recipient=recipient,
+            metadata_uri=metadata_uri,
+        )
         if on_pre_broadcast is not None:
             # If the caller's persistence step itself fails we MUST abort —
             # broadcasting a tx whose hash isn't durably recorded is the very
             # thing this hook exists to prevent.
-            on_pre_broadcast(expected_hash_hex)
+            on_pre_broadcast(attempt)
 
         # Point of no return for metadata-pin cleanup. After this line the
         # next statement attempts ``send_raw_transaction``; even if it raises,
@@ -464,6 +517,173 @@ class EvmClient:
         except ValueError:
             return 900
         return value if value > 0 else 900
+
+    @staticmethod
+    def _build_attempt_dict(
+        *,
+        tx: dict[str, Any],
+        tx_hash: str,
+        nonce: int,
+        kind: str,
+        recipient: str,
+        metadata_uri: str,
+    ) -> dict[str, Any]:
+        """Snapshot one broadcast attempt for ``claims.tx_attempts``.
+
+        Captures fees so RBF can compute the next bump (×1.20 over previous),
+        and recipient/metadata_uri so RBF can rebuild the same calldata
+        without rejoining other tables. ``kind`` is 'initial' for the first
+        send and 'replacement' for any RBF bump.
+        """
+        # EIP-1559 path: maxFeePerGas/maxPriorityFeePerGas. Legacy fallback
+        # uses gasPrice for both fields, with priority defaulting to 0 since
+        # legacy txs don't have a separate tip.
+        max_fee_wei = int(tx.get("maxFeePerGas") or tx.get("gasPrice") or 0)
+        max_priority_wei = int(
+            tx.get("maxPriorityFeePerGas")
+            if tx.get("maxPriorityFeePerGas") is not None
+            else 0
+        )
+        return {
+            "hash": tx_hash,
+            "nonce": int(nonce),
+            "max_fee_wei": max_fee_wei,
+            "max_priority_wei": max_priority_wei,
+            "kind": str(kind),
+            "submitted_at": datetime.now(tz=timezone.utc).isoformat(),
+            "recipient": recipient,
+            "metadata_uri": metadata_uri,
+        }
+
+    # ── RBF (Replace-By-Fee) ──────────────────────────────────────────────────
+
+    # Minimum bump factor over the previous attempt. EIP-1559 requires +12.5%
+    # for both maxFeePerGas and maxPriorityFeePerGas to evict the old tx from
+    # the mempool. We use 1.20 (×120%) to leave headroom against partial-tier
+    # mempools that enforce stricter replacement rules.
+    RBF_BUMP_FACTOR: float = 1.20
+
+    def replace_stuck_tx(
+        self,
+        *,
+        previous_attempt: dict[str, Any],
+        current_rapid_max_fee_wei: int,
+        max_fee_wei_ceiling: int | None = None,
+        on_pre_broadcast: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """Submit a Replace-By-Fee bump for a stuck mint tx.
+
+        ``previous_attempt`` is the most recent entry from ``claims.tx_attempts``
+        (carries old hash/nonce/fees and the calldata args ``recipient`` /
+        ``metadata_uri`` so we can rebuild the same ``mintTo`` call).
+
+        ``current_rapid_max_fee_wei`` is the live rapid-tier max fee from the
+        gas tracker — the new tx pays at least this much, even if ×1.20 of the
+        previous would be lower (otherwise the bump can't actually unstick
+        the tx in current network conditions).
+
+        ``max_fee_wei_ceiling`` is the per-tx hard cap; raises
+        :class:`ReplacementCapped` if the bumped fee exceeds it.
+
+        Raises one of:
+          * :class:`ReplacementCapped` — bumped fee × gas would exceed cap.
+          * :class:`ReplacementUnderpriced` — RPC rejected with "underpriced";
+            caller should record the failure and try later with a higher cap.
+          * :class:`ReplacementOriginalAlreadyMined` — RPC rejected with
+            "nonce too low", meaning the original tx mined while we were
+            preparing the bump. Recovery should verify the previous hash.
+          * :class:`ReplacementInsufficientFunds` — wallet doesn't have ETH
+            to cover the bumped tx. Operator alert territory.
+          * Any other RPC error propagates as-is.
+
+        On success returns the new attempt dict (for the caller to persist
+        via the same ``on_pre_broadcast`` channel as the initial send).
+        """
+        recipient = Web3.to_checksum_address(str(previous_attempt["recipient"]).strip())
+        metadata_uri = str(previous_attempt["metadata_uri"])
+        old_nonce = int(previous_attempt["nonce"])
+        old_max_fee = int(previous_attempt.get("max_fee_wei") or 0)
+        old_max_priority = int(previous_attempt.get("max_priority_wei") or 0)
+
+        # Bump policy: each fee is max(old × 1.20, current rapid). The cap is
+        # a hard ceiling — if even the minimum bump would breach it, bail
+        # rather than silently doing a smaller bump that EIP-1559 will reject.
+        bumped_max_fee = max(
+            int(old_max_fee * self.RBF_BUMP_FACTOR),
+            int(current_rapid_max_fee_wei or 0),
+        )
+        # Default priority floor: 2 gwei if we don't have a previous tip
+        # (e.g. legacy-pricing initial attempt). Bump previous tip by the
+        # same factor and clamp to ≤ max_fee.
+        default_priority = self.w3.to_wei(2, "gwei")
+        bumped_max_priority = max(
+            int(old_max_priority * self.RBF_BUMP_FACTOR),
+            int(default_priority),
+        )
+        bumped_max_priority = min(bumped_max_priority, bumped_max_fee)
+
+        chain_id = self._chain_id or self.w3.eth.chain_id
+        fn = self._contract.functions.mintTo(recipient, metadata_uri)
+
+        try:
+            gas_estimate = fn.estimate_gas({"from": self._account.address})
+        except ContractLogicError as exc:
+            # The contract reverts the simulation now — usually means state
+            # changed (e.g. supply exhausted) since the original tx was sent.
+            # Caller should mark the claim as needing manual review; we don't
+            # have a clean recovery path here.
+            raise RuntimeError(f"replacement mintTo would revert: {exc}") from exc
+
+        gas_limit = int(gas_estimate * self.GAS_MULTIPLIER)
+        if max_fee_wei_ceiling is not None:
+            tx_max_cost_wei = bumped_max_fee * gas_limit
+            if tx_max_cost_wei > int(max_fee_wei_ceiling):
+                raise ReplacementCapped(
+                    f"bumped fee {bumped_max_fee} wei × gas {gas_limit} = "
+                    f"{tx_max_cost_wei} wei exceeds ceiling {max_fee_wei_ceiling} wei"
+                )
+
+        tx = fn.build_transaction({
+            "from": self._account.address,
+            "nonce": old_nonce,                  # ← KEY: same nonce as stuck tx
+            "gas": gas_limit,
+            "maxFeePerGas": bumped_max_fee,
+            "maxPriorityFeePerGas": bumped_max_priority,
+            "chainId": chain_id,
+        })
+        signed = self._account.sign_transaction(tx)
+        new_hash = signed.hash.hex()
+        if not new_hash.startswith("0x"):
+            new_hash = f"0x{new_hash}"
+
+        attempt = self._build_attempt_dict(
+            tx=tx,
+            tx_hash=new_hash,
+            nonce=old_nonce,
+            kind="replacement",
+            recipient=recipient,
+            metadata_uri=metadata_uri,
+        )
+        # Persist BEFORE broadcast — same invariant as the initial send.
+        # Without this, a crash after send leaves the row pointing at the
+        # OLD hash even though the replacement is now in the mempool, so
+        # recovery would verify a hash that can never mine.
+        if on_pre_broadcast is not None:
+            on_pre_broadcast(attempt)
+
+        try:
+            self.w3.eth.send_raw_transaction(signed.raw_transaction)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "replacement transaction underpriced" in msg or "underpriced" in msg:
+                raise ReplacementUnderpriced(str(exc)) from exc
+            if "nonce too low" in msg or "nonce already" in msg:
+                raise ReplacementOriginalAlreadyMined(str(exc)) from exc
+            if "insufficient funds" in msg:
+                raise ReplacementInsufficientFunds(str(exc)) from exc
+            raise
+
+        return attempt
 
     def _build_tx(
         self,

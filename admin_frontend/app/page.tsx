@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { ArrowUpDown, Copy, Loader2, Pencil, RotateCcw } from "lucide-react";
 import { API_BASE, fetchJSON } from "./lib/api";
 import { ClaimsMint } from "./tabs/ClaimsMint";
+import { MintQueueHealth } from "./tabs/MintQueueHealth";
 
 type TabKey =
   | "overview"
@@ -46,6 +47,16 @@ type ClaimRow = {
   // (immutable) number — the badge in the UI surfaces this divergence.
   is_renumbered?: boolean;
   error_message?: string | null;
+  // Most recent updated_at — fed into the Health column to compute "stale
+  // for N min" for PROCESSING rows.
+  updated_at?: string;
+  // Length of claims.tx_attempts. > 1 means RBF has bumped the original
+  // tx at least once. The Health column shows "RBF #N" when this is > 1.
+  tx_attempts_count?: number;
+  // True when error_message starts with '[stuck:…]' — operator-attention
+  // badge written by RBF / wallet guards. The Health column colors the
+  // row red when this is set.
+  is_stuck?: boolean;
 };
 
 type WinnerWalletRow = {
@@ -172,6 +183,105 @@ type CardBuilderPayload = {
   gravity: string;
   leaderboard_rank: number;
 };
+
+// ── Health badge for the Claims-table "health" column ───────────────────────
+// Translates raw claim state (status + tx_attempts_count + is_stuck +
+// updated_at) into a single visual badge for at-a-glance triage. Goal: the
+// operator scrolls the table and instantly sees which rows want attention
+// without having to read error_message manually.
+//
+// Color palette is intentionally limited to four states and reuses the
+// existing supply-meter colors so we don't introduce new CSS:
+//   * grey   = passive (queued / completed / failed)
+//   * blue   = mint in progress, healthy
+//   * yellow = RBF-bumping (still automated, but not happening fast)
+//   * red    = stuck, needs human (or PROCESSING > 2h with no RBF activity)
+type ClaimHealthBadge = {
+  label: string;
+  background: string;
+  color: string;
+  tooltip: string;
+};
+
+function computeClaimHealthBadge(row: ClaimRow): ClaimHealthBadge {
+  const status = (row.status || "").toUpperCase();
+  // Stuck takes priority over everything — we want it visible regardless
+  // of the underlying status (which is always PROCESSING for stuck rows).
+  if (row.is_stuck) {
+    return {
+      label: "🔥 stuck",
+      background: "#fecaca",
+      color: "#7f1d1d",
+      tooltip: row.error_message || "Operator attention required",
+    };
+  }
+  if (status === "QUEUED") {
+    return {
+      label: "queued",
+      background: "#e5e7eb",
+      color: "#374151",
+      tooltip: "Awaiting pickup by the next mint-queue cron tick",
+    };
+  }
+  if (status === "PROCESSING") {
+    const attempts = row.tx_attempts_count ?? 0;
+    if (attempts > 1) {
+      return {
+        label: `RBF #${attempts}`,
+        background: "#fef3c7",
+        color: "#78350f",
+        tooltip:
+          `Replace-By-Fee active: tx has been bumped ${attempts - 1} ` +
+          `time${attempts - 1 === 1 ? "" : "s"}. Will continue auto-bumping ` +
+          "every 20 min until included or until cap (5 attempts) is reached.",
+      };
+    }
+    // Detect "stale processing" — over 2h with no RBF means the row has
+    // somehow escaped both the mint loop and the RBF pass. Surfaces edge
+    // cases (RPC degraded, gas tracker down) before they cascade.
+    if (row.updated_at) {
+      const ageMs = Date.now() - Date.parse(row.updated_at);
+      if (!Number.isNaN(ageMs) && ageMs > 2 * 3600 * 1000) {
+        return {
+          label: "⚠ stale",
+          background: "#fed7aa",
+          color: "#7c2d12",
+          tooltip:
+            `In PROCESSING for ${Math.floor(ageMs / 60000)} min with no RBF ` +
+            "activity — gas tracker or RPC may be degraded.",
+        };
+      }
+    }
+    return {
+      label: "minting",
+      background: "#dbeafe",
+      color: "#1e3a8a",
+      tooltip: "Mint in progress",
+    };
+  }
+  if (status === "COMPLETED") {
+    return {
+      label: "✓ minted",
+      background: "#d1fae5",
+      color: "#064e3b",
+      tooltip: row.tx_hash ? `tx ${row.tx_hash.slice(0, 12)}…` : "Minted",
+    };
+  }
+  if (status === "FAILED") {
+    return {
+      label: "✗ failed",
+      background: "#1f2937",
+      color: "#f9fafb",
+      tooltip: row.error_message || "Mint failed",
+    };
+  }
+  return {
+    label: status.toLowerCase() || "unknown",
+    background: "#e5e7eb",
+    color: "#374151",
+    tooltip: "",
+  };
+}
 
 function getInstanceFromRecurrence(recurrence: string | null): "FRACTAL" | "SINGULAR" {
   const value = String(recurrence ?? "").trim().toLowerCase();
@@ -1577,6 +1687,11 @@ export default function HomePage() {
 
       {tab === "overview" ? (
         <section className="panel">
+          {/* Mint queue health widget — self-polling, independent of the
+              page's other refreshers. Surfaces stuck claims and low hot-wallet
+              balance proactively so the operator notices issues before users
+              hit "mint not working" in Discord. */}
+          <MintQueueHealth />
           <div className="row">
             <button
               onClick={() =>
@@ -1703,47 +1818,67 @@ export default function HomePage() {
           <table>
             <thead>
               <tr>
-                <th>id</th><th>wallet</th><th>phase</th><th>status</th><th>cmn</th><th>tx_hash</th><th>asset_address</th><th>timestamp</th><th>created_at</th>
+                <th>id</th><th>wallet</th><th>phase</th><th>status</th><th>health</th><th>cmn</th><th>tx_hash</th><th>asset_address</th><th>timestamp</th><th>created_at</th>
               </tr>
             </thead>
             <tbody>
-              {seasonClaimsRows.map((r) => (
-                <tr key={r.id}>
-                  <td>{r.id}</td>
-                  <td>{r.user_wallet}</td>
-                  <td>{r.phase_type}</td>
-                  <td>{r.status}</td>
-                  <td>
-                    {r.collection_mint_number ?? ""}
-                    {r.is_renumbered ? (
+              {seasonClaimsRows.map((r) => {
+                const badge = computeClaimHealthBadge(r);
+                return (
+                  <tr key={r.id}>
+                    <td>{r.id}</td>
+                    <td>{r.user_wallet}</td>
+                    <td>{r.phase_type}</td>
+                    <td>{r.status}</td>
+                    <td>
                       <span
-                        title={
-                          "Recovery renumbered this row's collection_mint_number after a duplicate-key conflict. " +
-                          "The on-chain NFT and the IPFS-pinned card image still reference the ORIGINAL number — " +
-                          "the DB cmn shown here is the corrected one. " +
-                          (r.error_message ?? "")
-                        }
+                        title={badge.tooltip}
                         style={{
-                          marginLeft: 6,
                           padding: "1px 6px",
                           borderRadius: 4,
-                          background: "#fde68a",
-                          color: "#78350f",
+                          background: badge.background,
+                          color: badge.color,
                           fontSize: "0.75em",
                           fontWeight: 600,
-                          cursor: "help",
+                          cursor: badge.tooltip ? "help" : "default",
+                          whiteSpace: "nowrap",
                         }}
                       >
-                        renumbered
+                        {badge.label}
                       </span>
-                    ) : null}
-                  </td>
-                  <td>{r.tx_hash}</td>
-                  <td>{r.asset_address}</td>
-                  <td>{r.timestamp}</td>
-                  <td>{r.created_at}</td>
-                </tr>
-              ))}
+                    </td>
+                    <td>
+                      {r.collection_mint_number ?? ""}
+                      {r.is_renumbered ? (
+                        <span
+                          title={
+                            "Recovery renumbered this row's collection_mint_number after a duplicate-key conflict. " +
+                            "The on-chain NFT and the IPFS-pinned card image still reference the ORIGINAL number — " +
+                            "the DB cmn shown here is the corrected one. " +
+                            (r.error_message ?? "")
+                          }
+                          style={{
+                            marginLeft: 6,
+                            padding: "1px 6px",
+                            borderRadius: 4,
+                            background: "#fde68a",
+                            color: "#78350f",
+                            fontSize: "0.75em",
+                            fontWeight: 600,
+                            cursor: "help",
+                          }}
+                        >
+                          renumbered
+                        </span>
+                      ) : null}
+                    </td>
+                    <td>{r.tx_hash}</td>
+                    <td>{r.asset_address}</td>
+                    <td>{r.timestamp}</td>
+                    <td>{r.created_at}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </section>
