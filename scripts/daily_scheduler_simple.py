@@ -2371,7 +2371,7 @@ class SimplifiedScheduler:
                     cursor.execute(
                         f"""
                         SELECT id, season_id, collection_mint_number,
-                               tx_hash, asset_address, tx_attempts,
+                               tx_hash, asset_address, tx_attempts, metadata_uri,
                                EXTRACT(EPOCH FROM (NOW() - updated_at))::bigint AS stale_seconds
                         FROM   claims
                         WHERE  status = 'PROCESSING'
@@ -2393,7 +2393,13 @@ class SimplifiedScheduler:
             original_cmn = picked.get("collection_mint_number")
             tx_hash = str(picked.get("tx_hash") or "").strip()
             existing_asset_address = str(picked.get("asset_address") or "").strip() or None
+            existing_metadata_uri = str(picked.get("metadata_uri") or "").strip() or None
             stale_seconds = int(picked.get("stale_seconds") or 0)
+            # ``verified_token_id`` is populated by the success-branch receipt
+            # lookup (or the historical-winner fallback) and consumed by the
+            # post-flip hooks below to backfill ``claims.token_id`` — the
+            # recovery flip itself doesn't touch that column.
+            verified_token_id: Optional[int] = None
 
             if not tx_hash:
                 # Should be unreachable given the WHERE clause; defensive skip.
@@ -2411,7 +2417,7 @@ class SimplifiedScheduler:
                     break
 
             try:
-                onchain_status, _verified_token_id, verified_asset_address = (
+                onchain_status, fetched_token_id, verified_asset_address = (
                     verifier.fetch_mint_receipt_status(tx_hash)
                 )
             except Exception as verify_exc:
@@ -2422,6 +2428,9 @@ class SimplifiedScheduler:
                 # Bump updated_at so we back off until the next stale window.
                 self._touch_claim_updated_at(claim_id)
                 continue
+
+            if isinstance(fetched_token_id, int):
+                verified_token_id = fetched_token_id
 
             if onchain_status == "pending":
                 print(
@@ -2446,22 +2455,28 @@ class SimplifiedScheduler:
                 # winning hash and free up the row cleanly.
                 attempts_audit = picked.get("tx_attempts") or []
                 if isinstance(attempts_audit, list) and len(attempts_audit) > 1:
-                    historical_winner: Optional[Tuple[str, str | None]] = None
+                    historical_winner: Optional[Tuple[str, str | None, Optional[int]]] = None
                     for prior in reversed(attempts_audit[:-1]):
                         prior_hash = str(prior.get("hash") or "").strip()
                         if not prior_hash or prior_hash == tx_hash:
                             continue
                         try:
-                            prior_status, _, prior_asset = (
+                            prior_status, prior_token_id, prior_asset = (
                                 verifier.fetch_mint_receipt_status(prior_hash)
                             )
                         except Exception:
                             continue
                         if prior_status == "success":
-                            historical_winner = (prior_hash, prior_asset)
+                            historical_winner = (
+                                prior_hash,
+                                prior_asset,
+                                prior_token_id if isinstance(prior_token_id, int) else None,
+                            )
                             break
                     if historical_winner is not None:
-                        winning_hash, winning_asset = historical_winner
+                        winning_hash, winning_asset, winning_token_id = historical_winner
+                        if winning_token_id is not None:
+                            verified_token_id = winning_token_id
                         print(
                             f"   🔁 Recovery: claim {claim_id} latest tx "
                             f"{tx_hash[:10]}… not_found, but historical attempt "
@@ -2573,6 +2588,11 @@ class SimplifiedScheduler:
                             f"   ✅ Recovery: claim {claim_id} auto-completed "
                             f"(season {season_id}, cmn={original_cmn}, tx={tx_hash[:10]}…)"
                         )
+                        self._run_post_recovery_hooks(
+                            claim_id=claim_id,
+                            metadata_uri=existing_metadata_uri,
+                            token_id=verified_token_id,
+                        )
                         continue
                     except psycopg2.errors.UniqueViolation as conflict:
                         constraint = (
@@ -2635,6 +2655,11 @@ class SimplifiedScheduler:
                         f"cmn {original_cmn} → {new_cmn} (season {season_id}, "
                         f"on-chain metadata unchanged)"
                     )
+                    self._run_post_recovery_hooks(
+                        claim_id=claim_id,
+                        metadata_uri=existing_metadata_uri,
+                        token_id=verified_token_id,
+                    )
             except Exception as exc:
                 try:
                     conn.rollback()
@@ -2655,6 +2680,103 @@ class SimplifiedScheduler:
             'renumbered': renumbered,
             'finalized_failed': finalized_failed,
         }
+
+    def _run_post_recovery_hooks(
+        self,
+        *,
+        claim_id: int,
+        metadata_uri: Optional[str],
+        token_id: Optional[int],
+    ) -> None:
+        """Replay the post-mint side-effects that the normal QUEUE pickup
+        loop runs after a successful flip to COMPLETED, but which the
+        recovery path doesn't normally execute:
+
+        * Backfill ``claims.token_id`` from the on-chain receipt (recovery's
+          simple-flip / renumber UPDATEs don't touch that column).
+        * Reconstruct the ``polystars_card`` payload from the IPFS metadata
+          we already pinned (``card_display_data`` block — see
+          ``EvmClient._build_card_display_data_payload``) and call
+          ``denormalize_card_onto_claim`` so ``/api/cards/{slug}`` resolves
+          the recovered STAR.
+        * Fire the Telegram "NEW CLAIM" announcement.
+
+        All steps are best-effort: a failure here MUST NOT undo the
+        recovery flip that already committed (the row is COMPLETED on
+        chain and in the DB, side-effects are catch-up). On any error we
+        log and return — the operator can replay manually if needed.
+        """
+        if token_id is not None:
+            try:
+                conn = self.manager.get_connection()
+                try:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            UPDATE claims
+                            SET    token_id   = %s,
+                                   updated_at = NOW()
+                            WHERE  id = %s
+                              AND  token_id IS NULL
+                            """,
+                            (int(token_id), claim_id),
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception as exc:
+                print(
+                    f"   ⚠️  Recovery hooks: claim {claim_id} token_id backfill failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        if not metadata_uri:
+            return
+
+        try:
+            from scripts.polystars_card_payload import (
+                build_recovery_payload_from_ipfs,
+                denormalize_card_onto_claim,
+            )
+        except Exception as exc:
+            print(
+                f"   ⚠️  Recovery hooks: claim {claim_id} payload helpers import failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+
+        payload = build_recovery_payload_from_ipfs(metadata_uri)
+        if not payload:
+            # Legacy mint with no card_display_data block, gateway down, or
+            # malformed JSON — skip silently. The recovery flip is already
+            # committed; missing card fields are non-blocking.
+            return
+
+        try:
+            denormalize_card_onto_claim(
+                self.manager, claim_id=claim_id, polystars_card=payload,
+            )
+        except Exception as exc:
+            print(
+                f"   ⚠️  Recovery hooks: claim {claim_id} denormalize failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        try:
+            from scripts.telegram_notifier import notify_claim_minted
+            notify_claim_minted(
+                front_image_url=str(payload.get("front_image_url") or ""),
+                season_type=payload.get("season_type"),
+                collection_mint_number=payload.get("collection_mint_number"),
+                season_capacity=payload.get("season_size"),
+                card_url=str(payload.get("qr_payload") or ""),
+                archetype=payload.get("archetype"),
+            )
+        except Exception as exc:
+            print(
+                f"   ⚠️  Recovery hooks: claim {claim_id} telegram notify failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     def _touch_claim_updated_at(self, claim_id: int) -> None:
         """Bump ``updated_at`` so the stale-PROCESSING timer resets without

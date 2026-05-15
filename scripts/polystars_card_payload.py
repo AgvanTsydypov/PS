@@ -524,6 +524,95 @@ def _slug_from_qr_payload(qr_payload: Any) -> Optional[str]:
     return tail or None
 
 
+# Pinata public gateway used to resolve ``ipfs://<cid>`` metadata URIs back to
+# fetchable HTTPS. Match the production constant in ``scripts/evm_service.py``
+# (``PINATA_GATEWAY_PREFIX``) so a fix here doesn't need a parallel edit.
+_RECOVERY_IPFS_GATEWAY = "https://gateway.pinata.cloud/ipfs/"
+_RECOVERY_METADATA_TIMEOUT_SECONDS = float(
+    os.getenv("RECOVERY_METADATA_TIMEOUT_SECONDS", "8")
+)
+
+
+def _metadata_uri_to_https(metadata_uri: str) -> Optional[str]:
+    """Turn an on-chain ``tokenURI`` into a fetchable HTTPS URL.
+
+    Accepts the two shapes we actually produce: ``ipfs://<cid>[/path]`` and
+    ``https://gateway.pinata.cloud/ipfs/<cid>...``. Returns ``None`` for any
+    other scheme so the recovery helper can refuse to fetch from an
+    untrusted host.
+    """
+    s = str(metadata_uri or "").strip()
+    if not s:
+        return None
+    if s.startswith("ipfs://"):
+        rest = s[len("ipfs://"):]
+        if rest.lower().startswith("ipfs/"):
+            rest = rest[len("ipfs/"):]
+        rest = rest.lstrip("/")
+        if not rest:
+            return None
+        return f"{_RECOVERY_IPFS_GATEWAY}{rest}"
+    if s.startswith(_RECOVERY_IPFS_GATEWAY):
+        return s
+    return None
+
+
+def build_recovery_payload_from_ipfs(metadata_uri: str) -> Optional[Dict[str, Any]]:
+    """Reconstruct a ``polystars_card``-shaped dict from an already-pinned
+    metadata JSON. Used by the recovery path so historical-winner promotions
+    can run ``denormalize_card_onto_claim`` and ``notify_claim_minted``
+    without rebuilding the SVG/PNG (those are already on IPFS) or re-pinning.
+
+    The on-chain metadata we publish (``EvmClient._build_metadata_uri``)
+    embeds a ``card_display_data`` block whose keys are exactly the subset
+    of ``polystars_card`` consumed by the two downstream hooks
+    (``front_image_url``, ``back_image_url``, ``qr_payload``, ``card_title``,
+    ``primary_tag``, ``secondary_tag``, ``archetype``, ``season_type``,
+    ``season_size``, ``collection_mint_number``, …). So the payload returned
+    here is a passthrough of that block — no further reshaping needed.
+
+    Returns ``None`` when the URI isn't fetchable from our gateway, the JSON
+    fails to parse, or the ``card_display_data`` block is missing (legacy
+    mints predating that field). Caller treats ``None`` as "skip post-mint
+    side-effects" rather than retry — the recovery flip itself has already
+    succeeded.
+    """
+    https_url = _metadata_uri_to_https(metadata_uri)
+    if not https_url:
+        return None
+    try:
+        req = urllib.request.Request(
+            https_url,
+            method="GET",
+            headers={"Accept": "application/json"},
+        )
+        with urlopen_after_ssrf_check(
+            req, timeout=_RECOVERY_METADATA_TIMEOUT_SECONDS,
+        ) as response:
+            raw = response.read()
+        if not raw:
+            return None
+        metadata = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    card_display_data = metadata.get("card_display_data")
+    if not isinstance(card_display_data, dict):
+        return None
+    # Mandatory invariants for the downstream hooks. ``qr_payload`` drives the
+    # slug + the Telegram button; the two image URLs gate ``denormalize_card``
+    # writing anything at all (see early-return on :548). Bail early if any is
+    # missing so the caller's failure mode is "skip" rather than a half-write.
+    if not str(card_display_data.get("qr_payload") or "").strip():
+        return None
+    if not str(card_display_data.get("front_image_url") or "").strip():
+        return None
+    if not str(card_display_data.get("back_image_url") or "").strip():
+        return None
+    return dict(card_display_data)
+
+
 def denormalize_card_onto_claim(
     manager: DataLoadingManager,
     *,
