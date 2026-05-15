@@ -177,51 +177,33 @@ function hasPolymarketRank(traderRank: string | null | undefined): boolean {
 // ── Token-holder mint gate ────────────────────────────────────────────────────
 // A wallet may mint if it has a real Polymarket trader rank *or* it holds at
 // least TOKEN_GATE_MIN_BALANCE of the PolyStars project ERC-20 token on
-// Ethereum mainnet. NOTE: this is the project *token* contract, not the NFT
-// collection contract. Mirrors the server-side gate in user_web_backend/main.py
-// (TOKEN_GATE_* env) — keep the contract address / threshold in sync.
-const TOKEN_GATE_CONTRACT = (
-  process.env.NEXT_PUBLIC_TOKEN_GATE_CONTRACT ?? "0x9e68096675578CCcf6eb7AD01350f731DDe633eD"
-)
-  .trim()
-  .toLowerCase();
-const TOKEN_GATE_RPC_URL =
-  process.env.NEXT_PUBLIC_TOKEN_GATE_RPC_URL ?? "https://cloudflare-eth.com";
-// 50,000 tokens × 10^18 (the token uses 18 decimals). Built via the BigInt()
-// constructor rather than a `123n` literal so it compiles under the ES2017
-// TS target.
-const TOKEN_GATE_MIN_BALANCE_WEI = BigInt(50000) * BigInt(10) ** BigInt(18);
-// balanceOf(address) — keccak256("balanceOf(address)")[:4]
-const ERC20_BALANCE_OF_SELECTOR = "0x70a08231";
-
-/**
- * Best-effort on-chain check: does ``wallet`` hold >= the gate threshold of the
- * project token on Ethereum mainnet? Queries a public JSON-RPC endpoint with a
- * plain ``eth_call`` so it works regardless of which chain the connected wallet
- * is currently on. Any failure (RPC down, bad address) resolves to ``false`` —
- * the wallet then has to qualify via Polymarket trader rank instead.
- */
-async function walletHoldsGateToken(wallet: string | null | undefined): Promise<boolean> {
-  if (!wallet || !/^0x[0-9a-fA-F]{40}$/.test(wallet.trim())) return false;
-  const data = ERC20_BALANCE_OF_SELECTOR + wallet.trim().toLowerCase().replace(/^0x/, "").padStart(64, "0");
+// Ethereum mainnet. Authoritative check lives on the backend (uses the paid
+// Alchemy RPC + a 30s cache); this helper just relays its decision so the
+// "GET STAR" copy and the server-side mint gate never disagree.
+//
+// Returns ``true`` / ``false`` when the backend confirmed the on-chain read,
+// and ``null`` when the read could not be performed (RPC unavailable,
+// transient transport error). Callers must treat ``null`` as "don't block" —
+// the mint endpoint will still refuse if the wallet really doesn't qualify.
+async function fetchGateTokenHolds(
+  apiBaseFetcher: (path: string) => string,
+): Promise<boolean | null> {
   try {
-    const res = await fetch(TOKEN_GATE_RPC_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_call",
-        params: [{ to: TOKEN_GATE_CONTRACT, data }, "latest"],
-      }),
+    const res = await fetch(apiBaseFetcher("/api/me/gate-token-status"), {
+      method: "GET",
+      credentials: userApiCredentials,
     });
-    if (!res.ok) return false;
-    const json = (await res.json()) as { result?: string };
-    const hex = json?.result;
-    if (!hex || hex === "0x") return false;
-    return BigInt(hex) >= TOKEN_GATE_MIN_BALANCE_WEI;
+    if (!res.ok) return null;
+    const json = (await res.json()) as {
+      holds?: boolean | null;
+      status?: string;
+    };
+    const status = String(json?.status ?? "");
+    if (status !== "ok") return null;
+    if (typeof json?.holds !== "boolean") return null;
+    return json.holds;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -621,6 +603,11 @@ export default function UserDashboard() {
   }, [isSignedIn, walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // On-chain token-holder gate: re-check whenever the signed-in wallet changes.
+  // Delegates to the backend so the "GET STAR" UI and the server-side mint
+  // gate read the same balance via the same RPC. The previous direct
+  // public-RPC call from the browser silently treated any RPC error as
+  // "not a holder" and greyed out the button for legit holders whenever
+  // cloudflare-eth.com rate-limited the request.
   useEffect(() => {
     if (!isSignedIn || !walletAddress) {
       setGateTokenOk(null);
@@ -628,7 +615,7 @@ export default function UserDashboard() {
     }
     let cancelled = false;
     setGateTokenOk(null);
-    void walletHoldsGateToken(walletAddress).then((ok) => {
+    void fetchGateTokenHolds(buildApiUrl).then((ok) => {
       if (!cancelled) setGateTokenOk(ok);
     });
     return () => {
@@ -1020,8 +1007,8 @@ export default function UserDashboard() {
     }
     // Mint requires either a real Polymarket trader rank OR holding enough of
     // the project token. ``gateTokenOk === null`` means the on-chain check
-    // hasn't resolved yet — let the request through and rely on the server-side
-    // gate rather than blocking on a still-pending RPC read.
+    // hasn't resolved yet *or* the RPC was unavailable — in both cases let the
+    // request through and rely on the authoritative server-side gate.
     if (!hasPolymarketRank(traderRank) && gateTokenOk === false) {
       setMintError("WALLET HAS NO POLYMARKET TRADING HISTORY AND IS NOT A PROJECT TOKEN HOLDER.");
       return;
@@ -1154,8 +1141,6 @@ export default function UserDashboard() {
     let blockedReason = "";
     if (!hasRank && gateTokenOk === false) {
       blockedReason = "WALLET HAS NO POLYMARKET TRADING HISTORY AND IS NOT A PROJECT TOKEN HOLDER.";
-    } else if (!hasRank && gateTokenOk === null) {
-      blockedReason = "CHECKING ELIGIBILITY...";
     } else if (eligibilityLoading && !stream) {
       blockedReason = "CHECKING ELIGIBILITY...";
     } else if (eligibilityError) {

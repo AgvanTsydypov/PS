@@ -56,6 +56,7 @@ class TestPhaseResult:
         assert set(d.keys()) == {
             "phase", "is_claim_open", "requires_origin",
             "reason", "season_type", "supply_remaining", "supply_total",
+            "phase_ends_at",
         }
 
     def test_to_dict_values_match(self):

@@ -44,6 +44,7 @@ export type ActiveSeasonView = {
   total: number;
   phase: string;
   phaseReason: string;
+  phaseCountdown: string;
 };
 
 type ActiveSeasonsBoardProps = {
@@ -203,6 +204,24 @@ export const ActiveSeasonsBoard = forwardRef<
         }
       }
 
+      let phaseCountdown = "";
+      if (season.phase_ends_at) {
+        const phaseEndMs = Date.parse(season.phase_ends_at);
+        if (!Number.isNaN(phaseEndMs)) {
+          const diffSec = Math.floor((phaseEndMs - syncedNowMs) / 1000);
+          if (diffSec > 0) {
+            const days = Math.floor(diffSec / 86400);
+            const hours = Math.floor((diffSec % 86400) / 3600);
+            const mins = Math.floor((diffSec % 3600) / 60);
+            const secs = diffSec % 60;
+            phaseCountdown =
+              days > 0
+                ? `${days}d ${hours}h ${mins}m`
+                : `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+          }
+        }
+      }
+
       return {
         id: season.id,
         type: season.type,
@@ -214,6 +233,7 @@ export const ActiveSeasonsBoard = forwardRef<
         total,
         phase: season.phase || "unknown",
         phaseReason: season.phase_reason || "",
+        phaseCountdown,
       } satisfies ActiveSeasonView;
     });
   }, [activeSeasons, syncedNowMs]);
@@ -242,7 +262,14 @@ export const ActiveSeasonsBoard = forwardRef<
               </div>
               <div className="season-card-phase">
                 <span>CURRENT PHASE</span>
-                <strong>{season.phase}</strong>
+                <div className="season-card-phase-value">
+                  {season.phaseCountdown ? (
+                    <span className="season-card-phase-countdown">
+                      {season.phaseCountdown}
+                    </span>
+                  ) : null}
+                  <strong>{season.phase}</strong>
+                </div>
               </div>
               <div className="season-card-bottom">
                 <span>STARS AVAILABLE</span>

@@ -35,6 +35,7 @@ class PhaseResult:
     season_type: str
     supply_remaining: int
     supply_total: int
+    phase_ends_at: Optional[datetime] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -45,6 +46,9 @@ class PhaseResult:
             "season_type": self.season_type,
             "supply_remaining": self.supply_remaining,
             "supply_total": self.supply_total,
+            "phase_ends_at": (
+                self.phase_ends_at.isoformat() if self.phase_ends_at else None
+            ),
         }
 
 
@@ -310,6 +314,7 @@ class SeasonManager:
                 season_type=season_type,
                 supply_remaining=remaining_supply,
                 supply_total=total_supply,
+                phase_ends_at=None,
             ).to_dict()
 
         now = datetime.now(timezone.utc)
@@ -337,6 +342,7 @@ class SeasonManager:
                 season_type=season_type,
                 supply_remaining=remaining_supply,
                 supply_total=total_supply,
+                phase_ends_at=start_date,
             ).to_dict()
 
         # Genesis uses the same phase windows as standard for days 1-6,
@@ -351,6 +357,7 @@ class SeasonManager:
                     season_type=season_type,
                     supply_remaining=remaining_supply,
                     supply_total=total_supply,
+                    phase_ends_at=breach_end,
                 ).to_dict()
 
             if now < vault_end:
@@ -366,6 +373,7 @@ class SeasonManager:
                     season_type=season_type,
                     supply_remaining=remaining_supply,
                     supply_total=total_supply,
+                    phase_ends_at=vault_end,
                 ).to_dict()
 
             return PhaseResult(
@@ -376,6 +384,7 @@ class SeasonManager:
                 season_type=season_type,
                 supply_remaining=remaining_supply,
                 supply_total=total_supply,
+                phase_ends_at=None,
             ).to_dict()
 
         # Transmission: day 10 (last 24h of 10-day cycle).
@@ -388,6 +397,7 @@ class SeasonManager:
                 season_type=season_type,
                 supply_remaining=remaining_supply,
                 supply_total=total_supply,
+                phase_ends_at=transmission_end,
             ).to_dict()
 
         # After the cycle window ended, keep claims closed.
@@ -400,6 +410,7 @@ class SeasonManager:
                 season_type=season_type,
                 supply_remaining=remaining_supply,
                 supply_total=total_supply,
+                phase_ends_at=None,
             ).to_dict()
 
         # Breach: active while both conditions hold.
@@ -412,6 +423,7 @@ class SeasonManager:
                 season_type=season_type,
                 supply_remaining=remaining_supply,
                 supply_total=total_supply,
+                phase_ends_at=breach_end,
             ).to_dict()
 
         # Vault: active after breach ended and before day 6.
@@ -428,6 +440,7 @@ class SeasonManager:
                 season_type=season_type,
                 supply_remaining=remaining_supply,
                 supply_total=total_supply,
+                phase_ends_at=vault_end,
             ).to_dict()
 
         # Scavenge: day 7 through end of day 9.
@@ -439,6 +452,7 @@ class SeasonManager:
             season_type=season_type,
             supply_remaining=remaining_supply,
             supply_total=total_supply,
+            phase_ends_at=scavenge_end,
         ).to_dict()
 
     def check_user_eligibility(self, wallet_address: str) -> Dict[str, Any]:
