@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import mimetypes
@@ -172,7 +174,12 @@ class ChallengeRequest(BaseModel):
 
 class VerifyRequest(BaseModel):
     challenge_id: str
-    wallet_address: str = Field(min_length=42, max_length=42)
+    # Optional: the authoritative wallet is the one stored alongside the
+    # challenge at /challenge time. We accept the field for backwards
+    # compatibility with existing clients and, when present, sanity-check it
+    # against the stored value. Dropping the trust on this client-supplied
+    # field shrinks the input that has to be validated.
+    wallet_address: Optional[str] = Field(default=None, min_length=42, max_length=42)
     signature: str
 
 
@@ -247,6 +254,13 @@ app.add_middleware(
 )
 
 CHALLENGE_TTL_SECONDS = int(os.getenv("USER_WEB_CHALLENGE_TTL_SECONDS", "300"))
+# Storage cap: at most this many outstanding (unconsumed, unexpired) challenges
+# per wallet. Older rows are dropped on each new /challenge so a spammy client
+# cannot inflate wallet_siwe_challenges. Cap is on stored rows, not request
+# rate (the latter is enforced by RATE_LIMITS["/api/auth/wallet/challenge"]).
+MAX_OUTSTANDING_CHALLENGES_PER_WALLET = max(
+    1, int(os.getenv("USER_WEB_MAX_OUTSTANDING_CHALLENGES_PER_WALLET", "5"))
+)
 season_manager = SeasonManager(use_local_db=True, connection_factory=_get_connection)
 mint_service = SeasonWorkbenchService()
 JWT_ALG = "HS256"
@@ -707,12 +721,30 @@ def _insert_siwe_challenge_record(
     try:
         with conn.cursor() as cursor:
             _purge_stale_siwe_challenges(cursor)
+            wallet_lower = wallet_address.lower()
+            # Drop-oldest cap: keep at most MAX_OUTSTANDING_CHALLENGES_PER_WALLET-1
+            # before inserting the new row, so the post-insert count stays at the
+            # cap. Drop-oldest (vs. reject) avoids letting an attacker who shares
+            # the wallet field DoS the legit user — the latest, currently-being-
+            # signed challenge always survives.
+            cursor.execute(
+                """
+                DELETE FROM wallet_siwe_challenges
+                WHERE id IN (
+                    SELECT id FROM wallet_siwe_challenges
+                    WHERE wallet_address = %s
+                    ORDER BY created_at DESC
+                    OFFSET %s
+                )
+                """,
+                (wallet_lower, MAX_OUTSTANDING_CHALLENGES_PER_WALLET - 1),
+            )
             cursor.execute(
                 """
                 INSERT INTO wallet_siwe_challenges (id, wallet_address, message, expires_at)
                 VALUES (%s, %s, %s, %s)
                 """,
-                (challenge_id, wallet_address.lower(), message, expires_at),
+                (challenge_id, wallet_lower, message, expires_at),
             )
         conn.commit()
     except Exception:
@@ -764,6 +796,32 @@ def _delete_siwe_challenge_by_id(challenge_id: str) -> None:
     except Exception:
         conn.rollback()
         logger.exception("Failed to delete SIWE challenge id=%s", challenge_id)
+    finally:
+        conn.close()
+
+
+def _consume_siwe_challenge(challenge_id: str) -> bool:
+    """Atomically consume the challenge row in a single statement.
+
+    Returns True iff THIS call deleted the row (won the race). Two concurrent
+    /verify requests for the same challenge_id will both pass _peek + signature
+    recovery; only the one whose DELETE...RETURNING actually finds the row
+    proceeds. The loser gets False and must be rejected so a single signed
+    nonce cannot mint two sessions.
+    """
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM wallet_siwe_challenges WHERE id = %s RETURNING id",
+                (challenge_id,),
+            )
+            won = cursor.fetchone() is not None
+        conn.commit()
+        return won
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -1612,6 +1670,129 @@ _token_gate_balance_cache: Dict[str, Tuple[float, bool]] = {}
 _token_gate_balance_cache_lock = threading.Lock()
 
 
+# ── Mint IP-hash sybil gate ──────────────────────────────────────────────────
+# When a wallet qualifies for a mint via the *token-holder* path (no Polymarket
+# trader rank), we additionally require that its current request IP has not
+# been used by some OTHER wallet to mint in the same season. This is a
+# soft-but-cheap defence against the "split 50k tokens across N fresh wallets,
+# mint N NFTs from the same machine" pattern. Trader-rank wallets are NOT
+# subject to this gate (they're already sybil-resistant via real Polymarket
+# trading history, and a CGNAT/coffee-shop IP collision would falsely block
+# legitimate users).
+#
+# The hash is HMAC-SHA256(salt, ip). Raw SHA256 of an IPv4 address is
+# brute-forceable in seconds (only 2^32 inputs); the secret salt is what makes
+# the stored value pseudonymous. Hashes are written into
+# ``user_wallet_signins.last_ip_hash`` at sign-in and on each successful mint,
+# so the join over that column captures both "same IP signed in two wallets"
+# and "same IP minted two wallets" sybil shapes.
+MINT_IP_GATE_ENABLED = os.getenv("MINT_IP_GATE_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+# Cap of distinct prior-minted wallets allowed to share an IP hash within a
+# single season. 1 = strict (no other wallet from this IP may have minted).
+MINT_IP_GATE_MAX_PER_SEASON = max(
+    1, int(os.getenv("MINT_IP_GATE_MAX_PER_SEASON", "1"))
+)
+
+
+def _mint_ip_hash_salt() -> Optional[bytes]:
+    """Secret salt used for HMAC-SHA256 of client IPs. None disables the gate.
+
+    Hard-required in production by ``_enforce_production_security_invariants``;
+    in development we fall back to a deterministic dev salt so the feature is
+    locally testable without extra config.
+    """
+    raw = os.getenv("MINT_IP_HASH_SALT", "").strip()
+    if raw:
+        return raw.encode("utf-8")
+    if os.getenv("NODE_ENV", "development") == "development":
+        return b"dev-only-mint-ip-hash-salt-change-me"
+    return None
+
+
+def _hash_client_ip(ip: Optional[str]) -> Optional[str]:
+    """Return ``hex(HMAC-SHA256(salt, ip))`` or None if either input is missing.
+
+    A None return means "we cannot identify this caller" (no salt configured,
+    or the request had no resolvable client IP). Callers must treat that as
+    "skip the gate" rather than "deny" — failing closed on missing salt would
+    silently lock everyone out the moment a config knob breaks.
+    """
+    if not ip or ip == "unknown":
+        return None
+    salt = _mint_ip_hash_salt()
+    if not salt:
+        return None
+    return hmac.new(salt, ip.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _count_other_wallets_minted_from_ip(
+    ip_hash: str,
+    season_id: int,
+    self_wallet: str,
+) -> int:
+    """How many *other* wallets share this IP hash AND already have an
+    active claim in this season. Used by the token-holder mint gate to
+    refuse a mint when the same IP has already been spent on another
+    wallet's mint in the same season.
+
+    "Active" matches the same statuses claims_check_caps counts: anything
+    that holds a slot, including QUEUED rows that have not been finalized
+    on-chain yet — otherwise an attacker could submit N mints in parallel
+    before any of them flips to COMPLETED.
+    """
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(DISTINCT LOWER(c.user_wallet))
+                FROM user_wallet_signins uws
+                JOIN claims c
+                  ON LOWER(c.user_wallet) = LOWER(uws.wallet_address)
+                WHERE uws.last_ip_hash = %s
+                  AND c.season_id = %s
+                  AND c.status IN ('QUEUED','PENDING','PROCESSING','COMPLETED')
+                  AND LOWER(c.user_wallet) <> LOWER(%s)
+                """,
+                (ip_hash, season_id, self_wallet),
+            )
+            row = cursor.fetchone()
+            return int(row[0] or 0) if row else 0
+    finally:
+        conn.close()
+
+
+def _record_mint_ip_hash(wallet_address: str, ip_hash: str) -> None:
+    """Bind the wallet to its mint-time IP hash so subsequent sybil checks
+    see the up-to-date binding. Updates only the IP-hash column; sign-in
+    timestamps stay untouched.
+    """
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE user_wallet_signins
+                SET last_ip_hash = %s
+                WHERE LOWER(wallet_address) = LOWER(%s)
+                """,
+                (ip_hash, wallet_address),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            "Failed to record mint-time IP hash for wallet=%s", wallet_address
+        )
+    finally:
+        conn.close()
+
+
 def _get_token_gate_contract():
     """Return a read-only Web3 contract handle for the project token, or None.
 
@@ -1981,6 +2162,16 @@ def _enforce_production_security_invariants() -> None:
                 "domain. Set it to your user-facing https origin."
             )
 
+    if MINT_IP_GATE_ENABLED:
+        ip_salt = os.getenv("MINT_IP_HASH_SALT", "").strip()
+        if len(ip_salt) < 32:
+            raise RuntimeError(
+                "MINT_IP_HASH_SALT must be at least 32 characters when "
+                "MINT_IP_GATE_ENABLED is on (set MINT_IP_GATE_ENABLED=0 to "
+                "disable the IP sybil gate). Hashing IPv4 addresses without a "
+                "secret salt is brute-forceable in seconds."
+            )
+
 
 @app.on_event("startup")
 def startup_checks() -> None:
@@ -2198,9 +2389,8 @@ def wallet_challenge(payload: ChallengeRequest):
 
 
 @app.post("/api/auth/wallet/verify")
-def wallet_verify(payload: VerifyRequest):
+def wallet_verify(payload: VerifyRequest, request: Request):
     _require_wallet_actions_enabled()
-    wallet_address = _normalize_evm_address(payload.wallet_address)
     challenge, peek_status = _peek_siwe_challenge(payload.challenge_id)
     if peek_status == "missing":
         raise HTTPException(status_code=400, detail="Unknown challenge")
@@ -2208,8 +2398,14 @@ def wallet_verify(payload: VerifyRequest):
         _delete_siwe_challenge_by_id(payload.challenge_id)
         raise HTTPException(status_code=400, detail="Challenge expired")
     assert challenge is not None
-    if challenge.wallet_address.lower() != wallet_address.lower():
-        raise HTTPException(status_code=400, detail="Challenge wallet mismatch")
+    # The authoritative wallet is the one bound to the challenge in the DB at
+    # /challenge time. wallet_address in the payload is now optional and only
+    # serves as a sanity check for clients that still send it.
+    wallet_address = _normalize_evm_address(challenge.wallet_address)
+    if payload.wallet_address is not None:
+        submitted = _normalize_evm_address(payload.wallet_address)
+        if submitted.lower() != wallet_address.lower():
+            raise HTTPException(status_code=400, detail="Challenge wallet mismatch")
 
     encoded = encode_defunct(text=challenge.message)
     try:
@@ -2219,6 +2415,14 @@ def wallet_verify(payload: VerifyRequest):
 
     if recovered_address.lower() != wallet_address.lower():
         raise HTTPException(status_code=401, detail="Signature verification failed")
+
+    # One-shot guarantee: atomically consume the challenge row before issuing
+    # any session. If a concurrent /verify already deleted it, we lost the
+    # race and must refuse — otherwise the same signed nonce could mint two
+    # sessions. Done as its own connection so it doesn't depend on whether
+    # the later upsert tx commits.
+    if not _consume_siwe_challenge(payload.challenge_id):
+        raise HTTPException(status_code=409, detail="Challenge already consumed")
 
     stored_proxy_wallet, stored_trader_rank = _load_wallet_signin_snapshot(wallet_address)
     proxy_wallet = stored_proxy_wallet
@@ -2245,28 +2449,32 @@ def wallet_verify(payload: VerifyRequest):
             # Keep last known rank from DB when leaderboard API is unavailable.
             trader_rank = stored_trader_rank
 
+    # Capture sign-in IP hash so the mint-time sybil gate has at least one
+    # data point per wallet even if the user signs in once and mints later.
+    # COALESCE on update preserves the last known hash when the current request
+    # has no resolvable IP (proxy misconfig, internal probe), so we don't blank
+    # out a previously-recorded hash with NULL.
+    signin_ip_hash = _hash_client_ip(_rate_limit_client_ip(request))
+
     conn = _get_connection()
     try:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO user_wallet_signins (wallet_address, first_seen_at, last_signed_in_at, sign_in_count, proxy_wallet, trader_rank)
-                VALUES (%s, NOW(), NOW(), 1, %s, %s)
+                INSERT INTO user_wallet_signins (wallet_address, first_seen_at, last_signed_in_at, sign_in_count, proxy_wallet, trader_rank, last_ip_hash)
+                VALUES (%s, NOW(), NOW(), 1, %s, %s, %s)
                 ON CONFLICT (wallet_address)
                 DO UPDATE SET
                     last_signed_in_at = NOW(),
                     sign_in_count = user_wallet_signins.sign_in_count + 1,
                     proxy_wallet = EXCLUDED.proxy_wallet,
-                    trader_rank = EXCLUDED.trader_rank
+                    trader_rank = EXCLUDED.trader_rank,
+                    last_ip_hash = COALESCE(EXCLUDED.last_ip_hash, user_wallet_signins.last_ip_hash)
                 RETURNING wallet_address, first_seen_at, last_signed_in_at, sign_in_count, proxy_wallet, trader_rank
                 """,
-                (wallet_address, proxy_wallet, trader_rank),
+                (wallet_address, proxy_wallet, trader_rank, signin_ip_hash),
             )
             row = cursor.fetchone()
-            cursor.execute(
-                "DELETE FROM wallet_siwe_challenges WHERE id = %s",
-                (payload.challenge_id,),
-            )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -2751,6 +2959,7 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
         effective_trader_rank,
         has_rank,
     )
+    qualified_via_token_holder = False
     if not has_rank:
         # Fallback gate: a wallet with no Polymarket rank may still mint if it
         # holds at least TOKEN_GATE_MIN_BALANCE of the project token on mainnet.
@@ -2767,6 +2976,7 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
                 status_code=403,
                 detail="WALLET HAS NO POLYMARKET TRADING HISTORY AND IS NOT A POLYSTARS TOKEN HOLDER.",
             )
+        qualified_via_token_holder = True
 
     try:
         season_id = int(payload.season_id)
@@ -2774,6 +2984,39 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Invalid season_id")
     if season_id <= 0:
         raise HTTPException(status_code=400, detail="Invalid season_id")
+
+    # IP sybil gate: applied ONLY to token-holder-path mints. Trader-rank
+    # wallets are sybil-resistant by virtue of real Polymarket trading history;
+    # putting them through an IP gate would falsely block CGNAT/coffee-shop
+    # users with no defensive payoff. The gate refuses when another wallet
+    # already minted from the same IP hash in the same season.
+    request_ip = _rate_limit_client_ip(request)
+    request_ip_hash = _hash_client_ip(request_ip)
+    if (
+        MINT_IP_GATE_ENABLED
+        and qualified_via_token_holder
+        and request_ip_hash is not None
+    ):
+        collisions = _count_other_wallets_minted_from_ip(
+            request_ip_hash, season_id, wallet
+        )
+        if collisions >= MINT_IP_GATE_MAX_PER_SEASON:
+            logger.info(
+                "IP sybil gate blocked mint: wallet=%s season_id=%s "
+                "collisions=%d cap=%d",
+                wallet,
+                season_id,
+                collisions,
+                MINT_IP_GATE_MAX_PER_SEASON,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Another wallet from this network has already minted in "
+                    "this season via the token-holder path. Only one "
+                    "token-holder mint per network is allowed per season."
+                ),
+            )
 
     mint_request = MintClaimRequest(
         wallet=wallet,
@@ -2784,7 +3027,7 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
         db_only=False,
     )
     try:
-        return mint_service.run_queue_mint_request(mint_request)
+        result = mint_service.run_queue_mint_request(mint_request)
     except HTTPException:
         raise
     except ValueError as exc:
@@ -2811,6 +3054,15 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
             status_code=503,
             detail="Mint could not be completed. Please try again later.",
         ) from None
+
+    # Bind this wallet to its mint-time IP hash so subsequent token-holder
+    # mints from the same network collide on the next sybil check, even if
+    # the user originally signed in from a different IP. Best-effort: a DB
+    # blip here must not undo the mint that already enqueued.
+    if MINT_IP_GATE_ENABLED and qualified_via_token_holder and request_ip_hash:
+        _record_mint_ip_hash(wallet, request_ip_hash)
+
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────────
