@@ -1,0 +1,201 @@
+ что нужно делать при stuck
+
+● Runbook: что делать когда видишь [stuck: ...]
+
+  0. Найти все застрявшие
+
+  SELECT id, season_id, user_wallet, tx_hash,
+         jsonb_array_length(tx_attempts) AS attempts,
+         error_message,
+         NOW() - updated_at AS stuck_for
+  FROM   claims
+  WHERE  status = 'PROCESSING'
+    AND  error_message LIKE '[stuck:%'
+  ORDER  BY updated_at ASC;
+
+  Прежде чем что-то трогать — посмотри сколько их. Если 1-2 — точечно. Если 10+ — это системная проблема (wallet пуст, RPC лежит, или скачок газа). Сначала чини корень.
+
+  1. Понять, что показывает error_message
+
+  Сообщение всегда говорит почему автоматика сдалась. По нему выбираешь стратегию:
+
+  ┌────────────────────────────┬─────────────────────────────┬───────────────────────┐
+  │    Что в error_message     │        Что произошло        │ Что делать (см. ниже) │
+  ├────────────────────────────┼─────────────────────────────┼───────────────────────┤
+  │ max RBF attempts reached   │ 5 раз подряд bump не помог  │ A                     │
+  ├────────────────────────────┼─────────────────────────────┼───────────────────────┤
+  │ max RBF fee cap reached    │ Bump ×1.20 превысил $2.50   │ B                     │
+  ├────────────────────────────┼─────────────────────────────┼───────────────────────┤
+  │ replacement underpriced    │ Нода отвергла замену        │ C                     │
+  ├────────────────────────────┼─────────────────────────────┼───────────────────────┤
+  │ insufficient funds for RBF │ Wallet пуст                 │ D                     │
+  ├────────────────────────────┼─────────────────────────────┼───────────────────────┤
+  │ legacy attempt ...         │ Old бэкфилл, нет fee-данных │ E                     │
+  ├────────────────────────────┼─────────────────────────────┼───────────────────────┤
+  │ RBF error: <Что-то>        │ Неизвестная ошибка          │ F                     │
+  └────────────────────────────┴─────────────────────────────┴───────────────────────┘
+
+  2. Перед любыми действиями — проверь что на чейне
+
+  Перед тем как «оживлять» застрявший claim, обязательно убедись что tx ещё не включилась. Бывает: RBF упал с ошибкой, badge поставлен, а через 5 минут оригинальная tx неожиданно намайнилась. Если ты сейчас попробуешь снова — будет двойной mint.
+
+  # Берёшь tx_hash из claim
+  psql ... -c "SELECT tx_hash, tx_attempts FROM claims WHERE id = <ID>;"
+
+  # Проверяешь каждый hash из tx_attempts на Etherscan
+  # https://etherscan.io/tx/0x...
+
+  # Или через RPC:
+  cast tx 0xaaa... --rpc-url $EVM_RPC_URL
+
+  Что искать:
+  - Если хоть один hash имеет status=1 (success): tx уже на чейне. Ничего не делай руками — recovery на следующем тике сам это подхватит через tx_attempts fallback и допишет COMPLETED. Просто подожди.
+  - Если все hash = not_found или status=0 (reverted): tx реально не прошла, можно лечить.
+
+  ---
+  A. max RBF attempts reached
+
+  5 раз подряд bump ×1.20 не сработал — это очень редкий случай. Скорее всего сеть была в реальном капитальном congestion (gas spike в 5+ раз).
+
+  Что сделать:
+  1. Проверь текущий base fee (https://etherscan.io/gastracker). Если он сейчас в норме (≤ 50 gwei) — RBF просто хочет ещё одну попытку.
+  2. Подними cap и сними badge:
+  UPDATE claims
+  SET    error_message = NULL,
+         updated_at    = NOW() - INTERVAL '21 minutes'
+  WHERE  id = <ID>;
+  # На сервере scheduler:
+  MINT_QUEUE_MAX_RBF_ATTEMPTS=10 docker compose restart scheduler
+  3. На следующем cron-тике RBF попробует attempt #6. Если всё ок — намайнится, COMPLETED.
+
+  ---
+  B. max RBF fee cap reached
+
+  Bump получился дороже потолка ($2.50 = 5× от $0.50 price gate). Сеть прямо сейчас дорогая.
+
+  Что сделать:
+  - Подождать. Cap намеренно низкий чтобы не сжигать деньги в плохих условиях. На следующий день base fee часто падает в 2-3 раза, тогда snimaесь badge и RBF пройдёт без поднятия cap.
+  - Поднять cap (если срочно):
+  MINT_QUEUE_RBF_FEE_CEILING_MULTIPLIER=10 docker compose restart scheduler
+  UPDATE claims SET error_message = NULL,
+                    updated_at = NOW() - INTERVAL '21 minutes'
+  WHERE id = <ID>;
+  - Теперь до $5 на mint. После того как разрулилось — верни обратно =5.
+
+  ---
+  C. replacement underpriced
+
+  RPC сказал «слишком маленький bump». Обычно значит: в мемпуле уже есть ещё более высокая замена для этого nonce. Это либо ты сам когда-то послал руками, либо MEV-бот случайно подобрал.
+
+  Что сделать:
+  1. Сначала проверь nonce руками:
+  cast tx 0x<hash из tx_attempts> --rpc-url $EVM_RPC_URL
+  # Запомни nonce из output
+  cast nonce $WALLET_ADDRESS --rpc-url $EVM_RPC_URL
+  # Это latest mined nonce. Если он >= nonce застрявшей tx — она УЖЕ включилась под другим hash.
+  2. Если nonce уже использован сетью — recovery сам найдёт через tx_attempts fallback. Снимать badge не надо, просто подожди следующий recovery-pass.
+  3. Если nonce ещё свободен — кто-то конкурирует. Подними MINT_QUEUE_RBF_FEE_CEILING_MULTIPLIER до 10, сними badge, RBF на следующем тике попробует ещё больший bump (×1.44 от исходной).
+
+  ---
+  D. insufficient funds for RBF
+
+  В hot wallet'е нет ETH. Это блокирует ВСЕ mints, не только эту строку.
+
+  Что сделать:
+  1. Залить ETH:
+  cast send $HOT_WALLET --value 0.1ether --rpc-url $EVM_RPC_URL --private-key $FUND_KEY
+  2. Дождаться подтверждения:
+  cast balance $HOT_WALLET --rpc-url $EVM_RPC_URL
+  3. Снять badge со всех stuck-строк одной командой:
+  UPDATE claims
+  SET    error_message = NULL,
+         updated_at    = NOW() - INTERVAL '21 minutes'
+  WHERE  status = 'PROCESSING'
+    AND  error_message LIKE '%insufficient funds%';
+  4. На следующем тике RBF пройдёт по всем сразу.
+
+  ---
+  E. legacy attempt without fee metadata / legacy attempt missing calldata args
+
+  Backfilled-строка — это claim, заминченный до RBF-фичи. У него в tx_attempts есть только hash и нет max_fee_wei / recipient / metadata_uri. RBF не может строить bump, потому что не знает что бампить и что отправлять.
+
+  Что сделать:
+  1. Прежде всего — проверь что tx реально не на чейне (cast tx 0x...). Если она COMPLETED по факту, просто допиши COMPLETED руками:
+  UPDATE claims SET status = 'COMPLETED' WHERE id = <ID>;
+  2. Если tx реально потерялась — нужно сбросить и реквью:
+  UPDATE claims
+  SET    status                 = 'QUEUED',
+         tx_hash                = NULL,
+         collection_mint_number = NULL,
+         tx_attempts            = '[]'::jsonb,
+         error_message          = '[manually requeued: legacy stuck claim]',
+         updated_at             = NOW()
+  WHERE  id = <ID>;
+  2. Воркер подберёт как новый QUEUED, выдаст новый cmn, заминтит заново. Только если уверен что старая tx не пройдёт — иначе double-mint.
+
+  ---
+  F. RBF error: <ExcType>: <message>
+
+  Неизвестная ошибка. Скорее всего:
+  - RPC отвалился именно в момент broadcast
+  - Web3.py вернул что-то странное
+  - Контракт revert при estimate_gas (например, supply исчерпан)
+
+  Что сделать:
+  1. Прочитай error_message целиком — там точный тип исключения и сообщение.
+  2. Если это would revert — контракт прямо сейчас отказывается принимать tx. Это надо разбирать руками: проверь supply, paused-флаг, blacklist:
+  cast call $EVM_CONTRACT_ADDRESS "totalSupply()(uint256)" --rpc-url $EVM_RPC_URL
+  cast call $EVM_CONTRACT_ADDRESS "paused()(bool)" --rpc-url $EVM_RPC_URL  # если есть
+  3. Если ошибка транзиентная (RPC timeout, JSON parse error) — просто сними badge:
+  UPDATE claims SET error_message = NULL,
+                    updated_at = NOW() - INTERVAL '21 minutes'
+  WHERE id = <ID>;
+  4. Если повторяется одна и та же ошибка — заводи тикет, ищи root cause.
+
+  ---
+  Если решил вообще «отменить» mint и пометить FAILED
+
+  В редких случаях claim лучше похоронить (например, supply контракта реально исчерпан и mint никогда не пройдёт):
+
+  UPDATE claims
+  SET    status                 = 'FAILED',
+         collection_mint_number = NULL,
+         error_message          = '[manually failed: <reason>]',
+         updated_at             = NOW()
+  WHERE  id = <ID>
+    AND  status = 'PROCESSING';
+
+  collection_mint_number = NULL важно — освобождает слот в нумерации сезона для следующего mint'а.
+
+  Но! Не делай это пока не убедился по cast tx что ни один tx_hash из tx_attempts не находится в pending в мемпуле. Иначе через час эта tx может неожиданно намайниться, и ты получишь NFT, который в БД помечен как FAILED. Рассинхрон админки с чейном.
+
+  Универсальная «безопасная разморозка»
+
+  Если не понятно что делать и хочется просто «попробовать ещё раз»:
+
+  -- Снимает все stuck badges, кроме insufficient_funds (где сначала надо залить ETH)
+  UPDATE claims
+  SET    error_message = NULL,
+         updated_at    = NOW() - INTERVAL '21 minutes'
+  WHERE  status = 'PROCESSING'
+    AND  error_message LIKE '[stuck:%'
+    AND  error_message NOT LIKE '%insufficient funds%';
+
+  Безопасно если:
+  - Wallet не пуст.
+  - Base fee сейчас в норме (< 50 gwei).
+  - Все tx_hash из tx_attempts на Etherscan показывают dropped или not_found.
+
+  Если все три условия выполнены — RBF на следующем тике перепопытается, и в большинстве случаев включит.
+
+  TL;DR-чеклист
+
+  1. SELECT claims WHERE error_message LIKE '[stuck:%'  — посмотри сколько
+  2. Прочитай error_message конкретной строки           — поймёшь причину
+  3. Cast tx по всем hash из tx_attempts                — НЕ ВКЛЮЧИЛАСЬ ЛИ УЖЕ?
+  4. Если включилась → ждать recovery (он сам всё сделает)
+  5. Если нет → причинно-специфичный фикс из таблицы выше
+  6. Снять badge SQL'ем                                 — error_message = NULL
+  7. Подождать следующий cron-тик (5 минут)             — должно проститься
+
+  Если 6-7 шаг прошёл, но через 30 минут снова [stuck:, причём с тем же сообщением — значит причина не устранена, иди в шаг 2.

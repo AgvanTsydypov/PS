@@ -986,13 +986,18 @@ class TestPreBroadcastHookOrdering:
         client.GAS_MULTIPLIER = 1.3
 
         # Drive _send_mint_tx with the production-style hook closure.
-        def on_pre_broadcast(tx_hash: str) -> None:
+        # Hook signature now takes the full attempt dict (RBF makes this
+        # the canonical way to capture nonce + fees alongside the hash).
+        captured_attempts: list[dict] = []
+
+        def on_pre_broadcast(attempt: dict) -> None:
+            captured_attempts.append(attempt)
             conn = make_real_connection()
             try:
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE claims SET tx_hash = %s, updated_at = NOW() WHERE id = %s",
-                        (tx_hash, cid),
+                        (attempt["hash"], cid),
                     )
                 conn.commit()
             finally:
@@ -1010,3 +1015,18 @@ class TestPreBroadcastHookOrdering:
         # refactor exists to eliminate.
         assert observed["db_tx_hash_at_send"] is not None
         assert observed["db_tx_hash_at_send"].startswith("0xdeadbeef")
+
+        # Attempt dict carries everything RBF needs to bump later.
+        assert len(captured_attempts) == 1
+        attempt = captured_attempts[0]
+        assert attempt["hash"].startswith("0xdeadbeef")
+        assert attempt["kind"] == "initial"
+        assert attempt["nonce"] == 0  # from get_transaction_count mock
+        assert attempt["recipient"] == "0x" + "0" * 40
+        assert attempt["metadata_uri"] == "ipfs://test"
+        # Fees come from the build_transaction mock returning {"foo":"bar"}
+        # (no max_fee field), so the helper falls back to 0 — that's fine
+        # for this test, what matters is the keys exist for RBF to read.
+        assert "max_fee_wei" in attempt
+        assert "max_priority_wei" in attempt
+        assert "submitted_at" in attempt

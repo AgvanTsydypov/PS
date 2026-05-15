@@ -2394,6 +2394,156 @@ def gas_tracker_eth_mint() -> Dict[str, Any]:
     return payload
 
 
+# ── Mint queue health snapshot ────────────────────────────────────────────────
+# Powers the Overview health widget. Composes three independent reads:
+#   1. Counts from claims (one SQL).
+#   2. Hot wallet ETH balance (one RPC, cached).
+#   3. Gas snapshot (reuses _GAS_TRACKER_CACHE so we don't double-fetch).
+# Each source degrades independently — a failed RPC just blanks the wallet
+# field, the rest of the payload still renders. Avoids hard 500s that would
+# blank the whole widget when one upstream is flaky.
+
+_WALLET_BALANCE_CACHE: Dict[str, Any] = {"value": None, "expires_at": 0.0}
+_WALLET_BALANCE_LOCK = threading.Lock()
+_WALLET_BALANCE_TTL_SECONDS = 60.0
+
+
+def _fetch_hot_wallet_balance() -> Dict[str, Any]:
+    """Returns ``{address, eth_balance, fetched_at}`` or ``{error}`` on failure.
+    Cached 60s to spare the RPC quota — wallet balance moves slowly enough
+    that a one-minute lag in the widget is invisible to the operator."""
+    now = monotonic()
+    with _WALLET_BALANCE_LOCK:
+        cached = _WALLET_BALANCE_CACHE.get("value")
+        if cached is not None and _WALLET_BALANCE_CACHE.get("expires_at", 0.0) > now:
+            return cached
+    try:
+        from scripts.evm_service import EvmClient
+        client = EvmClient()
+        address = client.public_key
+        wei_balance = client.w3.eth.get_balance(address)
+        eth_balance = float(wei_balance) / 1e18
+        payload = {
+            "ok": True,
+            "address": address,
+            "eth_balance": eth_balance,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        payload = {
+            "ok": False,
+            "error": str(exc),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+    with _WALLET_BALANCE_LOCK:
+        _WALLET_BALANCE_CACHE["value"] = payload
+        _WALLET_BALANCE_CACHE["expires_at"] = monotonic() + _WALLET_BALANCE_TTL_SECONDS
+    return payload
+
+
+@app.get("/api/mint-queue/health")
+def mint_queue_health() -> Dict[str, Any]:
+    """One-shot snapshot used by the Overview health widget.
+
+    Returns:
+        {
+          "counts": {queued, processing, processing_with_rbf, stuck,
+                     completed_today, failed_today},
+          "last_mint_at": ISO timestamp or None,
+          "hot_wallet": {address, eth_balance} or {error},
+          "gas": {rapid_gwei, rapid_usd_per_mint, eth_usd} or {error},
+          "fetched_at": ISO timestamp,
+        }
+
+    Each sub-block degrades independently: the counts query is the only
+    hard requirement (it's local Postgres, can't really fail without
+    bringing down the whole admin); RPC and gas tracker may be ``ok:false``
+    and the widget renders ``--`` for those fields rather than blanking.
+    """
+    counts: Dict[str, Any] = {}
+    last_mint_at: Optional[str] = None
+    counts_error: Optional[str] = None
+    try:
+        conn = service.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                      COUNT(*) FILTER (WHERE status = 'QUEUED')                   AS queued,
+                      COUNT(*) FILTER (WHERE status = 'PROCESSING'
+                                       AND (error_message IS NULL
+                                            OR error_message NOT LIKE '[stuck:%')) AS processing,
+                      COUNT(*) FILTER (WHERE status = 'PROCESSING'
+                                       AND jsonb_array_length(tx_attempts) > 1
+                                       AND (error_message IS NULL
+                                            OR error_message NOT LIKE '[stuck:%')) AS processing_with_rbf,
+                      COUNT(*) FILTER (WHERE status = 'PROCESSING'
+                                       AND error_message LIKE '[stuck:%')         AS stuck,
+                      COUNT(*) FILTER (WHERE status = 'COMPLETED'
+                                       AND timestamp > NOW() - INTERVAL '24 hours') AS completed_today,
+                      COUNT(*) FILTER (WHERE status = 'FAILED'
+                                       AND updated_at > NOW() - INTERVAL '24 hours') AS failed_today,
+                      MAX(timestamp) FILTER (WHERE status = 'COMPLETED')          AS last_mint_at
+                    FROM claims
+                    """
+                )
+                row = cursor.fetchone()
+        finally:
+            conn.close()
+        if row:
+            counts = {
+                "queued": int(row[0] or 0),
+                "processing": int(row[1] or 0),
+                "processing_with_rbf": int(row[2] or 0),
+                "stuck": int(row[3] or 0),
+                "completed_today": int(row[4] or 0),
+                "failed_today": int(row[5] or 0),
+            }
+            if row[6] is not None:
+                # ``timestamp`` column is TIMESTAMPTZ — psycopg2 returns datetime.
+                last_mint_at = row[6].isoformat() if hasattr(row[6], "isoformat") else str(row[6])
+    except Exception as exc:
+        counts_error = str(exc)
+
+    wallet_payload = _fetch_hot_wallet_balance()
+    # Reuse the gas-tracker cache directly so we don't double-fetch when the
+    # widget and the gas-tracker page are both open. If the cache is empty
+    # / expired we just leave the gas block as ``ok:false`` rather than
+    # forcing a fresh fetch here — the dedicated /api/gas-tracker endpoint
+    # warms it on its own polling cycle.
+    gas_block: Dict[str, Any]
+    with _GAS_TRACKER_LOCK:
+        gas_cached = _GAS_TRACKER_CACHE.get("value")
+        gas_expires_at = _GAS_TRACKER_CACHE.get("expires_at", 0.0)
+    if gas_cached is not None and gas_expires_at > monotonic():
+        gas_block = {
+            "ok": True,
+            "rapid_gwei": gas_cached.get("rapid_gwei"),
+            "rapid_usd_per_mint": gas_cached.get("rapid_usd"),
+            "safe_gwei": gas_cached.get("safe_gwei"),
+            "safe_usd_per_mint": gas_cached.get("safe_usd"),
+            "eth_usd": gas_cached.get("eth_usd"),
+            "fetched_at": gas_cached.get("fetched_at"),
+        }
+    else:
+        gas_block = {
+            "ok": False,
+            "error": "gas snapshot not warm; call /api/gas-tracker/eth-mint to refresh",
+        }
+
+    payload: Dict[str, Any] = {
+        "counts": counts,
+        "last_mint_at": last_mint_at,
+        "hot_wallet": wallet_payload,
+        "gas": gas_block,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if counts_error is not None:
+        payload["counts_error"] = counts_error
+    return payload
+
+
 @app.get("/api/event-cards")
 def get_event_cards(
     limit: int = 500,
