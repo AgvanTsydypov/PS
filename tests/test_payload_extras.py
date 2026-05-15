@@ -1,8 +1,10 @@
 """
 Unit tests for remaining pure helpers in scripts/polystars_card_payload.py:
-  _border_css_color, _generated_card_slug, _build_render_payload.
+  _border_css_color, _generated_card_slug, _build_render_payload,
+  _metadata_uri_to_https, build_recovery_payload_from_ipfs.
 """
 
+import json
 import re
 from unittest.mock import patch, MagicMock
 
@@ -13,6 +15,8 @@ from scripts.polystars_card_payload import (
     _border_css_color,
     _build_render_payload,
     _generated_card_slug,
+    _metadata_uri_to_https,
+    build_recovery_payload_from_ipfs,
 )
 
 
@@ -186,3 +190,171 @@ class TestBuildRenderPayload:
     def test_empty_payload_returns_empty_dict(self):
         result = _build_render_payload({})
         assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# _metadata_uri_to_https
+# ---------------------------------------------------------------------------
+
+class TestMetadataUriToHttps:
+    def test_ipfs_uri_converted_to_pinata_gateway(self):
+        url = _metadata_uri_to_https("ipfs://bafkreitest")
+        assert url == "https://gateway.pinata.cloud/ipfs/bafkreitest"
+
+    def test_ipfs_uri_with_redundant_ipfs_prefix_stripped(self):
+        url = _metadata_uri_to_https("ipfs://ipfs/bafkreitest")
+        assert url == "https://gateway.pinata.cloud/ipfs/bafkreitest"
+
+    def test_pinata_gateway_url_passthrough(self):
+        url = _metadata_uri_to_https("https://gateway.pinata.cloud/ipfs/bafkreitest")
+        assert url == "https://gateway.pinata.cloud/ipfs/bafkreitest"
+
+    def test_empty_string_returns_none(self):
+        assert _metadata_uri_to_https("") is None
+
+    def test_none_returns_none(self):
+        assert _metadata_uri_to_https(None) is None
+
+    def test_bare_ipfs_prefix_returns_none(self):
+        assert _metadata_uri_to_https("ipfs://") is None
+
+    def test_other_https_host_rejected(self):
+        # SSRF defence: we only fetch from the Pinata gateway we control.
+        assert _metadata_uri_to_https("https://evil.example.com/metadata.json") is None
+
+    def test_http_rejected(self):
+        assert _metadata_uri_to_https("http://gateway.pinata.cloud/ipfs/bafkreitest") is None
+
+
+# ---------------------------------------------------------------------------
+# build_recovery_payload_from_ipfs
+# ---------------------------------------------------------------------------
+
+def _mock_json_urlopen(payload: dict):
+    raw = json.dumps(payload).encode("utf-8")
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = raw
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    return mock_resp
+
+
+_VALID_CARD_DISPLAY_DATA = {
+    "season_type": "standard",
+    "season_number": 1,
+    "season_size": 256,
+    "collection_mint_number": 15,
+    "archetype": "SUBSTRATE",
+    "card_title": "Test Star",
+    "primary_tag": "Economy",
+    "secondary_tag": "Macro",
+    "front_image_url": "https://gateway.pinata.cloud/ipfs/bafkreifront",
+    "back_image_url": "https://gateway.pinata.cloud/ipfs/bafkreiback",
+    "qr_payload": "https://polystars.app/cards/test-slug-abc",
+}
+
+
+class TestBuildRecoveryPayloadFromIpfs:
+    def test_happy_path_returns_card_display_data(self):
+        metadata = {
+            "name": "STAR Genesis #15",
+            "image": "ipfs://bafkreifront",
+            "card_display_data": dict(_VALID_CARD_DISPLAY_DATA),
+        }
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=_mock_json_urlopen(metadata),
+        ):
+            payload = build_recovery_payload_from_ipfs("ipfs://bafkreimeta")
+        assert payload is not None
+        assert payload["qr_payload"] == "https://polystars.app/cards/test-slug-abc"
+        assert payload["front_image_url"].endswith("/bafkreifront")
+        assert payload["archetype"] == "SUBSTRATE"
+
+    def test_non_pinata_uri_returns_none_without_fetching(self):
+        # SSRF defence: must not attempt to fetch arbitrary hosts.
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+        ) as mock_fetch:
+            payload = build_recovery_payload_from_ipfs(
+                "https://evil.example.com/m.json"
+            )
+        assert payload is None
+        mock_fetch.assert_not_called()
+
+    def test_empty_metadata_uri_returns_none(self):
+        assert build_recovery_payload_from_ipfs("") is None
+        assert build_recovery_payload_from_ipfs(None) is None
+
+    def test_missing_card_display_data_returns_none(self):
+        metadata = {"name": "STAR Genesis #15"}  # legacy mint, no card_display_data
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=_mock_json_urlopen(metadata),
+        ):
+            assert build_recovery_payload_from_ipfs("ipfs://bafkreimeta") is None
+
+    def test_missing_qr_payload_returns_none(self):
+        bad = dict(_VALID_CARD_DISPLAY_DATA)
+        bad["qr_payload"] = ""
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=_mock_json_urlopen({"card_display_data": bad}),
+        ):
+            assert build_recovery_payload_from_ipfs("ipfs://bafkreimeta") is None
+
+    def test_missing_front_image_returns_none(self):
+        bad = dict(_VALID_CARD_DISPLAY_DATA)
+        bad["front_image_url"] = ""
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=_mock_json_urlopen({"card_display_data": bad}),
+        ):
+            assert build_recovery_payload_from_ipfs("ipfs://bafkreimeta") is None
+
+    def test_missing_back_image_returns_none(self):
+        bad = dict(_VALID_CARD_DISPLAY_DATA)
+        bad["back_image_url"] = ""
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=_mock_json_urlopen({"card_display_data": bad}),
+        ):
+            assert build_recovery_payload_from_ipfs("ipfs://bafkreimeta") is None
+
+    def test_fetch_failure_returns_none(self):
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            side_effect=Exception("gateway timeout"),
+        ):
+            assert build_recovery_payload_from_ipfs("ipfs://bafkreimeta") is None
+
+    def test_malformed_json_returns_none(self):
+        bad_resp = MagicMock()
+        bad_resp.read.return_value = b"not json"
+        bad_resp.__enter__ = lambda s: s
+        bad_resp.__exit__ = MagicMock(return_value=False)
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=bad_resp,
+        ):
+            assert build_recovery_payload_from_ipfs("ipfs://bafkreimeta") is None
+
+    def test_non_dict_metadata_returns_none(self):
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=_mock_json_urlopen([1, 2, 3]),  # array instead of object
+        ):
+            assert build_recovery_payload_from_ipfs("ipfs://bafkreimeta") is None
+
+    def test_returned_payload_is_a_copy(self):
+        # Mutating the returned dict must not affect the source metadata.
+        original = dict(_VALID_CARD_DISPLAY_DATA)
+        metadata = {"card_display_data": original}
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            return_value=_mock_json_urlopen(metadata),
+        ):
+            payload = build_recovery_payload_from_ipfs("ipfs://bafkreimeta")
+        assert payload is not None
+        payload["card_title"] = "MUTATED"
+        assert original["card_title"] == "Test Star"
