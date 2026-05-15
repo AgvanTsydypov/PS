@@ -2066,27 +2066,66 @@ def _fetch_polymarket_trader_rank(proxy_wallet: str) -> Tuple[Optional[str], boo
         return None, False
 
 
-def _trust_x_forwarded_for_rate_limit() -> bool:
-    """When true, use the first ``X-Forwarded-For`` hop as the client IP for rate limits.
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 
-    Enable only when this app is deployed behind a trusted reverse proxy that sets
-    ``X-Forwarded-For`` correctly; otherwise clients can spoof arbitrary IPs.
+
+def _trust_proxy_headers() -> bool:
+    """When true, derive the client IP from proxy-set headers (CF-Connecting-IP,
+    True-Client-IP, X-Real-IP, X-Forwarded-For) instead of the TCP peer.
+
+    Enable only when this app sits behind a trusted reverse proxy chain — e.g.
+    Cloudflare → nginx → uvicorn. With direct public exposure the headers are
+    client-controlled and trivially spoofable, so any IP-based gate becomes
+    bypassable. With a proxy chain in front and trust *disabled*, the opposite
+    failure mode appears: every request appears to come from the nearest
+    proxy's loopback, so the mint-time sybil gate would block every legit user
+    after the first.
+
+    ``USER_WEB_TRUST_X_FORWARDED_FOR`` is honored as a backwards-compatible
+    alias for ``USER_WEB_TRUST_PROXY_HEADERS``.
     """
-    return os.getenv("USER_WEB_TRUST_X_FORWARDED_FOR", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    for env_name in ("USER_WEB_TRUST_PROXY_HEADERS", "USER_WEB_TRUST_X_FORWARDED_FOR"):
+        if os.getenv(env_name, "").strip().lower() in _TRUE_ENV_VALUES:
+            return True
+    return False
+
+
+# Header precedence used by ``_rate_limit_client_ip``. Ordered most-authoritative
+# first: Cloudflare itself stamps ``CF-Connecting-IP`` from the actual TCP peer
+# it terminated, so even with nginx in between (Cloudflare → nginx → app) this
+# is the correct value to trust. ``True-Client-IP`` is Cloudflare Enterprise /
+# Akamai's variant. ``X-Real-IP`` is what a single-hop nginx commonly sets via
+# ``$remote_addr`` — which behind Cloudflare would be a Cloudflare edge IP, so
+# it ranks below the CF headers. ``X-Forwarded-For`` is the RFC fallback;
+# leftmost token = the original client.
+_PROXY_IP_HEADERS_IN_PRIORITY: Tuple[str, ...] = (
+    "cf-connecting-ip",
+    "true-client-ip",
+    "x-real-ip",
+    "x-forwarded-for",
+)
+
+
+def _extract_client_ip_from_proxy_headers(request: Request) -> Optional[str]:
+    for header in _PROXY_IP_HEADERS_IN_PRIORITY:
+        raw = request.headers.get(header)
+        if not raw:
+            continue
+        # X-Forwarded-For is a comma-separated chain; the leftmost token is the
+        # original client and the rest are intermediate proxies. Single-IP
+        # headers like CF-Connecting-IP have no commas, so the split is a no-op.
+        candidate = raw.split(",")[0].strip()
+        if candidate:
+            return candidate[:200]
+    return None
 
 
 def _rate_limit_client_ip(request: Request) -> str:
-    if _trust_x_forwarded_for_rate_limit():
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            parts = [p.strip() for p in forwarded.split(",") if p.strip()]
-            if parts:
-                return parts[0][:200]
+    if _trust_proxy_headers():
+        proxied = _extract_client_ip_from_proxy_headers(request)
+        if proxied:
+            return proxied
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
@@ -2170,6 +2209,29 @@ def _enforce_production_security_invariants() -> None:
                 "MINT_IP_GATE_ENABLED is on (set MINT_IP_GATE_ENABLED=0 to "
                 "disable the IP sybil gate). Hashing IPv4 addresses without a "
                 "secret salt is brute-forceable in seconds."
+            )
+        # The gate needs the real client IP. Behind any reverse proxy
+        # (Cloudflare, nginx, ALB, …) the TCP peer is the proxy itself, so
+        # every request collapses to one IP hash and the gate locks out every
+        # legit user after the first. Force the operator to explicitly choose
+        # — "1" if a trusted proxy chain is in front, "0" if the app is
+        # directly exposed — so this never silently misfires.
+        proxy_trust_raw = os.getenv("USER_WEB_TRUST_PROXY_HEADERS", "").strip().lower()
+        legacy_trust_raw = os.getenv("USER_WEB_TRUST_X_FORWARDED_FOR", "").strip().lower()
+        decided = (
+            proxy_trust_raw in _TRUE_ENV_VALUES | _FALSE_ENV_VALUES
+            or legacy_trust_raw in _TRUE_ENV_VALUES | _FALSE_ENV_VALUES
+        )
+        if not decided:
+            raise RuntimeError(
+                "USER_WEB_TRUST_PROXY_HEADERS must be explicitly set to '1' or "
+                "'0' in production when MINT_IP_GATE_ENABLED is on. Set '1' if "
+                "this app sits behind a trusted reverse proxy (Cloudflare, "
+                "nginx, ALB, etc.) so the real client IP is read from "
+                "CF-Connecting-IP / X-Real-IP / X-Forwarded-For; set '0' if "
+                "the app is directly exposed. Leaving this unset silently "
+                "collapses every request to the proxy loopback and the IP "
+                "sybil gate falsely blocks every user after the first."
             )
 
 
