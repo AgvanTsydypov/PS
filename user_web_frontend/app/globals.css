@@ -1568,6 +1568,22 @@ main {
   font-family: var(--bd-font-mono);
 }
 
+.season-card-phase-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.season-card-phase-countdown {
+  font-family: var(--bd-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--bd-ink-mute);
+  padding: 2px 6px;
+  border: 1px solid var(--bd-ink-mute);
+  border-radius: 0;
+}
+
 .season-card-bottom strong {
   font-size: 13px;
   font-family: var(--bd-font-mono);

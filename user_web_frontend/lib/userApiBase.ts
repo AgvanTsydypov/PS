@@ -29,6 +29,7 @@ export type SeasonResponse = {
   is_active: boolean;
   phase: string;
   phase_reason: string;
+  phase_ends_at: string | null;
 };
 
 export type SeasonCatalogEntry = {

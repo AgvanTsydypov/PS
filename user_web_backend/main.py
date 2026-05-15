@@ -1826,31 +1826,77 @@ def _wallet_holds_gate_token(wallet: str) -> bool:
     has to qualify via Polymarket trader rank. Results are cached per wallet for
     ``_TOKEN_GATE_BALANCE_TTL_SECONDS`` so a dashboard burst can't hammer the RPC.
     """
+    status = _wallet_gate_token_status(wallet)
+    return status["holds"] is True
+
+
+def _wallet_gate_token_status(wallet: str) -> Dict[str, Any]:
+    """Tri-state token-gate check for the *display* layer.
+
+    Unlike ``_wallet_holds_gate_token`` (which collapses every failure into
+    ``False``), this returns a structured response so the frontend can tell a
+    confirmed "not a holder" apart from "we could not check the balance right
+    now". The mint endpoint still uses the bool variant so an unverifiable
+    balance stays fail-closed at enforcement time; the UI uses this variant so
+    a flaky public RPC doesn't silently grey out the mint button for a user
+    who actually holds the token.
+
+    Returns dict with:
+    - ``holds``: True / False / None  (None = could not determine)
+    - ``status``: "ok" | "unavailable" | "disabled"
+    - ``balance_raw``: hex-string balance when known, else None
+    - ``threshold_raw``: configured threshold as decimal string
+    - ``contract_address``: gate token address
+    """
+    response: Dict[str, Any] = {
+        "holds": None,
+        "status": "unavailable",
+        "balance_raw": None,
+        "threshold_raw": str(TOKEN_GATE_MIN_BALANCE_RAW),
+        "contract_address": TOKEN_GATE_CONTRACT_ADDRESS,
+    }
     if TOKEN_GATE_MIN_BALANCE_RAW <= 0:
-        return False
+        response.update({"holds": False, "status": "disabled"})
+        return response
+
     wallet_lower = wallet.strip().lower()
     if _TOKEN_GATE_BALANCE_TTL_SECONDS > 0:
         now = monotonic()
         with _token_gate_balance_cache_lock:
             entry = _token_gate_balance_cache.get(wallet_lower)
             if entry and entry[0] > now:
-                return entry[1]
+                response.update({"holds": bool(entry[1]), "status": "ok"})
+                return response
+
     contract = _get_token_gate_contract()
     if contract is None:
-        return False
+        # RPC / contract config missing — caller treats as "unknown" so the UI
+        # doesn't block; mint-time gate will still refuse.
+        return response
+
     try:
-        balance = int(contract.functions.balanceOf(Web3.to_checksum_address(wallet)).call())
-        result = balance >= TOKEN_GATE_MIN_BALANCE_RAW
+        balance = int(
+            contract.functions.balanceOf(Web3.to_checksum_address(wallet)).call()
+        )
     except Exception as exc:
         logger.warning("Token-gate balanceOf failed for wallet=%s: %s", wallet, exc)
-        result = False
+        return response
+
+    holds = balance >= TOKEN_GATE_MIN_BALANCE_RAW
     if _TOKEN_GATE_BALANCE_TTL_SECONDS > 0:
         with _token_gate_balance_cache_lock:
             _token_gate_balance_cache[wallet_lower] = (
                 monotonic() + _TOKEN_GATE_BALANCE_TTL_SECONDS,
-                result,
+                holds,
             )
-    return result
+    response.update(
+        {
+            "holds": holds,
+            "status": "ok",
+            "balance_raw": str(balance),
+        }
+    )
+    return response
 
 
 def _maybe_refresh_polymarket_session_snapshot(
@@ -2329,10 +2375,14 @@ def active_seasons() -> List[Dict[str, Any]]:
             end_date = row[5]
             phase = "unknown"
             phase_reason = "Phase unavailable"
+            phase_ends_at: Optional[str] = None
             try:
                 phase_info = season_manager.get_current_phase(int(row[0]))
                 phase = str(phase_info.get("phase", "unknown"))
                 phase_reason = str(phase_info.get("reason", ""))
+                phase_ends_at_val = phase_info.get("phase_ends_at")
+                if phase_ends_at_val:
+                    phase_ends_at = str(phase_ends_at_val)
             except Exception:
                 # Keep endpoint resilient even if phase resolution fails for a row.
                 pass
@@ -2350,6 +2400,7 @@ def active_seasons() -> List[Dict[str, Any]]:
                     "is_active": bool(row[6]),
                     "phase": phase,
                     "phase_reason": phase_reason,
+                    "phase_ends_at": phase_ends_at,
                 }
             )
         return result
@@ -2931,6 +2982,23 @@ def me_eligibility(request: Request) -> Dict[str, Any]:
             status_code=503,
             detail="Eligibility could not be determined. Please try again later.",
         ) from None
+
+
+@app.get("/api/me/gate-token-status")
+def me_gate_token_status(request: Request) -> Dict[str, Any]:
+    """Tri-state token-holder gate for the signed-in wallet.
+
+    Replaces the frontend's direct public-RPC call: the dashboard uses this to
+    decide whether to greenlight the mint button copy. Returns ``holds=null``
+    when the on-chain read could not be performed (RPC down, contract
+    misconfigured) so the UI can fall through to the server-side gate at
+    mint time instead of silently blocking the user.
+    """
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+    return _wallet_gate_token_status(wallet)
 
 
 @app.post("/api/me/mint")
