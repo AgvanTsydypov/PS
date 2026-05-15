@@ -733,8 +733,19 @@ CREATE TABLE IF NOT EXISTS user_wallet_signins (
     sign_in_count INTEGER NOT NULL DEFAULT 1,
     proxy_wallet TEXT NOT NULL DEFAULT 'Not registered in PM',
     trader_rank TEXT NOT NULL DEFAULT 'No trades yet',
+    -- HMAC-SHA256(secret_salt, client_ip) hex digest. Written by the user-web
+    -- backend at /verify (sign-in) and refreshed on each successful token-
+    -- holder mint. Used to refuse a token-holder mint when another wallet
+    -- already minted from the same network in the same season. Salt lives
+    -- only in the app process (env MINT_IP_HASH_SALT) so the column alone
+    -- cannot be reversed to a raw IP. Nullable: pre-IP-gate rows, gate
+    -- disabled, or no resolvable client IP.
+    last_ip_hash TEXT,
     CONSTRAINT user_wallet_signins_wallet_check CHECK (wallet_address ~* '^0x[a-f0-9]{40}$')
 );
+
+-- Backfill column on existing deployments that pre-date the IP-gate.
+ALTER TABLE user_wallet_signins ADD COLUMN IF NOT EXISTS last_ip_hash TEXT;
 
 -- Ensure uniqueness guard index for claims exists when claims table is present.
 DO $$
@@ -752,6 +763,12 @@ END $$;
 
 CREATE INDEX IF NOT EXISTS idx_user_wallet_signins_last_signed_in_at
     ON user_wallet_signins(last_signed_in_at DESC);
+
+-- Speeds up the cross-wallet sybil check at mint time
+-- (SELECT … FROM user_wallet_signins WHERE last_ip_hash = $1 …).
+CREATE INDEX IF NOT EXISTS idx_user_wallet_signins_last_ip_hash
+    ON user_wallet_signins(last_ip_hash)
+    WHERE last_ip_hash IS NOT NULL;
 
 DO $$ BEGIN RAISE NOTICE '✅ user_wallet_signins table created'; END $$;
 
