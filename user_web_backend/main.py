@@ -1670,6 +1670,138 @@ _token_gate_balance_cache: Dict[str, Tuple[float, bool]] = {}
 _token_gate_balance_cache_lock = threading.Lock()
 
 
+# ── ERC-721 recipient preflight ──────────────────────────────────────────────
+# Before we queue a claim row we check on-chain whether the recipient address
+# can actually receive an ERC-721 token. This catches three classes of
+# wallets that would otherwise hit a contract-side revert at the cron
+# worker's ``mintTo`` simulation and leave a FAILED claims row with a
+# user-unfriendly technical error:
+#
+#   1. EIP-7702 delegated EOAs (Pectra). Code starts with the magic 3-byte
+#      prefix ``0xef0100`` followed by the 20-byte delegate address. If the
+#      delegate doesn't implement ``IERC721Receiver`` then OpenZeppelin's
+#      ``_safeMint`` reverts. This is the case we hit in prod for the wallet
+#      ``0x4a01…2568`` -> delegate ``0x5350…3bc2``, which prompted this
+#      gate. The message also warns about the (common) possibility that the
+#      delegation was installed by a phishing sweeper.
+#   2. Plain contract recipients whose ``onERC721Received`` probe reverts.
+#      Older multisigs (early Gnosis Safe versions, plain proxies, etc.).
+#   3. Plain contract recipients whose probe succeeds but returns the wrong
+#      magic value. Means the address answers the selector but isn't a
+#      conforming ERC-721 receiver.
+#
+# RPC failures fail-OPEN: a transient outage of EVM_RPC_URL must not block
+# the entire mint flow. The cron worker's ``estimate_gas`` is the final
+# safety net before any tx is signed.
+_ERC721_RECEIVER_SELECTOR_HEX = "150b7a02"
+_ERC721_RECEIVER_PROBE_CALLDATA = (
+    "0x"
+    + _ERC721_RECEIVER_SELECTOR_HEX
+    + ("0" * 64)            # operator   = address(0)
+    + ("0" * 64)            # from       = address(0)
+    + ("0" * 64)            # tokenId    = 0
+    + "80".rjust(64, "0")   # bytes offset = 0x80
+    + ("0" * 64)            # bytes length = 0
+)
+_EIP7702_DELEGATION_MAGIC = b"\xef\x01\x00"
+
+MINT_PREFLIGHT_MSG_7702 = (
+    "Your wallet has an EIP-7702 delegation set, pointing at {delegate}. "
+    "That delegate contract doesn't accept ERC-721 transfers, so the mint "
+    "can't go through (no gas was charged). If you didn't set up a smart-"
+    "account wallet yourself, your wallet may be compromised — move funds "
+    "to a fresh address immediately. Otherwise, mint from a wallet without "
+    "a 7702 delegation."
+)
+MINT_PREFLIGHT_MSG_CONTRACT_REVERTS = (
+    "Your wallet is a smart contract that doesn't implement ERC-721 "
+    "receiver support (the on-chain probe reverted). Multisigs and some "
+    "smart-account wallets can't accept NFTs without extra setup. Please "
+    "mint from a regular EOA (e.g. MetaMask, Rabby) instead."
+)
+MINT_PREFLIGHT_MSG_CONTRACT_BAD_RECEIVER = (
+    "Your wallet is a smart contract whose ERC-721 receiver returned an "
+    "invalid response, so the mint would be rejected by our NFT contract. "
+    "This usually means the address is not a standard ERC-721-compatible "
+    "wallet. Please mint from a regular EOA (e.g. MetaMask, Rabby) instead."
+)
+
+
+def _mint_preflight_w3():
+    """Return the shared Web3 client used for mint-time preflight reads, or
+    ``None`` if EVM_RPC_URL isn't configured. Reuses the lazy singleton
+    created by the token gate so we don't open two HTTPProviders against
+    the same endpoint."""
+    global _token_gate_w3
+    if not TOKEN_GATE_RPC_URL:
+        return None
+    try:
+        with _token_gate_w3_lock:
+            if _token_gate_w3 is None:
+                _token_gate_w3 = Web3(
+                    Web3.HTTPProvider(TOKEN_GATE_RPC_URL, request_kwargs={"timeout": 10})
+                )
+        return _token_gate_w3
+    except Exception as exc:
+        logger.warning("Mint preflight Web3 init failed: %s", exc)
+        return None
+
+
+def _check_recipient_can_receive_nft(recipient: str) -> Optional[str]:
+    """Decide whether ``recipient`` can be the target of ``mintTo``.
+
+    Returns one of the ``MINT_PREFLIGHT_MSG_*`` strings to refuse the mint
+    with that message, or ``None`` to allow it to proceed.
+
+    ``recipient`` MUST already be a checksum address. Any RPC failure
+    returns ``None`` (fail-open) so a degraded EVM_RPC_URL doesn't
+    accidentally lock every mint."""
+    w3 = _mint_preflight_w3()
+    if w3 is None:
+        return None
+    try:
+        code = w3.eth.get_code(recipient)
+    except Exception as exc:
+        logger.warning(
+            "Mint preflight eth_getCode failed for %s: %s; allowing mint to queue",
+            recipient, exc,
+        )
+        return None
+    code_bytes = bytes(code or b"")
+    if not code_bytes:
+        return None  # plain EOA — _safeMint accepts unconditionally
+
+    # 1. EIP-7702 delegation. Fixed 23-byte deployed code: ``0xef0100`` || delegate.
+    if len(code_bytes) == 23 and code_bytes[:3] == _EIP7702_DELEGATION_MAGIC:
+        delegate = "0x" + code_bytes[3:].hex()
+        logger.info(
+            "Mint preflight blocked: %s has EIP-7702 delegation to %s",
+            recipient, delegate,
+        )
+        return MINT_PREFLIGHT_MSG_7702.format(delegate=delegate)
+
+    # 2/3. Plain contract recipient. Probe IERC721Receiver and branch on
+    # the failure mode so we can show the more specific message.
+    try:
+        result = w3.eth.call({"to": recipient, "data": _ERC721_RECEIVER_PROBE_CALLDATA})
+    except Exception as exc:
+        logger.info(
+            "Mint preflight blocked: %s is a contract whose ERC-721 receiver "
+            "probe reverted (%s)", recipient, exc,
+        )
+        return MINT_PREFLIGHT_MSG_CONTRACT_REVERTS
+
+    result_bytes = bytes(result or b"")
+    if len(result_bytes) < 4 or result_bytes[:4].hex() != _ERC721_RECEIVER_SELECTOR_HEX:
+        logger.info(
+            "Mint preflight blocked: %s is a contract whose ERC-721 receiver "
+            "probe returned wrong data (%s)", recipient, result_bytes.hex(),
+        )
+        return MINT_PREFLIGHT_MSG_CONTRACT_BAD_RECEIVER
+
+    return None  # conforming ERC-721 receiver — allow the mint to queue
+
+
 # ── Mint IP-hash sybil gate ──────────────────────────────────────────────────
 # When a wallet qualifies for a mint via the *token-holder* path (no Polymarket
 # trader rank), we additionally require that its current request IP has not
@@ -3147,6 +3279,26 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
                     "token-holder mint per network is allowed per season."
                 ),
             )
+
+    # ERC-721 receiver preflight. The cron worker's ``estimate_gas`` would
+    # also catch these — but only after we've inserted a QUEUED row and the
+    # user has waited for the next cron tick to see a FAILED with an opaque
+    # ``mintTo call would revert`` message. Refusing here gives them an
+    # immediate, specific reason and avoids polluting the claims table with
+    # rows that can never succeed. Fail-open on RPC errors (see helper).
+    try:
+        recipient_checksum_for_preflight = Web3.to_checksum_address(wallet)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+    preflight_reason = _check_recipient_can_receive_nft(
+        recipient_checksum_for_preflight
+    )
+    if preflight_reason is not None:
+        logger.info(
+            "Mint refused by recipient preflight: wallet=%s season_id=%s reason=%r",
+            wallet, season_id, preflight_reason,
+        )
+        raise HTTPException(status_code=400, detail=preflight_reason)
 
     mint_request = MintClaimRequest(
         wallet=wallet,
