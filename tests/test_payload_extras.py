@@ -225,6 +225,57 @@ class TestMetadataUriToHttps:
     def test_http_rejected(self):
         assert _metadata_uri_to_https("http://gateway.pinata.cloud/ipfs/bafkreitest") is None
 
+    def test_default_pinata_url_still_accepted_after_env_switch(self, monkeypatch):
+        # Operator switches gateway to dweb.link via env, but legacy rows
+        # whose metadata_uri is the hardcoded Pinata URL must still resolve
+        # — otherwise the gateway switch silently bricks all pre-switch
+        # claims for the recovery backfill CLI.
+        import importlib
+        import scripts.polystars_card_payload as mod
+        monkeypatch.setenv("RECOVERY_IPFS_GATEWAY", "https://dweb.link/ipfs/")
+        importlib.reload(mod)
+        try:
+            # New ipfs:// URIs go to the operator-chosen gateway.
+            assert mod._metadata_uri_to_https("ipfs://bafkreinew") == (
+                "https://dweb.link/ipfs/bafkreinew"
+            )
+            # Legacy rows (already pointing at Pinata explicitly) keep
+            # working — no re-pin required.
+            assert mod._metadata_uri_to_https(
+                "https://gateway.pinata.cloud/ipfs/bafkreilegacy"
+            ) == "https://gateway.pinata.cloud/ipfs/bafkreilegacy"
+        finally:
+            # Restore default gateway for sibling tests in the same session.
+            monkeypatch.delenv("RECOVERY_IPFS_GATEWAY", raising=False)
+            importlib.reload(mod)
+
+
+class TestGatewayPrefixNormalization:
+    """``RECOVERY_IPFS_GATEWAY`` is operator-supplied; normalize trailing
+    slash so ``f"{prefix}{cid}"`` always produces a valid URL regardless
+    of how the operator wrote the env var. Without this a gateway set
+    without a trailing ``/`` would yield ``https://dweb.link/ipfsbafkrei…``."""
+
+    def test_appends_trailing_slash_when_missing(self):
+        from scripts.polystars_card_payload import _normalize_gateway_prefix
+        assert _normalize_gateway_prefix("https://dweb.link/ipfs") == (
+            "https://dweb.link/ipfs/"
+        )
+
+    def test_keeps_trailing_slash_when_present(self):
+        from scripts.polystars_card_payload import _normalize_gateway_prefix
+        assert _normalize_gateway_prefix("https://dweb.link/ipfs/") == (
+            "https://dweb.link/ipfs/"
+        )
+
+    def test_empty_falls_back_to_pinata_default(self):
+        from scripts.polystars_card_payload import _normalize_gateway_prefix
+        assert _normalize_gateway_prefix("") == "https://gateway.pinata.cloud/ipfs/"
+
+    def test_whitespace_falls_back_to_pinata_default(self):
+        from scripts.polystars_card_payload import _normalize_gateway_prefix
+        assert _normalize_gateway_prefix("   ") == "https://gateway.pinata.cloud/ipfs/"
+
 
 # ---------------------------------------------------------------------------
 # build_recovery_payload_from_ipfs
@@ -358,3 +409,30 @@ class TestBuildRecoveryPayloadFromIpfs:
         assert payload is not None
         payload["card_title"] = "MUTATED"
         assert original["card_title"] == "Test Star"
+
+    def test_request_carries_browser_user_agent(self):
+        # Pinata's gateway 403s urllib's default ``Python-urllib/<ver>`` UA.
+        # The helper must inject a non-default UA so production fetches
+        # don't silently bounce. Captures the actual Request passed to
+        # ``urlopen_after_ssrf_check`` and asserts the header is present.
+        captured: dict = {}
+
+        def _capture(req, *, timeout):
+            captured["user_agent"] = req.get_header("User-agent") or ""
+            captured["accept"] = req.get_header("Accept") or ""
+            return _mock_json_urlopen(
+                {"card_display_data": dict(_VALID_CARD_DISPLAY_DATA)}
+            )
+
+        with patch(
+            "scripts.polystars_card_payload.urlopen_after_ssrf_check",
+            side_effect=_capture,
+        ):
+            payload = build_recovery_payload_from_ipfs("ipfs://bafkreiua")
+        assert payload is not None
+        ua = captured["user_agent"]
+        assert ua and not ua.lower().startswith("python-urllib"), (
+            f"helper sent default urllib UA ({ua!r}) — Pinata will 403"
+        )
+        # Accept header preserved alongside the new UA.
+        assert captured["accept"] == "application/json"

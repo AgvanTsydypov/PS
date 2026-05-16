@@ -524,22 +524,48 @@ def _slug_from_qr_payload(qr_payload: Any) -> Optional[str]:
     return tail or None
 
 
-# Pinata public gateway used to resolve ``ipfs://<cid>`` metadata URIs back to
-# fetchable HTTPS. Match the production constant in ``scripts/evm_service.py``
-# (``PINATA_GATEWAY_PREFIX``) so a fix here doesn't need a parallel edit.
-_RECOVERY_IPFS_GATEWAY = "https://gateway.pinata.cloud/ipfs/"
+# IPFS gateway used to resolve ``ipfs://<cid>`` metadata URIs back to a
+# fetchable HTTPS URL. Defaults to Pinata's public gateway (matches
+# ``PINATA_GATEWAY_PREFIX`` in ``scripts/evm_service.py``); operators can
+# point at dweb.link / ipfs.io / a private gateway via the env var when
+# Pinata rate-limits or 403s. The trailing ``/`` is normalized so callers
+# don't have to think about it.
+def _normalize_gateway_prefix(raw: str) -> str:
+    s = str(raw or "").strip()
+    if not s:
+        return "https://gateway.pinata.cloud/ipfs/"
+    if not s.endswith("/"):
+        s = s + "/"
+    return s
+
+
+_DEFAULT_PINATA_GATEWAY = "https://gateway.pinata.cloud/ipfs/"
+_RECOVERY_IPFS_GATEWAY = _normalize_gateway_prefix(
+    os.getenv("RECOVERY_IPFS_GATEWAY", _DEFAULT_PINATA_GATEWAY)
+)
 _RECOVERY_METADATA_TIMEOUT_SECONDS = float(
     os.getenv("RECOVERY_METADATA_TIMEOUT_SECONDS", "8")
+)
+# urllib's default ``Python-urllib/<ver>`` User-Agent is treated as scripted
+# access by Pinata's gateway and 403'd. Sending a generic browser-style UA
+# bypasses that heuristic; this is the same workaround curl users hit
+# implicitly via curl's default UA.
+_RECOVERY_FETCH_USER_AGENT = os.getenv(
+    "RECOVERY_FETCH_USER_AGENT",
+    "Mozilla/5.0 (compatible; PolyStarsRecovery/1.0; +https://polystars.app)",
 )
 
 
 def _metadata_uri_to_https(metadata_uri: str) -> Optional[str]:
     """Turn an on-chain ``tokenURI`` into a fetchable HTTPS URL.
 
-    Accepts the two shapes we actually produce: ``ipfs://<cid>[/path]`` and
-    ``https://gateway.pinata.cloud/ipfs/<cid>...``. Returns ``None`` for any
-    other scheme so the recovery helper can refuse to fetch from an
-    untrusted host.
+    Accepts the shapes we actually produce: ``ipfs://<cid>[/path]``, the
+    configured ``RECOVERY_IPFS_GATEWAY`` host (default
+    ``https://gateway.pinata.cloud/ipfs/``), and the hardcoded Pinata
+    default — the last keeps URLs minted before ``RECOVERY_IPFS_GATEWAY``
+    was introduced fetchable even after an operator switches gateways.
+    Returns ``None`` for any other scheme so the recovery helper can refuse
+    to fetch from an untrusted host.
     """
     s = str(metadata_uri or "").strip()
     if not s:
@@ -553,6 +579,12 @@ def _metadata_uri_to_https(metadata_uri: str) -> Optional[str]:
             return None
         return f"{_RECOVERY_IPFS_GATEWAY}{rest}"
     if s.startswith(_RECOVERY_IPFS_GATEWAY):
+        return s
+    # Legacy fallback: rows minted before RECOVERY_IPFS_GATEWAY was a
+    # configurable env var have ``metadata_uri`` already pointing at
+    # gateway.pinata.cloud explicitly. Honour that even after an operator
+    # rebases the default to a different gateway.
+    if s.startswith(_DEFAULT_PINATA_GATEWAY):
         return s
     return None
 
@@ -581,10 +613,18 @@ def build_recovery_payload_from_ipfs(metadata_uri: str) -> Optional[Dict[str, An
     if not https_url:
         return None
     try:
+        # Explicit User-Agent + Accept. Pinata's public gateway 403s urllib's
+        # default ``Python-urllib/<ver>`` UA as suspected scripted access
+        # (curl works because curl sends ``curl/x.y`` which is allow-listed).
+        # Override via ``RECOVERY_FETCH_USER_AGENT`` if a private gateway
+        # demands a specific signature.
         req = urllib.request.Request(
             https_url,
             method="GET",
-            headers={"Accept": "application/json"},
+            headers={
+                "Accept": "application/json",
+                "User-Agent": _RECOVERY_FETCH_USER_AGENT,
+            },
         )
         with urlopen_after_ssrf_check(
             req, timeout=_RECOVERY_METADATA_TIMEOUT_SECONDS,
