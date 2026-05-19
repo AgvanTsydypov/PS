@@ -3305,3 +3305,233 @@ a.season-mint-button {
   border-top: 1px solid var(--bd-line-strong);
   margin: 32px 0;
 }
+
+/* ── Home: Events button (amber outline, matches preview-card accent) ────── */
+
+.home-sm-action-row {
+  align-self: stretch;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.home-sm-action-row .season-mint-button {
+  flex: 1 1 0;
+  min-width: 0;
+  background: transparent;
+  border: 2px solid var(--bd-line-strong);
+}
+
+.home-events-button {
+  background: transparent;
+  border: 2px solid #f0c43a;
+  color: #f0c43a;
+}
+
+.home-events-button:not(:disabled):hover {
+  border-color: #f0c43a;
+  background: #f0c43a;
+  color: var(--bd-ink);
+  box-shadow: 4px 4px 0 var(--bd-ink);
+}
+
+/* ── /events page ────────────────────────────────────────────────────────── */
+
+.events-page {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: clamp(24px, 4vw, 56px) clamp(16px, 3vw, 32px) 96px;
+  color: var(--bd-ink);
+}
+
+.events-page-header {
+  margin-bottom: 28px;
+}
+
+.events-back-link {
+  display: inline-block;
+  margin-bottom: 14px;
+  font-family: var(--bd-font-display);
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--bd-ink-mute);
+  text-decoration: none;
+}
+
+.events-back-link:hover {
+  color: var(--bd-brand);
+}
+
+.events-page-title {
+  margin: 0 0 8px;
+  font-family: var(--bd-font-display);
+  font-size: clamp(22px, 3vw, 30px);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.events-page-lede {
+  margin: 0;
+  color: var(--bd-ink-mute);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.events-selector-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  margin: 22px 0 18px;
+  padding: 14px 16px;
+  border: 2px solid #f0c43a;
+  background: transparent;
+}
+
+.events-selector-label {
+  font-family: var(--bd-font-display);
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #f0c43a;
+}
+
+.events-season-select {
+  flex: 1 1 220px;
+  min-width: 0;
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--bd-line-strong);
+  border-radius: 0;
+  color: var(--bd-ink);
+  font-family: var(--bd-font-ui);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.events-season-select:focus {
+  outline: none;
+  border-color: #f0c43a;
+}
+
+.events-season-select option {
+  background: #111;
+  color: var(--bd-ink);
+}
+
+.events-selector-meta {
+  font-family: var(--bd-font-mono);
+  font-size: 11px;
+  color: var(--bd-ink-mute);
+  letter-spacing: 0.04em;
+}
+
+.events-list-section {
+  margin-top: 12px;
+}
+
+.events-empty,
+.events-error {
+  font-family: var(--bd-font-mono);
+  font-size: 12px;
+  color: var(--bd-ink-mute);
+  letter-spacing: 0.04em;
+  padding: 18px 0;
+}
+
+.events-error {
+  color: var(--bd-brand);
+}
+
+.events-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.events-list-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--bd-line-strong);
+  background: transparent;
+  transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+
+.events-list-item:hover {
+  border-color: #f0c43a;
+}
+
+.events-list-thumb {
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  background: #181818;
+  border: 1px solid var(--bd-line-strong);
+}
+
+.events-list-thumb-placeholder {
+  background: repeating-linear-gradient(
+    45deg,
+    #1a1a1a,
+    #1a1a1a 6px,
+    #111 6px,
+    #111 12px
+  );
+}
+
+.events-list-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.events-list-title {
+  font-family: var(--bd-font-display);
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  color: var(--bd-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.events-list-meta {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-family: var(--bd-font-mono);
+  font-size: 11px;
+  color: var(--bd-ink-mute);
+  letter-spacing: 0.04em;
+}
+
+.events-list-closed {
+  color: var(--bd-brand);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+.events-list-link {
+  flex: 0 0 auto;
+  font-family: var(--bd-font-display);
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #f0c43a;
+  text-decoration: none;
+  padding: 6px 10px;
+  border: 1px solid #f0c43a;
+}
+
+.events-list-link:hover {
+  background: #f0c43a;
+  color: var(--bd-ink);
+}

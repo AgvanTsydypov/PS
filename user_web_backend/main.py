@@ -2541,6 +2541,151 @@ def active_seasons() -> List[Dict[str, Any]]:
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
 
+@app.get("/api/seasons/list")
+def seasons_list() -> List[Dict[str, Any]]:
+    """All seasons (active + completed + upcoming), ordered newest first.
+
+    Powers the season selector on the public /events page.
+    """
+    try:
+        conn = _get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, type, season_number, start_date, end_date,
+                           is_active, is_completed
+                    FROM seasons
+                    ORDER BY
+                        CASE WHEN type = 'genesis' THEN 0 ELSE 1 END,
+                        season_number DESC,
+                        id DESC
+                    """
+                )
+                rows = cursor.fetchall()
+        finally:
+            conn.close()
+
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            season_type = str(row[1])
+            season_number = int(row[2])
+            if season_type == "genesis":
+                title = "Genesis"
+            else:
+                title = f"{season_type.capitalize()} #{season_number}"
+            result.append(
+                {
+                    "id": int(row[0]),
+                    "type": season_type,
+                    "season_number": season_number,
+                    "title": title,
+                    "start_date": row[3].isoformat() if row[3] else None,
+                    "end_date": row[4].isoformat() if row[4] else None,
+                    "is_active": bool(row[5]),
+                    "is_completed": bool(row[6]),
+                }
+            )
+        return result
+    except Exception:
+        logger.exception("Failed to load seasons list")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+
+
+@app.get("/api/seasons/{season_id}/events")
+def season_events(season_id: int) -> Dict[str, Any]:
+    """Distinct events being raffled inside a given season.
+
+    Reads from the season's participants partition and joins on the events
+    table for the user-facing title/slug/image/dates. Quietly returns an
+    empty list if the season exists but the partition is empty.
+    """
+    if season_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid season_id")
+    try:
+        conn = _get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id, type, season_number FROM seasons WHERE id = %s",
+                    (season_id,),
+                )
+                season_row = cursor.fetchone()
+                if not season_row:
+                    raise HTTPException(status_code=404, detail="Season not found")
+
+                cursor.execute(
+                    """
+                    WITH agg AS (
+                        SELECT
+                            p.event_id   AS p_event_id,
+                            p.event_slug AS p_event_slug,
+                            COUNT(*)::BIGINT AS participant_count
+                        FROM participants p
+                        WHERE p.season_id = %s
+                        GROUP BY p.event_id, p.event_slug
+                    )
+                    SELECT
+                        COALESCE(e_id.id, e_slug.id)                       AS event_id,
+                        COALESCE(
+                            NULLIF(BTRIM(e_id.slug), ''),
+                            NULLIF(BTRIM(e_slug.slug), ''),
+                            agg.p_event_slug
+                        )                                                  AS event_slug,
+                        COALESCE(
+                            NULLIF(BTRIM(e_id.title), ''),
+                            NULLIF(BTRIM(e_slug.title), '')
+                        )                                                  AS event_title,
+                        COALESCE(
+                            NULLIF(BTRIM(e_id.image), ''),
+                            NULLIF(BTRIM(e_id.icon), ''),
+                            NULLIF(BTRIM(e_slug.image), ''),
+                            NULLIF(BTRIM(e_slug.icon), '')
+                        )                                                  AS event_image_url,
+                        COALESCE(e_id.end_date, e_slug.end_date)           AS event_end_date,
+                        COALESCE(e_id.closed,   e_slug.closed)             AS event_closed,
+                        agg.participant_count                              AS participant_count
+                    FROM agg
+                    LEFT JOIN events e_id   ON e_id.id     = agg.p_event_id
+                    LEFT JOIN events e_slug ON e_slug.slug = agg.p_event_slug
+                    ORDER BY agg.participant_count DESC, event_title NULLS LAST
+                    """,
+                    (season_id,),
+                )
+                rows = cursor.fetchall()
+        finally:
+            conn.close()
+
+        season_type = str(season_row[1])
+        season_number = int(season_row[2])
+        season_title = "Genesis" if season_type == "genesis" else f"{season_type.capitalize()} #{season_number}"
+
+        events: List[Dict[str, Any]] = []
+        for row in rows:
+            events.append(
+                {
+                    "event_id": row[0],
+                    "slug": row[1],
+                    "title": row[2],
+                    "image_url": row[3],
+                    "end_date": row[4].isoformat() if row[4] else None,
+                    "closed": bool(row[5]) if row[5] is not None else None,
+                    "participant_count": int(row[6] or 0),
+                }
+            )
+
+        return {
+            "season_id": int(season_row[0]),
+            "season_title": season_title,
+            "events": events,
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to load events for season %s", season_id)
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+
+
 # ── "Community achievements" board — frozen ──────────────────────────────────
 # Both endpoints below power the homepage "Community achievements" widget,
 # which is currently UNDER CONSTRUCTION. They are disabled at the route layer

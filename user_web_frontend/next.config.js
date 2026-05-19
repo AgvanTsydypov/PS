@@ -4,6 +4,11 @@ const STATIC_IMAGE_ORIGINS = [
   "https://cloudflare-ipfs.com",
   "https://ipfs.io",
   "https://dweb.link",
+  // Polymarket event/market thumbnails (referenced from the events table)
+  "https://polymarket-upload.s3.us-east-2.amazonaws.com",
+  "https://polymarket-upload.s3.amazonaws.com",
+  "https://polymarket.com",
+  "https://*.polymarket.com",
 ];
 
 function buildCspImgSrc() {
@@ -70,6 +75,9 @@ function buildRemotePatterns() {
     { protocol: "https", hostname: "cloudflare-ipfs.com" },
     { protocol: "https", hostname: "ipfs.io" },
     { protocol: "https", hostname: "dweb.link" },
+    { protocol: "https", hostname: "polymarket-upload.s3.us-east-2.amazonaws.com" },
+    { protocol: "https", hostname: "polymarket-upload.s3.amazonaws.com" },
+    { protocol: "https", hostname: "**.polymarket.com" },
   ];
 }
 
