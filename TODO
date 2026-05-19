@@ -9,4 +9,4 @@ docker exec -e MINT_QUEUE_STALE_PROCESSING_MINUTES=1 \
 docker cp csv_with_eoa.csv polystars_scheduler:/app/csv_with_eoa.csv
 docker exec polystars_scheduler python /app/scripts/check_csv_in_participants.py \
     --input /app/csv_with_eoa.csv \
-    --enqueue --season-id 1 --phase vault --limit 2
+    --enqueue --season-id 1 --phase vault --limit 100
