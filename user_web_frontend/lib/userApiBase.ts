@@ -270,6 +270,49 @@ export async function fetchSeasonsCatalog(
   return fetchPublicUserApiJson<SeasonsCatalogResponse>("/api/seasons/catalog", options);
 }
 
+export type SeasonsListEntry = {
+  id: number;
+  type: string;
+  season_number: number;
+  title: string;
+  start_date: string | null;
+  end_date: string | null;
+  is_active: boolean;
+  is_completed: boolean;
+};
+
+export async function fetchSeasonsList(
+  options?: PublicFetchOptions,
+): Promise<SeasonsListEntry[] | null> {
+  return fetchPublicUserApiJson<SeasonsListEntry[]>("/api/seasons/list", options);
+}
+
+export type SeasonEventEntry = {
+  event_id: string | null;
+  slug: string | null;
+  title: string | null;
+  image_url: string | null;
+  end_date: string | null;
+  closed: boolean | null;
+  participant_count: number;
+};
+
+export type SeasonEventsResponse = {
+  season_id: number;
+  season_title: string;
+  events: SeasonEventEntry[];
+};
+
+export async function fetchSeasonEvents(
+  seasonId: number,
+  options?: PublicFetchOptions,
+): Promise<SeasonEventsResponse | null> {
+  return fetchPublicUserApiJson<SeasonEventsResponse>(
+    `/api/seasons/${seasonId}/events`,
+    options,
+  );
+}
+
 export async function fetchSeasonArchetypeOpens(
   seasonId: number,
   options?: PublicFetchOptions,

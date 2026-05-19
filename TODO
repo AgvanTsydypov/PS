@@ -1,3 +1,7 @@
 docker exec --env-file .env.prod polystars_scheduler python scripts/backfill_recovery_card_fields.py --dry-run
 docker exec --env-file .env.prod polystars_scheduler python scripts/backfill_recovery_card_fields.py --claim-ids 18
 docker exec --env-file .env.prod polystars_scheduler python scripts/backfill_recovery_card_fields.py --notify
+
+docker exec -e MINT_QUEUE_STALE_PROCESSING_MINUTES=1 \
+      polystars_scheduler python scripts/daily_scheduler_simple.py \
+      --process-mint-queue --mint-queue-batch-size 1
