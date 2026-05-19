@@ -291,9 +291,9 @@ export type SeasonEventEntry = {
   event_id: string | null;
   slug: string | null;
   title: string | null;
-  image_url: string | null;
+  start_date: string | null;
   end_date: string | null;
-  closed: boolean | null;
+  volume: number | null;
   participant_count: number;
 };
 
