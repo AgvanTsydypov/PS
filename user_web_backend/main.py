@@ -2667,7 +2667,9 @@ def season_events(season_id: int) -> Dict[str, Any]:
                     FROM agg
                     LEFT JOIN events e_id   ON e_id.id     = agg.p_event_id
                     LEFT JOIN events e_slug ON e_slug.slug = agg.p_event_slug
-                    ORDER BY agg.participant_count DESC, event_title NULLS LAST
+                    ORDER BY event_volume DESC NULLS LAST,
+                             agg.participant_count DESC,
+                             event_title NULLS LAST
                     """,
                     (season_id,),
                 )
