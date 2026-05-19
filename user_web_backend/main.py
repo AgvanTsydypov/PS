@@ -347,6 +347,15 @@ USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS = float(
     os.getenv("USER_WEB_CARDS_TICKER_CACHE_TTL_SECONDS", "30")
 )
 
+# Per-season events list (``/api/seasons/{id}/events``). Refreshed by the
+# daily pipeline via ``refresh_participants_for_season`` — a 24h TTL is the
+# right cadence here. Override with ``USER_WEB_SEASON_EVENTS_CACHE_TTL_SECONDS``.
+_season_events_cache_lock = threading.Lock()
+_season_events_cache: Dict[int, Tuple[float, Dict[str, Any]]] = {}
+USER_WEB_SEASON_EVENTS_CACHE_TTL_SECONDS = float(
+    os.getenv("USER_WEB_SEASON_EVENTS_CACHE_TTL_SECONDS", "86400")
+)
+
 # Home-page ticker feed: random sample of minted STARs *plus* unminted
 # preview cards from the admin showcase simulator.
 #
@@ -2599,9 +2608,24 @@ def season_events(season_id: int) -> Dict[str, Any]:
     Reads from the season's participants partition and joins on the events
     table for the user-facing title/slug/image/dates. Quietly returns an
     empty list if the season exists but the partition is empty.
+
+    The participants partition is rebuilt at most once per day by the
+    pipeline, so the result is cached for ``USER_WEB_SEASON_EVENTS_CACHE_TTL_SECONDS``
+    (24h by default).
     """
     if season_id <= 0:
         raise HTTPException(status_code=400, detail="Invalid season_id")
+
+    ttl = USER_WEB_SEASON_EVENTS_CACHE_TTL_SECONDS
+    if ttl > 0:
+        now = monotonic()
+        with _season_events_cache_lock:
+            cached = _season_events_cache.get(season_id)
+            if cached is not None:
+                ts, payload = cached
+                if now - ts < ttl:
+                    return payload
+
     try:
         conn = _get_connection()
         try:
@@ -2674,11 +2698,15 @@ def season_events(season_id: int) -> Dict[str, Any]:
                 }
             )
 
-        return {
+        payload = {
             "season_id": int(season_row[0]),
             "season_title": season_title,
             "events": events,
         }
+        if ttl > 0:
+            with _season_events_cache_lock:
+                _season_events_cache[season_id] = (monotonic(), payload)
+        return payload
     except HTTPException:
         raise
     except Exception:
