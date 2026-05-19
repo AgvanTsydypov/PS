@@ -563,6 +563,13 @@ class EvmClient:
     # mempools that enforce stricter replacement rules.
     RBF_BUMP_FACTOR: float = 1.20
 
+    # Headroom applied on top of the admin-selected gas tier when pinning the
+    # initial ``maxFeePerGas``. Etherscan's gasoracle is backward-looking, so
+    # a tight pin gets stranded by a +12.5%-per-block base-fee spike before
+    # inclusion. 1.5× absorbs ~3-4 consecutive max-spike blocks while still
+    # staying well under the RBF USD ceiling.
+    PINNED_MAX_FEE_HEADROOM: float = 1.5
+
     def replace_stuck_tx(
         self,
         *,
@@ -697,18 +704,23 @@ class EvmClient:
         """EIP-1559 preferred; falls back to legacy gasPrice.
 
         When ``gas_price_gwei`` is set, ``maxFeePerGas`` is pinned to that
-        total (Etherscan SafeGasPrice already includes priority+base) and the
-        priority tip is clamped to never exceed the cap. The legacy fallback
-        uses the same value as the flat ``gasPrice``.
+        total multiplied by ``PINNED_MAX_FEE_HEADROOM`` (Etherscan's tier
+        snapshot is backward-looking; without headroom a one-block base-fee
+        spike pushes the tx out of the inclusion window and we burn an RBF
+        cycle instead of getting mined). The priority tip is clamped to never
+        exceed the cap. The legacy fallback uses the boosted value as the
+        flat ``gasPrice``.
         """
         pinned_max_fee_wei = (
-            int(gas_price_gwei * 1e9) if gas_price_gwei is not None else None
+            int(gas_price_gwei * 1e9 * self.PINNED_MAX_FEE_HEADROOM)
+            if gas_price_gwei is not None
+            else None
         )
         try:
             base_fee = self.w3.eth.get_block("latest").get("baseFeePerGas")
             if base_fee is None:
                 raise ValueError("baseFeePerGas absent")
-            default_priority = self.w3.to_wei(2, "gwei")
+            default_priority = self.w3.to_wei(3, "gwei")
             if pinned_max_fee_wei is not None:
                 max_fee = pinned_max_fee_wei
                 max_priority = min(default_priority, max_fee)
