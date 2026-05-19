@@ -165,6 +165,46 @@ const [claimRecipient, setClaimRecipient] = useState("");
   const [syncedNowMs, setSyncedNowMs] = useState<number | null>(null);
   const [gasTracker, setGasTracker] = useState<GasTracker | null>(null);
   const [gasTrackerLoading, setGasTrackerLoading] = useState(false);
+  const [mintSpeedTier, setMintSpeedTier] = useState<"safe" | "propose" | "rapid">("safe");
+  const [mintSpeedTierSaving, setMintSpeedTierSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await fetchJSON<{ tier: "safe" | "propose" | "rapid" }>(
+          "/api/mint-settings/speed-tier",
+        );
+        if (!cancelled && data.tier) setMintSpeedTier(data.tier);
+      } catch {
+        // Leave the default tier in place. Worker also falls back to 'safe'.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const updateMintSpeedTier = async (tier: "safe" | "propose" | "rapid") => {
+    setMintSpeedTierSaving(true);
+    const prev = mintSpeedTier;
+    setMintSpeedTier(tier);
+    try {
+      const data = await fetchJSON<{ tier: "safe" | "propose" | "rapid" }>(
+        "/api/mint-settings/speed-tier",
+        { method: "PUT", body: JSON.stringify({ tier }) },
+      );
+      if (data.tier) setMintSpeedTier(data.tier);
+    } catch (e) {
+      setMintSpeedTier(prev);
+      const message = e instanceof Error ? e.message : String(e);
+      setClaimOutput(
+        (cur) => `${cur}[${new Date().toISOString()}] Speed tier update failed: ${message}\n`,
+      );
+    } finally {
+      setMintSpeedTierSaving(false);
+    }
+  };
 
   const refreshGasTracker = async () => {
     setGasTrackerLoading(true);
@@ -444,6 +484,20 @@ const [claimRecipient, setClaimRecipient] = useState("");
       <div className="row">
         <label><input type="checkbox" checked={claimAutoPhase} onChange={(e) => setClaimAutoPhase(e.target.checked)} /> Auto phase</label>
         <label><input type="checkbox" checked={claimDbOnly} onChange={(e) => setClaimDbOnly(e.target.checked)} /> DB only</label>
+        <label title="Gas tier used by the cron worker for the price gate AND the on-chain broadcast. Applies to the next claim picked off the queue.">
+          Speed:{" "}
+          <select
+            value={mintSpeedTier}
+            disabled={mintSpeedTierSaving}
+            onChange={(e) =>
+              void updateMintSpeedTier(e.target.value as "safe" | "propose" | "rapid")
+            }
+          >
+            <option value="safe">Standard</option>
+            <option value="propose">Fast</option>
+            <option value="rapid">Rapid</option>
+          </select>
+        </label>
         <button
           disabled={
             claimMinting ||
