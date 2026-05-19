@@ -3469,25 +3469,6 @@ a.season-mint-button {
   border-color: #f0c43a;
 }
 
-.events-list-thumb {
-  flex: 0 0 48px;
-  width: 48px;
-  height: 48px;
-  object-fit: cover;
-  background: #181818;
-  border: 1px solid var(--bd-line-strong);
-}
-
-.events-list-thumb-placeholder {
-  background: repeating-linear-gradient(
-    45deg,
-    #1a1a1a,
-    #1a1a1a 6px,
-    #111 6px,
-    #111 12px
-  );
-}
-
 .events-list-body {
   flex: 1 1 auto;
   min-width: 0;
@@ -3517,6 +3498,28 @@ a.season-mint-button {
   color: var(--bd-brand);
   text-transform: uppercase;
   letter-spacing: 0.14em;
+}
+
+.events-list-stats {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  text-align: right;
+  margin-right: 6px;
+}
+
+.events-list-stat {
+  font-family: var(--bd-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--bd-ink);
+  white-space: nowrap;
+}
+
+.events-list-stat-muted {
+  color: var(--bd-ink-mute);
 }
 
 .events-list-link {

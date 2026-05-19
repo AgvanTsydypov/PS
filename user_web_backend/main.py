@@ -2660,14 +2660,9 @@ def season_events(season_id: int) -> Dict[str, Any]:
                             NULLIF(BTRIM(e_id.title), ''),
                             NULLIF(BTRIM(e_slug.title), '')
                         )                                                  AS event_title,
-                        COALESCE(
-                            NULLIF(BTRIM(e_id.image), ''),
-                            NULLIF(BTRIM(e_id.icon), ''),
-                            NULLIF(BTRIM(e_slug.image), ''),
-                            NULLIF(BTRIM(e_slug.icon), '')
-                        )                                                  AS event_image_url,
-                        COALESCE(e_id.end_date, e_slug.end_date)           AS event_end_date,
-                        COALESCE(e_id.closed,   e_slug.closed)             AS event_closed,
+                        COALESCE(e_id.start_date, e_slug.start_date)       AS event_start_date,
+                        COALESCE(e_id.end_date,   e_slug.end_date)         AS event_end_date,
+                        COALESCE(e_id.volume,     e_slug.volume)           AS event_volume,
                         agg.participant_count                              AS participant_count
                     FROM agg
                     LEFT JOIN events e_id   ON e_id.id     = agg.p_event_id
@@ -2686,14 +2681,15 @@ def season_events(season_id: int) -> Dict[str, Any]:
 
         events: List[Dict[str, Any]] = []
         for row in rows:
+            volume_raw = row[5]
             events.append(
                 {
                     "event_id": row[0],
                     "slug": row[1],
                     "title": row[2],
-                    "image_url": row[3],
+                    "start_date": row[3].isoformat() if row[3] else None,
                     "end_date": row[4].isoformat() if row[4] else None,
-                    "closed": bool(row[5]) if row[5] is not None else None,
+                    "volume": float(volume_raw) if volume_raw is not None else None,
                     "participant_count": int(row[6] or 0),
                 }
             )

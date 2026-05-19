@@ -157,28 +157,21 @@ export default function EventsBrowser() {
               const polymarketUrl = ev.slug
                 ? `${POLYMARKET_EVENT_BASE}${ev.slug}`
                 : null;
+              const volumeLabel =
+                ev.volume != null
+                  ? `Historical Vol. $${Math.round(ev.volume).toLocaleString()}`
+                  : null;
+              const startStr = ev.start_date
+                ? new Date(ev.start_date).toLocaleDateString()
+                : null;
+              const endStr = ev.end_date
+                ? new Date(ev.end_date).toLocaleDateString()
+                : null;
+              const dateLabel = startStr && endStr
+                ? `${startStr} → ${endStr}`
+                : startStr ?? endStr;
               return (
                 <li key={key} className="events-list-item">
-                  {ev.image_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      className="events-list-thumb"
-                      src={ev.image_url}
-                      alt=""
-                      loading="lazy"
-                      onError={(e) => {
-                        const img = e.currentTarget;
-                        img.style.display = "none";
-                        const placeholder = img.nextElementSibling as HTMLElement | null;
-                        if (placeholder) placeholder.style.display = "block";
-                      }}
-                    />
-                  ) : null}
-                  <div
-                    className="events-list-thumb events-list-thumb-placeholder"
-                    style={{ display: ev.image_url ? "none" : "block" }}
-                    aria-hidden="true"
-                  />
                   <div className="events-list-body">
                     <div className="events-list-title">{title}</div>
                     <div className="events-list-meta">
@@ -186,6 +179,16 @@ export default function EventsBrowser() {
                         {ev.participant_count.toLocaleString()} Stars in the Event
                       </span>
                     </div>
+                  </div>
+                  <div className="events-list-stats">
+                    {volumeLabel ? (
+                      <span className="events-list-stat">{volumeLabel}</span>
+                    ) : null}
+                    {dateLabel ? (
+                      <span className="events-list-stat events-list-stat-muted">
+                        {dateLabel}
+                      </span>
+                    ) : null}
                   </div>
                   {polymarketUrl ? (
                     <a
