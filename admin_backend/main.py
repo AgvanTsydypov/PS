@@ -109,6 +109,13 @@ class UserWebWalletActionsUpdate(BaseModel):
     disabled: bool
 
 
+MINT_SPEED_TIERS = ("safe", "propose", "rapid")
+
+
+class MintSpeedTierUpdate(BaseModel):
+    tier: str
+
+
 class ResetRequest(BaseModel):
     confirm: bool
 
@@ -269,6 +276,51 @@ class SeasonWorkbenchService(ClaimsMintMixin):
                         updated_at = NOW()
                     """,
                     (disabled,),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_mint_speed_tier(self) -> str:
+        """Return the gas tier chosen by the admin for cron mint broadcasts.
+
+        Falls back to 'safe' if the singleton row is missing — matches the
+        DEFAULT in init-db.sql and the historical behaviour of broadcasting
+        at the cheapest tier.
+        """
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT mint_speed_tier FROM polystars_mint_runtime_settings WHERE singleton_id = 1"
+                )
+                row = cursor.fetchone()
+                tier = row[0] if row else None
+                return tier if tier in MINT_SPEED_TIERS else "safe"
+        finally:
+            conn.close()
+
+    def set_mint_speed_tier(self, tier: str) -> None:
+        if tier not in MINT_SPEED_TIERS:
+            raise ValueError(
+                f"Invalid mint speed tier '{tier}' "
+                f"(expected one of: {', '.join(MINT_SPEED_TIERS)})"
+            )
+        conn = self.manager.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO polystars_mint_runtime_settings (singleton_id, mint_speed_tier, updated_at)
+                    VALUES (1, %s, NOW())
+                    ON CONFLICT (singleton_id) DO UPDATE
+                    SET mint_speed_tier = EXCLUDED.mint_speed_tier,
+                        updated_at      = NOW()
+                    """,
+                    (tier,),
                 )
             conn.commit()
         except Exception:
@@ -1965,6 +2017,26 @@ def put_user_web_wallet_actions(body: UserWebWalletActionsUpdate) -> Dict[str, A
         "wallet_actions_disabled": env_on or db_disabled,
         "database_wallet_actions_disabled": db_disabled,
         "env_override_active": env_on,
+    }
+
+
+@app.get("/api/mint-settings/speed-tier")
+def get_mint_speed_tier() -> Dict[str, Any]:
+    return {
+        "tier": service.get_mint_speed_tier(),
+        "allowed": list(MINT_SPEED_TIERS),
+    }
+
+
+@app.put("/api/mint-settings/speed-tier")
+def put_mint_speed_tier(body: MintSpeedTierUpdate) -> Dict[str, Any]:
+    try:
+        service.set_mint_speed_tier(body.tier)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        "tier": service.get_mint_speed_tier(),
+        "allowed": list(MINT_SPEED_TIERS),
     }
 
 

@@ -3160,6 +3160,33 @@ class SimplifiedScheduler:
         finally:
             conn.close()
 
+    def _read_mint_speed_tier(self) -> str:
+        """Return the admin-selected gas tier from polystars_mint_runtime_settings.
+
+        Falls back to 'safe' if the table/row is missing or the value is somehow
+        out of bounds — matches the historical default broadcast behaviour.
+        """
+        allowed = ("safe", "propose", "rapid")
+        try:
+            conn = self.manager.get_connection()
+        except Exception:
+            return "safe"
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT mint_speed_tier FROM polystars_mint_runtime_settings WHERE singleton_id = 1"
+                )
+                row = cursor.fetchone()
+                tier = row[0] if row else None
+                return tier if tier in allowed else "safe"
+        except Exception:
+            return "safe"
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
     def process_mint_queue(self, max_claims: int = 100) -> Dict:
         """Process QUEUED claims into on-chain mints. Picks up to ``max_claims``
         claims in FIFO order, atomically transitions each QUEUED → PROCESSING,
@@ -3293,11 +3320,16 @@ class SimplifiedScheduler:
 
             # Tier the next mint pays. Stays None when the gate is disabled,
             # which preserves the original "let the node pick" behaviour.
-            # The gate certifies affordability under the worst case (rapid),
-            # but the actual broadcast goes out at the safe tier — the network
-            # is cheap right now, no reason to overpay for inclusion.
+            # Admin chooses the tier via PUT /api/mint-settings/speed-tier:
+            # the same tier governs both the price-gate USD comparison and the
+            # actual broadcast gwei. Re-read on each iteration so a mid-batch
+            # change in the admin applies to the very next pickup.
             mint_gas_price_gwei: float | None = None
             for _ in range(max_claims):
+                tier = self._read_mint_speed_tier()
+                tier_gwei_attr = f"{tier}_gwei"
+                tier_usd_attr = f"{tier}_usd"
+
                 # Price gate — re-checked on every iteration so a successful mint
                 # is followed by another fresh check before the next pickup.
                 if price_gate_enabled:
@@ -3310,25 +3342,26 @@ class SimplifiedScheduler:
                             f"⏸️  Price gate: skipping batch — {price_gate_reason}"
                         )
                         break
-                    rapid_usd = snap.rapid_usd
-                    if rapid_usd > price_gate_threshold_usd:
+                    tier_usd = getattr(snap, tier_usd_attr)
+                    tier_gwei = getattr(snap, tier_gwei_attr)
+                    if tier_usd > price_gate_threshold_usd:
                         price_gate_skipped = True
                         price_gate_reason = (
-                            f"rapid mint cost ${rapid_usd:.4f} "
+                            f"{tier} mint cost ${tier_usd:.4f} "
                             f"> threshold ${price_gate_threshold_usd:.4f} "
-                            f"(rapid={snap.rapid_gwei:.3f} gwei, "
+                            f"({tier}={tier_gwei:.3f} gwei, "
                             f"ETH=${snap.eth_usd:.2f}, "
                             f"gas_units={snap.gas_estimate})"
                         )
                         print(f"⏸️  Price gate: {price_gate_reason} — waiting for next cron tick")
                         break
-                    mint_gas_price_gwei = snap.safe_gwei
+                    mint_gas_price_gwei = tier_gwei
                     print(
-                        f"   ✅ Price gate: rapid mint cost ${rapid_usd:.4f} "
+                        f"   ✅ Price gate: {tier} mint cost ${tier_usd:.4f} "
                         f"≤ ${price_gate_threshold_usd:.4f} "
-                        f"(rapid={snap.rapid_gwei:.3f} gwei, ETH=${snap.eth_usd:.2f}); "
-                        f"will broadcast at safe={snap.safe_gwei:.3f} gwei "
-                        f"(~${snap.safe_usd:.4f})"
+                        f"({tier}={tier_gwei:.3f} gwei, ETH=${snap.eth_usd:.2f}); "
+                        f"will broadcast at {tier}={tier_gwei:.3f} gwei "
+                        f"(~${tier_usd:.4f})"
                     )
 
                 # Atomic claim pickup: FOR UPDATE SKIP LOCKED + transition to PROCESSING.
