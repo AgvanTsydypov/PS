@@ -185,6 +185,14 @@ CREATE TABLE IF NOT EXISTS claims (
     pattern            TEXT,
     card_payload_json  JSONB,
 
+    -- Polymarket public-profile identity of the snapshot's proxy_wallet,
+    -- resolved best-effort at queue-insert time from
+    -- gamma-api.polymarket.com/public-profile?address={proxy_wallet}. NULL when
+    -- the wallet has no registered profile or the lookup failed (a later
+    -- backfill pass can fill these in — see scripts/backfill_claims_profile.py).
+    x_username         TEXT,
+    profile_name       TEXT,
+
     -- Metadata
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -254,6 +262,18 @@ COMMENT ON COLUMN claims.tx_attempts IS
     'Ordered audit of every broadcast attempt (initial + RBF replacements). '
     'Last element is the live/canonical tx_hash; recovery falls back to '
     'older entries if the live hash returns not_found.';
+
+-- Idempotent column add for upgrades from earlier schema versions: the
+-- Polymarket public-profile identity of the snapshot's proxy_wallet.
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS x_username   TEXT;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS profile_name TEXT;
+
+COMMENT ON COLUMN claims.x_username IS
+    'X (Twitter) handle from the proxy_wallet''s Polymarket public profile '
+    '(xUsername), resolved best-effort at queue-insert time. NULL if absent.';
+COMMENT ON COLUMN claims.profile_name IS
+    'Display name from the proxy_wallet''s Polymarket public profile (name), '
+    'resolved best-effort at queue-insert time. NULL if absent.';
 
 -- Drop the legacy BEFORE-INSERT trigger / function from older deployments.
 -- Under the queue model these double-allocated collection_mint_number — a

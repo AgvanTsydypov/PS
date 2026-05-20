@@ -6,13 +6,17 @@ SeasonWorkbenchService inherits ClaimsMintMixin to keep mint logic isolated.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional, List, Tuple
 
 import psycopg2
 import psycopg2.errors
@@ -30,6 +34,58 @@ from scripts.cardgen.generate_card import compute_structural_signature
 logger = logging.getLogger(__name__)
 
 BLOCKCHAIN_ETHEREUM = "ethereum"
+
+# Polymarket public-profile lookup used to stamp the X handle / display name of
+# the snapshot's proxy_wallet onto the claim at queue-insert time. Shares the
+# same gamma-api base + browser UA as user_web_backend so the WAF/CDN treats
+# both callers identically.
+POLYMARKET_GAMMA_API_BASE = os.getenv(
+    "POLYMARKET_GAMMA_API_BASE", "https://gamma-api.polymarket.com"
+).rstrip("/")
+POLYMARKET_PROFILE_TIMEOUT_SECONDS = float(
+    os.getenv("POLYMARKET_PROFILE_TIMEOUT_SECONDS", "8")
+)
+_POLYMARKET_PROFILE_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def fetch_proxy_profile_identity(proxy_wallet: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort (x_username, profile_name) from Polymarket's public profile.
+
+    Returns ``(None, None)`` for anything that isn't a clean hit — empty wallet,
+    missing profile (403/404), network error, timeout, or bad JSON. This is
+    intentionally non-raising so a flaky profile lookup never blocks a mint;
+    the values can be filled later by scripts/backfill_claims_profile.py.
+    """
+    wallet = str(proxy_wallet or "").strip()
+    if not wallet:
+        return None, None
+    url = f"{POLYMARKET_GAMMA_API_BASE}/public-profile?{urllib.parse.urlencode({'address': wallet})}"
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Accept": "application/json", "User-Agent": _POLYMARKET_PROFILE_UA},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=POLYMARKET_PROFILE_TIMEOUT_SECONDS) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+    except urllib.error.HTTPError as exc:
+        if exc.code not in {403, 404}:
+            logger.warning("Polymarket profile HTTP %s for wallet %s", exc.code, wallet)
+        return None, None
+    except (urllib.error.URLError, TimeoutError) as exc:
+        logger.warning("Polymarket profile network error for wallet %s: %s", wallet, exc)
+        return None, None
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("Polymarket profile bad JSON for wallet %s", wallet)
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    x_username = str(payload.get("xUsername") or "").strip() or None
+    profile_name = str(payload.get("name") or "").strip() or None
+    return x_username, profile_name
 
 
 @dataclass(frozen=True)
@@ -507,6 +563,8 @@ class ClaimsMintMixin:
         recurrence: Optional[str],
         season_type: Optional[str],
         season_number: Any,
+        x_username: Optional[str] = None,
+        profile_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Insert a QUEUED claim row carrying the full participant snapshot.
 
@@ -544,6 +602,7 @@ class ClaimsMintMixin:
                 archetype, archetype_description, archetype_math, rarity_bracket,
                 participant_rank, claim_type,
                 signature,
+                x_username, profile_name,
                 mint_chain,
                 created_at, updated_at
             )
@@ -556,6 +615,7 @@ class ClaimsMintMixin:
                 %s, %s, %s, %s,
                 %s, %s,
                 %s,
+                %s, %s,
                 %s,
                 NOW(), NOW()
             )
@@ -575,6 +635,7 @@ class ClaimsMintMixin:
                 snap.get("archetype_math"), snap.get("rarity_bracket"),
                 snap.get("rank"), allocation.claim_type,
                 signature,
+                x_username, profile_name,
                 BLOCKCHAIN_ETHEREUM,
             ),
         )
@@ -645,6 +706,10 @@ class ClaimsMintMixin:
         # already taken (auto mode only). Survives across iterations so we
         # don't keep re-fetching the same blocked row on every attempt.
         force_looter_path = claim_type_pref == "looter"
+        # Memo of best-effort Polymarket profile lookups keyed by lowercased
+        # proxy_wallet, so a looter re-pick across retries never re-hits the
+        # API for a wallet we already resolved this request.
+        profile_memo: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
         for attempt in range(LOOTER_ALLOC_MAX_ATTEMPTS):
             conn = self.manager.get_connection()
             try:
@@ -683,6 +748,15 @@ class ClaimsMintMixin:
                     )
                     season_meta = self._resolve_season_meta(cursor, req.season_id)
                     primary_tag = event_meta["primary_tag"]
+                    # Best-effort Polymarket profile identity for the allocated
+                    # proxy_wallet. Never raises — NULLs are acceptable and can
+                    # be backfilled later (scripts/backfill_claims_profile.py).
+                    memo_key = allocation.proxy_wallet.lower()
+                    if memo_key not in profile_memo:
+                        profile_memo[memo_key] = fetch_proxy_profile_identity(
+                            allocation.proxy_wallet
+                        )
+                    x_username, profile_name = profile_memo[memo_key]
                     try:
                         inserted = self._insert_queued_claim(
                             cursor,
@@ -695,6 +769,8 @@ class ClaimsMintMixin:
                             recurrence=event_meta["recurrence"],
                             season_type=season_meta["season_type"],
                             season_number=season_meta["season_number"],
+                            x_username=x_username,
+                            profile_name=profile_name,
                         )
                     except psycopg2.errors.UniqueViolation as exc:
                         conn.rollback()
