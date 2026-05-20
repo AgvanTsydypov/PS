@@ -16,6 +16,7 @@ import {
   navigateToCardIfCenterClick,
   triggerCardFlip,
 } from "./cardInteractions";
+import CardImage from "./CardImage";
 import SiteLogoLink from "./SiteLogoLink";
 import { fetchSiteStatus, userApiCredentials } from "../lib/userApiBase";
 
@@ -144,6 +145,8 @@ type MyMintedNftItem = {
   name: string | null;
   front_image_url: string | null;
   back_image_url: string | null;
+  front_image_fallback_url?: string | null;
+  back_image_fallback_url?: string | null;
   card_slug: string | null;
   explorer_asset_url: string | null;
   explorer_tx_url: string | null;
@@ -1500,16 +1503,24 @@ export default function UserDashboard() {
                           <div className={`generated-card-flip-inner ${isFlipped ? "is-flipped" : ""}`}>
                             <div className="generated-card-flip-face generated-card-flip-face-front">
                               {item.front_image_url ? (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img className="generated-card-image" src={item.front_image_url} alt={cardLabel} />
+                                <CardImage
+                                  className="generated-card-image"
+                                  src={item.front_image_url}
+                                  fallbackSrc={item.front_image_fallback_url}
+                                  alt={cardLabel}
+                                />
                               ) : (
                                 <div className="generated-card-image nft-image-empty">No preview</div>
                               )}
                             </div>
                             <div className="generated-card-flip-face generated-card-flip-face-back">
                               {item.back_image_url ? (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img className="generated-card-image" src={item.back_image_url} alt={`${cardLabel} back`} />
+                                <CardImage
+                                  className="generated-card-image"
+                                  src={item.back_image_url}
+                                  fallbackSrc={item.back_image_fallback_url}
+                                  alt={`${cardLabel} back`}
+                                />
                               ) : (
                                 <div className="generated-card-image nft-image-empty">No back preview</div>
                               )}

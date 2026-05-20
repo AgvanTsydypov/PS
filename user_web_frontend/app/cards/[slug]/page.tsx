@@ -3,6 +3,7 @@
 import Link from "next/link";
 import React, { useEffect, useState } from "react";
 
+import CardImage from "../../../components/CardImage";
 import SiteLogoLink from "../../../components/SiteLogoLink";
 import { isSafeExternalUrl } from "../../../components/cardInteractions";
 import { fetchPublicUserApiJsonResult } from "../../../lib/userApiBase";
@@ -43,6 +44,9 @@ type GeneratedCardItem = {
   pattern?: string | null;
   front_image_url: string;
   back_image_url: string;
+  /** Pinata-gateway fallbacks for the R2-primary images (onError retry). */
+  front_image_fallback_url?: string | null;
+  back_image_fallback_url?: string | null;
   card_payload_json?: GeneratedCardPayload;
   event_snapshot?: {
     title?: string | null;
@@ -211,8 +215,12 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                 className="card-detail-image-card card-detail-image-card-front"
                 style={{"--card-border-color": (card.card_payload_json as {border_color?: string} | undefined)?.border_color ?? "#B6BBC8"} as React.CSSProperties}
               >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img className="card-detail-image" src={card.front_image_url} alt={`${title} front`} />
+                <CardImage
+                  className="card-detail-image"
+                  src={card.front_image_url}
+                  fallbackSrc={card.front_image_fallback_url}
+                  alt={`${title} front`}
+                />
               </section>
 
               <div className="card-detail-info">
@@ -330,8 +338,12 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                 className="card-detail-image-card card-detail-image-card-back"
                 style={{"--card-border-color": (card.card_payload_json as {border_color?: string} | undefined)?.border_color ?? "#B6BBC8"} as React.CSSProperties}
               >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img className="card-detail-image" src={card.back_image_url} alt={`${title} back`} />
+                <CardImage
+                  className="card-detail-image"
+                  src={card.back_image_url}
+                  fallbackSrc={card.back_image_fallback_url}
+                  alt={`${title} back`}
+                />
               </section>
             </div>
           </>

@@ -56,6 +56,7 @@ from admin_backend.main import MintClaimRequest, SeasonWorkbenchService
 from scripts.cardgen.assets import (
     delete_r2_object_by_key,
     extract_r2_key_from_public_url,
+    ipfs_backup_public_url,
     r2_public_base_url,
     render_card_pngs,
     upload_card_assets_to_r2,
@@ -1142,19 +1143,75 @@ def _log_card_get_phase(phase: str, phase_start: float) -> float:
     return monotonic()
 
 
+def _ipfs_r2_mirror_url(asset_path: str) -> Optional[str]:
+    """R2-mirror URL for an IPFS/Pinata image, or ``None`` if not applicable.
+
+    The bytes behind every ``…/ipfs/<CID>`` card image already live on R2
+    (hard-required DR mirror at pin time), and R2 is CDN-fronted with no
+    per-IP rate limit — unlike ``gateway.pinata.cloud`` which 429s under load.
+    Returns ``None`` for non-IPFS inputs or when R2 env is unconfigured, so the
+    caller falls back to the public Pinata gateway.
+    """
+    cid_path = _extract_ipfs_cid_path(asset_path)
+    if not cid_path:
+        return None
+    # Mirror is keyed by the bare file CID (no sub-path); card PNGs are pinned
+    # with wrapWithDirectory=false so the CID is the first path segment.
+    cid = cid_path.split("/", 1)[0]
+    if not cid:
+        return None
+    try:
+        return ipfs_backup_public_url(cid, "png")
+    except Exception:
+        return None
+
+
 def _absolute_asset_url(request: Request, asset_path: str) -> str:
     raw = str(asset_path or "")
-    # ``ipfs://<CID>`` and private ``*.mypinata.cloud/ipfs/<CID>`` URLs aren't
-    # loadable by a browser as-is — rewrite them to the canonical public
-    # Pinata gateway. Plain http(s) URLs (R2 etc.) and relative R2 keys are
-    # left to the existing handling below.
+    # ``ipfs://<CID>`` and ``*.pinata.cloud/ipfs/<CID>`` images: serve the R2
+    # mirror (CDN-cached, immutable, no per-IP 429). Only when R2 is
+    # unconfigured do we fall back to the canonical public Pinata gateway so
+    # the URL is still browser-loadable. ``_image_fallback_url`` exposes the
+    # gateway URL separately so the client can retry there if R2 ever misses.
     if raw.strip().startswith("ipfs://") or "/ipfs/" in raw:
+        mirror = _ipfs_r2_mirror_url(raw)
+        if mirror:
+            return mirror
         normalized = _normalize_ipfs_gateway_url(raw)
         if normalized:
             return normalized
     if raw.startswith("http://") or raw.startswith("https://"):
         return raw
     return urllib.parse.urljoin(str(request.base_url), raw.lstrip("/"))
+
+
+def _image_fallback_url(asset_path: str) -> Optional[str]:
+    """Public Pinata-gateway URL to use as a browser ``onError`` fallback when
+    the primary (R2 mirror) URL fails. ``None`` for non-IPFS assets (R2/preview
+    images need no fallback) or when the primary wasn't rewritten to R2."""
+    raw = str(asset_path or "")
+    if not (raw.strip().startswith("ipfs://") or "/ipfs/" in raw):
+        return None
+    # Only meaningful when the primary actually went to R2; otherwise the
+    # primary already IS the gateway URL and a duplicate fallback is noise.
+    if _ipfs_r2_mirror_url(raw) is None:
+        return None
+    return _normalize_ipfs_gateway_url(raw)
+
+
+def _image_primary_and_fallback(value: Any) -> Tuple[Optional[str], Optional[str]]:
+    """``(primary, fallback)`` for a stored card image URL (``ipfs://`` or
+    gateway). Primary is the R2 mirror when available (CDN-cached, no per-IP
+    429); fallback is the public Pinata gateway. Non-IPFS URLs (already on R2)
+    pass through with no fallback. Used by surfaces that don't go through
+    ``_format_generated_card_row`` (e.g. the dashboard collection)."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None, None
+    mirror = _ipfs_r2_mirror_url(raw)
+    if mirror:
+        return mirror, _normalize_ipfs_gateway_url(raw)
+    return _public_image_url(raw), None
 
 
 def _clone_cards_ticker_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1327,8 +1384,14 @@ def _format_generated_card_row(row: Dict[str, Any], request: Request, include_pa
     created_at = payload.get("created_at")
     if isinstance(created_at, datetime):
         payload["created_at"] = created_at.astimezone(timezone.utc).isoformat()
-    payload["front_image_url"] = _absolute_asset_url(request, str(payload.get("front_image_path") or ""))
-    payload["back_image_url"] = _absolute_asset_url(request, str(payload.get("back_image_path") or ""))
+    front_path = str(payload.get("front_image_path") or "")
+    back_path = str(payload.get("back_image_path") or "")
+    payload["front_image_url"] = _absolute_asset_url(request, front_path)
+    payload["back_image_url"] = _absolute_asset_url(request, back_path)
+    # Pinata-gateway fallbacks for the client's onError retry (null unless the
+    # primary was rewritten to the R2 mirror).
+    payload["front_image_fallback_url"] = _image_fallback_url(front_path)
+    payload["back_image_fallback_url"] = _image_fallback_url(back_path)
     if isinstance(payload.get("card_payload_json"), str):
         try:
             payload["card_payload_json"] = json.loads(payload["card_payload_json"])
@@ -3030,6 +3093,8 @@ def generated_cards_ticker(request: Request, limit: Optional[int] = None) -> Dic
                 "card_title": title,
                 "front_image_url": _absolute_asset_url(request, front_path),
                 "back_image_url": _absolute_asset_url(request, back_path) if back_path else None,
+                "front_image_fallback_url": _image_fallback_url(front_path),
+                "back_image_fallback_url": _image_fallback_url(back_path) if back_path else None,
                 "created_at": created_iso,
             }
         )
@@ -3705,8 +3770,16 @@ def me_cards(request: Request) -> Dict[str, Any]:
         # phase, polished labels). Fall back to Alchemy-indexed metadata
         # only when we don't have a local row — that covers NFTs received
         # via secondary transfer or minted from another instance.
-        claim_front = _public_image_url(row.get("front_image_url")) if row else None
-        claim_back = _public_image_url(row.get("back_image_url")) if row else None
+        # Prefer the claim's own image (richer), else the on-chain metadata's.
+        # Each resolves to an R2-primary URL + Pinata-gateway fallback.
+        chosen_front = (
+            row.get("front_image_url") if row and row.get("front_image_url") else nft.image_url
+        )
+        chosen_back = (
+            row.get("back_image_url") if row and row.get("back_image_url") else nft.back_image_url
+        )
+        front_url, front_fallback = _image_primary_and_fallback(chosen_front)
+        back_url, back_fallback = _image_primary_and_fallback(chosen_back)
         claim_name = (str(row["name"]).strip() or None) if row and row.get("name") else None
         claim_metadata_uri = (str(row["metadata_uri"]).strip() or None) if row and row.get("metadata_uri") else None
         items.append({
@@ -3720,12 +3793,14 @@ def me_cards(request: Request) -> Dict[str, Any]:
             "phase": (str(row["phase"]).strip() or None) if row and row.get("phase") else None,
             "collection_mint_number": row.get("collection_mint_number") if row else None,
             "name": claim_name or nft.name,
-            "front_image_url": claim_front or _public_image_url(nft.image_url),
+            "front_image_url": front_url,
             # Back falls back to ``properties.files[]`` from the on-chain
             # metadata (our minter writes [front, back] there, as ``ipfs://``).
             # Null only when neither claims row nor on-chain metadata carry it —
             # the UI shows "No back preview" in that case.
-            "back_image_url": claim_back or _public_image_url(nft.back_image_url),
+            "back_image_url": back_url,
+            "front_image_fallback_url": front_fallback,
+            "back_image_fallback_url": back_fallback,
             "card_slug": (str(row["card_slug"]).strip() or None) if row and row.get("card_slug") else None,
             "explorer_asset_url": etherscan_nft_url(contract_address, token_id, chain_id),
             "explorer_tx_url": etherscan_tx_url(tx_hash, chain_id) if tx_hash else None,

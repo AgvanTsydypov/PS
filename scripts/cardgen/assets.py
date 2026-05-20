@@ -428,6 +428,19 @@ def _ipfs_backup_r2_key(cid: str, ext: str) -> str:
     return f"{prefix}/{key}" if prefix else key
 
 
+def ipfs_backup_public_url(cid: str, ext: str = "png") -> str:
+    """Public R2 URL of the disaster-recovery mirror for a pinned IPFS CID.
+
+    Every byte pinned to Pinata is also mirrored to R2 under
+    ``{R2_PREFIX}/ipfs-backup/<cid>.<ext>`` (see :func:`backup_ipfs_bytes_to_r2`),
+    so card images can be served from R2 — which is CDN-fronted and has no
+    per-IP rate limit — instead of hot-linking ``gateway.pinata.cloud`` (which
+    429s under load). Raises ``ValueError`` if R2 env is not configured so the
+    caller can fall back to the public Pinata gateway.
+    """
+    return f"{r2_public_base_url()}/{_ipfs_backup_r2_key(cid, ext)}"
+
+
 def backup_ipfs_bytes_to_r2(
     cid: str, body: bytes, content_type: str, ext: str,
 ) -> str:
