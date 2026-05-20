@@ -28,6 +28,12 @@ type GeneratedCardItem = {
   owner_proxy_wallet?: string | null;
   /** Polymarket proxy on the allocation row (claims.proxy_wallet). */
   winner_proxy_wallet?: string | null;
+  /** X (Twitter) handle from the Star's Polymarket public profile
+   *  (claims.x_username). Null on previews or when the profile had none. */
+  x_username?: string | null;
+  /** Display name from the Star's Polymarket public profile
+   *  (claims.profile_name). Null on previews or when the profile had none. */
+  profile_name?: string | null;
   season_id: number;
   event_id?: string | null;
   event_slug?: string | null;
@@ -133,6 +139,16 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
   const eventSlug = event.slug ?? card?.event_slug ?? null;
   const polymarketUrl = eventSlug ? `https://polymarket.com/event/${encodeURIComponent(eventSlug)}` : null;
 
+  // Polymarket public-profile identity of the Star's proxy_wallet.
+  const xUsername = String(card?.x_username ?? "").trim();
+  const profileName = String(card?.profile_name ?? "").trim();
+  const twitterUrl = xUsername ? `https://x.com/${encodeURIComponent(xUsername)}` : null;
+  // Polymarket profiles resolve reliably by proxy_wallet; the display name is
+  // only used as the link label when present.
+  const polymarketProfileUrl = starWallet
+    ? `https://polymarket.com/profile/${encodeURIComponent(starWallet)}`
+    : null;
+
   const polygonscanStarUrl = starWallet ? `https://polygonscan.com/address/${starWallet}` : null;
   const explorerUrl = card?.explorer_asset_url ?? null;
   const openseaUrl = card?.opensea_asset_url ?? null;
@@ -213,6 +229,26 @@ export default function CardDetailPage({ params }: { params: { slug: string } })
                     <dd>{starWallet ?? "N/A"}</dd>
                     <dt>Claim type</dt>
                     <dd>{claimType}</dd>
+                    <dt>X (Twitter)</dt>
+                    <dd>
+                      {isSafeExternalUrl(twitterUrl) ? (
+                        <a href={twitterUrl!} target="_blank" rel="noopener noreferrer">
+                          @{xUsername} ↗
+                        </a>
+                      ) : (
+                        "N/A"
+                      )}
+                    </dd>
+                    <dt>Polymarket profile</dt>
+                    <dd>
+                      {isSafeExternalUrl(polymarketProfileUrl) ? (
+                        <a href={polymarketProfileUrl!} target="_blank" rel="noopener noreferrer">
+                          {profileName || starWallet} ↗
+                        </a>
+                      ) : (
+                        "N/A"
+                      )}
+                    </dd>
                   </dl>
                 </section>
 

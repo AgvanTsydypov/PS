@@ -3084,7 +3084,12 @@ SELECT
     e.end_date AS event_end_date,
     e.closed_time AS event_closed_time,
     gc.owner_proxy_wallet AS winner_proxy_wallet,
-    NULL::text AS minted_asset_address
+    NULL::text AS minted_asset_address,
+    -- preview_cards has no claim behind it yet, so there is no resolved
+    -- Polymarket identity to surface — keep the column shape aligned with
+    -- the minted SQL by selecting NULLs.
+    NULL::text AS x_username,
+    NULL::text AS profile_name
 FROM preview_cards gc
 LEFT JOIN events e ON e.id = gc.event_id
 WHERE gc.slug = %s
@@ -3131,7 +3136,12 @@ SELECT
     e.closed_time AS event_closed_time,
     c.proxy_wallet AS winner_proxy_wallet,
     c.asset_address AS minted_asset_address,
-    c.metadata_uri AS minted_metadata_uri
+    c.metadata_uri AS minted_metadata_uri,
+    -- Polymarket public-profile identity of the Star's proxy_wallet, stamped
+    -- onto the claim at queue-insert time (or backfilled). Drives the X /
+    -- Polymarket profile links on the card detail page.
+    c.x_username,
+    c.profile_name
 FROM claims c
 LEFT JOIN events e ON e.id = c.event_id
 LEFT JOIN user_wallet_signins uws ON LOWER(uws.wallet_address) = LOWER(COALESCE(NULLIF(c.recipient_address, ''), c.user_wallet))

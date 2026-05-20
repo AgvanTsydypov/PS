@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import admin_backend.claims_mint as claims_mint
 from admin_backend.claims_mint import (
     ClaimsMintMixin,
     MintClaimRequest,
@@ -21,6 +22,18 @@ from admin_backend.claims_mint import (
 # A valid EVM-shaped address (lower-case; Web3 will checksum it internally).
 _WALLET = "0x" + "1" * 40
 _RECIPIENT = "0x" + "2" * 40
+
+
+@pytest.fixture(autouse=True)
+def _stub_polymarket_profile(monkeypatch):
+    """Keep these unit tests offline: the insert path now best-effort fetches
+    the proxy_wallet's Polymarket profile, which would otherwise hit the
+    network. Stub it to a deterministic identity."""
+    monkeypatch.setattr(
+        claims_mint,
+        "fetch_proxy_profile_identity",
+        lambda proxy_wallet: ("sat0shi", "Satoshi"),
+    )
 
 
 def _origin_alloc() -> ParticipantAllocation:
@@ -118,6 +131,9 @@ def test_looter_choice_skips_origin_allocation_even_for_origin_wallet():
     # The queued row carries the looter allocation's snapshot, not the wallet's own.
     assert svc.inserted[0]["allocation"].claim_type == "looter"
     assert svc.inserted[0]["phase"] == "breach"
+    # The best-effort Polymarket identity is threaded into the insert.
+    assert svc.inserted[0]["x_username"] == "sat0shi"
+    assert svc.inserted[0]["profile_name"] == "Satoshi"
     assert svc.cleared_cache == 1
 
 
