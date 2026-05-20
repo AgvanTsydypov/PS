@@ -73,6 +73,9 @@ export type CardTickerItem = {
   card_title: string;
   front_image_url: string;
   back_image_url?: string | null;
+  /** Pinata-gateway fallbacks for the R2-primary images (onError retry). */
+  front_image_fallback_url?: string | null;
+  back_image_fallback_url?: string | null;
   created_at?: string | null;
 };
 

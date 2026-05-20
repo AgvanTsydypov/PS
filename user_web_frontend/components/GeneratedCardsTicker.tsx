@@ -17,6 +17,7 @@ import {
   navigateToCardIfCenterClick,
   triggerCardFlip,
 } from "./cardInteractions";
+import CardImage from "./CardImage";
 import { fetchCardTicker, type CardTickerItem } from "../lib/userApiBase";
 
 const TICKER_RETRY_DELAYS_MS = [3000, 8000, 15000, 30000];
@@ -271,14 +272,16 @@ export default function GeneratedCardsTicker({
     const isFlipped = Boolean(flippedCards[interactionId]);
     const isAnimating = Boolean(animatingCards[interactionId]);
     const backImageUrl = item.back_image_url || item.front_image_url;
+    const frontFallback = item.front_image_fallback_url ?? null;
+    const backFallback = item.back_image_fallback_url ?? frontFallback;
 
     if (tickerLiteTheme) {
       const cardMarkup = (
         <article className="nft-card card-ticker-card card-ticker-card-lite home-panel-card">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
+          <CardImage
             className="generated-card-image card-ticker-thumb"
             src={item.front_image_url}
+            fallbackSrc={frontFallback}
             alt=""
             width={TICKER_THUMB_PX}
             height={TICKER_THUMB_HEIGHT_PX}
@@ -372,10 +375,10 @@ export default function GeneratedCardsTicker({
         >
           <div className={`generated-card-flip-inner ${isFlipped ? "is-flipped" : ""}`}>
             <div className="generated-card-flip-face generated-card-flip-face-front">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
+              <CardImage
                 className="generated-card-image card-ticker-thumb"
                 src={item.front_image_url}
+                fallbackSrc={frontFallback}
                 alt=""
                 width={TICKER_THUMB_PX}
                 height={TICKER_THUMB_HEIGHT_PX}
@@ -384,10 +387,10 @@ export default function GeneratedCardsTicker({
               />
             </div>
             <div className="generated-card-flip-face generated-card-flip-face-back">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
+              <CardImage
                 className="generated-card-image card-ticker-thumb"
                 src={backImageUrl}
+                fallbackSrc={backFallback}
                 alt=""
                 width={TICKER_THUMB_PX}
                 height={TICKER_THUMB_HEIGHT_PX}
@@ -501,10 +504,10 @@ export default function GeneratedCardsTicker({
                   aria-label={`Open card: ${label}`}
                 >
                   <article className="nft-card card-ticker-card card-ticker-card-lite">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
+                    <CardImage
                       className="generated-card-image card-ticker-thumb"
                       src={item.front_image_url}
+                      fallbackSrc={item.front_image_fallback_url ?? null}
                       alt=""
                       width={TICKER_THUMB_PX}
                       height={TICKER_THUMB_HEIGHT_PX}
