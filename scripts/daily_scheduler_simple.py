@@ -538,50 +538,83 @@ class SimplifiedScheduler:
         except Exception:
             return None
 
-    def _get_standard_filtered_event_ids(self, cursor: Any, season_id: Optional[int] = None) -> List[str]:
+    def _get_standard_filtered_event_ids(
+        self,
+        cursor: Any,
+        season_id: Optional[int] = None,
+        *,
+        apply_caps: bool = True,
+    ) -> List[str]:
         if season_id is None:
+            # Resolve the anchor date for the *upcoming* standard season's
+            # snapshot window. While at least one standard season exists the
+            # next season starts when the latest one ends, so the latest
+            # season's end_date is that upcoming start. Before the first
+            # standard season is bootstrapped the table is empty, so derive the
+            # grid of season starts from genesis (genesis_start + bootstrap
+            # delay, then every STANDARD_SEASON_CYCLE_DAYS) and project to the
+            # next boundary strictly after now -- this matches what this branch
+            # returns once the daily cron actually creates the seasons.
             cursor.execute(
                 """
-                WITH anchor AS (
-                    -- The upcoming standard season's start date, used to anchor
-                    -- the snapshot window. While at least one standard season
-                    -- exists, the next season starts when the latest one ends,
-                    -- so its start == latest.end_date. Before the first standard
-                    -- season is created the table is empty, so fall back to the
-                    -- computed Standard #1 start (genesis_start + bootstrap delay)
-                    -- to keep the future-window preview working at bootstrap.
-                    SELECT COALESCE(
-                        (
-                            SELECT s.end_date
-                            FROM seasons s
-                            WHERE s.type = 'standard'
-                            ORDER BY s.start_date DESC, s.id DESC
-                            LIMIT 1
-                        ),
-                        (
-                            SELECT g.start_date + make_interval(days => %s)
-                            FROM seasons g
-                            WHERE g.type = 'genesis'
-                            ORDER BY g.start_date ASC, g.id ASC
-                            LIMIT 1
+                SELECT end_date
+                FROM seasons
+                WHERE type = 'standard'
+                ORDER BY start_date DESC, id DESC
+                LIMIT 1
+                """
+            )
+            latest_standard = cursor.fetchone()
+            anchor_date: Optional[datetime] = None
+            if latest_standard is not None:
+                anchor_date = (
+                    latest_standard["end_date"]
+                    if isinstance(latest_standard, dict)
+                    else latest_standard[0]
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT start_date
+                    FROM seasons
+                    WHERE type = 'genesis'
+                    ORDER BY start_date ASC, id ASC
+                    LIMIT 1
+                    """
+                )
+                genesis_row = cursor.fetchone()
+                genesis_start = None
+                if genesis_row is not None:
+                    genesis_start = (
+                        genesis_row["start_date"]
+                        if isinstance(genesis_row, dict)
+                        else genesis_row[0]
+                    )
+                if genesis_start is not None:
+                    first_start = self._utc_day_start(genesis_start) + timedelta(
+                        days=FIRST_STANDARD_BOOTSTRAP_DELAY_DAYS
+                    )
+                    now = datetime.now(timezone.utc)
+                    cycle = STANDARD_SEASON_CYCLE_DAYS
+                    if now < first_start:
+                        # The very first standard season is the upcoming one.
+                        anchor_date = first_start
+                    else:
+                        cycles_elapsed = (now - first_start).days // cycle
+                        anchor_date = first_start + timedelta(
+                            days=(cycles_elapsed + 1) * cycle
                         )
-                    ) AS anchor_date
-                ),
-                next_window AS (
-                    SELECT
-                        (
-                            anchor.anchor_date
-                            - make_interval(days => %s)
-                            - make_interval(days => %s)
-                        ) AS window_start,
-                        (
-                            anchor.anchor_date
-                            - make_interval(days => %s)
-                        ) AS window_end
-                    FROM anchor
-                    WHERE anchor.anchor_date IS NOT NULL
-                ),
-                working_events AS (
+            if anchor_date is None:
+                return []
+            if anchor_date.tzinfo is None:
+                anchor_date = anchor_date.replace(tzinfo=timezone.utc)
+            window_end = anchor_date - timedelta(days=STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS)
+            window_start = window_end - timedelta(days=ORIGIN_LOOKBACK_DAYS_STANDARD)
+
+            # ``apply_caps`` then decides whether the TOP20/TAG5 snapshot rules
+            # are applied on top of the raw windowed candidate set.
+            base_cte = """
+                WITH working_events AS (
                     SELECT
                         e.id AS event_id,
                         e.slug AS event_slug,
@@ -589,15 +622,14 @@ class SimplifiedScheduler:
                         COALESCE(e.volume, 0) AS event_volume,
                         COALESCE(NULLIF(BTRIM(ec.primary_tag), ''), '__UNTAGGED__') AS primary_tag
                     FROM events e
-                    JOIN next_window nw ON TRUE
                     LEFT JOIN event_resolution_queue erq
                       ON erq.event_id = e.id
                     LEFT JOIN event_cards ec
                       ON ec.event_id = e.id
                     WHERE erq.status = 'processed'
                       AND erq.resolution_ready_at IS NOT NULL
-                      AND erq.resolution_ready_at >= nw.window_start
-                      AND erq.resolution_ready_at < nw.window_end
+                      AND erq.resolution_ready_at >= %s
+                      AND erq.resolution_ready_at < %s
                       AND NOT EXISTS (
                           SELECT 1
                           FROM participants pp
@@ -606,7 +638,12 @@ class SimplifiedScheduler:
                               OR (e.slug IS NOT NULL AND pp.event_slug = e.slug)
                           )
                       )
-                ),
+                )
+            """
+            window_params = (window_start, window_end)
+            if apply_caps:
+                query = base_cte + """
+                ,
                 tag_capped_events AS (
                     SELECT
                         ranked.event_id,
@@ -648,16 +685,26 @@ class SimplifiedScheduler:
                 FROM final_events
                 WHERE event_id IS NOT NULL
                 ORDER BY overall_rank
-                """,
-                (
-                    FIRST_STANDARD_BOOTSTRAP_DELAY_DAYS,
-                    STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS,
-                    ORIGIN_LOOKBACK_DAYS_STANDARD,
-                    STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS,
+                """
+                params = window_params + (
                     STANDARD_SNAPSHOT_PRIMARY_TAG_CAP,
                     STANDARD_SNAPSHOT_EVENT_LIMIT,
-                ),
-            )
+                )
+            else:
+                # Uncapped: every event that lands in the season window, so the
+                # future-window preview can show the full candidate pool before
+                # the TOP20/TAG5 rules trim it.
+                query = base_cte + """
+                SELECT event_id
+                FROM working_events
+                WHERE event_id IS NOT NULL
+                ORDER BY
+                    event_volume DESC,
+                    season_anchor_at DESC NULLS LAST,
+                    COALESCE(event_id, event_slug) ASC
+                """
+                params = window_params
+            cursor.execute(query, params)
         else:
             cursor.execute(
                 """
@@ -1409,10 +1456,18 @@ class SimplifiedScheduler:
         cursor.execute("SELECT type FROM seasons WHERE id = %s", (season_id,))
         season_row = cursor.fetchone()
         season_type = (season_row or {}).get("type") if isinstance(season_row, dict) else (season_row[0] if season_row else None)
+        event_id_allowlist: Optional[List[str]] = None
         if season_type == "standard":
             window_end = season_start_date - timedelta(days=STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS)
             window_start = window_end - timedelta(days=ORIGIN_LOOKBACK_DAYS_STANDARD)
             use_resolution_anchor = True
+            # Cap the materialized pool to the TOP20/TAG5 selection so the
+            # season contains exactly the events shown in the admin preview
+            # (not every event that merely falls inside the window).
+            event_id_allowlist = self._get_standard_filtered_event_ids(
+                cursor,
+                season_id=season_id,
+            )
         else:
             window_start = datetime.combine(GENESIS_START_DATE, datetime.min.time(), tzinfo=timezone.utc)
             window_end = datetime.combine(
@@ -1424,8 +1479,8 @@ class SimplifiedScheduler:
 
         cursor.execute("SELECT participants_ensure_partition(%s)", (season_id,))
         cursor.execute(
-            "SELECT refresh_participants_for_season(%s, %s, %s, %s) AS n",
-            (season_id, window_start, window_end, use_resolution_anchor),
+            "SELECT refresh_participants_for_season(%s, %s, %s, %s, %s::text[]) AS n",
+            (season_id, window_start, window_end, use_resolution_anchor, event_id_allowlist),
         )
         result = cursor.fetchone()
         if isinstance(result, dict):

@@ -1063,12 +1063,20 @@ $$ LANGUAGE plpgsql;
 -- TRUNCATE the partition for a season and reload it from participants_analytics
 -- filtered to the season's working events. Caller passes window bounds and
 -- whether to anchor by event_resolution_queue (standard) or events.end_date
--- (genesis). Returns the count of rows inserted.
+-- (genesis). When p_event_ids is non-NULL the load is further restricted to
+-- that explicit event allowlist -- standard seasons pass the TOP20/TAG5
+-- selection here so the materialized pool matches the admin preview; genesis
+-- passes NULL (no cap). Returns the count of rows inserted.
+--
+-- The signature gained the p_event_ids argument; drop the old 4-arg version so
+-- re-applying this file does not leave a stale overload behind.
+DROP FUNCTION IF EXISTS refresh_participants_for_season(BIGINT, TIMESTAMPTZ, TIMESTAMPTZ, BOOLEAN);
 CREATE OR REPLACE FUNCTION refresh_participants_for_season(
     p_season_id              BIGINT,
     p_window_start           TIMESTAMPTZ,
     p_window_end             TIMESTAMPTZ,
-    p_use_resolution_anchor  BOOLEAN
+    p_use_resolution_anchor  BOOLEAN,
+    p_event_ids              TEXT[] DEFAULT NULL
 )
 RETURNS INTEGER AS $$
 DECLARE
@@ -1106,6 +1114,8 @@ BEGIN
                   (pa.event_id IS NOT NULL AND e.id = pa.event_id)
               OR  (e.slug = pa.event_slug)
           )
+          -- Optional explicit allowlist (e.g. TOP20/TAG5 capped events).
+          AND (p_event_ids IS NULL OR e.id = ANY(p_event_ids))
           AND (
               (
                   p_use_resolution_anchor
@@ -1139,10 +1149,12 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-COMMENT ON FUNCTION refresh_participants_for_season(BIGINT, TIMESTAMPTZ, TIMESTAMPTZ, BOOLEAN) IS
+COMMENT ON FUNCTION refresh_participants_for_season(BIGINT, TIMESTAMPTZ, TIMESTAMPTZ, BOOLEAN, TEXT[]) IS
     'TRUNCATE the season''s participants partition and reload it from '
     'participants_analytics filtered to the season''s working events. '
-    'Caller decides the window and resolution anchor based on season type.';
+    'Caller decides the window and resolution anchor based on season type, and '
+    'may pass an explicit event allowlist (p_event_ids) to cap the pool '
+    '(standard seasons pass their TOP20/TAG5 selection; genesis passes NULL).';
 
 -- 12.4 Pre-create partitions for every existing season so the partitioned
 --      table is immediately usable. Initial population happens lazily on the
