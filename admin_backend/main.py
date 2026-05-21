@@ -1616,41 +1616,19 @@ class SeasonWorkbenchService(ClaimsMintMixin):
                         ]
                     )
                 elif snapshot_scope_filter == "next_window":
-                    where_parts.append(
-                        """
-                        EXISTS (
-                            SELECT 1
-                            FROM (
-                                SELECT
-                                    (
-                                        s.end_date
-                                        - make_interval(days => %s)
-                                        - make_interval(days => %s)
-                                    ) AS window_start,
-                                    (
-                                        s.end_date
-                                        - make_interval(days => %s)
-                                    ) AS window_end
-                                FROM seasons s
-                                WHERE s.type = 'standard'
-                                ORDER BY s.start_date DESC, s.id DESC
-                                LIMIT 1
-                            ) nw
-                            LEFT JOIN event_resolution_queue erq ON erq.event_id = ec.event_id
-                            WHERE erq.status = 'processed'
-                              AND erq.resolution_ready_at IS NOT NULL
-                              AND erq.resolution_ready_at >= nw.window_start
-                              AND erq.resolution_ready_at < nw.window_end
-                        )
-                        """
+                    # Unfiltered future window: show the full candidate pool that
+                    # lands in the upcoming season's window (before TOP20/TAG5
+                    # trims it). Reuse the scheduler's uncapped selection so the
+                    # bootstrap anchor + participants exclusion stay in one place
+                    # and this set is a strict superset of the TOP20TAG5 result.
+                    window_event_ids = self.scheduler._get_standard_filtered_event_ids(
+                        cursor,
+                        apply_caps=False,
                     )
-                    params.extend(
-                        [
-                            self.origin_snapshot_offset_days,
-                            self.origin_lookback_days_standard,
-                            self.origin_snapshot_offset_days,
-                        ]
-                    )
+                    if not window_event_ids:
+                        return []
+                    where_parts.append("ec.event_id = ANY(%s)")
+                    params.append(window_event_ids)
 
                 where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
                 query = f"""
