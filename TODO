@@ -17,3 +17,7 @@ docker exec polystars_scheduler python /app/scripts/export_x_usernames_from_clai
 docker cp polystars_scheduler:/app/x_usernames.csv ~/x_usernames.csv
 # Скачать файл с прода к себе в текущую директорию
   scp root@209.38.244.240:~/x_usernames.csv .\x_usernames.csv
+
+
+
+docker exec polystars_scheduler python /app/scripts/backfill_claims_profile.py --dry-run

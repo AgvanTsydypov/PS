@@ -1191,7 +1191,7 @@ export default function UserDashboard() {
       <>
         <nav className="site-nav" aria-label="Site">
           <SiteLogoLink colorful />
-          <span className="site-nav-title">My dashboard</span>
+          <span className="site-nav-title">DASHBOARD</span>
         </nav>
         <main className="card-detail-page" style={{ padding: "2rem", maxWidth: 480 }}>
           <p className="season-board-muted">Checking site status…</p>
@@ -1205,7 +1205,7 @@ export default function UserDashboard() {
       <>
         <nav className="site-nav" aria-label="Site">
           <SiteLogoLink colorful />
-          <span className="site-nav-title">My dashboard</span>
+          <span className="site-nav-title">DASHBOARD</span>
         </nav>
         <main className="card-detail-page" style={{ padding: "2rem", maxWidth: 520 }}>
           <h1 style={{ fontSize: "1.25rem", marginBottom: "0.75rem" }}>Dashboard unavailable</h1>
@@ -1224,7 +1224,7 @@ export default function UserDashboard() {
     <>
       <nav className="site-nav" aria-label="Site">
         <SiteLogoLink colorful />
-        <span className="site-nav-title">My dashboard</span>
+        <span className="site-nav-title">DASHBOARD</span>
       </nav>
       {/* ── Wallet picker modal ── */}
       {showPicker && (
