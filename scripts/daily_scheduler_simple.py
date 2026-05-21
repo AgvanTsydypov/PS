@@ -542,21 +542,44 @@ class SimplifiedScheduler:
         if season_id is None:
             cursor.execute(
                 """
-                WITH next_window AS (
+                WITH anchor AS (
+                    -- The upcoming standard season's start date, used to anchor
+                    -- the snapshot window. While at least one standard season
+                    -- exists, the next season starts when the latest one ends,
+                    -- so its start == latest.end_date. Before the first standard
+                    -- season is created the table is empty, so fall back to the
+                    -- computed Standard #1 start (genesis_start + bootstrap delay)
+                    -- to keep the future-window preview working at bootstrap.
+                    SELECT COALESCE(
+                        (
+                            SELECT s.end_date
+                            FROM seasons s
+                            WHERE s.type = 'standard'
+                            ORDER BY s.start_date DESC, s.id DESC
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT g.start_date + make_interval(days => %s)
+                            FROM seasons g
+                            WHERE g.type = 'genesis'
+                            ORDER BY g.start_date ASC, g.id ASC
+                            LIMIT 1
+                        )
+                    ) AS anchor_date
+                ),
+                next_window AS (
                     SELECT
                         (
-                            s.end_date
+                            anchor.anchor_date
                             - make_interval(days => %s)
                             - make_interval(days => %s)
                         ) AS window_start,
                         (
-                            s.end_date
+                            anchor.anchor_date
                             - make_interval(days => %s)
                         ) AS window_end
-                    FROM seasons s
-                    WHERE s.type = 'standard'
-                    ORDER BY s.start_date DESC, s.id DESC
-                    LIMIT 1
+                    FROM anchor
+                    WHERE anchor.anchor_date IS NOT NULL
                 ),
                 working_events AS (
                     SELECT
@@ -627,6 +650,7 @@ class SimplifiedScheduler:
                 ORDER BY overall_rank
                 """,
                 (
+                    FIRST_STANDARD_BOOTSTRAP_DELAY_DAYS,
                     STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS,
                     ORIGIN_LOOKBACK_DAYS_STANDARD,
                     STANDARD_ORIGIN_SNAPSHOT_OFFSET_DAYS,
