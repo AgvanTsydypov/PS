@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { usePackStore } from "./store";
+import { CardRotateHint } from "./CardRotateHint";
 
 const CARD_FRAME_COUNT = 120;
 const cardFramePath = (i: number) =>
@@ -29,6 +30,7 @@ export function CardReveal() {
   const activePointerRef = useRef<number | null>(null);
   const rafRef = useRef(0);
   const [loaded, setLoaded] = useState(0);
+  const [hasDragged, setHasDragged] = useState(false);
 
   // Card is present from "revealing" so the flying-away pack (rendered on top)
   // overlaps and progressively uncovers it.
@@ -70,6 +72,12 @@ export function CardReveal() {
     if (!show) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
+
+    // Every fresh reveal must start with the card facing the user (frame 0).
+    // The component returns null while hidden instead of unmounting, so the
+    // ref would otherwise persist the last dragged rotation across openings.
+    frameFloatRef.current = 0;
+    setHasDragged(false); // re-show the rotate hint for the new card
 
     const sizeCanvas = () => {
       // Use offset* (layout size, ignores the entry scale transform) — measuring
@@ -148,6 +156,7 @@ export function CardReveal() {
     const dx = e.clientX - lastXRef.current;
     lastXRef.current = e.clientX;
     frameFloatRef.current += dx / DRAG_PX_PER_FRAME;
+    if (dx !== 0 && !hasDragged) setHasDragged(true); // hide the rotate hint
   };
   const endDrag = (e: React.PointerEvent) => {
     if (activePointerRef.current !== e.pointerId) return;
@@ -186,9 +195,7 @@ export function CardReveal() {
         >
           <canvas ref={canvasRef} className="card-turntable-canvas" />
           {!ready && <div className="card-turntable-hint">LOADING…</div>}
-          {ready && phase === "revealed" && (
-            <div className="card-turntable-grab-hint">DRAG TO ROTATE</div>
-          )}
+          {ready && phase === "revealed" && !hasDragged && <CardRotateHint />}
         </motion.div>
 
         {phase === "revealed" && (

@@ -171,25 +171,15 @@
   -webkit-user-drag: none;
 }
 
-.card-turntable-hint,
-.card-turntable-grab-hint {
+.card-turntable-hint {
   position: absolute;
+  top: 50%;
   left: 50%;
-  transform: translateX(-50%);
+  transform: translate(-50%, -50%);
   font-size: 10px;
   letter-spacing: 0.3em;
   color: var(--bd-ink-mute, #888);
   pointer-events: none;
-}
-
-.card-turntable-hint {
-  top: 50%;
-  transform: translate(-50%, -50%);
-}
-
-.card-turntable-grab-hint {
-  bottom: -8px;
-  opacity: 0.6;
 }
 
 .card-actions {
@@ -248,11 +238,402 @@
   z-index: 6;
 }
 
+/* ── Drag hint (animated cursor: hold + drag up) ──────────────────────── */
+
+/* Bounding box of the diagonal track. Its bottom-left corner is the drag's
+   start point: 10% from the left, 30% from the top (bottom edge -> bottom: 70%).
+   Width spans 10%->90% of the stage; aspect-ratio = cot(15°) sets the height so
+   the box diagonal sits at exactly 15° to the horizontal. */
+.drag-hint {
+  position: absolute;
+  left: 10%;
+  bottom: 70%;
+  width: 80%;
+  aspect-ratio: 3.7320508; /* cot(15°) */
+  z-index: 13; /* above the pack so it always reads while idle */
+  pointer-events: none; /* drag falls through to the gesture target */
+}
+
+/* Coordinate frame for the diagonal: a zero-height strip pinned to the box's
+   bottom-left corner (the start point), with its +x axis rotated up to 15°. */
+.drag-hint-rail {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 103.528%; /* sec(15°): reaches the top-right corner of the box */
+  height: 0;
+  transform: rotate(-15deg);
+  transform-origin: 0 0;
+}
+
+/* Guide line the cursor travels along (the full diagonal). */
+.drag-hint-track {
+  position: absolute;
+  left: 0;
+  top: -1px;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(
+    to right,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.22) 22%,
+    rgba(255, 255, 255, 0.22) 78%,
+    rgba(255, 255, 255, 0) 100%
+  );
+}
+
+/* Direction marker at the far (upper-right) end of the track. */
+.drag-hint-arrow {
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  transform: translate(-3px, -50%);
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 8px solid rgba(255, 255, 255, 0.45);
+}
+
+/* Moving group: travels from the start point to the upper-right end. */
+.drag-hint-pointer {
+  position: absolute;
+  left: 0;
+  top: -13px; /* centre the 26px cursor on the line */
+  animation: drag-hint-move 2.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* Counter-rotate so the hand stays upright while the rail is tilted. */
+.drag-hint-cursor {
+  position: relative;
+  display: block;
+  width: 26px;
+  height: 26px;
+  transform: rotate(15deg);
+  transform-origin: 50% 50%;
+}
+
+.drag-hint-hand {
+  position: absolute;
+  top: 0;
+  left: 0;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.7));
+}
+
+/* Open hand first, then the grab swaps in once the press registers (~0.5s). */
+.drag-hint-hand--open {
+  animation: drag-hint-open 2.8s steps(1, end) infinite;
+}
+.drag-hint-hand--grab {
+  opacity: 0;
+  animation: drag-hint-grab 2.8s steps(1, end) infinite;
+}
+
+/* Press pulse, centred on the cursor. */
+.drag-hint-ring {
+  position: absolute;
+  top: 13px;
+  left: 13px;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border-radius: 50%;
+  border: 2px solid var(--bd-brand, #ff4000);
+  opacity: 0;
+  animation: drag-hint-press 2.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.drag-hint-label {
+  position: absolute;
+  left: -8px;
+  top: calc(100% + 8px); /* just below the start point */
+  white-space: nowrap;
+  font-size: 9px;
+  letter-spacing: 0.28em;
+  color: var(--bd-ink-mute, #888);
+}
+
+@keyframes drag-hint-move {
+  0% {
+    left: 0;
+    opacity: 0;
+  }
+  8% {
+    left: 0;
+    opacity: 1;
+  }
+  18% {
+    left: -3%; /* slight press dip back */
+  }
+  68% {
+    left: 100%; /* dragged up the diagonal to the end */
+    opacity: 1;
+  }
+  82% {
+    left: 100%;
+    opacity: 1;
+  }
+  92%,
+  100% {
+    left: 100%;
+    opacity: 0;
+  }
+}
+
+/* Open hand visible only at the start (first ~0.5s of the 2.8s loop). */
+@keyframes drag-hint-open {
+  0%,
+  15% {
+    opacity: 1;
+  }
+  20%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Grab hand takes over once the press lands and stays through the drag. */
+@keyframes drag-hint-grab {
+  0%,
+  15% {
+    opacity: 0;
+  }
+  20%,
+  90% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes drag-hint-press {
+  0%,
+  12% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  20% {
+    opacity: 1;
+    transform: scale(1); /* press registers */
+  }
+  68% {
+    opacity: 0.65;
+    transform: scale(1); /* held while dragging */
+  }
+  84% {
+    opacity: 0;
+    transform: scale(1.5); /* release */
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+}
+
+/* ── Rotate hint (animated cursor over the revealed card) ─────────────── */
+
+/* Fixed-width box (240×64) so the px-based curve below maps 1:1 to the SVG
+   and stays consistent across card sizes. */
+.rotate-hint {
+  position: absolute;
+  left: 50%;
+  top: 56%;
+  width: 240px;
+  height: 64px;
+  margin-left: -120px;
+  z-index: 3; /* above the card canvas */
+  pointer-events: none; /* drag falls through to the turntable */
+}
+
+/* Curved guide (the front arc of the turntable). */
+.rotate-hint-track {
+  position: absolute;
+  inset: 0;
+  width: 240px;
+  height: 64px;
+  overflow: visible;
+}
+
+/* Moving group: rides the arc via offset-path (matches the SVG d attribute). */
+.rotate-hint-pointer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  offset-path: path("M 8 20 C 60 58 180 58 232 20");
+  offset-rotate: 0deg; /* keep the hand upright along the curve */
+  offset-anchor: 50% 50%; /* the cursor centre rides the path */
+  animation: rotate-hint-move 3.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.rotate-hint-cursor {
+  position: relative;
+  display: block;
+  width: 26px;
+  height: 26px;
+}
+
+.rotate-hint-hand {
+  position: absolute;
+  top: 0;
+  left: 0;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.7));
+}
+
+/* Open hand first, then the grab swaps in once the press registers (~0.5s). */
+.rotate-hint-hand--open {
+  animation: rotate-hint-open 3.6s steps(1, end) infinite;
+}
+.rotate-hint-hand--grab {
+  opacity: 0;
+  animation: rotate-hint-grab 3.6s steps(1, end) infinite;
+}
+
+.rotate-hint-ring {
+  position: absolute;
+  top: 13px;
+  left: 13px;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border-radius: 50%;
+  border: 2px solid var(--bd-brand, #ff4000);
+  opacity: 0;
+  animation: rotate-hint-press 3.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.rotate-hint-label {
+  position: absolute;
+  left: 50%;
+  top: 60px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 9px;
+  letter-spacing: 0.3em;
+  color: var(--bd-ink-mute, #888);
+}
+
+@keyframes rotate-hint-move {
+  0% {
+    offset-distance: 50%; /* centre of the arc (front, closest) */
+    opacity: 0;
+  }
+  7% {
+    offset-distance: 50%;
+    opacity: 1;
+  }
+  22% {
+    offset-distance: 50%; /* hold while the press lands */
+  }
+  45% {
+    offset-distance: 100%; /* sweep right — curves up and back into depth */
+  }
+  73% {
+    offset-distance: 0%; /* sweep left across the front of the arc */
+  }
+  88% {
+    offset-distance: 50%; /* settle back to centre */
+    opacity: 1;
+  }
+  96%,
+  100% {
+    offset-distance: 50%;
+    opacity: 0;
+  }
+}
+
+@keyframes rotate-hint-open {
+  0%,
+  12% {
+    opacity: 1;
+  }
+  16%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes rotate-hint-grab {
+  0%,
+  12% {
+    opacity: 0;
+  }
+  16%,
+  92% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes rotate-hint-press {
+  0%,
+  10% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  16% {
+    opacity: 1;
+    transform: scale(1); /* press registers */
+  }
+  85% {
+    opacity: 0.5;
+    transform: scale(1); /* held through the swing */
+  }
+  94% {
+    opacity: 0;
+    transform: scale(1.5); /* release */
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+}
+
 /* ── Accessibility ────────────────────────────────────────────────────── */
 
 @media (prefers-reduced-motion: reduce) {
   .minting-spinner {
     animation: none !important;
+  }
+  .drag-hint-pointer,
+  .drag-hint-ring,
+  .drag-hint-hand {
+    animation: none !important;
+  }
+  .drag-hint-pointer {
+    left: 45%;
+    opacity: 1;
+  }
+  .drag-hint-hand--open {
+    opacity: 0;
+  }
+  .drag-hint-hand--grab {
+    opacity: 1;
+  }
+  .drag-hint-ring {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+  .rotate-hint-pointer,
+  .rotate-hint-ring,
+  .rotate-hint-hand {
+    animation: none !important;
+  }
+  .rotate-hint-pointer {
+    offset-distance: 50%; /* rest at the front of the arc */
+    opacity: 1;
+  }
+  .rotate-hint-hand--open {
+    opacity: 0;
+  }
+  .rotate-hint-hand--grab {
+    opacity: 1;
+  }
+  .rotate-hint-ring {
+    opacity: 0.5;
+    transform: scale(1);
   }
 }
 
@@ -264,5 +645,9 @@
   .card-turntable {
     width: 300px;
     height: 508px;
+  }
+  .drag-hint-label {
+    font-size: 8px;
+    letter-spacing: 0.2em;
   }
 }
