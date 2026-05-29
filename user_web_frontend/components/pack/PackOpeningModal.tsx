@@ -5,6 +5,7 @@ import { usePackGesture } from "./usePackGesture";
 import { PackFrameSequence } from "./PackFrameSequence";
 import { MintingOverlay } from "./MintingOverlay";
 import { CardReveal } from "./CardReveal";
+import { DragHint } from "./DragHint";
 import { usePackStore } from "./store";
 import "./pack.css";
 
@@ -45,6 +46,7 @@ export function PackOpeningModal() {
         <MintingOverlay />
         <CardReveal />
 
+        {phase === "idle" && <DragHint />}
         {phase === "idle" && (
           <div className="pack-hint-strip">
             CLICK · HOLD · DRAG UP TO TEAR

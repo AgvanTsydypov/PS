@@ -105,3 +105,5 @@ card_render/PNG/*.png
 card_render/textures/*
 !card_render/PNG/.gitkeep
 !card_render/textures/.gitkeep
+
+.claude/settings.local.json
