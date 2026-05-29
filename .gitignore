@@ -91,3 +91,17 @@ TODO
 ca-certificate.crt
 
 contracts/.env.collection
+
+# Pack-opening frame originals (heavy PNG source; only WebP is committed)
+user_web_frontend/public/pack/frames/*.png
+
+# Card-reveal frame originals (rendered WebP is committed, PNG is not)
+user_web_frontend/public/pack/card-frames/*.png
+
+# Blender card-render tooling (heavy binaries + scratch render output)
+card_render/*.blend
+card_render/*.blend1
+card_render/PNG/*.png
+card_render/textures/*
+!card_render/PNG/.gitkeep
+!card_render/textures/.gitkeep

@@ -134,7 +134,26 @@
       "PowerShell(npx tsc --noEmit 2>&1 | Select-Object -Last 15)",
       "WebFetch(domain:api.polygonscan.com)",
       "WebFetch(domain:api.etherscan.io)",
-      "WebFetch(domain:gamma-api.polymarket.com)"
+      "WebFetch(domain:gamma-api.polymarket.com)",
+      "Bash(mv \"pack top.png\" pack_top.png)",
+      "Bash(mv \"foil_texture.png.png\" foil_texture.png)",
+      "Bash(rtk du *)",
+      "Bash(where cwebp *)",
+      "Bash(cwebp -version)",
+      "Bash(where magick *)",
+      "Bash(magick -version)",
+      "Bash(where ffmpeg *)",
+      "Bash(ffmpeg -version)",
+      "Bash(printf '!.gitkeep\\\\n')",
+      "Bash(rm -f card_render/textures/.gitkeep.tmp)",
+      "Bash('C:/Program Files \\(x86\\)/Steam/steamapps/common/Blender/blender.exe' -b card_render/Карточка.blend --python-expr ' *)",
+      "Bash(mkdir -p card_render/_test)",
+      "Bash(\"C:/Program Files \\(x86\\)/Steam/steamapps/common/Blender/blender.exe\" -b \"card_render/Карточка.blend\" -o \"//card_render/_test/t_\" -f 1)",
+      "Bash(rm -rf card_render/card_render)",
+      "Bash('C:/Program Files \\(x86\\)/Steam/steamapps/common/Blender/blender.exe' -b card_render/Карточка.blend -o __TRACKED_VAR__/card_render/_test/r_ -f 181)",
+      "Bash(rm -rf card_render/_test)",
+      "Bash(rm -f card_render/PNG/*.png)",
+      "Bash(rm -f components/pack/ParticleBurst.tsx)"
     ]
   },
   "enabledMcpjsonServers": [
