@@ -20,13 +20,17 @@ export function usePackGesture() {
 
   const phase = usePackStore((s) => s.phase);
   const setPhase = usePackStore((s) => s.setPhase);
+  const mintLocked = usePackStore((s) => s.mintLocked);
 
   // Reset pull intent whenever we land back on idle (e.g. after "Mint another")
   useEffect(() => {
     if (phase === "idle") progress.set(0);
   }, [phase, progress]);
 
-  const interactionLocked = phase !== "idle" && phase !== "dragging";
+  // Locked while we wait for on-chain mint + compose, AND while the pack-
+  // pulling state machine is past the user-controlled drag phase.
+  const interactionLocked =
+    mintLocked || (phase !== "idle" && phase !== "dragging");
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (interactionLocked) return;
