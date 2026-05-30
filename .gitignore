@@ -95,6 +95,10 @@ contracts/.env.collection
 # Pack-opening frame originals (heavy PNG source; only WebP is committed)
 user_web_frontend/public/pack/frames/*.png
 
+# Per-claim composed turntable frames — built on the fly by user_web_backend,
+# served via /static/turntables/. Pure runtime cache; never commit.
+user_web_backend/_turntable_cache/
+
 # Card-reveal turntable frames — local fallback for the /pack-test demo only.
 # The real /me flow composes per-claim frames on the fly under
 # /static/turntables/{claim_id}/, so these 360 webp files are dev-only and
