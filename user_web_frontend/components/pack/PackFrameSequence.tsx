@@ -57,7 +57,7 @@ export function PackFrameSequence({ progress }: Props) {
 
   const phase = usePackStore((s) => s.phase);
   const setPhase = usePackStore((s) => s.setPhase);
-  const triggerMint = usePackStore((s) => s.triggerMint);
+  const triggerReveal = usePackStore((s) => s.triggerReveal);
   const [loaded, setLoaded] = useState(0);
 
   // Track phase + reset segment clock on every phase change.
@@ -76,7 +76,12 @@ export function PackFrameSequence({ progress }: Props) {
     }
   }, [phase]);
 
-  // Size canvas (HiDPI aware) on mount + resize
+  // Size canvas (HiDPI aware). ResizeObserver retries automatically the
+  // moment the canvas actually gets non-zero layout dimensions — necessary
+  // because on /me the modal mounts via a state-flip and the first useEffect
+  // can fire before the fixed-overlay gate has laid out, leaving the canvas
+  // at 0×0. In that case the rAF loop would spin forever with sizedRef=false
+  // and drawFrame would no-op (pack appears frozen).
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -90,8 +95,13 @@ export function PackFrameSequence({ progress }: Props) {
       currentFrameRef.current = -1;
     };
     sizeCanvas();
+    const ro = new ResizeObserver(sizeCanvas);
+    ro.observe(canvas);
     window.addEventListener("resize", sizeCanvas);
-    return () => window.removeEventListener("resize", sizeCanvas);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", sizeCanvas);
+    };
   }, []);
 
   // Preload all WebP frames (browser throttles concurrency per origin)
@@ -155,7 +165,9 @@ export function PackFrameSequence({ progress }: Props) {
         );
         if (!triggeredRef.current && openingFrameRef.current >= b) {
           triggeredRef.current = true;
-          triggerMint(); // opening finished -> start minting
+          // On-chain mint already settled before unlock; this just hands off to
+          // the reveal phase so CardReveal mounts and starts its turntable.
+          triggerReveal();
         } else if (!pulling && openingFrameRef.current <= a) {
           setPhase("idle"); // played back to the start without opening
         }

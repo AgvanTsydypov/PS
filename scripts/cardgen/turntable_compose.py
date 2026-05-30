@@ -100,6 +100,43 @@ class TurntableTemplate:
         path = os.path.join(self.root, frame_meta["light"])
         return Image.open(path).convert("RGBA")
 
+    @property
+    def crop_bbox(self) -> Optional[Tuple[int, int, int, int]]:
+        """Union alpha bounding box of the card across every baked frame.
+
+        The bake renders the card at the centre of a much larger canvas with
+        transparent margins. Cropping to this bbox before downscaling makes the
+        card fill the final webp; without it a 1200→900 downscale leaves the
+        card occupying ~1/3 of the frame width.
+
+        Returns ``None`` if the manifest doesn't have ``crop_bbox`` cached.
+        Use ``ensure_crop_bbox()`` to compute + persist it.
+        """
+        b = self.manifest.get("crop_bbox")
+        return tuple(b) if b else None  # type: ignore[return-value]
+
+    def ensure_crop_bbox(self, pad: int = 12) -> Optional[Tuple[int, int, int, int]]:
+        """Return ``crop_bbox`` from the manifest or compute, persist and return it.
+
+        Computation is a one-pass scan of every light frame's alpha (threaded).
+        On success the bbox is written back into ``template.json`` so the next
+        call is free.
+        """
+        cached = self.crop_bbox
+        if cached is not None:
+            return cached
+        bbox = _compute_crop_bbox(self, pad=pad)
+        if bbox is None:
+            return None
+        self.manifest["crop_bbox"] = list(bbox)
+        try:
+            with open(os.path.join(self.root, "template.json"),
+                      "w", encoding="utf-8") as fh:
+                json.dump(self.manifest, fh, indent=2)
+        except OSError:
+            pass  # non-fatal — we still return the bbox for this run
+        return bbox
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Compositing
@@ -110,13 +147,60 @@ def _quad_corners_px(width: int, height: int) -> List[Tuple[int, int]]:
     return [(0, 0), (width, 0), (width, height), (0, height)]
 
 
+def _compute_crop_bbox(
+    template: "TurntableTemplate",
+    pad: int = 12,
+) -> Optional[Tuple[int, int, int, int]]:
+    """Union of every light frame's alpha bbox, padded and clamped to the canvas."""
+    import concurrent.futures as cf
+
+    from PIL import Image  # lazy
+
+    def one(frame_meta: Dict[str, Any]):
+        path = os.path.join(template.root, frame_meta["light"])
+        with Image.open(path) as im:
+            return im.convert("RGBA").getchannel("A").getbbox()
+
+    union: Optional[List[int]] = None
+    workers = min(8, os.cpu_count() or 4)
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        for bbox in ex.map(one, template.frames):
+            if bbox is None:
+                continue
+            if union is None:
+                union = list(bbox)
+            else:
+                union[0] = min(union[0], bbox[0])
+                union[1] = min(union[1], bbox[1])
+                union[2] = max(union[2], bbox[2])
+                union[3] = max(union[3], bbox[3])
+    if union is None:
+        return None
+    union[0] = max(0, union[0] - pad)
+    union[1] = max(0, union[1] - pad)
+    union[2] = min(template.width, union[2] + pad)
+    union[3] = min(template.height, union[3] + pad)
+    return tuple(union)  # type: ignore[return-value]
+
+
 def compose_frame(
     front_tex,
     back_tex,
     template: TurntableTemplate,
     frame_meta: Dict[str, Any],
+    *,
+    out_size: Optional[Tuple[int, int]] = None,
+    scale: float = 1.0,
+    crop_offset: Tuple[int, int] = (0, 0),
+    crop_bbox: Optional[Tuple[int, int, int, int]] = None,
 ):
-    """Compose a single RGBA turntable frame (PIL Image) from the two textures."""
+    """Compose a single RGBA turntable frame (PIL Image) from the two textures.
+
+    ``crop_bbox`` is the union alpha bbox in bake coords; if given the light
+    layer is cropped to it and ``crop_offset = (x0, y0)`` is subtracted from
+    every quad coord. ``scale`` is then applied to map into ``out_size`` — so
+    we composite at the *cropped, downscaled* resolution end-to-end.
+    """
     from PIL import Image  # lazy
 
     side = frame_meta.get("side", "front")
@@ -124,18 +208,24 @@ def compose_frame(
     if side == "back" and template.mirror_back:
         tex = tex.transpose(Image.FLIP_LEFT_RIGHT)
 
-    w, h = template.width, template.height
-    quad = [tuple(p) for p in frame_meta["quad"]]
+    if out_size is None:
+        w, h = template.width, template.height
+    else:
+        w, h = out_size
+    ox, oy = crop_offset
+    quad = [((p[0] - ox) * scale, (p[1] - oy) * scale) for p in frame_meta["quad"]]
     src = _quad_corners_px(tex.width, tex.height)
     coeffs = _find_coeffs(quad, src)
 
-    # Warp the texture into the face quad; everything outside the quad is
-    # transparent so it composites cleanly over the baked shading layer.
+    # BILINEAR is ~2× faster than BICUBIC and visually indistinguishable once
+    # we composite at the target output resolution (no further downscale).
     warped = tex.transform(
-        (w, h), Image.PERSPECTIVE, coeffs, resample=Image.BICUBIC, fillcolor=(0, 0, 0, 0)
+        (w, h), Image.PERSPECTIVE, coeffs, resample=Image.BILINEAR, fillcolor=(0, 0, 0, 0)
     )
 
     light = template.light_image(frame_meta)
+    if crop_bbox is not None:
+        light = light.crop(crop_bbox)
     if light.size != (w, h):
         light = light.resize((w, h), Image.LANCZOS)
 
@@ -192,6 +282,9 @@ def compose_turntable(
     out_dir: Optional[str] = None,
     target_width: Optional[int] = None,
     webp_quality: int = 92,
+    webp_method: int = 4,
+    workers: Optional[int] = None,
+    mirror_back: Optional[bool] = None,
 ) -> List[Tuple[int, bytes]]:
     """Render the full turntable for one card.
 
@@ -199,11 +292,51 @@ def compose_turntable(
     is a ``TurntableTemplate`` or a path to its directory. Returns a list of
     ``(frame_index, webp_bytes)``; if ``out_dir`` is given, also writes
     ``{index:04d}.webp`` files (the naming the frontend already expects).
+
+    Performance notes:
+
+    * ``target_width`` makes us composite **at** that resolution (quad coords
+      and light layer scaled once) instead of compositing at the bake
+      resolution and LANCZOS-ing down — saves quadratic time on every frame.
+    * ``webp_method=4`` is Pillow's default and ~3× faster than ``method=6``
+      with barely-visible quality loss at quality 92.
+    * ``workers`` runs frames in a thread pool; PIL.transform, numpy math and
+      the webp encoder all release the GIL, so threads scale near-linearly.
+      Defaults to ``min(8, cpu_count())``; pass ``1`` to force serial.
     """
+    import concurrent.futures as cf
     from io import BytesIO
 
     if isinstance(template, str):
         template = TurntableTemplate.load(template)
+
+    # Caller can override the manifest's mirror_back flag (e.g. when the back
+    # texture is already supplied pre-mirrored, our default flip would write
+    # text backwards).
+    if mirror_back is not None:
+        template.mirror_back = mirror_back
+
+    # The bake leaves the card in the centre of a much larger canvas; crop to
+    # its union alpha bbox so the downscale to target_width actually fills the
+    # frame with card pixels instead of mostly empty margin.
+    crop_bbox = template.ensure_crop_bbox()
+    if crop_bbox is not None:
+        x0, y0, x1, y1 = crop_bbox
+        src_w, src_h = x1 - x0, y1 - y0
+        crop_offset = (x0, y0)
+    else:
+        src_w, src_h = template.width, template.height
+        crop_offset = (0, 0)
+
+    # Decide working resolution up front: composite directly at target_width
+    # so PIL.transform, numpy multiply and webp encode all run on a smaller
+    # canvas instead of doing them at bake res and downscaling after.
+    if target_width and target_width < src_w:
+        scale = target_width / src_w
+        out_size = (target_width, round(src_h * scale))
+    else:
+        scale = 1.0
+        out_size = (src_w, src_h)
 
     front_tex = _load_texture(front)
     back_tex = _load_texture(back)
@@ -211,26 +344,31 @@ def compose_turntable(
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    results: List[Tuple[int, bytes]] = []
-    for frame_meta in template.frames:
+    def render_one(frame_meta: Dict[str, Any]) -> Tuple[int, bytes]:
         idx = int(frame_meta["index"])
-        frame = compose_frame(front_tex, back_tex, template, frame_meta)
-
-        if target_width and frame.width > target_width:
-            new_h = round(frame.height * target_width / frame.width)
-            from PIL import Image  # lazy
-
-            frame = frame.resize((target_width, new_h), Image.LANCZOS)
-
+        frame = compose_frame(
+            front_tex, back_tex, template, frame_meta,
+            out_size=out_size, scale=scale,
+            crop_offset=crop_offset, crop_bbox=crop_bbox,
+        )
         buf = BytesIO()
-        frame.save(buf, "WEBP", quality=webp_quality, method=6)
+        frame.save(buf, "WEBP", quality=webp_quality, method=webp_method)
         data = buf.getvalue()
-        results.append((idx, data))
-
         if out_dir:
             with open(os.path.join(out_dir, f"{idx:04d}.webp"), "wb") as fh:
                 fh.write(data)
+        return idx, data
 
+    if workers is None:
+        workers = min(8, os.cpu_count() or 4)
+
+    if workers <= 1:
+        results = [render_one(fm) for fm in template.frames]
+    else:
+        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(render_one, template.frames))
+
+    results.sort(key=lambda r: r[0])
     return results
 
 

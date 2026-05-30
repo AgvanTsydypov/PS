@@ -152,8 +152,8 @@
 
 .card-turntable {
   position: relative;
-  width: 370px;
-  height: 626px; /* matches rendered frame aspect 898:1520; kept under pack size */
+  width: 444px;
+  height: 751px; /* matches rendered frame aspect 898:1520; kept under pack size */
   cursor: grab;
   touch-action: none;
   will-change: transform;
@@ -225,6 +225,57 @@
   pointer-events: none;
 }
 
+/* Locked-pack waiting state while the on-chain mint settles. The pack itself
+   keeps pulsing in the closed-pulse idle loop underneath; this overlay sits
+   above so the user understands the modal is intentionally inert. */
+.pack-wait-overlay {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 22px;
+  background: rgba(0, 0, 0, 0.78);
+  border: 1px solid rgba(255, 183, 77, 0.55);
+  box-shadow: 0 0 24px rgba(255, 183, 77, 0.25);
+  color: var(--bd-ink, #fff);
+  font-size: 14px;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  z-index: 13;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.pack-wait-overlay-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffb74d;
+  box-shadow: 0 0 16px #ffb74d;
+  animation: pack-wait-pulse 1.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.pack-wait-overlay-text {
+  line-height: 1.45;
+}
+
+.pack-wait-overlay-sub {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  color: var(--bd-ink-mute, #aaa);
+}
+
+@keyframes pack-wait-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.4; transform: scale(0.85); }
+}
+
 .pack-error-strip {
   position: absolute;
   bottom: 40px;
@@ -236,6 +287,146 @@
   border: 2px solid #ff4000;
   padding: 8px 16px;
   z-index: 6;
+}
+
+/* Friendly "your mint is queued, check back later" card — shown when the
+   claim stayed QUEUED past the 30s threshold (almost always price-gate
+   gas-too-high). NOT an error visually: amber/neutral palette, calm copy,
+   no shouting. Same layout as the error card so they swap cleanly. */
+.pack-queued-card {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 520px;
+  padding: 28px 32px;
+  background: rgba(0, 0, 0, 0.92);
+  border: 2px solid #ffb74d;
+  box-shadow: 0 0 32px rgba(255, 183, 77, 0.35);
+  z-index: 14;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+  pointer-events: auto;
+}
+
+.pack-queued-card-title {
+  font-size: 18px;
+  letter-spacing: 0.4em;
+  color: #ffb74d;
+  font-weight: 700;
+}
+
+.pack-queued-card-body {
+  font-size: 13px;
+  letter-spacing: 0.05em;
+  line-height: 1.6;
+  color: var(--bd-ink, #fff);
+  /* Plain sentence — no uppercase here so the longer copy stays readable. */
+}
+
+.pack-queued-card-close {
+  background: transparent;
+  color: #ffb74d;
+  border: 2px solid #ffb74d;
+  padding: 10px 22px;
+  font-family: var(--bd-font-display, "Orbitron", sans-serif);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.pack-queued-card-close:hover {
+  background: #ffb74d;
+  color: #000;
+}
+
+/* Center-stage error card — replaces the easy-to-miss bottom strip. Holds the
+   full error detail (so reasons like "already has an active claim" don't get
+   truncated) plus a CLOSE button so the user can actually dismiss the modal
+   and retry. */
+.pack-error-card {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 520px;
+  padding: 28px 32px;
+  background: rgba(0, 0, 0, 0.92);
+  border: 2px solid #ff4000;
+  box-shadow: 0 0 32px rgba(255, 64, 0, 0.4);
+  z-index: 14; /* above the wait overlay and tear-flash */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+  pointer-events: auto;
+}
+
+.pack-error-card-title {
+  font-size: 18px;
+  letter-spacing: 0.4em;
+  color: #ff4000;
+  font-weight: 700;
+}
+
+.pack-error-card-body {
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  line-height: 1.55;
+  color: var(--bd-ink, #fff);
+  word-break: break-word;
+  text-transform: uppercase;
+}
+
+.pack-error-card-close {
+  background: transparent;
+  color: #ff4000;
+  border: 2px solid #ff4000;
+  padding: 10px 22px;
+  font-family: var(--bd-font-display, "Orbitron", sans-serif);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.pack-error-card-close:hover {
+  background: #ff4000;
+  color: #000;
+}
+
+/* Always-available close button (top-right of the modal) so the user can bail
+   out of any phase — error, mintLocked wait, or just changed their mind. */
+.pack-close-btn {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: var(--bd-ink, #fff);
+  font-size: 24px;
+  font-family: var(--bd-font-display, "Orbitron", sans-serif);
+  line-height: 1;
+  cursor: pointer;
+  z-index: 20;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.pack-close-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.55);
 }
 
 /* ── Drag hint (animated cursor: hold + drag up) ──────────────────────── */
@@ -643,8 +834,8 @@
     height: 100vh;
   }
   .card-turntable {
-    width: 300px;
-    height: 508px;
+    width: 360px;
+    height: 610px;
   }
   .drag-hint-label {
     font-size: 8px;
