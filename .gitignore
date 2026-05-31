@@ -122,3 +122,5 @@ card_render/textures/*
 card_render/template/
 
 .claude/settings.local.json
+
+card_render_template.tar.gz
