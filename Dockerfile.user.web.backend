@@ -13,6 +13,19 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+# Chromium for SVG -> PNG card rasterization. user_web_backend now kicks
+# process_mint_queue inline after POST /api/me/mint (USER_WEB_INLINE_MINT_KICK,
+# default on) so the pack-opening flow doesn't wait for the cron scheduler.
+# Without Chromium installed here svg_to_png hangs 60s and the user sees
+# "SVG rasterization timed out -- Playwright worker is dead".
+RUN playwright install --with-deps chromium
+
+# Chromium refuses to start as root with the default sandbox, and small
+# /dev/shm in containers can crash it mid-screenshot. The rasterizer reads
+# both env vars (see scripts/cardgen/rasterize.py).
+ENV PLAYWRIGHT_NO_SANDBOX=1
+ENV PLAYWRIGHT_CHROMIUM_ARGS=--disable-dev-shm-usage
+
 COPY package.json package-lock.json /app/
 RUN npm ci --omit=dev
 
