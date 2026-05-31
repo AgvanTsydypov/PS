@@ -186,6 +186,14 @@ services:
       PYTHONUNBUFFERED: 1
     expose:
       - "8011"
+    volumes:
+      # Blender-baked turntable template (~270MB, 360 light_NNNN.png + template.json).
+      # Gitignored on purpose — not COPYed into the image. The pack-opening
+      # /turntable endpoint reads template.json via _expected_frame_count();
+      # without this mount it returns 503 "Turntable template missing on host"
+      # and the frontend animation never starts. Regenerate locally with:
+      #   python card_render/render_card.py --bake-template --step 1
+      - ./card_render/template:/app/card_render/template:ro
     networks:
       - polystars_user_web_network
 
