@@ -4192,6 +4192,412 @@ def _turntable_cache_startup_sweep() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# /api/me/claims/{id}/turntable — per-claim 120-frame pack-reveal sequence
+# ──────────────────────────────────────────────────────────────────────────────
+# Composes the texture-independent bake (card_render/template/) with this
+# claim's front/back PNGs and caches the result under _turntable_cache/{id}/.
+# Frontend polls this endpoint after POST /api/me/mint until it returns
+# ``ready``. ``pending`` covers both "claim not COMPLETED yet" and "compose
+# still running" — the client just keeps polling.
+
+def _claim_for_wallet(claim_id: int, wallet_lower: str) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, status, user_wallet, recipient_address,
+                       front_image_url, back_image_url, tx_hash, asset_address
+                FROM claims WHERE id = %s
+                """,
+                (claim_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    owners = {
+        (row.get("user_wallet") or "").lower(),
+        (row.get("recipient_address") or "").lower(),
+    }
+    if wallet_lower not in owners:
+        return None
+    return dict(row)
+
+
+# Per-claim finalize lock so two parallel /turntable polls don't race on the
+# same receipt lookup + UPDATE. Cheap dict-of-locks keyed by claim_id.
+_FINALIZE_LOCKS: Dict[int, threading.Lock] = {}
+_FINALIZE_LOCKS_GUARD = threading.Lock()
+
+
+def _finalize_lock(claim_id: int) -> threading.Lock:
+    with _FINALIZE_LOCKS_GUARD:
+        lock = _FINALIZE_LOCKS.get(claim_id)
+        if lock is None:
+            lock = threading.Lock()
+            _FINALIZE_LOCKS[claim_id] = lock
+        return lock
+
+
+def _try_finalize_processing_claim(claim_id: int, tx_hash: str) -> Optional[str]:
+    """On-demand per-claim flip ``PROCESSING → COMPLETED`` / ``FAILED`` driven
+    by the live receipt for ``tx_hash``. Bypasses the cron worker's 30-minute
+    stale-PROCESSING threshold (``MINT_QUEUE_STALE_PROCESSING_MINUTES``) so the
+    frontend's 2s /turntable polling actually drives the state transition
+    instead of the user staring at a wedged ``PROCESSING`` row until the next
+    worker tick.
+
+    Returns the new status string when a flip lands, ``None`` when the row
+    stays in PROCESSING (receipt still pending or RPC blip). Never raises —
+    receipt failures degrade to "stay pending" so a transient RPC hiccup does
+    not corrupt the row.
+    """
+    tx_hash = (tx_hash or "").strip()
+    if not tx_hash:
+        return None
+    lock = _finalize_lock(claim_id)
+    if not lock.acquire(blocking=False):
+        # Another poll is already finalizing this claim. Don't pile up.
+        return None
+    try:
+        try:
+            verifier = mint_service.scheduler._make_mint_receipt_verifier()
+        except Exception as exc:
+            logger.warning(
+                "[finalize] claim %s: cannot init verifier (%s: %s); "
+                "leaving PROCESSING",
+                claim_id, type(exc).__name__, exc,
+            )
+            return None
+        try:
+            onchain_status, verified_token_id, verified_asset = (
+                verifier.fetch_mint_receipt_status(tx_hash)
+            )
+        except Exception as exc:
+            logger.warning(
+                "[finalize] claim %s: receipt lookup failed (%s: %s); "
+                "leaving PROCESSING",
+                claim_id, type(exc).__name__, exc,
+            )
+            return None
+
+        if onchain_status == "success":
+            conn = _get_connection()
+            metadata_uri_for_hooks: Optional[str] = None
+            try:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        UPDATE claims
+                           SET status        = 'COMPLETED',
+                               asset_address = COALESCE(asset_address, %s),
+                               timestamp     = COALESCE(timestamp, NOW()),
+                               updated_at    = NOW()
+                         WHERE id = %s
+                           AND status = 'PROCESSING'
+                           AND tx_hash IS NOT NULL
+                         RETURNING metadata_uri
+                        """,
+                        (verified_asset, claim_id),
+                    )
+                    flipped = cur.fetchone()
+                conn.commit()
+                if flipped:
+                    metadata_uri_for_hooks = str(flipped.get("metadata_uri") or "") or None
+            finally:
+                conn.close()
+            if flipped:
+                logger.info(
+                    "[finalize] claim %s: PROCESSING → COMPLETED "
+                    "(tx=%s asset=%s)", claim_id, tx_hash[:10], verified_asset,
+                )
+                # Replay post-mint side-effects the cron worker would have
+                # done — denormalize card fields onto the claim row so
+                # /api/me/cards and the turntable compose actually see
+                # front_image_url / back_image_url / card_title. Best-effort;
+                # failure here does not undo the COMPLETED flip.
+                try:
+                    mint_service.scheduler._run_post_recovery_hooks(
+                        claim_id=claim_id,
+                        metadata_uri=metadata_uri_for_hooks,
+                        token_id=verified_token_id if isinstance(verified_token_id, int) else None,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[finalize] claim %s: post-recovery hooks failed",
+                        claim_id,
+                    )
+                return "COMPLETED"
+            return None
+
+        if onchain_status == "reverted":
+            conn = _get_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE claims
+                           SET status                 = 'FAILED',
+                               collection_mint_number = NULL,
+                               error_message          = 'On-chain mint reverted (status=0)',
+                               updated_at             = NOW()
+                         WHERE id = %s
+                           AND status = 'PROCESSING'
+                        """,
+                        (claim_id,),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            logger.warning(
+                "[finalize] claim %s: PROCESSING → FAILED "
+                "(tx=%s reverted on-chain)", claim_id, tx_hash[:10],
+            )
+            return "FAILED"
+
+        # "pending" or "not_found" — stay in PROCESSING, let next poll retry.
+        return None
+    finally:
+        lock.release()
+
+
+def _expected_frame_count() -> int:
+    tj = TURNTABLE_TEMPLATE_DIR / "template.json"
+    if not tj.is_file():
+        return 0
+    try:
+        with open(tj, "r", encoding="utf-8") as fh:
+            return int(json.load(fh).get("frame_count") or 0)
+    except Exception:
+        return 0
+
+
+def _turntable_ready(claim_id: int, expected: int) -> bool:
+    out_dir = TURNTABLE_CACHE_DIR / str(claim_id)
+    if not out_dir.is_dir():
+        return False
+    return expected > 0 and sum(1 for p in out_dir.iterdir()
+                                 if p.suffix == ".webp") >= expected
+
+
+def _turntable_payload(request: Request, claim_id: int,
+                        expected: int) -> Dict[str, Any]:
+    base = str(request.base_url).rstrip("/")
+    return {
+        "status": "ready",
+        "base_url": f"{base}/static/turntables/{claim_id}",
+        "frame_count": expected,
+    }
+
+
+# Per-claim compose lock so a frontend poll burst doesn't spin up the same
+# compose multiple times in parallel. Cheap dict-of-locks keyed by claim_id.
+_TURNTABLE_COMPOSE_LOCKS: Dict[int, threading.Lock] = {}
+_TURNTABLE_COMPOSE_LOCKS_GUARD = threading.Lock()
+
+
+def _turntable_lock(claim_id: int) -> threading.Lock:
+    with _TURNTABLE_COMPOSE_LOCKS_GUARD:
+        lock = _TURNTABLE_COMPOSE_LOCKS.get(claim_id)
+        if lock is None:
+            lock = threading.Lock()
+            _TURNTABLE_COMPOSE_LOCKS[claim_id] = lock
+        return lock
+
+
+@app.get("/api/me/claims/{claim_id}/turntable")
+def me_claim_turntable(claim_id: int, request: Request) -> Dict[str, Any]:
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+    claim = _claim_for_wallet(claim_id, wallet)
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+
+    status_upper = str(claim.get("status") or "").upper()
+    # On-demand finalize: if the cron worker broadcast the tx but never landed
+    # the COMPLETED flip (worker crash, RPC timeout mid-receipt-wait, etc.),
+    # drive the transition from the poll itself instead of waiting on the
+    # 30-minute stale-PROCESSING recovery window. Cheap when the receipt is
+    # pending (one RPC call, no DB write).
+    if status_upper == "PROCESSING":
+        tx_hash = str(claim.get("tx_hash") or "").strip()
+        if tx_hash:
+            new_status = _try_finalize_processing_claim(claim_id, tx_hash)
+            if new_status:
+                claim = _claim_for_wallet(claim_id, wallet) or claim
+                status_upper = str(claim.get("status") or "").upper()
+    if status_upper != "COMPLETED":
+        return {"status": "pending", "claim_status": status_upper}
+
+    expected = _expected_frame_count()
+    if expected <= 0:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Turntable template missing on host. "
+                "Run: python card_render/render_card.py --bake-template --step 3"
+            ),
+        )
+
+    if _turntable_ready(claim_id, expected):
+        return _turntable_payload(request, claim_id, expected)
+
+    front_url = str(claim.get("front_image_url") or "")
+    back_url = str(claim.get("back_image_url") or "")
+    if not front_url or not back_url:
+        return {"status": "pending", "claim_status": status_upper}
+
+    # Serialize compose for this claim so concurrent polls don't double-run.
+    lock = _turntable_lock(claim_id)
+    with lock:
+        if _turntable_ready(claim_id, expected):  # another poll finished first
+            return _turntable_payload(request, claim_id, expected)
+        out_dir = TURNTABLE_CACHE_DIR / str(claim_id)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            front_bytes = _fetch_turntable_image(request, front_url)
+            back_bytes = _fetch_turntable_image(request, back_url)
+        except Exception as exc:
+            logger.exception("Failed to fetch claim images claim_id=%s", claim_id)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not fetch card images: {exc}",
+            ) from exc
+        try:
+            from scripts.cardgen.turntable_compose import compose_turntable
+            compose_turntable(
+                front_bytes, back_bytes,
+                str(TURNTABLE_TEMPLATE_DIR),
+                out_dir=str(out_dir),
+                target_width=900,
+                mirror_back=False,
+            )
+        except Exception as exc:
+            logger.exception("Compose failed claim_id=%s", claim_id)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Compose failed: {exc}",
+            ) from exc
+
+    return _turntable_payload(request, claim_id, expected)
+
+
+def _delete_turntable_cache(claim_id: int) -> int:
+    """Remove the per-claim turntable frames directory. Returns the number of
+    files deleted (0 if the dir was absent). Safe to call repeatedly —
+    idempotent and silent on missing-dir."""
+    out_dir = TURNTABLE_CACHE_DIR / str(claim_id)
+    if not out_dir.is_dir():
+        return 0
+    deleted = 0
+    for entry in out_dir.iterdir():
+        try:
+            entry.unlink()
+            deleted += 1
+        except OSError:
+            pass
+    try:
+        out_dir.rmdir()
+    except OSError:
+        # Non-empty (entry deletion failed) or perms — leave for TTL sweep.
+        pass
+    return deleted
+
+
+def _sweep_stale_turntable_cache() -> Dict[str, int]:
+    """Best-effort TTL cleanup of orphaned per-claim turntable dirs. A dir is
+    'stale' when its newest file's mtime is older than
+    ``TURNTABLE_CACHE_TTL_SECONDS``. Called once on app startup so a long-
+    running uvicorn doesn't accumulate abandoned reveals from tab-closed mid-
+    flight mints."""
+    if not TURNTABLE_CACHE_DIR.is_dir():
+        return {"scanned": 0, "deleted_dirs": 0, "deleted_files": 0}
+    now = time.time()
+    scanned = 0
+    deleted_dirs = 0
+    deleted_files = 0
+    for child in TURNTABLE_CACHE_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        scanned += 1
+        try:
+            newest_mtime = max(
+                (p.stat().st_mtime for p in child.iterdir()),
+                default=child.stat().st_mtime,
+            )
+        except OSError:
+            continue
+        if now - newest_mtime < TURNTABLE_CACHE_TTL_SECONDS:
+            continue
+        try:
+            claim_id = int(child.name)
+        except ValueError:
+            # Foreign directory under the cache root — leave alone.
+            continue
+        deleted_files += _delete_turntable_cache(claim_id)
+        if not child.exists():
+            deleted_dirs += 1
+    return {
+        "scanned": scanned,
+        "deleted_dirs": deleted_dirs,
+        "deleted_files": deleted_files,
+    }
+
+
+def _fetch_turntable_image(request: Request, url: str) -> bytes:
+    """Resolve a stored claim image URL (R2 mirror, IPFS gateway, …) to bytes.
+
+    ``urlopen_after_ssrf_check`` takes a ``urllib.request.Request`` object (it
+    calls ``.get_full_url()`` to feed the SSRF guard); a bare URL string would
+    raise ``'str' object has no attribute 'get_full_url'`` during compose.
+    """
+    abs_url = _absolute_asset_url(request, url)
+    req = urllib.request.Request(abs_url, headers={"User-Agent": "polystars-turntable/1"})
+    with urlopen_after_ssrf_check(req, timeout=20) as resp:
+        return resp.read()
+
+
+@app.delete("/api/me/claims/{claim_id}/turntable")
+def me_claim_turntable_delete(claim_id: int, request: Request) -> Dict[str, Any]:
+    """Drop the per-claim turntable cache directory. Called by the frontend's
+    ``reset()`` after a successful reveal so the ~360 webp frames don't sit on
+    disk forever. Idempotent — returns ``deleted_files=0`` when the cache is
+    already gone. Ownership-gated (same as the GET endpoint) so a random
+    wallet can't nuke another user's in-flight reveal."""
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+    claim = _claim_for_wallet(claim_id, wallet)
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    deleted = _delete_turntable_cache(claim_id)
+    return {"status": "ok", "claim_id": claim_id, "deleted_files": deleted}
+
+
+@app.on_event("startup")
+def _turntable_cache_startup_sweep() -> None:
+    """Run a TTL sweep of the turntable cache on app startup. Catches dirs
+    abandoned by tab-closed reveals across uvicorn restarts. Best-effort —
+    failure here must not stop the app from coming up."""
+    try:
+        stats = _sweep_stale_turntable_cache()
+        if stats["deleted_dirs"]:
+            logger.info(
+                "[turntable-sweep] startup sweep: scanned=%d deleted_dirs=%d deleted_files=%d "
+                "ttl=%ds",
+                stats["scanned"], stats["deleted_dirs"], stats["deleted_files"],
+                TURNTABLE_CACHE_TTL_SECONDS,
+            )
+    except Exception:
+        logger.exception("[turntable-sweep] startup sweep failed")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # /api/me/cards — owned-on-chain PS NFTs for the signed-in wallet
 # ──────────────────────────────────────────────────────────────────────────────
 # Source of truth is on-chain ownership on the configured EVM contract
