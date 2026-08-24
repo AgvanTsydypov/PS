@@ -9,8 +9,8 @@ export default function HomePage() {
     <GeneratedCardsTicker
       centerContent={
         <div className="home-showcase-center-stack">
-          <div className="home-hero-logo" aria-label="PolyStars">
-            <img src="/polystars-long.svg" alt="PolyStars" className="home-hero-wordmark" />
+          <div className="home-hero-logo" aria-label="PS">
+            <img src="/polystars-long.svg" alt="PS" className="home-hero-wordmark" />
           </div>
           <ActiveSeasonsBoard
             title="ACTIVE SEASONS"

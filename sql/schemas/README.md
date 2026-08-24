@@ -1,6 +1,6 @@
-# 📊 PolyStars Database Schema
+# 📊 PS Database Schema
 
-Структура базы данных для проекта PolyStars.
+Структура базы данных для проекта PS.
 
 ## 📁 Файлы в этой папке
 

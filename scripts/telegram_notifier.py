@@ -59,7 +59,7 @@ def _post(url: str, payload: dict) -> None:
 
 
 def _build_view_card_keyboard(link: str) -> Optional[dict]:
-    """Inline keyboard with a single ``View on POLYSTARS`` button.
+    """Inline keyboard with a single ``View on PS`` button.
 
     Returns None when ``link`` is empty so the caller can omit the button.
     Telegram requires public ``http(s)://`` URLs here — the production
@@ -69,7 +69,7 @@ def _build_view_card_keyboard(link: str) -> Optional[dict]:
     if not link:
         return None
     return {
-        "inline_keyboard": [[{"text": "View on POLYSTARS", "url": link}]],
+        "inline_keyboard": [[{"text": "View on PS", "url": link}]],
     }
 
 
@@ -215,11 +215,11 @@ def notify_claim_minted(
     """Send a Telegram message announcing a freshly minted claim.
 
     Posts the rendered front image as a photo with a 3-line caption and
-    a "View on POLYSTARS" inline-keyboard button below:
+    a "View on PS" inline-keyboard button below:
         🚨 NEW CLAIM!  <archetype emoji gradient>
         🎴 Season type: <TYPE>
         💎 Season mint: #<N>/<capacity>
-        [ View on POLYSTARS ]   (inline keyboard button → card_url)
+        [ View on PS ]   (inline keyboard button → card_url)
 
     ``card_url`` is taken as-is — it is the production
     ``polystars_card["qr_payload"]`` (``https://polystars.app/cards/<slug>``).

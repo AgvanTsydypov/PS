@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-**PolyStars** is a data platform for Polymarket ingestion, analytics, season lifecycle management, and NFT card minting on Solana. It combines:
+**PS** is a data platform for Polymarket ingestion, analytics, season lifecycle management, and NFT card minting on Solana. It combines:
 - A scheduled data pipeline pulling from the Polymarket API into PostgreSQL
 - AI generation of trading card content (titles, lore, tag colors) via Claude/Gemini
 - SVG/PNG card rendering and upload to Cloudflare R2 / Pinata

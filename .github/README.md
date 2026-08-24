@@ -1,4 +1,4 @@
-# PolyStars Documentation Index
+# PS Documentation Index
 
 This file is a quick navigation entry for project docs.  
 For full setup and operational details, use the root `README.md`.

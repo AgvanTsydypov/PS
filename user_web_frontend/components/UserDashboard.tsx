@@ -181,7 +181,7 @@ function hasPolymarketRank(traderRank: string | null | undefined): boolean {
 
 // ── Token-holder mint gate ────────────────────────────────────────────────────
 // A wallet may mint if it has a real Polymarket trader rank *or* it holds at
-// least TOKEN_GATE_MIN_BALANCE of the PolyStars project ERC-20 token on
+// least TOKEN_GATE_MIN_BALANCE of the PS project ERC-20 token on
 // Ethereum mainnet. Authoritative check lives on the backend (uses the paid
 // Alchemy RPC + a 30s cache); this helper just relays its decision so the
 // "GET STAR" copy and the server-side mint gate never disagree.

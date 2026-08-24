@@ -205,7 +205,7 @@ class MintMyNftRequest(BaseModel):
     season_id: int
 
 
-app = FastAPI(title="PolyStars User Web API", version="1.0.0")
+app = FastAPI(title="PS User Web API", version="1.0.0")
 
 
 def _allowed_origins() -> List[str]:
@@ -593,7 +593,7 @@ def _build_challenge_message(wallet_address: str, nonce: str, expires_at: dateti
         f"{_siwe_domain()} wants you to sign in with your Ethereum account:\n"
         f"{wallet_address}\n"
         "\n"
-        "Sign in to PolyStars\n"
+        "Sign in to PS\n"
         "\n"
         f"URI: {_siwe_uri()}\n"
         "Version: 1\n"
@@ -1739,7 +1739,7 @@ def _is_registered_on_polymarket(proxy_wallet: Optional[str]) -> bool:
 
 # ── Token-holder mint gate ───────────────────────────────────────────────────
 # A wallet may mint if it has a real Polymarket trader rank *or* it holds at
-# least ``TOKEN_GATE_MIN_BALANCE`` whole tokens of the PolyStars *project*
+# least ``TOKEN_GATE_MIN_BALANCE`` whole tokens of the PS *project*
 # ERC-20 token on Ethereum mainnet. NOTE: this is the project token contract,
 # not the NFT collection contract (``EVM_CONTRACT_ADDRESS``).
 TOKEN_GATE_CONTRACT_ADDRESS = os.getenv(
@@ -3605,7 +3605,7 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
             if not holds_gate_token:
                 raise HTTPException(
                     status_code=403,
-                    detail="WALLET HAS NO POLYMARKET TRADING HISTORY AND IS NOT A POLYSTARS TOKEN HOLDER.",
+                    detail="WALLET HAS NO POLYMARKET TRADING HISTORY AND IS NOT A PS TOKEN HOLDER.",
                 )
             qualified_via_token_holder = True
 
@@ -4192,7 +4192,7 @@ def _turntable_cache_startup_sweep() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# /api/me/cards — owned-on-chain PolyStars NFTs for the signed-in wallet
+# /api/me/cards — owned-on-chain PS NFTs for the signed-in wallet
 # ──────────────────────────────────────────────────────────────────────────────
 # Source of truth is on-chain ownership on the configured EVM contract
 # (Sepolia in test, Ethereum mainnet in prod). For each COMPLETED claim that
@@ -4281,7 +4281,7 @@ def _serialize_minted_at(value: Any) -> Optional[str]:
 
 @app.get("/api/me/cards")
 def me_cards(request: Request) -> Dict[str, Any]:
-    """Return PolyStars NFTs currently owned on-chain by the signed-in wallet.
+    """Return PS NFTs currently owned on-chain by the signed-in wallet.
 
     The on-chain collection is the source of truth: we enumerate every
     tokenId the wallet currently owns on the configured contract (via

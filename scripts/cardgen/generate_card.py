@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-generate_card.py — Pixel-perfect SVG card generator for Polystars NFT cards.
+generate_card.py — Pixel-perfect SVG card generator for PS NFT cards.
 
 Reads card data (Python dict) and generates a standards-compliant SVG
 matching the Figma design spec (polystars_card_svg_V3.md).
@@ -1146,7 +1146,7 @@ def generate_card_svg(data: Dict[str, Any]) -> str:
 <text x="{X_POLYSTARS}" y="{Y_POLYSTARS}"
       text-anchor="start" dominant-baseline="hanging"
       font-size="6">
-  <tspan fill="#2E5CFF">P</tspan><tspan fill="#D5744C">O</tspan><tspan fill="#B8BFCE">L</tspan><tspan fill="#925AB9">Y</tspan><tspan fill="#328ADD">S</tspan><tspan fill="#3E9292">T</tspan><tspan fill="#C08838">A</tspan><tspan fill="#736D51">R</tspan><tspan fill="#BA4040">S</tspan>
+  <tspan fill="#2E5CFF">P</tspan><tspan fill="#BA4040">S</tspan>
 </text>''')
 
     # ---- Layer 17: Structural outer border (always #333333) ----
@@ -1560,7 +1560,7 @@ def _back_clamp_line_count(lines: List[str], max_lines: int) -> List[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Structural Signature (Section 4 of the Polystars spec)
+# Structural Signature (Section 4 of the PS spec)
 # Format: [ARCH]-[P(E)]-[E][Y][G]-[INST]-[CLAIM]-S[N]-[PLATFORM][EVENT_ID]
 # ─────────────────────────────────────────────────────────────────────────────
 

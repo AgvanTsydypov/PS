@@ -1,5 +1,5 @@
 """
-Build canonical PolyStars card payloads for NFT mint metadata.
+Build canonical PS card payloads for NFT mint metadata.
 
 This mirrors the user-generated card payload shape and also generates
 front/back SVG card assets so the minted NFT metadata can reference them.

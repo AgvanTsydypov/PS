@@ -1,4 +1,4 @@
-"""Export X (Twitter) usernames of minted PolyStars card owners.
+"""Export X (Twitter) usernames of minted PS card owners.
 
 Walks the ``claims`` table, takes each distinct ``proxy_wallet`` that already
 has a public card page (``card_slug`` filled in by the cron mint worker),

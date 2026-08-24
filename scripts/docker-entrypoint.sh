@@ -3,7 +3,7 @@
 
 set -e
 
-echo "🐍 PolyStars Python Container Starting..."
+echo "🐍 PS Python Container Starting..."
 
 # Проверка подключения к PostgreSQL
 echo "⏳ Ожидание PostgreSQL..."

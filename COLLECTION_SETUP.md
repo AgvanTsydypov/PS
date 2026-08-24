@@ -1,4 +1,4 @@
-# PolyStars Collection Setup (Devnet)
+# PS Collection Setup (Devnet)
 
 This guide describes the current, supported flow for creating the master Metaplex Core collection.
 

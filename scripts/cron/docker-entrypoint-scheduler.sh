@@ -13,7 +13,7 @@
 
 set -e
 
-echo "🚀 Starting PolyStars Scheduler Service"
+echo "🚀 Starting PS Scheduler Service"
 echo "======================================"
 
 # Wait for PostgreSQL to be ready (using environment variables)

@@ -1,6 +1,6 @@
-# PolyStars
+# PS
 
-PolyStars is a data platform for Polymarket ingestion, analytics, season lifecycle operations, and NFT claim workflows.
+PS is a data platform for Polymarket ingestion, analytics, season lifecycle operations, and NFT claim workflows.
 
 This repository includes:
 - a production-style data pipeline (`events`, `markets`, `redemptions`, `positions`, `leaderboard`),

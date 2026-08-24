@@ -1,6 +1,6 @@
 ## 8.1 Overview
 
-Polystars is a curated archive. Every Star ever minted refers to a specific Polymarket event, and every event admitted to a Season passes through a deliberate ingestion pipeline that filters, validates, and contextualizes the underlying market before it becomes part of the protocol's record.
+PS is a curated archive. Every Star ever minted refers to a specific Polymarket event, and every event admitted to a Season passes through a deliberate ingestion pipeline that filters, validates, and contextualizes the underlying market before it becomes part of the protocol's record.
 
 This section documents what enters the system, why, and through what architecture. The companion section (9 — Behavioral Substrate) documents what is measured once ingestion produces a clean event surface. Together they form the protocol's data layer. 
 
@@ -39,7 +39,7 @@ A central architectural challenge involves how prediction markets record lifecyc
 2.  **Early Resolution:** The underlying outcome becomes unambiguous earlier than expected, causing the market to close ahead of the `endDate`.
 3.  **Parent-Child Cascade:** An event only transitions to "closed" once *every* underlying market within it has resolved. One slow-resolving market can hold the entire event container open.
 
-> **The Architectural Consequence:** A standard pipeline polling for events based on `endDate` would systematically miss any event with a delayed resolution. By the time those events finally close, a passive script has moved on, creating permanent gaps in the archive. The Polystars pipeline is specifically designed to account for this drift.
+> **The Architectural Consequence:** A standard pipeline polling for events based on `endDate` would systematically miss any event with a delayed resolution. By the time those events finally close, a passive script has moved on, creating permanent gaps in the archive. The PS pipeline is specifically designed to account for this drift.
 
 ---
 
