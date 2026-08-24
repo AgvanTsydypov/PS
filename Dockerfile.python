@@ -1,4 +1,4 @@
-# Dockerfile для Python скриптов PolyStars
+# Dockerfile для Python скриптов PS
 FROM python:3.12-slim
 
 # Установка системных зависимостей

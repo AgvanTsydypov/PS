@@ -1,6 +1,6 @@
 ## 5.1 Overview
 
-The Polystars ecosystem does not operate in flat endlessness, but in strict, mathematical cycles. To preserve the scarcity of historical data and the integrity of each archival window, the network is segmented into isolated operational periods: **Seasons**. Each Season is bound to a specific collection of resolved Polymarket events, and each Season produces a fixed supply of Stars that are minted and then permanently closed.
+The PS ecosystem does not operate in flat endlessness, but in strict, mathematical cycles. To preserve the scarcity of historical data and the integrity of each archival window, the network is segmented into isolated operational periods: **Seasons**. Each Season is bound to a specific collection of resolved Polymarket events, and each Season produces a fixed supply of Stars that are minted and then permanently closed.
 
 The system runs two temporal frameworks simultaneously: 
 

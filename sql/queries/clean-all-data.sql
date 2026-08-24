@@ -1,5 +1,5 @@
 -- ============================================================================
--- CLEAN ALL DATA FROM POLYSTARS DATABASE
+-- CLEAN ALL DATA FROM PS DATABASE
 -- ============================================================================
 -- This script removes all rows from ALL user tables while preserving schema.
 -- It truncates every table in every non-system schema and resets identities.

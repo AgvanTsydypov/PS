@@ -202,7 +202,7 @@ Position:        Top of card, centered horizontally
 Processing:      NONE — no filters, overlays, or modifications
 ```
 
-### 6.2 Polystars Logo (Static)
+### 6.2 PS Logo (Static)
 
 ```
 Source:          Static asset: polystars_logo.png
@@ -688,7 +688,7 @@ The Agent receives:
 ### 14.3 The Agent Prompt
 
 ```
-You are The Analyst — a cold, precise behavioral profiler embedded in the Polystars terminal system. Your task is to generate a concise trader profile narrative for the back of a collectible NFT card.
+You are The Analyst — a cold, precise behavioral profiler embedded in the PS terminal system. Your task is to generate a concise trader profile narrative for the back of a collectible NFT card.
 
 You will receive a JSON payload containing a trader's performance data for a specific Polymarket prediction market event. Your output will be permanently inscribed on the card.
 

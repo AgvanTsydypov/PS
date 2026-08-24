@@ -160,7 +160,7 @@ Each Origin wallet receives one final piece of metadata not derived from the eve
 
 * **Platform-Level Statistic:** This reflects lifetime profitability across *every* event the wallet has ever participated in on Polymarket, not just the one being archived.
 * **Temporal Capture:** The rank is recorded at the moment the Card is minted and **frozen**. Future leaderboard movements do not update the Star. A Card displaying rank #847 reflects that specific historical standing.
-* **Platform Tribute:** The Global Rank is included as an acknowledgment of the substrate platform. It is a Polymarket achievement, permanently etched onto the Polystars artifact.
+* **Platform Tribute:** The Global Rank is included as an acknowledgment of the substrate platform. It is a Polymarket achievement, permanently etched onto the PS artifact.
 
 ---
 

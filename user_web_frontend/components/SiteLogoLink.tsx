@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 
-const WORDMARK = "POLYSTARS";
+const WORDMARK = "PS";
 
 // Per-letter colors — must match the footer wordmark on the generated card
 // (scripts/cardgen/generate_card.py, "FOOTER" block).
@@ -40,7 +40,7 @@ export default function SiteLogoLink({
     <Link
       href="/"
       className={`site-logo-link${className ? ` ${className}` : ""}`}
-      aria-label="PolyStars home"
+      aria-label="PS home"
     >
       <span className={wordmarkClassName}>
         {colorful

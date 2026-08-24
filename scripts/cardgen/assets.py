@@ -1,7 +1,7 @@
 """
 Unified card asset pipeline: SVG -> PNG -> (R2 or Pinata).
 
-Single source of truth for how PolyStars cards are turned into shippable image
+Single source of truth for how PS cards are turned into shippable image
 bytes and where those bytes are published. Every caller (NFT mint payload,
 admin showcase simulator, user-facing ``/api/cards/get``) goes through the
 helpers in this module, so the on-chain / on-IPFS / on-R2 formats, filenames

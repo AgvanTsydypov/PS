@@ -38,7 +38,7 @@ Origins claim what their participation earned them. Looters inherit the slots th
 
 Polymarket users do not trade from their **externally owned account (EOA)** directly. Instead, Polymarket assigns each user a **proxy wallet**: a smart contract account associated with the user's EOA that executes trades on the platform. Trade history accumulates on the proxy, not the EOA.
 
-Eligibility verification operates against this proxy. When a user signs into Polystars with their EOA, the system retrieves the associated proxy wallet from the Polymarket API and runs all subsequent checks against it. In normal operation, this resolution happens silently; the user signs with the EOA they recognize, and the protocol handles the abstraction.
+Eligibility verification operates against this proxy. When a user signs into PS with their EOA, the system retrieves the associated proxy wallet from the Polymarket API and runs all subsequent checks against it. In normal operation, this resolution happens silently; the user signs with the EOA they recognize, and the protocol handles the abstraction.
 
 > **Critical Distinction:** The address embedded in the Star's signature and displayed on the Card front is the **proxy wallet address**, not the EOA. The Star records the entity that performed the trade, not the entity that signed the login. While bound, they are not identical.
 

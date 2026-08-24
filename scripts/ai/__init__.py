@@ -1,4 +1,4 @@
-"""AI helpers for PolyStars."""
+"""AI helpers for PS."""
 
 from .claude_client import ClaudeJsonClient
 from .event_card_agent1 import Agent1CardResponse, Agent1QuantCardGenerator

@@ -237,7 +237,7 @@ class OptimizedParallelEventFetcher:
         """Fetch all events via GET /events/keyset (sequential cursor chain)."""
         self.stats['start_time'] = datetime.now()
 
-        print("🚀 PolyStars - Events fetcher (Gamma /events/keyset)")
+        print("🚀 PS - Events fetcher (Gamma /events/keyset)")
         print("=" * 70)
         print(f"📋 Configuration:")
         print(f"   • Minimum Event Volume: ${config.MIN_VOLUME:,.0f}")

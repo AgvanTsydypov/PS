@@ -115,7 +115,7 @@ def etherscan_nft_url(contract_address: str, token_id: int, chain_id: int) -> st
     return f"{etherscan_base_url(chain_id)}/nft/{contract_address}/{token_id}"
 
 
-# OpenSea is the primary NFT marketplace for PolyStars STARs. Item URLs are
+# OpenSea is the primary NFT marketplace for PS STARs. Item URLs are
 # ``https://opensea.io/item/<chain-slug>/<contract>/<tokenId>`` on mainnets and
 # ``https://testnets.opensea.io/item/<chain-slug>/...`` on testnets.
 _OPENSEA_CHAIN: dict[int, tuple[str, str]] = {
@@ -1198,7 +1198,7 @@ class EvmReader:
 
     Unlike :class:`EvmClient`, this requires no private key — it never sends
     transactions. Used by the user-web backend to verify on-chain ownership
-    of minted PolyStars NFTs without granting that service mint authority.
+    of minted PS NFTs without granting that service mint authority.
     """
 
     def __init__(
