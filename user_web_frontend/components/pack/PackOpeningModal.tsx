@@ -88,6 +88,10 @@ export function PackOpeningModal() {
               <span className="pack-wait-overlay-sub">
                 PACK UNLOCKS WHEN THE TX SETTLES
               </span>
+              <br />
+              <span className="pack-wait-overlay-sub">
+                PLEASE HOLD ON FOR A MOMENT
+              </span>
             </div>
           </div>
         )}
