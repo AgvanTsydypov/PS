@@ -1,5 +1,5 @@
 -- ============================================================================
--- POLYSTARS SEASONS SYSTEM - SQL Migration
+-- PS SEASONS SYSTEM - SQL Migration
 -- ============================================================================
 -- This migration creates tables for NFT minting seasons system
 -- Supports Genesis (historical) and Standard (10-day) seasons
@@ -9,7 +9,7 @@
 -- that this file references when backfilling winner_wallets_nft_to_claim.
 -- ============================================================================
 
-DO $$ BEGIN RAISE NOTICE '🎮 Starting PolyStars Seasons System migration...'; END $$;
+DO $$ BEGIN RAISE NOTICE '🎮 Starting PS Seasons System migration...'; END $$;
 
 -- ============================================================================
 -- 1. CREATE SEASON TYPE ENUM
@@ -168,7 +168,7 @@ CREATE TABLE IF NOT EXISTS claims (
     claim_type            TEXT,
     recipient_address     TEXT,
 
-    -- Structural signature (Polystars Section 4): the Star's permanent
+    -- Structural signature (PS Section 4): the Star's permanent
     -- operational fingerprint, computed from the snapshot above + season +
     -- event_id at queue-insert time. Frozen forever once written so the
     -- string remains valid even if the encoding logic changes later.

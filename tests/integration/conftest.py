@@ -95,6 +95,9 @@ def _start_ephemeral_postgres() -> None:
     os.environ["DB_NAME"] = dbname
     os.environ["DB_USER"] = user
     os.environ["DB_PASSWORD"] = password
+    # testcontainers postgres has no TLS; override the prod-default "require"
+    # so db_uploader.py and other connect()s don't fail SSL negotiation.
+    os.environ["DB_SSLMODE"] = "disable"
 
 
 if os.getenv("POLYSTARS_USE_LIVE_DB") != "1":

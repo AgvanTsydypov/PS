@@ -19,6 +19,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import time
 from time import monotonic
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,6 +32,7 @@ from eth_account.messages import encode_defunct
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 from web3 import Web3
@@ -203,7 +205,7 @@ class MintMyNftRequest(BaseModel):
     season_id: int
 
 
-app = FastAPI(title="PolyStars User Web API", version="1.0.0")
+app = FastAPI(title="PS User Web API", version="1.0.0")
 
 
 def _allowed_origins() -> List[str]:
@@ -264,6 +266,34 @@ MAX_OUTSTANDING_CHALLENGES_PER_WALLET = max(
 )
 season_manager = SeasonManager(use_local_db=True, connection_factory=_get_connection)
 mint_service = SeasonWorkbenchService()
+
+# ── Pack-opening turntable cache ──────────────────────────────────────────────
+# When a mint completes the user-web frontend opens the pack-opening modal and
+# asks /api/me/claims/{id}/turntable for the 120 webp turntable frames. We
+# compose them on demand using the shared bake at card_render/template/ + the
+# claim's front/back PNGs, then cache them under _turntable_cache/{claim_id}/
+# and serve them from /static/turntables. Wiring the StaticFiles mount here
+# (right after app init, before any requests) keeps the per-claim webp URLs on
+# the same origin as the API so the frontend doesn't need a second base URL.
+TURNTABLE_CACHE_DIR = Path(__file__).resolve().parent / "_turntable_cache"
+TURNTABLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+TURNTABLE_TEMPLATE_DIR = Path(project_root) / "card_render" / "template"
+# Orphaned-cache TTL. Per-claim cache dirs live on local disk (NOT R2 — the
+# permanent on-chain card images on R2 are referenced by IPFS metadata and
+# stay forever; only the lazy-composed turntable frames are local-cache).
+# The frontend deletes its own dir explicitly when reset() fires after a
+# successful reveal, but a tab-close mid-flight or a crashed compose can
+# leave a partial dir behind. This sweep nukes any dir untouched for
+# ``TURNTABLE_CACHE_TTL_SECONDS`` (default 7 days) so the disk doesn't
+# slowly fill with abandoned reveals.
+TURNTABLE_CACHE_TTL_SECONDS = max(
+    300, int(os.getenv("USER_WEB_TURNTABLE_CACHE_TTL_SECONDS", str(7 * 24 * 3600))),
+)
+app.mount(
+    "/static/turntables",
+    StaticFiles(directory=str(TURNTABLE_CACHE_DIR), check_dir=False),
+    name="turntables",
+)
 JWT_ALG = "HS256"
 JWT_TTL_SECONDS = int(os.getenv("USER_WEB_JWT_TTL_SECONDS", "3600"))
 JWT_ISSUER = os.getenv("USER_WEB_JWT_ISSUER", "polystars-user-web-backend")
@@ -563,7 +593,7 @@ def _build_challenge_message(wallet_address: str, nonce: str, expires_at: dateti
         f"{_siwe_domain()} wants you to sign in with your Ethereum account:\n"
         f"{wallet_address}\n"
         "\n"
-        "Sign in to PolyStars\n"
+        "Sign in to PS\n"
         "\n"
         f"URI: {_siwe_uri()}\n"
         "Version: 1\n"
@@ -1709,7 +1739,7 @@ def _is_registered_on_polymarket(proxy_wallet: Optional[str]) -> bool:
 
 # ── Token-holder mint gate ───────────────────────────────────────────────────
 # A wallet may mint if it has a real Polymarket trader rank *or* it holds at
-# least ``TOKEN_GATE_MIN_BALANCE`` whole tokens of the PolyStars *project*
+# least ``TOKEN_GATE_MIN_BALANCE`` whole tokens of the PS *project*
 # ERC-20 token on Ethereum mainnet. NOTE: this is the project token contract,
 # not the NFT collection contract (``EVM_CONTRACT_ADDRESS``).
 TOKEN_GATE_CONTRACT_ADDRESS = os.getenv(
@@ -3353,13 +3383,31 @@ def me_eligibility(request: Request) -> Dict[str, Any]:
     if not Web3.is_address(wallet):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
     try:
-        return season_manager.check_user_eligibility(wallet)
+        result = season_manager.check_user_eligibility(wallet)
     except Exception:
         logger.exception("Failed to compute eligibility for wallet=%s", wallet)
         raise HTTPException(
             status_code=503,
             detail="Eligibility could not be determined. Please try again later.",
         ) from None
+    # Dev-only override: bypass wallets always look "never minted" so the GET
+    # STAR button keeps reappearing between test mints — drops the pending_claim
+    # short-circuit and the ineligible_reason that the dashboard renders into
+    # a status pill. Allocation + on-chain mint still run normally.
+    if _is_dev_bypass_wallet(wallet):
+        _strip_eligibility_blockers(result)
+    return result
+
+
+def _strip_eligibility_blockers(eligibility: Dict[str, Any]) -> None:
+    for key in ("genesis", "standard"):
+        stream = eligibility.get(key)
+        if not isinstance(stream, dict):
+            continue
+        stream["pending_claim"] = None
+        stream["is_eligible"] = True
+        stream["eligible_now"] = True
+        stream["ineligible_reason"] = ""
 
 
 @app.get("/api/me/gate-token-status")
@@ -3376,7 +3424,68 @@ def me_gate_token_status(request: Request) -> Dict[str, Any]:
     wallet = _extract_wallet_from_request(request).lower()
     if not Web3.is_address(wallet):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
+    if _is_dev_bypass_wallet(wallet):
+        # Dev override: pretend the wallet holds enough token so the dashboard
+        # button-gate (``!hasRank && gateTokenOk === false``) doesn't kick in.
+        return {"status": "ok", "holds": True}
     return _wallet_gate_token_status(wallet)
+
+
+def _dev_bypass_wallets() -> set:
+    """Lowercased EVM addresses allowed to mint without any gate checks.
+
+    Dev-only escape hatch for animation/UX testing. Set via the
+    ``USER_WEB_DEV_BYPASS_WALLETS`` env var as a comma-separated list of
+    addresses (case-insensitive). Empty in prod.
+    """
+    raw = os.getenv("USER_WEB_DEV_BYPASS_WALLETS", "").strip()
+    if not raw:
+        return set()
+    return {a.strip().lower() for a in raw.split(",") if a.strip()}
+
+
+def _is_dev_bypass_wallet(wallet_lower: str) -> bool:
+    return wallet_lower in _dev_bypass_wallets()
+
+
+def _cancel_active_claims_for_dev_bypass(wallet_lower: str, season_id: int) -> int:
+    """Mark any still-active claims for a dev-bypass wallet+season as FAILED so
+    the ``ux_claims_active_season_user_wallet_lower`` partial unique index
+    releases its slot and the next ``/api/me/mint`` call can insert a fresh
+    QUEUED row.
+
+    Without this, an animation/UX test run that left a QUEUED claim behind
+    (because the cron worker wasn't running, or the on-chain mint failed mid-
+    flight) wedges the dev wallet permanently — every subsequent GET STAR click
+    returns 400 "already has an active claim". COMPLETED rows are deliberately
+    NOT touched: those are real on-chain mints and the unique index is correct
+    to block another one.
+    """
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE claims
+                   SET status = 'FAILED',
+                       updated_at = NOW()
+                 WHERE season_id = %s
+                   AND LOWER(user_wallet) = %s
+                   AND status IN ('QUEUED', 'PENDING', 'PROCESSING')
+                """,
+                (season_id, wallet_lower),
+            )
+            cancelled = cur.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    if cancelled:
+        logger.warning(
+            "Dev-bypass wallet %s: marked %d stale active claim(s) as FAILED "
+            "for season_id=%s before retry.",
+            wallet_lower, cancelled, season_id,
+        )
+    return cancelled
 
 
 @app.post("/api/me/mint")
@@ -3386,6 +3495,19 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
     wallet = _extract_wallet_from_request(request).lower()
     if not Web3.is_address(wallet):
         raise HTTPException(status_code=400, detail="Invalid connected wallet")
+
+    # Dev-only escape hatch for animation/UX testing. Wallets listed in
+    # USER_WEB_DEV_BYPASS_WALLETS skip all four gates below (Polymarket rank,
+    # token-holder, IP sybil, ERC-721 receiver preflight). The downstream
+    # allocation + cron-worker mint logic still runs unchanged, so the cap
+    # trigger on ``claims`` and the on-chain mint still apply. Empty in prod.
+    bypass_gates = _is_dev_bypass_wallet(wallet)
+    if bypass_gates:
+        logger.warning(
+            "Dev-bypass wallet %s: skipping Polymarket gate, token-holder "
+            "gate, IP sybil gate and ERC-721 receiver preflight.",
+            wallet,
+        )
 
     # Strict server-side gate: the wallet must EITHER have a real Polymarket
     # leaderboard rank OR hold enough of the project token (see the token-gate
@@ -3401,90 +3523,91 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
     # the API was temporarily unavailable then). If a live call fails, we fall
     # back to the cached snapshot so a transient Polymarket outage does not
     # lock legitimate users out of minting.
-    cached_proxy_wallet, cached_trader_rank = _load_wallet_signin_snapshot(wallet)
-    live_proxy_wallet: Optional[str] = None
-    live_lookup_succeeded = False
-    try:
-        profile = _fetch_polymarket_public_profile(wallet)
-        live_proxy_wallet = _proxy_wallet_from_profile(profile)
-        live_lookup_succeeded = True
-    except Exception as exc:
-        logger.warning(
-            "Live Polymarket profile lookup failed for wallet=%s: %s; "
-            "falling back to cached proxy_wallet=%r",
-            wallet,
-            str(exc),
-            cached_proxy_wallet,
-        )
-
-    effective_proxy_wallet = (
-        live_proxy_wallet if live_lookup_succeeded else cached_proxy_wallet
-    )
-    is_registered = _is_registered_on_polymarket(effective_proxy_wallet)
-    logger.info(
-        "Polymarket mint gate check: wallet=%s live_ok=%s live_proxy=%r "
-        "cached_proxy=%r effective_proxy=%r is_registered=%s",
-        wallet,
-        live_lookup_succeeded,
-        live_proxy_wallet,
-        cached_proxy_wallet,
-        effective_proxy_wallet,
-        is_registered,
-    )
-    # Trader-rank gate: live lookup with cached fallback.
-    # ``_fetch_polymarket_trader_rank`` returns ``(rank, api_available)``;
-    # we treat any non-exception result as a successful lookup so a wallet
-    # that genuinely has no rank yet ("No trades yet") is correctly rejected
-    # instead of falling back to a possibly-stale cache.
-    live_trader_rank: Optional[str] = None
-    trader_rank_lookup_succeeded = False
-    try:
-        live_trader_rank, _live_api_available = _fetch_polymarket_trader_rank(
-            effective_proxy_wallet or ""
-        )
-        trader_rank_lookup_succeeded = bool(_live_api_available)
-    except Exception as exc:
-        logger.warning(
-            "Live Polymarket trader-rank lookup failed for wallet=%s proxy=%s: %s; "
-            "falling back to cached trader_rank=%r",
-            wallet,
-            effective_proxy_wallet,
-            str(exc),
-            cached_trader_rank,
-        )
-
-    effective_trader_rank = (
-        live_trader_rank if trader_rank_lookup_succeeded else cached_trader_rank
-    )
-    has_rank = _has_valid_polymarket_rank(effective_trader_rank)
-    logger.info(
-        "Polymarket trader-rank mint gate: wallet=%s live_ok=%s live_rank=%r "
-        "cached_rank=%r effective_rank=%r has_rank=%s",
-        wallet,
-        trader_rank_lookup_succeeded,
-        live_trader_rank,
-        cached_trader_rank,
-        effective_trader_rank,
-        has_rank,
-    )
     qualified_via_token_holder = False
-    if not has_rank:
-        # Fallback gate: a wallet with no Polymarket rank may still mint if it
-        # holds at least TOKEN_GATE_MIN_BALANCE of the project token on mainnet.
-        holds_gate_token = _wallet_holds_gate_token(wallet)
-        logger.info(
-            "Token-holder mint gate: wallet=%s holds_gate_token=%s (contract=%s threshold_raw=%s)",
-            wallet,
-            holds_gate_token,
-            TOKEN_GATE_CONTRACT_ADDRESS,
-            TOKEN_GATE_MIN_BALANCE_RAW,
-        )
-        if not holds_gate_token:
-            raise HTTPException(
-                status_code=403,
-                detail="WALLET HAS NO POLYMARKET TRADING HISTORY AND IS NOT A POLYSTARS TOKEN HOLDER.",
+    if not bypass_gates:
+        cached_proxy_wallet, cached_trader_rank = _load_wallet_signin_snapshot(wallet)
+        live_proxy_wallet: Optional[str] = None
+        live_lookup_succeeded = False
+        try:
+            profile = _fetch_polymarket_public_profile(wallet)
+            live_proxy_wallet = _proxy_wallet_from_profile(profile)
+            live_lookup_succeeded = True
+        except Exception as exc:
+            logger.warning(
+                "Live Polymarket profile lookup failed for wallet=%s: %s; "
+                "falling back to cached proxy_wallet=%r",
+                wallet,
+                str(exc),
+                cached_proxy_wallet,
             )
-        qualified_via_token_holder = True
+
+        effective_proxy_wallet = (
+            live_proxy_wallet if live_lookup_succeeded else cached_proxy_wallet
+        )
+        is_registered = _is_registered_on_polymarket(effective_proxy_wallet)
+        logger.info(
+            "Polymarket mint gate check: wallet=%s live_ok=%s live_proxy=%r "
+            "cached_proxy=%r effective_proxy=%r is_registered=%s",
+            wallet,
+            live_lookup_succeeded,
+            live_proxy_wallet,
+            cached_proxy_wallet,
+            effective_proxy_wallet,
+            is_registered,
+        )
+        # Trader-rank gate: live lookup with cached fallback.
+        # ``_fetch_polymarket_trader_rank`` returns ``(rank, api_available)``;
+        # we treat any non-exception result as a successful lookup so a wallet
+        # that genuinely has no rank yet ("No trades yet") is correctly rejected
+        # instead of falling back to a possibly-stale cache.
+        live_trader_rank: Optional[str] = None
+        trader_rank_lookup_succeeded = False
+        try:
+            live_trader_rank, _live_api_available = _fetch_polymarket_trader_rank(
+                effective_proxy_wallet or ""
+            )
+            trader_rank_lookup_succeeded = bool(_live_api_available)
+        except Exception as exc:
+            logger.warning(
+                "Live Polymarket trader-rank lookup failed for wallet=%s proxy=%s: %s; "
+                "falling back to cached trader_rank=%r",
+                wallet,
+                effective_proxy_wallet,
+                str(exc),
+                cached_trader_rank,
+            )
+
+        effective_trader_rank = (
+            live_trader_rank if trader_rank_lookup_succeeded else cached_trader_rank
+        )
+        has_rank = _has_valid_polymarket_rank(effective_trader_rank)
+        logger.info(
+            "Polymarket trader-rank mint gate: wallet=%s live_ok=%s live_rank=%r "
+            "cached_rank=%r effective_rank=%r has_rank=%s",
+            wallet,
+            trader_rank_lookup_succeeded,
+            live_trader_rank,
+            cached_trader_rank,
+            effective_trader_rank,
+            has_rank,
+        )
+        if not has_rank:
+            # Fallback gate: a wallet with no Polymarket rank may still mint if it
+            # holds at least TOKEN_GATE_MIN_BALANCE of the project token on mainnet.
+            holds_gate_token = _wallet_holds_gate_token(wallet)
+            logger.info(
+                "Token-holder mint gate: wallet=%s holds_gate_token=%s (contract=%s threshold_raw=%s)",
+                wallet,
+                holds_gate_token,
+                TOKEN_GATE_CONTRACT_ADDRESS,
+                TOKEN_GATE_MIN_BALANCE_RAW,
+            )
+            if not holds_gate_token:
+                raise HTTPException(
+                    status_code=403,
+                    detail="WALLET HAS NO POLYMARKET TRADING HISTORY AND IS NOT A PS TOKEN HOLDER.",
+                )
+            qualified_via_token_holder = True
 
     try:
         season_id = int(payload.season_id)
@@ -3492,6 +3615,14 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Invalid season_id")
     if season_id <= 0:
         raise HTTPException(status_code=400, detail="Invalid season_id")
+
+    # Dev-bypass escape hatch: clear stale QUEUED/PENDING/PROCESSING rows from
+    # the wallet's prior animation/UX test before retrying. The
+    # ux_claims_active_season_user_wallet_lower index would otherwise reject
+    # the new INSERT with "already has an active claim" and the user can't
+    # iterate on the pack flow without manually editing the DB.
+    if bypass_gates:
+        _cancel_active_claims_for_dev_bypass(wallet, season_id)
 
     # IP sybil gate: applied ONLY to token-holder-path mints. Trader-rank
     # wallets are sybil-resistant by virtue of real Polymarket trading history;
@@ -3532,19 +3663,20 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
     # ``mintTo call would revert`` message. Refusing here gives them an
     # immediate, specific reason and avoids polluting the claims table with
     # rows that can never succeed. Fail-open on RPC errors (see helper).
-    try:
-        recipient_checksum_for_preflight = Web3.to_checksum_address(wallet)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid connected wallet")
-    preflight_reason = _check_recipient_can_receive_nft(
-        recipient_checksum_for_preflight
-    )
-    if preflight_reason is not None:
-        logger.info(
-            "Mint refused by recipient preflight: wallet=%s season_id=%s reason=%r",
-            wallet, season_id, preflight_reason,
+    if not bypass_gates:
+        try:
+            recipient_checksum_for_preflight = Web3.to_checksum_address(wallet)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid connected wallet")
+        preflight_reason = _check_recipient_can_receive_nft(
+            recipient_checksum_for_preflight
         )
-        raise HTTPException(status_code=400, detail=preflight_reason)
+        if preflight_reason is not None:
+            logger.info(
+                "Mint refused by recipient preflight: wallet=%s season_id=%s reason=%r",
+                wallet, season_id, preflight_reason,
+            )
+            raise HTTPException(status_code=400, detail=preflight_reason)
 
     mint_request = MintClaimRequest(
         wallet=wallet,
@@ -3590,11 +3722,883 @@ def me_mint(payload: MintMyNftRequest, request: Request) -> Dict[str, Any]:
     if MINT_IP_GATE_ENABLED and qualified_via_token_holder and request_ip_hash:
         _record_mint_ip_hash(wallet, request_ip_hash)
 
+    # The on-chain mint normally happens on a 5-minute cron tick. The user is
+    # waiting behind a locked pack-opening modal — kick a one-shot processor
+    # immediately so their claim is picked up now instead of on the next tick.
+    # Backgrounded: the HTTP response returns the QUEUED claim straight away;
+    # the frontend polls /api/me/claims/{id}/turntable for COMPLETED state.
+    _kick_mint_queue_async()
+
     return result
 
 
+def _inline_mint_kick_enabled() -> bool:
+    """Inline kick is the prod-style mint trigger. In dev, some operators run
+    ``scripts/daily_scheduler_simple.py --process-mint-queue`` manually and
+    don't want this thread competing for the advisory lock — set
+    ``USER_WEB_INLINE_MINT_KICK=0`` to disable it. Default on."""
+    raw = os.getenv("USER_WEB_INLINE_MINT_KICK", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _kick_mint_queue_async() -> None:
+    """Run the mint-queue worker in a daemon thread so the user's claim is
+    picked up well inside the pack-modal wait budget (~30–60s instead of up to
+    a 5-minute cron tick). ``process_mint_queue`` is concurrency-safe via a
+    ``pg_try_advisory_lock`` — if the cron is mid-tick this returns instantly.
+    Toggle off via ``USER_WEB_INLINE_MINT_KICK=0`` when an external script
+    (e.g. dev's manual ``--process-mint-queue`` run) owns the queue worker.
+    """
+    if not _inline_mint_kick_enabled():
+        logger.info(
+            "[mint-kick] disabled via USER_WEB_INLINE_MINT_KICK=0 "
+            "(claim left QUEUED for external worker to pick up)"
+        )
+        return
+
+    def _run() -> None:
+        logger.info("[mint-kick] starting background process_mint_queue(max=5)")
+        try:
+            result = mint_service.scheduler.process_mint_queue(max_claims=5)
+            logger.info("[mint-kick] process_mint_queue returned: %r", result)
+        except Exception:
+            logger.exception("[mint-kick] inline mint-queue trigger failed")
+    threading.Thread(target=_run, name="user-web-mint-kick", daemon=True).start()
+
+
+@app.post("/api/me/admin/process-mint-queue")
+def me_admin_process_mint_queue(request: Request) -> Dict[str, Any]:
+    """Dev-only manual mint-queue trigger. Gated to USER_WEB_DEV_BYPASS_WALLETS
+    so a normal signed-in user can't kick the worker on demand. Useful when
+    inline kick is off and you want to drain the queue from the browser without
+    SSHing to run the cron script."""
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    if not _is_dev_bypass_wallet(wallet):
+        raise HTTPException(status_code=403, detail="Not a dev-bypass wallet")
+    logger.info("[mint-kick] manual trigger by wallet=%s", wallet)
+    try:
+        result = mint_service.scheduler.process_mint_queue(max_claims=5)
+    except Exception as exc:
+        logger.exception("[mint-kick] manual process_mint_queue failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"status": "ok", "result": result}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# /api/me/cards — owned-on-chain PolyStars NFTs for the signed-in wallet
+# /api/me/claims/{id}/turntable — per-claim 120-frame pack-reveal sequence
+# ──────────────────────────────────────────────────────────────────────────────
+# Composes the texture-independent bake (card_render/template/) with this
+# claim's front/back PNGs and caches the result under _turntable_cache/{id}/.
+# Frontend polls this endpoint after POST /api/me/mint until it returns
+# ``ready``. ``pending`` covers both "claim not COMPLETED yet" and "compose
+# still running" — the client just keeps polling.
+
+def _claim_for_wallet(claim_id: int, wallet_lower: str) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, status, user_wallet, recipient_address,
+                       front_image_url, back_image_url, tx_hash, asset_address
+                FROM claims WHERE id = %s
+                """,
+                (claim_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    owners = {
+        (row.get("user_wallet") or "").lower(),
+        (row.get("recipient_address") or "").lower(),
+    }
+    if wallet_lower not in owners:
+        return None
+    return dict(row)
+
+
+# Per-claim finalize lock so two parallel /turntable polls don't race on the
+# same receipt lookup + UPDATE. Cheap dict-of-locks keyed by claim_id.
+_FINALIZE_LOCKS: Dict[int, threading.Lock] = {}
+_FINALIZE_LOCKS_GUARD = threading.Lock()
+
+
+def _finalize_lock(claim_id: int) -> threading.Lock:
+    with _FINALIZE_LOCKS_GUARD:
+        lock = _FINALIZE_LOCKS.get(claim_id)
+        if lock is None:
+            lock = threading.Lock()
+            _FINALIZE_LOCKS[claim_id] = lock
+        return lock
+
+
+def _try_finalize_processing_claim(claim_id: int, tx_hash: str) -> Optional[str]:
+    """On-demand per-claim flip ``PROCESSING → COMPLETED`` / ``FAILED`` driven
+    by the live receipt for ``tx_hash``. Bypasses the cron worker's 30-minute
+    stale-PROCESSING threshold (``MINT_QUEUE_STALE_PROCESSING_MINUTES``) so the
+    frontend's 2s /turntable polling actually drives the state transition
+    instead of the user staring at a wedged ``PROCESSING`` row until the next
+    worker tick.
+
+    Returns the new status string when a flip lands, ``None`` when the row
+    stays in PROCESSING (receipt still pending or RPC blip). Never raises —
+    receipt failures degrade to "stay pending" so a transient RPC hiccup does
+    not corrupt the row.
+    """
+    tx_hash = (tx_hash or "").strip()
+    if not tx_hash:
+        return None
+    lock = _finalize_lock(claim_id)
+    if not lock.acquire(blocking=False):
+        # Another poll is already finalizing this claim. Don't pile up.
+        return None
+    try:
+        try:
+            verifier = mint_service.scheduler._make_mint_receipt_verifier()
+        except Exception as exc:
+            logger.warning(
+                "[finalize] claim %s: cannot init verifier (%s: %s); "
+                "leaving PROCESSING",
+                claim_id, type(exc).__name__, exc,
+            )
+            return None
+        try:
+            onchain_status, verified_token_id, verified_asset = (
+                verifier.fetch_mint_receipt_status(tx_hash)
+            )
+        except Exception as exc:
+            logger.warning(
+                "[finalize] claim %s: receipt lookup failed (%s: %s); "
+                "leaving PROCESSING",
+                claim_id, type(exc).__name__, exc,
+            )
+            return None
+
+        if onchain_status == "success":
+            conn = _get_connection()
+            metadata_uri_for_hooks: Optional[str] = None
+            try:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        UPDATE claims
+                           SET status        = 'COMPLETED',
+                               asset_address = COALESCE(asset_address, %s),
+                               timestamp     = COALESCE(timestamp, NOW()),
+                               updated_at    = NOW()
+                         WHERE id = %s
+                           AND status = 'PROCESSING'
+                           AND tx_hash IS NOT NULL
+                         RETURNING metadata_uri
+                        """,
+                        (verified_asset, claim_id),
+                    )
+                    flipped = cur.fetchone()
+                conn.commit()
+                if flipped:
+                    metadata_uri_for_hooks = str(flipped.get("metadata_uri") or "") or None
+            finally:
+                conn.close()
+            if flipped:
+                logger.info(
+                    "[finalize] claim %s: PROCESSING → COMPLETED "
+                    "(tx=%s asset=%s)", claim_id, tx_hash[:10], verified_asset,
+                )
+                # Replay post-mint side-effects the cron worker would have
+                # done — denormalize card fields onto the claim row so
+                # /api/me/cards and the turntable compose actually see
+                # front_image_url / back_image_url / card_title. Best-effort;
+                # failure here does not undo the COMPLETED flip.
+                try:
+                    mint_service.scheduler._run_post_recovery_hooks(
+                        claim_id=claim_id,
+                        metadata_uri=metadata_uri_for_hooks,
+                        token_id=verified_token_id if isinstance(verified_token_id, int) else None,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[finalize] claim %s: post-recovery hooks failed",
+                        claim_id,
+                    )
+                return "COMPLETED"
+            return None
+
+        if onchain_status == "reverted":
+            conn = _get_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE claims
+                           SET status                 = 'FAILED',
+                               collection_mint_number = NULL,
+                               error_message          = 'On-chain mint reverted (status=0)',
+                               updated_at             = NOW()
+                         WHERE id = %s
+                           AND status = 'PROCESSING'
+                        """,
+                        (claim_id,),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            logger.warning(
+                "[finalize] claim %s: PROCESSING → FAILED "
+                "(tx=%s reverted on-chain)", claim_id, tx_hash[:10],
+            )
+            return "FAILED"
+
+        # "pending" or "not_found" — stay in PROCESSING, let next poll retry.
+        return None
+    finally:
+        lock.release()
+
+
+def _expected_frame_count() -> int:
+    tj = TURNTABLE_TEMPLATE_DIR / "template.json"
+    if not tj.is_file():
+        return 0
+    try:
+        with open(tj, "r", encoding="utf-8") as fh:
+            return int(json.load(fh).get("frame_count") or 0)
+    except Exception:
+        return 0
+
+
+def _turntable_ready(claim_id: int, expected: int) -> bool:
+    out_dir = TURNTABLE_CACHE_DIR / str(claim_id)
+    if not out_dir.is_dir():
+        return False
+    return expected > 0 and sum(1 for p in out_dir.iterdir()
+                                 if p.suffix == ".webp") >= expected
+
+
+def _turntable_payload(request: Request, claim_id: int,
+                        expected: int) -> Dict[str, Any]:
+    base = str(request.base_url).rstrip("/")
+    return {
+        "status": "ready",
+        "base_url": f"{base}/static/turntables/{claim_id}",
+        "frame_count": expected,
+    }
+
+
+# Per-claim compose lock so a frontend poll burst doesn't spin up the same
+# compose multiple times in parallel. Cheap dict-of-locks keyed by claim_id.
+_TURNTABLE_COMPOSE_LOCKS: Dict[int, threading.Lock] = {}
+_TURNTABLE_COMPOSE_LOCKS_GUARD = threading.Lock()
+
+
+def _turntable_lock(claim_id: int) -> threading.Lock:
+    with _TURNTABLE_COMPOSE_LOCKS_GUARD:
+        lock = _TURNTABLE_COMPOSE_LOCKS.get(claim_id)
+        if lock is None:
+            lock = threading.Lock()
+            _TURNTABLE_COMPOSE_LOCKS[claim_id] = lock
+        return lock
+
+
+@app.get("/api/me/claims/{claim_id}/turntable")
+def me_claim_turntable(claim_id: int, request: Request) -> Dict[str, Any]:
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+    claim = _claim_for_wallet(claim_id, wallet)
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+
+    status_upper = str(claim.get("status") or "").upper()
+    # On-demand finalize: if the cron worker broadcast the tx but never landed
+    # the COMPLETED flip (worker crash, RPC timeout mid-receipt-wait, etc.),
+    # drive the transition from the poll itself instead of waiting on the
+    # 30-minute stale-PROCESSING recovery window. Cheap when the receipt is
+    # pending (one RPC call, no DB write).
+    if status_upper == "PROCESSING":
+        tx_hash = str(claim.get("tx_hash") or "").strip()
+        if tx_hash:
+            new_status = _try_finalize_processing_claim(claim_id, tx_hash)
+            if new_status:
+                claim = _claim_for_wallet(claim_id, wallet) or claim
+                status_upper = str(claim.get("status") or "").upper()
+    if status_upper != "COMPLETED":
+        return {"status": "pending", "claim_status": status_upper}
+
+    expected = _expected_frame_count()
+    if expected <= 0:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Turntable template missing on host. "
+                "Run: python card_render/render_card.py --bake-template --step 3"
+            ),
+        )
+
+    if _turntable_ready(claim_id, expected):
+        return _turntable_payload(request, claim_id, expected)
+
+    front_url = str(claim.get("front_image_url") or "")
+    back_url = str(claim.get("back_image_url") or "")
+    if not front_url or not back_url:
+        return {"status": "pending", "claim_status": status_upper}
+
+    # Serialize compose for this claim so concurrent polls don't double-run.
+    lock = _turntable_lock(claim_id)
+    with lock:
+        if _turntable_ready(claim_id, expected):  # another poll finished first
+            return _turntable_payload(request, claim_id, expected)
+        out_dir = TURNTABLE_CACHE_DIR / str(claim_id)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            front_bytes = _fetch_turntable_image(request, front_url)
+            back_bytes = _fetch_turntable_image(request, back_url)
+        except Exception as exc:
+            logger.exception("Failed to fetch claim images claim_id=%s", claim_id)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not fetch card images: {exc}",
+            ) from exc
+        try:
+            from scripts.cardgen.turntable_compose import compose_turntable
+            compose_turntable(
+                front_bytes, back_bytes,
+                str(TURNTABLE_TEMPLATE_DIR),
+                out_dir=str(out_dir),
+                target_width=900,
+                mirror_back=False,
+            )
+        except Exception as exc:
+            logger.exception("Compose failed claim_id=%s", claim_id)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Compose failed: {exc}",
+            ) from exc
+
+    return _turntable_payload(request, claim_id, expected)
+
+
+def _delete_turntable_cache(claim_id: int) -> int:
+    """Remove the per-claim turntable frames directory. Returns the number of
+    files deleted (0 if the dir was absent). Safe to call repeatedly —
+    idempotent and silent on missing-dir."""
+    out_dir = TURNTABLE_CACHE_DIR / str(claim_id)
+    if not out_dir.is_dir():
+        return 0
+    deleted = 0
+    for entry in out_dir.iterdir():
+        try:
+            entry.unlink()
+            deleted += 1
+        except OSError:
+            pass
+    try:
+        out_dir.rmdir()
+    except OSError:
+        # Non-empty (entry deletion failed) or perms — leave for TTL sweep.
+        pass
+    return deleted
+
+
+def _sweep_stale_turntable_cache() -> Dict[str, int]:
+    """Best-effort TTL cleanup of orphaned per-claim turntable dirs. A dir is
+    'stale' when its newest file's mtime is older than
+    ``TURNTABLE_CACHE_TTL_SECONDS``. Called once on app startup so a long-
+    running uvicorn doesn't accumulate abandoned reveals from tab-closed mid-
+    flight mints."""
+    if not TURNTABLE_CACHE_DIR.is_dir():
+        return {"scanned": 0, "deleted_dirs": 0, "deleted_files": 0}
+    now = time.time()
+    scanned = 0
+    deleted_dirs = 0
+    deleted_files = 0
+    for child in TURNTABLE_CACHE_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        scanned += 1
+        try:
+            newest_mtime = max(
+                (p.stat().st_mtime for p in child.iterdir()),
+                default=child.stat().st_mtime,
+            )
+        except OSError:
+            continue
+        if now - newest_mtime < TURNTABLE_CACHE_TTL_SECONDS:
+            continue
+        try:
+            claim_id = int(child.name)
+        except ValueError:
+            # Foreign directory under the cache root — leave alone.
+            continue
+        deleted_files += _delete_turntable_cache(claim_id)
+        if not child.exists():
+            deleted_dirs += 1
+    return {
+        "scanned": scanned,
+        "deleted_dirs": deleted_dirs,
+        "deleted_files": deleted_files,
+    }
+
+
+def _fetch_turntable_image(request: Request, url: str) -> bytes:
+    """Resolve a stored claim image URL (R2 mirror, IPFS gateway, …) to bytes.
+
+    ``urlopen_after_ssrf_check`` takes a ``urllib.request.Request`` object (it
+    calls ``.get_full_url()`` to feed the SSRF guard); a bare URL string would
+    raise ``'str' object has no attribute 'get_full_url'`` during compose.
+    """
+    abs_url = _absolute_asset_url(request, url)
+    req = urllib.request.Request(abs_url, headers={"User-Agent": "polystars-turntable/1"})
+    with urlopen_after_ssrf_check(req, timeout=20) as resp:
+        return resp.read()
+
+
+@app.delete("/api/me/claims/{claim_id}/turntable")
+def me_claim_turntable_delete(claim_id: int, request: Request) -> Dict[str, Any]:
+    """Drop the per-claim turntable cache directory. Called by the frontend's
+    ``reset()`` after a successful reveal so the ~360 webp frames don't sit on
+    disk forever. Idempotent — returns ``deleted_files=0`` when the cache is
+    already gone. Ownership-gated (same as the GET endpoint) so a random
+    wallet can't nuke another user's in-flight reveal."""
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+    claim = _claim_for_wallet(claim_id, wallet)
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    deleted = _delete_turntable_cache(claim_id)
+    return {"status": "ok", "claim_id": claim_id, "deleted_files": deleted}
+
+
+@app.on_event("startup")
+def _turntable_cache_startup_sweep() -> None:
+    """Run a TTL sweep of the turntable cache on app startup. Catches dirs
+    abandoned by tab-closed reveals across uvicorn restarts. Best-effort —
+    failure here must not stop the app from coming up."""
+    try:
+        stats = _sweep_stale_turntable_cache()
+        if stats["deleted_dirs"]:
+            logger.info(
+                "[turntable-sweep] startup sweep: scanned=%d deleted_dirs=%d deleted_files=%d "
+                "ttl=%ds",
+                stats["scanned"], stats["deleted_dirs"], stats["deleted_files"],
+                TURNTABLE_CACHE_TTL_SECONDS,
+            )
+    except Exception:
+        logger.exception("[turntable-sweep] startup sweep failed")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /api/me/claims/{id}/turntable — per-claim 120-frame pack-reveal sequence
+# ──────────────────────────────────────────────────────────────────────────────
+# Composes the texture-independent bake (card_render/template/) with this
+# claim's front/back PNGs and caches the result under _turntable_cache/{id}/.
+# Frontend polls this endpoint after POST /api/me/mint until it returns
+# ``ready``. ``pending`` covers both "claim not COMPLETED yet" and "compose
+# still running" — the client just keeps polling.
+
+def _claim_for_wallet(claim_id: int, wallet_lower: str) -> Optional[Dict[str, Any]]:
+    conn = _get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, status, user_wallet, recipient_address,
+                       front_image_url, back_image_url, tx_hash, asset_address
+                FROM claims WHERE id = %s
+                """,
+                (claim_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    owners = {
+        (row.get("user_wallet") or "").lower(),
+        (row.get("recipient_address") or "").lower(),
+    }
+    if wallet_lower not in owners:
+        return None
+    return dict(row)
+
+
+# Per-claim finalize lock so two parallel /turntable polls don't race on the
+# same receipt lookup + UPDATE. Cheap dict-of-locks keyed by claim_id.
+_FINALIZE_LOCKS: Dict[int, threading.Lock] = {}
+_FINALIZE_LOCKS_GUARD = threading.Lock()
+
+
+def _finalize_lock(claim_id: int) -> threading.Lock:
+    with _FINALIZE_LOCKS_GUARD:
+        lock = _FINALIZE_LOCKS.get(claim_id)
+        if lock is None:
+            lock = threading.Lock()
+            _FINALIZE_LOCKS[claim_id] = lock
+        return lock
+
+
+def _try_finalize_processing_claim(claim_id: int, tx_hash: str) -> Optional[str]:
+    """On-demand per-claim flip ``PROCESSING → COMPLETED`` / ``FAILED`` driven
+    by the live receipt for ``tx_hash``. Bypasses the cron worker's 30-minute
+    stale-PROCESSING threshold (``MINT_QUEUE_STALE_PROCESSING_MINUTES``) so the
+    frontend's 2s /turntable polling actually drives the state transition
+    instead of the user staring at a wedged ``PROCESSING`` row until the next
+    worker tick.
+
+    Returns the new status string when a flip lands, ``None`` when the row
+    stays in PROCESSING (receipt still pending or RPC blip). Never raises —
+    receipt failures degrade to "stay pending" so a transient RPC hiccup does
+    not corrupt the row.
+    """
+    tx_hash = (tx_hash or "").strip()
+    if not tx_hash:
+        return None
+    lock = _finalize_lock(claim_id)
+    if not lock.acquire(blocking=False):
+        # Another poll is already finalizing this claim. Don't pile up.
+        return None
+    try:
+        try:
+            verifier = mint_service.scheduler._make_mint_receipt_verifier()
+        except Exception as exc:
+            logger.warning(
+                "[finalize] claim %s: cannot init verifier (%s: %s); "
+                "leaving PROCESSING",
+                claim_id, type(exc).__name__, exc,
+            )
+            return None
+        try:
+            onchain_status, verified_token_id, verified_asset = (
+                verifier.fetch_mint_receipt_status(tx_hash)
+            )
+        except Exception as exc:
+            logger.warning(
+                "[finalize] claim %s: receipt lookup failed (%s: %s); "
+                "leaving PROCESSING",
+                claim_id, type(exc).__name__, exc,
+            )
+            return None
+
+        if onchain_status == "success":
+            conn = _get_connection()
+            metadata_uri_for_hooks: Optional[str] = None
+            try:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        UPDATE claims
+                           SET status        = 'COMPLETED',
+                               asset_address = COALESCE(asset_address, %s),
+                               timestamp     = COALESCE(timestamp, NOW()),
+                               updated_at    = NOW()
+                         WHERE id = %s
+                           AND status = 'PROCESSING'
+                           AND tx_hash IS NOT NULL
+                         RETURNING metadata_uri
+                        """,
+                        (verified_asset, claim_id),
+                    )
+                    flipped = cur.fetchone()
+                conn.commit()
+                if flipped:
+                    metadata_uri_for_hooks = str(flipped.get("metadata_uri") or "") or None
+            finally:
+                conn.close()
+            if flipped:
+                logger.info(
+                    "[finalize] claim %s: PROCESSING → COMPLETED "
+                    "(tx=%s asset=%s)", claim_id, tx_hash[:10], verified_asset,
+                )
+                # Replay post-mint side-effects the cron worker would have
+                # done — denormalize card fields onto the claim row so
+                # /api/me/cards and the turntable compose actually see
+                # front_image_url / back_image_url / card_title. Best-effort;
+                # failure here does not undo the COMPLETED flip.
+                try:
+                    mint_service.scheduler._run_post_recovery_hooks(
+                        claim_id=claim_id,
+                        metadata_uri=metadata_uri_for_hooks,
+                        token_id=verified_token_id if isinstance(verified_token_id, int) else None,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[finalize] claim %s: post-recovery hooks failed",
+                        claim_id,
+                    )
+                return "COMPLETED"
+            return None
+
+        if onchain_status == "reverted":
+            conn = _get_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE claims
+                           SET status                 = 'FAILED',
+                               collection_mint_number = NULL,
+                               error_message          = 'On-chain mint reverted (status=0)',
+                               updated_at             = NOW()
+                         WHERE id = %s
+                           AND status = 'PROCESSING'
+                        """,
+                        (claim_id,),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            logger.warning(
+                "[finalize] claim %s: PROCESSING → FAILED "
+                "(tx=%s reverted on-chain)", claim_id, tx_hash[:10],
+            )
+            return "FAILED"
+
+        # "pending" or "not_found" — stay in PROCESSING, let next poll retry.
+        return None
+    finally:
+        lock.release()
+
+
+def _expected_frame_count() -> int:
+    tj = TURNTABLE_TEMPLATE_DIR / "template.json"
+    if not tj.is_file():
+        return 0
+    try:
+        with open(tj, "r", encoding="utf-8") as fh:
+            return int(json.load(fh).get("frame_count") or 0)
+    except Exception:
+        return 0
+
+
+def _turntable_ready(claim_id: int, expected: int) -> bool:
+    out_dir = TURNTABLE_CACHE_DIR / str(claim_id)
+    if not out_dir.is_dir():
+        return False
+    return expected > 0 and sum(1 for p in out_dir.iterdir()
+                                 if p.suffix == ".webp") >= expected
+
+
+def _turntable_payload(request: Request, claim_id: int,
+                        expected: int) -> Dict[str, Any]:
+    base = str(request.base_url).rstrip("/")
+    return {
+        "status": "ready",
+        "base_url": f"{base}/static/turntables/{claim_id}",
+        "frame_count": expected,
+    }
+
+
+# Per-claim compose lock so a frontend poll burst doesn't spin up the same
+# compose multiple times in parallel. Cheap dict-of-locks keyed by claim_id.
+_TURNTABLE_COMPOSE_LOCKS: Dict[int, threading.Lock] = {}
+_TURNTABLE_COMPOSE_LOCKS_GUARD = threading.Lock()
+
+
+def _turntable_lock(claim_id: int) -> threading.Lock:
+    with _TURNTABLE_COMPOSE_LOCKS_GUARD:
+        lock = _TURNTABLE_COMPOSE_LOCKS.get(claim_id)
+        if lock is None:
+            lock = threading.Lock()
+            _TURNTABLE_COMPOSE_LOCKS[claim_id] = lock
+        return lock
+
+
+@app.get("/api/me/claims/{claim_id}/turntable")
+def me_claim_turntable(claim_id: int, request: Request) -> Dict[str, Any]:
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+    claim = _claim_for_wallet(claim_id, wallet)
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+
+    status_upper = str(claim.get("status") or "").upper()
+    # On-demand finalize: if the cron worker broadcast the tx but never landed
+    # the COMPLETED flip (worker crash, RPC timeout mid-receipt-wait, etc.),
+    # drive the transition from the poll itself instead of waiting on the
+    # 30-minute stale-PROCESSING recovery window. Cheap when the receipt is
+    # pending (one RPC call, no DB write).
+    if status_upper == "PROCESSING":
+        tx_hash = str(claim.get("tx_hash") or "").strip()
+        if tx_hash:
+            new_status = _try_finalize_processing_claim(claim_id, tx_hash)
+            if new_status:
+                claim = _claim_for_wallet(claim_id, wallet) or claim
+                status_upper = str(claim.get("status") or "").upper()
+    if status_upper != "COMPLETED":
+        return {"status": "pending", "claim_status": status_upper}
+
+    expected = _expected_frame_count()
+    if expected <= 0:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Turntable template missing on host. "
+                "Run: python card_render/render_card.py --bake-template --step 3"
+            ),
+        )
+
+    if _turntable_ready(claim_id, expected):
+        return _turntable_payload(request, claim_id, expected)
+
+    front_url = str(claim.get("front_image_url") or "")
+    back_url = str(claim.get("back_image_url") or "")
+    if not front_url or not back_url:
+        return {"status": "pending", "claim_status": status_upper}
+
+    # Serialize compose for this claim so concurrent polls don't double-run.
+    lock = _turntable_lock(claim_id)
+    with lock:
+        if _turntable_ready(claim_id, expected):  # another poll finished first
+            return _turntable_payload(request, claim_id, expected)
+        out_dir = TURNTABLE_CACHE_DIR / str(claim_id)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            front_bytes = _fetch_turntable_image(request, front_url)
+            back_bytes = _fetch_turntable_image(request, back_url)
+        except Exception as exc:
+            logger.exception("Failed to fetch claim images claim_id=%s", claim_id)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not fetch card images: {exc}",
+            ) from exc
+        try:
+            from scripts.cardgen.turntable_compose import compose_turntable
+            compose_turntable(
+                front_bytes, back_bytes,
+                str(TURNTABLE_TEMPLATE_DIR),
+                out_dir=str(out_dir),
+                target_width=900,
+                mirror_back=False,
+            )
+        except Exception as exc:
+            logger.exception("Compose failed claim_id=%s", claim_id)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Compose failed: {exc}",
+            ) from exc
+
+    return _turntable_payload(request, claim_id, expected)
+
+
+def _delete_turntable_cache(claim_id: int) -> int:
+    """Remove the per-claim turntable frames directory. Returns the number of
+    files deleted (0 if the dir was absent). Safe to call repeatedly —
+    idempotent and silent on missing-dir."""
+    out_dir = TURNTABLE_CACHE_DIR / str(claim_id)
+    if not out_dir.is_dir():
+        return 0
+    deleted = 0
+    for entry in out_dir.iterdir():
+        try:
+            entry.unlink()
+            deleted += 1
+        except OSError:
+            pass
+    try:
+        out_dir.rmdir()
+    except OSError:
+        # Non-empty (entry deletion failed) or perms — leave for TTL sweep.
+        pass
+    return deleted
+
+
+def _sweep_stale_turntable_cache() -> Dict[str, int]:
+    """Best-effort TTL cleanup of orphaned per-claim turntable dirs. A dir is
+    'stale' when its newest file's mtime is older than
+    ``TURNTABLE_CACHE_TTL_SECONDS``. Called once on app startup so a long-
+    running uvicorn doesn't accumulate abandoned reveals from tab-closed mid-
+    flight mints."""
+    if not TURNTABLE_CACHE_DIR.is_dir():
+        return {"scanned": 0, "deleted_dirs": 0, "deleted_files": 0}
+    now = time.time()
+    scanned = 0
+    deleted_dirs = 0
+    deleted_files = 0
+    for child in TURNTABLE_CACHE_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        scanned += 1
+        try:
+            newest_mtime = max(
+                (p.stat().st_mtime for p in child.iterdir()),
+                default=child.stat().st_mtime,
+            )
+        except OSError:
+            continue
+        if now - newest_mtime < TURNTABLE_CACHE_TTL_SECONDS:
+            continue
+        try:
+            claim_id = int(child.name)
+        except ValueError:
+            # Foreign directory under the cache root — leave alone.
+            continue
+        deleted_files += _delete_turntable_cache(claim_id)
+        if not child.exists():
+            deleted_dirs += 1
+    return {
+        "scanned": scanned,
+        "deleted_dirs": deleted_dirs,
+        "deleted_files": deleted_files,
+    }
+
+
+def _fetch_turntable_image(request: Request, url: str) -> bytes:
+    """Resolve a stored claim image URL (R2 mirror, IPFS gateway, …) to bytes.
+
+    ``urlopen_after_ssrf_check`` takes a ``urllib.request.Request`` object (it
+    calls ``.get_full_url()`` to feed the SSRF guard); a bare URL string would
+    raise ``'str' object has no attribute 'get_full_url'`` during compose.
+    """
+    abs_url = _absolute_asset_url(request, url)
+    req = urllib.request.Request(abs_url, headers={"User-Agent": "polystars-turntable/1"})
+    with urlopen_after_ssrf_check(req, timeout=20) as resp:
+        return resp.read()
+
+
+@app.delete("/api/me/claims/{claim_id}/turntable")
+def me_claim_turntable_delete(claim_id: int, request: Request) -> Dict[str, Any]:
+    """Drop the per-claim turntable cache directory. Called by the frontend's
+    ``reset()`` after a successful reveal so the ~360 webp frames don't sit on
+    disk forever. Idempotent — returns ``deleted_files=0`` when the cache is
+    already gone. Ownership-gated (same as the GET endpoint) so a random
+    wallet can't nuke another user's in-flight reveal."""
+    _require_wallet_actions_enabled()
+    wallet = _extract_wallet_from_request(request).lower()
+    if not Web3.is_address(wallet):
+        raise HTTPException(status_code=400, detail="Invalid connected wallet")
+    claim = _claim_for_wallet(claim_id, wallet)
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    deleted = _delete_turntable_cache(claim_id)
+    return {"status": "ok", "claim_id": claim_id, "deleted_files": deleted}
+
+
+@app.on_event("startup")
+def _turntable_cache_startup_sweep() -> None:
+    """Run a TTL sweep of the turntable cache on app startup. Catches dirs
+    abandoned by tab-closed reveals across uvicorn restarts. Best-effort —
+    failure here must not stop the app from coming up."""
+    try:
+        stats = _sweep_stale_turntable_cache()
+        if stats["deleted_dirs"]:
+            logger.info(
+                "[turntable-sweep] startup sweep: scanned=%d deleted_dirs=%d deleted_files=%d "
+                "ttl=%ds",
+                stats["scanned"], stats["deleted_dirs"], stats["deleted_files"],
+                TURNTABLE_CACHE_TTL_SECONDS,
+            )
+    except Exception:
+        logger.exception("[turntable-sweep] startup sweep failed")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /api/me/cards — owned-on-chain PS NFTs for the signed-in wallet
 # ──────────────────────────────────────────────────────────────────────────────
 # Source of truth is on-chain ownership on the configured EVM contract
 # (Sepolia in test, Ethereum mainnet in prod). For each COMPLETED claim that
@@ -3683,7 +4687,7 @@ def _serialize_minted_at(value: Any) -> Optional[str]:
 
 @app.get("/api/me/cards")
 def me_cards(request: Request) -> Dict[str, Any]:
-    """Return PolyStars NFTs currently owned on-chain by the signed-in wallet.
+    """Return PS NFTs currently owned on-chain by the signed-in wallet.
 
     The on-chain collection is the source of truth: we enumerate every
     tokenId the wallet currently owns on the configured contract (via

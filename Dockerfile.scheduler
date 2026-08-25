@@ -1,5 +1,5 @@
 # ============================================================================
-# Dockerfile for PolyStars Scheduler Service
+# Dockerfile for PS Scheduler Service
 # ============================================================================
 # This image runs the daily data scheduler with cron
 # ============================================================================

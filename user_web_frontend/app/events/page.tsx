@@ -1,7 +1,7 @@
 import EventsBrowser from "../../components/EventsBrowser";
 
 export const metadata = {
-  title: "Season Events · PolyStars",
+  title: "Season Events · PS",
 };
 
 export default function EventsPage() {

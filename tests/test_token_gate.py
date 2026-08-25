@@ -2,7 +2,7 @@
 Tests for the token-holder mint gate in ``user_web_backend.main``.
 
 The gate lets a wallet with no Polymarket trader rank mint anyway if it holds
-at least ``TOKEN_GATE_MIN_BALANCE`` whole tokens of the PolyStars *project*
+at least ``TOKEN_GATE_MIN_BALANCE`` whole tokens of the PS *project*
 ERC-20 token (``0x9e68096675578CCcf6eb7AD01350f731DDe633eD``, "POLYSTARS",
 18 decimals) on Ethereum mainnet — NOT the NFT collection contract.
 

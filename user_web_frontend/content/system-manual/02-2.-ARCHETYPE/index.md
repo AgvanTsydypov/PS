@@ -1,6 +1,6 @@
 ## 2.1 Overview
 
-Every Polystars card carries an **Archetype**: a categorical classification of the wallet's behavior on the underlying event. Archetypes are not titles, ranks, or qualitative judgments. They are the terminal output of a deterministic classification engine that processes each wallet's event-level performance through a fixed sequence of mathematical gates.
+Every PS card carries an **Archetype**: a categorical classification of the wallet's behavior on the underlying event. Archetypes are not titles, ranks, or qualitative judgments. They are the terminal output of a deterministic classification engine that processes each wallet's event-level performance through a fixed sequence of mathematical gates.
 
 > The system recognizes **thirteen Archetypes**. Their distribution across the ecosystem is not enforced by quota; it emerges from the underlying behavioral data of the Polymarket ledger. Empirical scarcity ranges from a structural baseline of approximately **44% (SUBSTRATE)** to apex tiers occupying less than **0.3% of the population (INSIDER)**.
 

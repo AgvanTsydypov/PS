@@ -1665,7 +1665,7 @@ export default function HomePage() {
     };
   }, [tab]);
 
-  const title = "PolyStars Seasons Test Workbench (Web)";
+  const title = "PS Seasons Test Workbench (Web)";
 
   return (
     <main>

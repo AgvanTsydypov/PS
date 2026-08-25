@@ -370,7 +370,7 @@ class TestCardDetailEndpoint:
 
 
 # ---------------------------------------------------------------------------
-# /api/me/cards — owned-on-chain PolyStars NFTs
+# /api/me/cards — owned-on-chain PS NFTs
 #
 # Source of truth is on-chain ownership of the configured collection
 # contract: the endpoint enumerates tokenIds the wallet currently owns and

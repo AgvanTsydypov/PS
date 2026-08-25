@@ -8,8 +8,8 @@ import SiteMaintenanceStrip from "../components/SiteMaintenanceStrip";
 import SiteSocialFooter from "../components/SiteSocialFooter";
 
 export const metadata: Metadata = {
-  title: "PolyStars User",
-  description: "Wallet sign-in for PolyStars users",
+  title: "PS User",
+  description: "Wallet sign-in for PS users",
   icons: {
     icon: [{ url: "/logo.svg", type: "image/svg+xml" }],
   },

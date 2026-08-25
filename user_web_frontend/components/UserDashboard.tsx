@@ -19,6 +19,8 @@ import {
 import CardImage from "./CardImage";
 import SiteLogoLink from "./SiteLogoLink";
 import { fetchSiteStatus, userApiCredentials } from "../lib/userApiBase";
+import { PackOpeningModal } from "./pack/PackOpeningModal";
+import { usePackStore } from "./pack/store";
 
 // ── EIP-6963 types ────────────────────────────────────────────────────────────
 type EIP6963ProviderInfo = {
@@ -179,7 +181,7 @@ function hasPolymarketRank(traderRank: string | null | undefined): boolean {
 
 // ── Token-holder mint gate ────────────────────────────────────────────────────
 // A wallet may mint if it has a real Polymarket trader rank *or* it holds at
-// least TOKEN_GATE_MIN_BALANCE of the PolyStars project ERC-20 token on
+// least TOKEN_GATE_MIN_BALANCE of the PS project ERC-20 token on
 // Ethereum mainnet. Authoritative check lives on the backend (uses the paid
 // Alchemy RPC + a 30s cache); this helper just relays its decision so the
 // "GET STAR" copy and the server-side mint gate never disagree.
@@ -475,6 +477,28 @@ function ScrambleText({
     .filter(Boolean)
     .join(" ");
   return <span className={classes || undefined}>{display}</span>;
+}
+
+/** Conditional mount for the pack-opening modal. The modal owns its own
+ *  full-screen overlay styles, so it's wrapped in a fixed-position layer that
+ *  only sits on top of the dashboard while a mint is in progress. The pack
+ *  store's ``open`` flag flips true at ``startMint`` and false at ``reset``. */
+function PackOpeningModalGate() {
+  const open = usePackStore((s) => s.open);
+  if (!open) return null;
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 1000,
+        background: "#000",
+        overflow: "auto",
+      }}
+    >
+      <PackOpeningModal />
+    </div>
+  );
 }
 
 export default function UserDashboard() {
@@ -1018,48 +1042,34 @@ export default function UserDashboard() {
     }
     setMintingSeasonId(seasonId);
     setMintError("");
-    setMintResultText(`[${new Date().toISOString()}] MINT REQUEST STARTED FOR SEASON ${seasonId}...`);
+    setMintResultText(`[${new Date().toISOString()}] OPENING PACK FOR SEASON ${seasonId}…`);
     try {
-      const res = await fetch(buildApiUrl("/api/me/mint"), {
-        method: "POST",
-        credentials: userApiCredentials,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ season_id: seasonId }),
-      });
-      const text = await res.text();
-      let parsed: MintApiResult | null = null;
-      try {
-        parsed = text ? (JSON.parse(text) as MintApiResult) : null;
-      } catch {
-        parsed = null;
-      }
-      if (!res.ok) {
-        const detail = parsed && typeof parsed === "object" && "detail" in parsed
-          ? String((parsed as { detail?: unknown }).detail ?? "")
-          : "";
-        throw new Error(detail || text || "Mint failed");
+      // The pack-opening modal now owns the full mint flow: it POSTs
+      // /api/me/mint immediately (opening the locked modal), then polls
+      // /api/me/claims/{id}/turntable until the on-chain mint + compose are
+      // ready, then unlocks the pack. We just kick it off here and surface
+      // its summary back into the dashboard's eligibility output panel.
+      await usePackStore.getState().startMint({ seasonId });
+      const { error: storeError, claimId, result } = usePackStore.getState();
+      if (storeError) {
+        throw new Error(storeError);
       }
       const summaryLines: string[] = [];
-      if (parsed?.status) summaryLines.push(`STATUS: ${parsed.status}`);
-      if (parsed?.claim_id != null) summaryLines.push(`CLAIM ID: ${parsed.claim_id}`);
-      if (parsed?.collection_mint_number != null) {
-        summaryLines.push(`STAR #: ${parsed.collection_mint_number}`);
+      if (claimId != null) summaryLines.push(`CLAIM ID: ${claimId}`);
+      if (result?.collection_mint_number != null) {
+        summaryLines.push(`STAR #: ${result.collection_mint_number}`);
       }
-      if (parsed?.phase) summaryLines.push(`PHASE: ${parsed.phase}`);
-      if (parsed?.recipient_address) {
-        summaryLines.push(`RECIPIENT: ${parsed.recipient_address}`);
+      if (result?.asset_address) {
+        summaryLines.push(`ASSET: ${result.asset_address}`);
       }
-      if (parsed?.mint_result?.asset_address) {
-        summaryLines.push(`ASSET: ${parsed.mint_result.asset_address}`);
-      }
-      if (parsed?.mint_result?.tx_hash) {
-        summaryLines.push(`TX: ${parsed.mint_result.tx_hash}`);
-      }
-      if (parsed?.warnings && parsed.warnings.length > 0) {
-        summaryLines.push(`WARNINGS: ${parsed.warnings.join("; ")}`);
+      if (result?.tx_hash) {
+        summaryLines.push(`TX: ${result.tx_hash}`);
       }
       setMintResultText(
-        [`[${new Date().toISOString()}] CLAIM QUEUED FOR SEASON ${seasonId}.`, ...summaryLines].join("\n"),
+        [
+          `[${new Date().toISOString()}] PACK READY FOR SEASON ${seasonId}.`,
+          ...summaryLines,
+        ].join("\n"),
       );
       await Promise.all([refreshEligibility(), refreshMyCards()]);
     } catch (error) {
@@ -1222,6 +1232,7 @@ export default function UserDashboard() {
 
   return (
     <>
+      <PackOpeningModalGate />
       <nav className="site-nav" aria-label="Site">
         <SiteLogoLink colorful />
         <span className="site-nav-title">DASHBOARD</span>

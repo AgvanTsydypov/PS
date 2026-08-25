@@ -1891,7 +1891,7 @@ class SeasonWorkbenchService(ClaimsMintMixin):
 service = SeasonWorkbenchService()
 ws_hub = WsHub()
 
-app = FastAPI(title="PolyStars Season Test Web API", version="1.0.0")
+app = FastAPI(title="PS Season Test Web API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

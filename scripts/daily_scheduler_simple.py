@@ -3558,6 +3558,12 @@ class SimplifiedScheduler:
                 # hash via eth_getTransactionReceipt and decides COMPLETED /
                 # FAILED / requeue.
                 on_chain_completed = False
+                # Defaulted here so the except-branch below can reference it
+                # safely when ``mint_user_nft`` raises before returning (e.g.
+                # ``TimeExhausted`` waiting for the receipt). Without this the
+                # crash recovery path itself crashes with ``UnboundLocalError``
+                # and the whole batch worker dies.
+                mint_result: Optional[Any] = None
 
                 def _record_pre_broadcast_tx_hash(
                     attempt: Dict[str, Any], _claim_id: int = claim_id

@@ -3,7 +3,7 @@ Date: 2026-04-26
 
 ## Overview
 
-Add a "SYSTEM MANUAL" docs-style page to `user_web_frontend` (`/system-manual`), accessible via a button under the "Community achievements" block on the main page. The page has a fixed left sidebar with accordion P1/P2 navigation matching the behavioral pattern of docs.alphakek.ai, using PolyStars' existing design tokens.
+Add a "SYSTEM MANUAL" docs-style page to `user_web_frontend` (`/system-manual`), accessible via a button under the "Community achievements" block on the main page. The page has a fixed left sidebar with accordion P1/P2 navigation matching the behavioral pattern of docs.alphakek.ai, using PS' existing design tokens.
 
 ---
 

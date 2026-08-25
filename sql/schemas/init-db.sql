@@ -1,11 +1,11 @@
 -- ============================================================================
 -- POLYMARKET DATABASE INITIALIZATION SCRIPT
 -- ============================================================================
--- This script creates all tables for PolyStars project
+-- This script creates all tables for PS project
 -- Auto-executed by Docker PostgreSQL on first container startup
 -- ============================================================================
 
-DO $$ BEGIN RAISE NOTICE '🚀 Starting PolyStars database initialization...'; END $$;
+DO $$ BEGIN RAISE NOTICE '🚀 Starting PS database initialization...'; END $$;
 
 -- ============================================================================
 -- 1. SERIES TABLE - Created before events so events.series_id can FK directly
@@ -1129,7 +1129,7 @@ DO $$ BEGIN RAISE NOTICE '✅ polystars_mint_runtime_settings ready'; END $$;
 -- COMPLETION
 -- ============================================================================
 DO $$ BEGIN RAISE NOTICE ''; END $$;
-DO $$ BEGIN RAISE NOTICE '✅ PolyStars database initialization complete!'; END $$;
+DO $$ BEGIN RAISE NOTICE '✅ PS database initialization complete!'; END $$;
 DO $$ BEGIN RAISE NOTICE ''; END $$;
 DO $$ BEGIN RAISE NOTICE '📊 Created tables:'; END $$;
 DO $$ BEGIN RAISE NOTICE '   - events'; END $$;

@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 
 const CONTRACT_ADDRESS = "0x9e68096675578CCcf6eb7AD01350f731DDe633eD";
 
-// Alphakek.ai's footer "Social" block recreated in PolyStars' brutalist
+// Alphakek.ai's footer "Social" block recreated in PS' brutalist
 // design language. Pinned to the viewport bottom as a near-transparent
 // overlay so the vertical card tickers on the home page remain visible
 // through it. The outer wrapper is pointer-events: none so hovers on

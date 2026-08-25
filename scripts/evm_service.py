@@ -115,7 +115,7 @@ def etherscan_nft_url(contract_address: str, token_id: int, chain_id: int) -> st
     return f"{etherscan_base_url(chain_id)}/nft/{contract_address}/{token_id}"
 
 
-# OpenSea is the primary NFT marketplace for PolyStars STARs. Item URLs are
+# OpenSea is the primary NFT marketplace for PS STARs. Item URLs are
 # ``https://opensea.io/item/<chain-slug>/<contract>/<tokenId>`` on mainnets and
 # ``https://testnets.opensea.io/item/<chain-slug>/...`` on testnets.
 _OPENSEA_CHAIN: dict[int, tuple[str, str]] = {
@@ -519,6 +519,19 @@ class EvmClient:
         return value if value > 0 else 900
 
     @staticmethod
+    def _gas_price_min_gwei() -> float:
+        """Read ``EVM_GAS_PRICE_MIN_GWEI`` env floor. Returns 0 (= no floor)
+        when unset/invalid, preserving legacy mainnet behaviour."""
+        raw = (os.environ.get("EVM_GAS_PRICE_MIN_GWEI") or "").strip()
+        if not raw:
+            return 0.0
+        try:
+            value = float(raw)
+        except ValueError:
+            return 0.0
+        return value if value > 0 else 0.0
+
+    @staticmethod
     def _build_attempt_dict(
         *,
         tx: dict[str, Any],
@@ -711,9 +724,27 @@ class EvmClient:
         exceed the cap. The legacy fallback uses the boosted value as the
         flat ``gasPrice``.
         """
+        # ``EVM_GAS_PRICE_MIN_GWEI`` floors the pinned maxFeePerGas. Exists for
+        # testnets like Sepolia, where the mainnet-derived Etherscan gasoracle
+        # tier (~0.15 gwei) is below what Sepolia validators bother to mine —
+        # broadcasts succeed but never enter a block and ``wait_for_receipt``
+        # times out at 900s. A floor of ~10 gwei reliably gets a Sepolia mint
+        # into the next block.
+        #
+        # HARD GUARD: floor is silently ignored on Ethereum mainnet (chain_id=1)
+        # so a stray ``EVM_GAS_PRICE_MIN_GWEI`` leaked from a dev .env into a
+        # prod deploy can never overpay gas. The price gate / tracker tier owns
+        # mainnet pricing — env override is dev-net-only by code, not just by
+        # operator discipline.
+        effective_gwei = gas_price_gwei
+        active_chain_id = self._chain_id or chain_id
+        if int(active_chain_id) != 1:
+            gwei_floor = self._gas_price_min_gwei()
+            if effective_gwei is not None and gwei_floor > 0:
+                effective_gwei = max(effective_gwei, gwei_floor)
         pinned_max_fee_wei = (
-            int(gas_price_gwei * 1e9 * self.PINNED_MAX_FEE_HEADROOM)
-            if gas_price_gwei is not None
+            int(effective_gwei * 1e9 * self.PINNED_MAX_FEE_HEADROOM)
+            if effective_gwei is not None
             else None
         )
         try:
@@ -1167,7 +1198,7 @@ class EvmReader:
 
     Unlike :class:`EvmClient`, this requires no private key — it never sends
     transactions. Used by the user-web backend to verify on-chain ownership
-    of minted PolyStars NFTs without granting that service mint authority.
+    of minted PS NFTs without granting that service mint authority.
     """
 
     def __init__(

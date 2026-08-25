@@ -1,5 +1,5 @@
 """
-Unit tests for the Polystars structural signature (Section 4 of the spec).
+Unit tests for the PS structural signature (Section 4 of the spec).
 
 The signature is the contract between ``claims.signature`` (frozen at
 queue-insert time) and the back-of-card render. A regression here will

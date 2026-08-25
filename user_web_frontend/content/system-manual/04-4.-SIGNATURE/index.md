@@ -1,6 +1,6 @@
 ## 4.1 Overview
 
-Every Star carries a structural signature: a compact identifier encoding the Star's full position within the Polystars taxonomy. The signature compresses the cryptographic, behavioral, event-level, and seasonal dimensions of a Star into a single fixed-grammar string.
+Every Star carries a structural signature: a compact identifier encoding the Star's full position within the PS taxonomy. The signature compresses the cryptographic, behavioral, event-level, and seasonal dimensions of a Star into a single fixed-grammar string.
 
 > The signature is not decoration. It is the operational fingerprint of the Star: the basis for filtering the catalog, the persistent identifier across protocol upgrades, the language by which collectors and observers reference specific positions in the system. A signature minted in Genesis remains readable, verifiable, and queryable.
 
@@ -39,7 +39,7 @@ The signature resolves to seven structural segments. Each segment carries one di
 
 * **[PLATFORM][EVENT_ID] — Source Token**
     Concatenation of platform code and the platform's native event identifier.
-    The Polystars protocol ingests events exclusively from Polymarket. The `POL` prefix is the only platform code defined at protocol initialization, and the system is designed around Polymarket-native data structures, not generic prediction-market integration. Every signature minted by the `V1` of the protocol carries the `POL` prefix.
+    The PS protocol ingests events exclusively from Polymarket. The `POL` prefix is the only platform code defined at protocol initialization, and the system is designed around Polymarket-native data structures, not generic prediction-market integration. Every signature minted by the `V1` of the protocol carries the `POL` prefix.
     
     > The event identifier is the canonical Polymarket event ID, preserved as-is from the source.
 
